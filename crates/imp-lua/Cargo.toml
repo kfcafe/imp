@@ -1,0 +1,15 @@
+[package]
+name = "imp-lua"
+version.workspace = true
+edition.workspace = true
+description = "Lua extension runtime (mlua bridge)"
+
+[dependencies]
+imp-core.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+mlua.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

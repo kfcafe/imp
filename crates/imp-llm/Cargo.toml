@@ -1,0 +1,22 @@
+[package]
+name = "imp-llm"
+version.workspace = true
+edition.workspace = true
+description = "Standalone multi-provider LLM streaming client"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+futures-core.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"

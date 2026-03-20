@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/imp-llm",
+    "crates/imp-core",
+    "crates/imp-lua",
+    "crates/imp-tui",
+    "crates/imp-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+futures-core = "0.3"
+futures = "0.3"
+uuid = { version = "1", features = ["v4"] }
+reqwest = { version = "0.12", features = ["stream", "json"] }
+toml = "0.8"
+similar = "2"
+walkdir = "2"
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+mlua = { version = "0.10", features = ["lua54", "vendored", "async", "send"] }
+
+imp-llm = { path = "crates/imp-llm" }
+imp-core = { path = "crates/imp-core" }
+imp-lua = { path = "crates/imp-lua" }
+imp-tui = { path = "crates/imp-tui" }

@@ -1,0 +1,27 @@
+[package]
+name = "imp-core"
+version.workspace = true
+edition.workspace = true
+description = "Agent engine — loop, tools, sessions, hooks, context"
+
+[dependencies]
+imp-llm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+futures-core.workspace = true
+futures.workspace = true
+uuid.workspace = true
+toml.workspace = true
+similar.workspace = true
+walkdir.workspace = true
+glob = "0.3"
+regex = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
