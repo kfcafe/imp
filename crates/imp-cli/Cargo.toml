@@ -1,0 +1,18 @@
+[package]
+name = "imp-cli"
+version.workspace = true
+edition.workspace = true
+description = "Binary entry point for imp"
+
+[[bin]]
+name = "imp"
+path = "src/main.rs"
+
+[dependencies]
+imp-llm.workspace = true
+imp-core.workspace = true
+imp-tui.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+clap.workspace = true
+futures.workspace = true

@@ -1,0 +1,6 @@
+project: imp
+next_id: 15
+auto_close_parent: true
+max_loops: 10
+max_concurrent: 10
+poll_interval: 30

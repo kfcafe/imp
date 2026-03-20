@@ -1,0 +1,32 @@
+//! Standalone multi-provider LLM streaming client.
+//!
+//! Core data types for messages, models, usage tracking, and provider traits.
+//! No I/O happens in this module — it defines the shared vocabulary used by
+//! provider implementations and the agent runtime.
+
+pub mod auth;
+pub mod error;
+pub mod message;
+pub mod model;
+pub mod oauth;
+pub mod provider;
+pub mod providers;
+pub mod stream;
+pub mod usage;
+
+pub use error::{Error, Result};
+pub use message::{
+    AssistantMessage, ContentBlock, Message, StopReason, ToolResultMessage, UserMessage,
+};
+pub use model::{Capabilities, Model, ModelMeta, ModelPricing, ModelRegistry};
+pub use provider::{CacheOptions, Context, Provider, RequestOptions, ThinkingLevel, ToolDefinition};
+pub use stream::{ProviderError, StreamEvent};
+pub use usage::{Cost, Usage};
+
+/// Current unix timestamp in seconds.
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
