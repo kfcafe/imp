@@ -643,6 +643,21 @@ fn parse_sse_stream(raw: &str, state: &mut StreamState) -> Vec<Result<StreamEven
 
 /// Create a streaming response from the Anthropic API.
 /// Returns a Stream of StreamEvents.
+/// Maximum number of retries for transient errors.
+const MAX_RETRIES: u32 = 3;
+
+/// Check if an HTTP status code is retryable.
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 500 | 502 | 503 | 529)
+}
+
+/// Compute backoff delay for a retry attempt (exponential with jitter).
+fn retry_delay(attempt: u32) -> std::time::Duration {
+    let base_ms = 1000u64 * 2u64.pow(attempt); // 1s, 2s, 4s
+    let jitter_ms = rand::random::<u64>() % 500;
+    std::time::Duration::from_millis(base_ms + jitter_ms)
+}
+
 fn stream_response(
     client: reqwest::Client,
     api_key: String,
@@ -651,43 +666,75 @@ fn stream_response(
     let (tx, rx) = futures::channel::mpsc::unbounded();
 
     tokio::spawn(async move {
-        // OAuth tokens use Bearer auth + beta header;
-        // API keys use x-api-key header. Both go to api.anthropic.com.
         let is_oauth = api_key.starts_with("sk-ant-oat");
 
-        let mut req = client
-            .post(API_URL)
-            .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json");
+        // Retry loop for transient failures (connection drops, 429, 5xx)
+        let mut attempt = 0u32;
+        let resp = loop {
+            let mut req = client
+                .post(API_URL)
+                .header("anthropic-version", API_VERSION)
+                .header("content-type", "application/json");
 
-        if is_oauth {
-            req = req
-                .header("authorization", format!("Bearer {api_key}"))
-                .header(
-                    "anthropic-beta",
-                    "oauth-2025-04-20,interleaved-thinking-2025-05-14",
-                )
-                .header("anthropic-dangerous-direct-browser-access", "true");
-        } else {
-            req = req.header("x-api-key", &api_key);
-        }
+            if is_oauth {
+                req = req
+                    .header("authorization", format!("Bearer {api_key}"))
+                    .header(
+                        "anthropic-beta",
+                        "oauth-2025-04-20,interleaved-thinking-2025-05-14",
+                    )
+                    .header("anthropic-dangerous-direct-browser-access", "true");
+            } else {
+                req = req.header("x-api-key", &api_key);
+            }
 
-        let result = req.json(&request).send().await;
+            let result = req.json(&request).send().await;
 
-        let resp = match result {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = tx.unbounded_send(Err(Error::Http(e)));
-                return;
+            match result {
+                Ok(r) => {
+                    let status = r.status();
+                    if status.is_success() {
+                        break r;
+                    }
+                    // Retryable HTTP error
+                    if is_retryable_status(status) && attempt < MAX_RETRIES {
+                        let delay = retry_delay(attempt);
+                        eprintln!(
+                            "[imp-llm] HTTP {status}, retrying in {}s (attempt {}/{})",
+                            delay.as_secs(),
+                            attempt + 1,
+                            MAX_RETRIES
+                        );
+                        tokio::time::sleep(delay).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    // Non-retryable or exhausted retries
+                    let body = r.text().await.unwrap_or_default();
+                    let _ =
+                        tx.unbounded_send(Err(Error::Provider(format!("HTTP {status}: {body}"))));
+                    return;
+                }
+                Err(e) => {
+                    // Connection/timeout errors are retryable
+                    let is_transient = e.is_connect() || e.is_timeout() || e.is_request();
+                    if is_transient && attempt < MAX_RETRIES {
+                        let delay = retry_delay(attempt);
+                        eprintln!(
+                            "[imp-llm] Connection error: {e}, retrying in {}s (attempt {}/{})",
+                            delay.as_secs(),
+                            attempt + 1,
+                            MAX_RETRIES
+                        );
+                        tokio::time::sleep(delay).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    let _ = tx.unbounded_send(Err(Error::Http(e)));
+                    return;
+                }
             }
         };
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let _ = tx.unbounded_send(Err(Error::Provider(format!("HTTP {status}: {body}"))));
-            return;
-        }
 
         let mut state = StreamState::new();
         let mut buf = String::new();
