@@ -62,32 +62,45 @@ impl Role {
 /// Built-in role definitions.
 pub fn builtin_roles() -> Vec<(&'static str, RoleDef)> {
     vec![
-        ("worker", RoleDef {
-            model: None,
-            thinking: Some(ThinkingLevel::Medium),
-            tools: None,
-            readonly: false,
-            instructions: None,
-            max_turns: None,
-        }),
-        ("explorer", RoleDef {
-            model: Some("haiku".into()),
-            thinking: Some(ThinkingLevel::Off),
-            tools: Some(vec![
-                "read".into(), "grep".into(), "find".into(),
-                "ls".into(), "probe_search".into(), "probe_extract".into(),
-            ]),
-            readonly: true,
-            instructions: Some("Explore and summarize. Do not modify files.".into()),
-            max_turns: Some(20),
-        }),
-        ("reviewer", RoleDef {
-            model: Some("sonnet".into()),
-            thinking: Some(ThinkingLevel::High),
-            tools: None,
-            readonly: true,
-            instructions: None,
-            max_turns: Some(10),
-        }),
+        (
+            "worker",
+            RoleDef {
+                model: None,
+                thinking: Some(ThinkingLevel::Medium),
+                tools: None,
+                readonly: false,
+                instructions: None,
+                max_turns: None,
+            },
+        ),
+        (
+            "explorer",
+            RoleDef {
+                model: Some("haiku".into()),
+                thinking: Some(ThinkingLevel::Off),
+                tools: Some(vec![
+                    "read".into(),
+                    "grep".into(),
+                    "find".into(),
+                    "ls".into(),
+                    "probe_search".into(),
+                    "probe_extract".into(),
+                ]),
+                readonly: true,
+                instructions: Some("Explore and summarize. Do not modify files.".into()),
+                max_turns: Some(20),
+            },
+        ),
+        (
+            "reviewer",
+            RoleDef {
+                model: Some("sonnet".into()),
+                thinking: Some(ThinkingLevel::High),
+                tools: None,
+                readonly: true,
+                instructions: None,
+                max_turns: Some(10),
+            },
+        ),
     ]
 }

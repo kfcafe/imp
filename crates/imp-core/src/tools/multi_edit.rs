@@ -11,8 +11,12 @@ pub struct MultiEditTool;
 
 #[async_trait]
 impl Tool for MultiEditTool {
-    fn name(&self) -> &str { "multi_edit" }
-    fn label(&self) -> &str { "Multi Edit" }
+    fn name(&self) -> &str {
+        "multi_edit"
+    }
+    fn label(&self) -> &str {
+        "Multi Edit"
+    }
     fn description(&self) -> &str {
         "Apply multiple find-and-replace edits to a single file in one call."
     }
@@ -37,7 +41,9 @@ impl Tool for MultiEditTool {
             "required": ["path", "edits"]
         })
     }
-    fn is_readonly(&self) -> bool { false }
+    fn is_readonly(&self) -> bool {
+        false
+    }
 
     async fn execute(
         &self,
@@ -64,7 +70,10 @@ impl Tool for MultiEditTool {
         };
 
         if !path.exists() {
-            return Ok(ToolOutput::error(format!("File not found: {}", path.display())));
+            return Ok(ToolOutput::error(format!(
+                "File not found: {}",
+                path.display()
+            )));
         }
 
         let raw_content = tokio::fs::read_to_string(&path).await?;
@@ -235,6 +244,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multi_edit_empty_edits_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("empty_edits.txt");
+        std::fs::write(&file, "content\n").unwrap();
+
+        let tool = MultiEditTool;
+        let result = tool
+            .execute(
+                "c5",
+                json!({
+                    "path": "empty_edits.txt",
+                    "edits": []
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn multi_edit_missing_path_error() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let tool = MultiEditTool;
+        let result = tool
+            .execute(
+                "c6",
+                json!({
+                    "edits": [{"oldText": "a", "newText": "b"}]
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn multi_edit_chained_three_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("chain3.txt");
+        std::fs::write(&file, "apple banana cherry\n").unwrap();
+
+        let tool = MultiEditTool;
+        // Each edit depends on the previous: apple→APPLE, APPLE banana→FRUIT, cherry→CHERRY
+        let result = tool
+            .execute(
+                "c7",
+                json!({
+                    "path": "chain3.txt",
+                    "edits": [
+                        {"oldText": "apple", "newText": "APPLE"},
+                        {"oldText": "APPLE banana", "newText": "FRUIT"},
+                        {"oldText": "cherry", "newText": "CHERRY"}
+                    ]
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(written, "FRUIT CHERRY\n");
+    }
+
+    #[tokio::test]
     async fn multi_edit_combined_diff() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("diff.txt");
@@ -257,10 +336,14 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        let text = result.content.iter().find_map(|b| match b {
-            imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        }).unwrap();
+        let text = result
+            .content
+            .iter()
+            .find_map(|b| match b {
+                imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
         // Diff should contain both changes
         assert!(text.contains("ALPHA"));
         assert!(text.contains("GAMMA"));

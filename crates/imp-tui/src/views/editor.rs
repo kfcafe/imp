@@ -245,13 +245,19 @@ impl EditorState {
         let inner_y = area.y + 1;
         let x = inner_x + self.cursor_col as u16;
         let y = inner_y + (self.cursor_line as u16).saturating_sub(self.scroll_offset as u16);
-        (x.min(area.x + area.width - 2), y.min(area.y + area.height - 2))
+        (
+            x.min(area.x + area.width - 2),
+            y.min(area.y + area.height - 2),
+        )
     }
 
     fn update_position(&mut self) {
         let before = &self.content[..self.cursor];
         self.cursor_line = before.matches('\n').count();
-        self.cursor_col = before.rfind('\n').map(|p| self.cursor - p - 1).unwrap_or(self.cursor);
+        self.cursor_col = before
+            .rfind('\n')
+            .map(|p| self.cursor - p - 1)
+            .unwrap_or(self.cursor);
     }
 }
 

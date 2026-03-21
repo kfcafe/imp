@@ -12,14 +12,20 @@ pub struct AskTool;
 #[serde(untagged)]
 enum OptionItem {
     Label(String),
-    Rich { label: String, description: Option<String> },
+    Rich {
+        label: String,
+        description: Option<String>,
+    },
 }
 
 impl OptionItem {
     #[allow(dead_code)]
     fn into_select_option(self) -> SelectOption {
         match self {
-            OptionItem::Label(label) => SelectOption { label, description: None },
+            OptionItem::Label(label) => SelectOption {
+                label,
+                description: None,
+            },
             OptionItem::Rich { label, description } => SelectOption { label, description },
         }
     }
@@ -34,8 +40,12 @@ impl OptionItem {
 
 #[async_trait]
 impl Tool for AskTool {
-    fn name(&self) -> &str { "ask" }
-    fn label(&self) -> &str { "Ask User" }
+    fn name(&self) -> &str {
+        "ask"
+    }
+    fn label(&self) -> &str {
+        "Ask User"
+    }
     fn description(&self) -> &str {
         "Ask the user a question. Provide options for multiple choice, omit for free text input."
     }
@@ -58,7 +68,9 @@ impl Tool for AskTool {
             "required": ["question"]
         })
     }
-    fn is_readonly(&self) -> bool { true }
+    fn is_readonly(&self) -> bool {
+        true
+    }
 
     async fn execute(
         &self,
@@ -88,7 +100,8 @@ impl Tool for AskTool {
         };
 
         // If options are provided, use select; otherwise use text input
-        let raw_options: Option<Vec<OptionItem>> = params.get("options")
+        let raw_options: Option<Vec<OptionItem>> = params
+            .get("options")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         match raw_options {
@@ -142,11 +155,9 @@ pub fn format_options(options: &[SelectOption]) -> String {
     options
         .iter()
         .enumerate()
-        .map(|(i, opt)| {
-            match &opt.description {
-                Some(desc) => format!("  {}. {} — {}", i + 1, opt.label, desc),
-                None => format!("  {}. {}", i + 1, opt.label),
-            }
+        .map(|(i, opt)| match &opt.description {
+            Some(desc) => format!("  {}. {} — {}", i + 1, opt.label, desc),
+            None => format!("  {}. {}", i + 1, opt.label),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -214,10 +225,7 @@ mod tests {
         };
 
         let tool = AskTool;
-        let result = tool
-            .execute("c3", json!({}), ctx)
-            .await
-            .unwrap();
+        let result = tool.execute("c3", json!({}), ctx).await.unwrap();
 
         assert!(result.is_error);
         let text = extract_text(&result);
@@ -227,8 +235,14 @@ mod tests {
     #[test]
     fn format_options_plain() {
         let options = vec![
-            SelectOption { label: "Red".into(), description: None },
-            SelectOption { label: "Blue".into(), description: None },
+            SelectOption {
+                label: "Red".into(),
+                description: None,
+            },
+            SelectOption {
+                label: "Blue".into(),
+                description: None,
+            },
         ];
         let formatted = format_options(&options);
         assert!(formatted.contains("1. Red"));
@@ -238,8 +252,14 @@ mod tests {
     #[test]
     fn format_options_with_descriptions() {
         let options = vec![
-            SelectOption { label: "Rust".into(), description: Some("Systems language".into()) },
-            SelectOption { label: "Python".into(), description: Some("Scripting language".into()) },
+            SelectOption {
+                label: "Rust".into(),
+                description: Some("Systems language".into()),
+            },
+            SelectOption {
+                label: "Python".into(),
+                description: Some("Scripting language".into()),
+            },
         ];
         let formatted = format_options(&options);
         assert!(formatted.contains("Rust — Systems language"));
@@ -257,7 +277,8 @@ mod tests {
         let items: Vec<OptionItem> = serde_json::from_value(json!([
             {"label": "Rust", "description": "Fast"},
             {"label": "Go"}
-        ])).unwrap();
+        ]))
+        .unwrap();
         assert_eq!(items[0].label(), "Rust");
         assert_eq!(items[1].label(), "Go");
     }
@@ -267,20 +288,35 @@ mod tests {
 
     #[async_trait]
     impl crate::ui::UserInterface for MockUi {
-        fn has_ui(&self) -> bool { true }
+        fn has_ui(&self) -> bool {
+            true
+        }
         async fn notify(&self, _: &str, _: crate::ui::NotifyLevel) {}
-        async fn confirm(&self, _: &str, _: &str) -> Option<bool> { None }
-        async fn select(&self, _: &str, _: &[SelectOption]) -> Option<usize> { None }
-        async fn input(&self, _: &str, _: &str) -> Option<String> { None }
+        async fn confirm(&self, _: &str, _: &str) -> Option<bool> {
+            None
+        }
+        async fn select(&self, _: &str, _: &[SelectOption]) -> Option<usize> {
+            None
+        }
+        async fn input(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
         async fn set_status(&self, _: &str, _: Option<&str>) {}
         async fn set_widget(&self, _: &str, _: Option<crate::ui::WidgetContent>) {}
-        async fn custom(&self, _: crate::ui::ComponentSpec) -> Option<serde_json::Value> { None }
+        async fn custom(&self, _: crate::ui::ComponentSpec) -> Option<serde_json::Value> {
+            None
+        }
     }
 
     fn extract_text(output: &ToolOutput) -> String {
-        output.content.iter().filter_map(|b| match b {
-            imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        }).collect::<Vec<_>>().join("\n")
+        output
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

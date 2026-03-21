@@ -65,9 +65,8 @@ pub async fn compact(
     let old_messages = &messages[..split_idx];
     let recent_messages = &messages[split_idx..];
 
-    let tokens_before = crate::context::estimate_tokens(
-        &serde_json::to_string(&messages).unwrap_or_default(),
-    );
+    let tokens_before =
+        crate::context::estimate_tokens(&serde_json::to_string(&messages).unwrap_or_default());
 
     // Build the compaction prompt.
     let old_json = serde_json::to_string(old_messages).unwrap_or_default();
@@ -100,7 +99,9 @@ pub async fn compact(
         ..Default::default()
     };
 
-    let mut stream = model.provider.stream(model, context, request_options, api_key);
+    let mut stream = model
+        .provider
+        .stream(model, context, request_options, api_key);
     let mut summary_parts: Vec<String> = Vec::new();
 
     while let Some(event_result) = stream.next().await {
@@ -197,9 +198,7 @@ mod tests {
 
     fn make_assistant_text(text: &str) -> Message {
         Message::Assistant(AssistantMessage {
-            content: vec![ContentBlock::Text {
-                text: text.into(),
-            }],
+            content: vec![ContentBlock::Text { text: text.into() }],
             usage: None,
             stop_reason: StopReason::EndTurn,
             timestamp: 2000,
@@ -241,11 +240,7 @@ mod tests {
             _options: RequestOptions,
             _api_key: &str,
         ) -> Pin<Box<dyn Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
-            let text = self
-                .response_text
-                .try_lock()
-                .expect("mock lock")
-                .clone();
+            let text = self.response_text.try_lock().expect("mock lock").clone();
             let events = vec![
                 StreamEvent::MessageStart {
                     model: "mock".into(),
@@ -331,7 +326,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = compact(&messages, &model, options, "test-key").await.unwrap();
+        let result = compact(&messages, &model, options, "test-key")
+            .await
+            .unwrap();
 
         assert_eq!(result.summary, summary_text);
         assert!(result.tokens_before > 0);
@@ -365,7 +362,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = compact(&messages, &model, options, "test-key").await.unwrap();
+        let result = compact(&messages, &model, options, "test-key")
+            .await
+            .unwrap();
 
         // The first_kept_id should correspond to turn 2 (the 3rd-from-last turn).
         // Turn 2 starts at assistant message for call_2.
@@ -394,7 +393,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = compact(&messages, &model, options, "test-key").await.unwrap();
+        let result = compact(&messages, &model, options, "test-key")
+            .await
+            .unwrap();
 
         // Simulate what the agent loop would do: replace old messages with summary + keep recent.
         let turn_starts: Vec<usize> = messages
@@ -405,9 +406,7 @@ mod tests {
             .collect();
         let split = turn_starts[turn_starts.len() - 3];
 
-        let mut new_messages = vec![
-            make_user(&result.summary),
-        ];
+        let mut new_messages = vec![make_user(&result.summary)];
         new_messages.extend_from_slice(&messages[split..]);
 
         // New conversation should be much shorter.
@@ -420,5 +419,200 @@ mod tests {
         }
         // Recent turns preserved.
         assert!(new_messages.len() >= 4); // summary + 3 turns (each = assistant + tool_result) + final text
+    }
+
+    // -- capturing mock for prompt verification --
+
+    /// Mock provider that captures the context sent to it so tests can inspect the prompt.
+    struct CapturingCompactionProvider {
+        response_text: Mutex<String>,
+        captured_context: Mutex<Option<imp_llm::Context>>,
+    }
+
+    impl CapturingCompactionProvider {
+        fn new(text: &str) -> Self {
+            Self {
+                response_text: Mutex::new(text.into()),
+                captured_context: Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for CapturingCompactionProvider {
+        fn stream(
+            &self,
+            _model: &Model,
+            context: imp_llm::Context,
+            _options: RequestOptions,
+            _api_key: &str,
+        ) -> Pin<Box<dyn Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
+            *self.captured_context.try_lock().expect("capture lock") = Some(context);
+            let text = self.response_text.try_lock().expect("mock lock").clone();
+            let events = vec![
+                StreamEvent::MessageStart {
+                    model: "mock".into(),
+                },
+                StreamEvent::TextDelta { text: text.clone() },
+                StreamEvent::MessageEnd {
+                    message: AssistantMessage {
+                        content: vec![ContentBlock::Text { text }],
+                        usage: Some(Usage {
+                            input_tokens: 500,
+                            output_tokens: 100,
+                            cache_read_tokens: 0,
+                            cache_write_tokens: 0,
+                        }),
+                        stop_reason: StopReason::EndTurn,
+                        timestamp: 3000,
+                    },
+                },
+            ];
+            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
+        }
+
+        async fn resolve_auth(
+            &self,
+            _auth: &imp_llm::auth::AuthStore,
+        ) -> imp_llm::Result<imp_llm::auth::ApiKey> {
+            Ok("mock-key".into())
+        }
+
+        fn id(&self) -> &str {
+            "mock-capturing"
+        }
+
+        fn models(&self) -> &[ModelMeta] {
+            &[]
+        }
+    }
+
+    fn capturing_model(summary: &str) -> (Model, Arc<CapturingCompactionProvider>) {
+        let provider = Arc::new(CapturingCompactionProvider::new(summary));
+        let model = Model {
+            meta: ModelMeta {
+                id: "mock-model".into(),
+                provider: "mock".into(),
+                name: "Mock".into(),
+                context_window: 200_000,
+                max_output_tokens: 4096,
+                pricing: ModelPricing::default(),
+                capabilities: Capabilities::default(),
+            },
+            provider: provider.clone(),
+        };
+        (model, provider)
+    }
+
+    // -- edge case tests --
+
+    #[tokio::test]
+    async fn compact_empty_messages() {
+        let model = mock_model("No conversation to summarize.");
+        let messages: Vec<Message> = vec![];
+        let options = CompactionOptions::default();
+
+        let result = compact(&messages, &model, options, "test-key")
+            .await
+            .unwrap();
+
+        assert_eq!(result.summary, "No conversation to summarize.");
+        assert_eq!(result.first_kept_id, "unknown");
+    }
+
+    #[tokio::test]
+    async fn compact_single_turn() {
+        let model = mock_model("Summary of single turn.");
+        let messages = vec![
+            make_user("Please fix the bug"),
+            make_assistant_text("I'll look into it."),
+        ];
+        let options = CompactionOptions {
+            keep_recent_turns: 3,
+            ..Default::default()
+        };
+
+        let result = compact(&messages, &model, options, "test-key")
+            .await
+            .unwrap();
+
+        // Only 1 turn, keep_recent=3 → split_idx=0, all messages are "recent".
+        assert_eq!(result.summary, "Summary of single turn.");
+        // first_kept_id comes from the first message in recent (the user message).
+        assert!(result.first_kept_id.starts_with("user_"));
+    }
+
+    #[tokio::test]
+    async fn compact_all_recent() {
+        let model = mock_model("Summary with all recent.");
+        let mut messages = vec![make_user("Do something")];
+        for i in 0..3 {
+            let cid = format!("c{i}");
+            messages.push(make_assistant_tool_call(
+                &cid,
+                "bash",
+                serde_json::json!({"cmd": "ls"}),
+            ));
+            messages.push(make_tool_result(&cid, "bash", "output"));
+        }
+
+        // 3 turns, keep_recent=5 → more than total, so split_idx=0.
+        let options = CompactionOptions {
+            keep_recent_turns: 5,
+            ..Default::default()
+        };
+
+        let result = compact(&messages, &model, options, "test-key")
+            .await
+            .unwrap();
+
+        assert_eq!(result.summary, "Summary with all recent.");
+        // All messages are "recent", first kept is the user message.
+        assert!(result.first_kept_id.starts_with("user_"));
+    }
+
+    #[tokio::test]
+    async fn compact_preserves_user_request() {
+        let original_request =
+            "Please refactor the authentication module to use JWT tokens instead of session cookies";
+        let (model, provider) = capturing_model("Summary preserving request.");
+
+        let mut messages = vec![make_user(original_request)];
+        for i in 0..5 {
+            let cid = format!("c{i}");
+            messages.push(make_assistant_tool_call(
+                &cid,
+                "read",
+                serde_json::json!({"path": "auth.rs"}),
+            ));
+            messages.push(make_tool_result(&cid, "read", "file contents"));
+        }
+
+        let options = CompactionOptions {
+            keep_recent_turns: 2,
+            ..Default::default()
+        };
+
+        let _result = compact(&messages, &model, options, "test-key")
+            .await
+            .unwrap();
+
+        // The prompt sent to the LLM must contain the original user request verbatim
+        // because old_messages (which includes the user message) is serialized into the prompt.
+        let captured = provider.captured_context.try_lock().unwrap();
+        let ctx = captured.as_ref().expect("context should be captured");
+        let prompt_msg = &ctx.messages[0];
+        if let Message::User(u) = prompt_msg {
+            if let ContentBlock::Text { text } = &u.content[0] {
+                assert!(
+                    text.contains(original_request),
+                    "compaction prompt must contain the original user request verbatim"
+                );
+            } else {
+                panic!("expected text block in prompt");
+            }
+        } else {
+            panic!("expected user message as prompt");
+        }
     }
 }

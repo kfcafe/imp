@@ -258,12 +258,10 @@ fn convert_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                                 "type": "input_text",
                                 "text": text
                             })),
-                            ContentBlock::Image { media_type, data } => {
-                                Some(serde_json::json!({
-                                    "type": "input_image",
-                                    "image_url": format!("data:{media_type};base64,{data}")
-                                }))
-                            }
+                            ContentBlock::Image { media_type, data } => Some(serde_json::json!({
+                                "type": "input_image",
+                                "image_url": format!("data:{media_type};base64,{data}")
+                            })),
                             _ => None,
                         })
                         .collect();
@@ -829,5 +827,144 @@ mod tests {
 
         // First: function_call_output with placeholder
         assert_eq!(items[0]["type"], "function_call_output");
+    }
+
+    // -- SSE parsing tests --
+
+    #[test]
+    fn openai_parse_text_delta() {
+        let data = r#"{"type":"response.content_part.delta","delta":"Hello world"}"#;
+        let event = parse_sse_event(data).unwrap().unwrap();
+        let mut state = StreamState::new();
+        let events = process_sse_event(event, &mut state);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], StreamEvent::TextDelta { text } if text == "Hello world"));
+    }
+
+    #[test]
+    fn openai_parse_function_call_accumulation() {
+        let mut state = StreamState::new();
+
+        // output_item.added for a function_call
+        let added = r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":"bash","call_id":"call_42"}}"#;
+        let event = parse_sse_event(added).unwrap().unwrap();
+        let events = process_sse_event(event, &mut state);
+        assert!(events.is_empty());
+
+        // argument deltas
+        let d1 = r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"com"}"#;
+        let event = parse_sse_event(d1).unwrap().unwrap();
+        let events = process_sse_event(event, &mut state);
+        assert!(events.is_empty());
+
+        let d2 = r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"mand\":\"ls\"}"}"#;
+        let event = parse_sse_event(d2).unwrap().unwrap();
+        let events = process_sse_event(event, &mut state);
+        assert!(events.is_empty());
+
+        // Verify the args buffer accumulated correctly
+        if let OutputItemState::FunctionCall { args_buf, .. } = &state.items[0] {
+            assert_eq!(args_buf, r#"{"command":"ls"}"#);
+        } else {
+            panic!("expected FunctionCall state");
+        }
+    }
+
+    #[test]
+    fn openai_parse_response_completed() {
+        let mut state = StreamState::new();
+        state.model = "gpt-4o".into();
+
+        let data = r#"{"type":"response.completed","response":{"model":"gpt-4o","status":"completed","usage":{"input_tokens":50,"output_tokens":25,"input_tokens_details":{"cached_tokens":10}}}}"#;
+        let event = parse_sse_event(data).unwrap().unwrap();
+        let events = process_sse_event(event, &mut state);
+
+        assert_eq!(events.len(), 1);
+        if let StreamEvent::MessageEnd { message } = &events[0] {
+            assert_eq!(message.stop_reason, StopReason::EndTurn);
+            let usage = message.usage.as_ref().unwrap();
+            assert_eq!(usage.input_tokens, 50);
+            assert_eq!(usage.output_tokens, 25);
+            assert_eq!(usage.cache_read_tokens, 10);
+        } else {
+            panic!("expected MessageEnd");
+        }
+    }
+
+    #[test]
+    fn openai_response_incomplete_maps_to_max_tokens() {
+        let mut state = StreamState::new();
+        let data = r#"{"type":"response.completed","response":{"status":"incomplete","usage":{"input_tokens":0,"output_tokens":0}}}"#;
+        let event = parse_sse_event(data).unwrap().unwrap();
+        let events = process_sse_event(event, &mut state);
+
+        assert_eq!(events.len(), 1);
+        if let StreamEvent::MessageEnd { message } = &events[0] {
+            assert_eq!(message.stop_reason, StopReason::MaxTokens);
+        } else {
+            panic!("expected MessageEnd");
+        }
+    }
+
+    #[test]
+    fn openai_reasoning_effort_off_returns_none() {
+        assert!(reasoning_effort(ThinkingLevel::Off).is_none());
+    }
+
+    #[test]
+    fn openai_reasoning_effort_levels() {
+        assert_eq!(reasoning_effort(ThinkingLevel::Minimal).as_deref(), Some("low"));
+        assert_eq!(reasoning_effort(ThinkingLevel::Low).as_deref(), Some("low"));
+        assert_eq!(reasoning_effort(ThinkingLevel::Medium).as_deref(), Some("medium"));
+        assert_eq!(reasoning_effort(ThinkingLevel::High).as_deref(), Some("high"));
+        assert_eq!(reasoning_effort(ThinkingLevel::XHigh).as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn openai_empty_instructions_omitted() {
+        let model_meta = ModelMeta {
+            id: "gpt-4o".into(),
+            provider: "openai".into(),
+            name: "GPT-4o".into(),
+            context_window: 128_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let provider = OpenAiProvider::new();
+        let model = Model {
+            meta: model_meta,
+            provider: Arc::new(provider),
+        };
+        let options = RequestOptions {
+            system_prompt: "".into(),
+            ..Default::default()
+        };
+        let req = build_request(&model, Context::default(), options);
+        assert!(req.instructions.is_none());
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("instructions").is_none());
+    }
+
+    #[test]
+    fn openai_parse_sse_event_malformed_json_returns_error() {
+        let result = parse_sse_event("{garbage}");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::Stream(_)));
+    }
+
+    #[test]
+    fn openai_parse_sse_event_empty_returns_none() {
+        let result = parse_sse_event("").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn openai_unknown_event_type_ignored() {
+        let data = r#"{"type":"response.in_progress"}"#;
+        let event = parse_sse_event(data).unwrap().unwrap();
+        let mut state = StreamState::new();
+        let events = process_sse_event(event, &mut state);
+        assert!(events.is_empty());
     }
 }

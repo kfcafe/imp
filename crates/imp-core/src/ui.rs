@@ -62,12 +62,22 @@ pub struct NullInterface;
 
 #[async_trait]
 impl UserInterface for NullInterface {
-    fn has_ui(&self) -> bool { false }
+    fn has_ui(&self) -> bool {
+        false
+    }
     async fn notify(&self, _message: &str, _level: NotifyLevel) {}
-    async fn confirm(&self, _title: &str, _message: &str) -> Option<bool> { None }
-    async fn select(&self, _title: &str, _options: &[SelectOption]) -> Option<usize> { None }
-    async fn input(&self, _title: &str, _placeholder: &str) -> Option<String> { None }
+    async fn confirm(&self, _title: &str, _message: &str) -> Option<bool> {
+        None
+    }
+    async fn select(&self, _title: &str, _options: &[SelectOption]) -> Option<usize> {
+        None
+    }
+    async fn input(&self, _title: &str, _placeholder: &str) -> Option<String> {
+        None
+    }
     async fn set_status(&self, _key: &str, _text: Option<&str>) {}
     async fn set_widget(&self, _key: &str, _content: Option<WidgetContent>) {}
-    async fn custom(&self, _component: ComponentSpec) -> Option<serde_json::Value> { None }
+    async fn custom(&self, _component: ComponentSpec) -> Option<serde_json::Value> {
+        None
+    }
 }

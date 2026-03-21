@@ -120,9 +120,7 @@ impl AnthropicOAuth {
 
         Ok(OAuthCredential {
             access_token: token.access_token,
-            refresh_token: token
-                .refresh_token
-                .unwrap_or_default(),
+            refresh_token: token.refresh_token.unwrap_or_default(),
             expires_at,
         })
     }
@@ -178,16 +176,12 @@ impl AnthropicOAuth {
         let pkce = PkceChallenge::generate();
         let auth_url = self.build_authorize_url(&pkce);
 
-        let server =
-            CallbackServer::bind(CALLBACK_HOST, CALLBACK_PORT).await?;
+        let server = CallbackServer::bind(CALLBACK_HOST, CALLBACK_PORT).await?;
         open_url(&auth_url);
 
         // Wait for callback with 5 minute timeout
         let timeout = Duration::from_secs(300);
-        match server
-            .wait_for_code(&pkce.verifier, timeout)
-            .await
-        {
+        match server.wait_for_code(&pkce.verifier, timeout).await {
             Ok(code) => {
                 self.exchange_code(&code, &pkce.verifier, REDIRECT_URI)
                     .await
@@ -261,11 +255,7 @@ impl CallbackServer {
     /// Wait for an OAuth callback request with the given state.
     ///
     /// Returns the authorization code on success, or an error on timeout/mismatch.
-    pub async fn wait_for_code(
-        self,
-        expected_state: &str,
-        timeout: Duration,
-    ) -> Result<String> {
+    pub async fn wait_for_code(self, expected_state: &str, timeout: Duration) -> Result<String> {
         let accept = tokio::time::timeout(timeout, self.listener.accept());
         let (mut stream, _) = accept
             .await
@@ -316,11 +306,7 @@ impl CallbackServer {
     }
 }
 
-async fn send_response(
-    stream: &mut tokio::net::TcpStream,
-    status: u16,
-    body: &str,
-) -> Result<()> {
+async fn send_response(stream: &mut tokio::net::TcpStream, status: u16, body: &str) -> Result<()> {
     let status_text = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -433,10 +419,9 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Simulate browser callback
-        let mut client =
-            tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
-                .await
-                .unwrap();
+        let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
         let request = format!(
             "GET /callback?code=auth-code-123&state={expected_state} HTTP/1.1\r\n\
              Host: localhost:{port}\r\n\
@@ -468,10 +453,9 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let mut client =
-            tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
-                .await
-                .unwrap();
+        let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
         let request = "GET /callback?code=some-code&state=wrong-state HTTP/1.1\r\n\
                         Host: localhost\r\n\r\n";
         client.write_all(request.as_bytes()).await.unwrap();
@@ -597,10 +581,7 @@ mod tests {
         tokio::spawn(serve_token_response(listener, 200, body));
 
         let oauth = AnthropicOAuth::with_token_url(format!("http://127.0.0.1:{port}/token"));
-        let cred = oauth
-            .refresh_token("rt-old-refresh-token")
-            .await
-            .unwrap();
+        let cred = oauth.refresh_token("rt-old-refresh-token").await.unwrap();
 
         assert_eq!(cred.access_token, "sk-ant-new-access-token");
         assert_eq!(cred.refresh_token, "rt-new-refresh-token");
@@ -629,10 +610,7 @@ mod tests {
         tokio::spawn(serve_token_response(listener, 200, body));
 
         let oauth = AnthropicOAuth::with_token_url(format!("http://127.0.0.1:{port}/token"));
-        let cred = oauth
-            .refresh_token("rt-original-token")
-            .await
-            .unwrap();
+        let cred = oauth.refresh_token("rt-original-token").await.unwrap();
 
         assert_eq!(cred.access_token, "sk-ant-refreshed");
         // Should keep the old refresh token when none returned
@@ -641,9 +619,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_oauth_refresh_token_failure() {
-        let body =
-            r#"{"error": "invalid_grant", "error_description": "Refresh token revoked"}"#
-                .to_string();
+        let body = r#"{"error": "invalid_grant", "error_description": "Refresh token revoked"}"#
+            .to_string();
         let (listener, port) = start_mock_token_server(&body).await;
 
         tokio::spawn(serve_token_response(listener, 401, body));

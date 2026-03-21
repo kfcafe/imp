@@ -134,9 +134,7 @@ fn agents_md_layer(agents: &[AgentsMd]) -> String {
 }
 
 fn skills_layer(skills: &[Skill]) -> String {
-    let mut s = String::from(
-        "Available skills (use read to load when relevant):\n",
-    );
+    let mut s = String::from("Available skills (use read to load when relevant):\n");
     for skill in skills {
         s.push_str(&format!(
             "- {}: {} [{}]\n",
@@ -196,8 +194,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use async_trait::async_trait;
     use crate::tools::{Tool, ToolContext, ToolOutput};
+    use async_trait::async_trait;
 
     // -- Test tool helpers --
 
@@ -209,15 +207,26 @@ mod tests {
 
     #[async_trait]
     impl Tool for FakeTool {
-        fn name(&self) -> &str { self.name }
-        fn label(&self) -> &str { self.name }
-        fn description(&self) -> &str { self.description }
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn label(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            self.description
+        }
         fn parameters(&self) -> serde_json::Value {
             serde_json::json!({"type": "object"})
         }
-        fn is_readonly(&self) -> bool { self.readonly }
+        fn is_readonly(&self) -> bool {
+            self.readonly
+        }
         async fn execute(
-            &self, _: &str, _: serde_json::Value, _: ToolContext,
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: ToolContext,
         ) -> crate::Result<ToolOutput> {
             Ok(ToolOutput::text("ok"))
         }
@@ -298,8 +307,12 @@ mod tests {
         assert!(result.text.contains("You are imp, a coding agent."));
         assert!(result.text.contains("- read: Read file contents"));
         assert!(result.text.contains("- write: Write content to a file"));
-        assert!(result.text.contains("- edit: Edit a file by replacing exact text"));
-        assert!(result.text.contains("- grep: Search file contents for a pattern"));
+        assert!(result
+            .text
+            .contains("- edit: Edit a file by replacing exact text"));
+        assert!(result
+            .text
+            .contains("- grep: Search file contents for a pattern"));
     }
 
     #[test]
@@ -322,7 +335,9 @@ mod tests {
         let agents = vec![make_agents_md("# Rules\n\nUse snake_case everywhere.")];
         let result = assemble(&reg, &agents, &[], &[], None, None);
         assert!(result.text.contains("# Project Context"));
-        assert!(result.text.contains("# Rules\n\nUse snake_case everywhere."));
+        assert!(result
+            .text
+            .contains("# Rules\n\nUse snake_case everywhere."));
     }
 
     #[test]
@@ -350,13 +365,27 @@ mod tests {
     fn system_prompt_skills_listed_with_paths() {
         let reg = make_registry();
         let skills = vec![
-            make_skill("rust", "Conventions for Rust code", "/home/.imp/skills/rust/SKILL.md"),
-            make_skill("testing", "Write and review tests", "/home/.imp/skills/testing/SKILL.md"),
+            make_skill(
+                "rust",
+                "Conventions for Rust code",
+                "/home/.imp/skills/rust/SKILL.md",
+            ),
+            make_skill(
+                "testing",
+                "Write and review tests",
+                "/home/.imp/skills/testing/SKILL.md",
+            ),
         ];
         let result = assemble(&reg, &[], &skills, &[], None, None);
-        assert!(result.text.contains("Available skills (use read to load when relevant):"));
-        assert!(result.text.contains("- rust: Conventions for Rust code [/home/.imp/skills/rust/SKILL.md]"));
-        assert!(result.text.contains("- testing: Write and review tests [/home/.imp/skills/testing/SKILL.md]"));
+        assert!(result
+            .text
+            .contains("Available skills (use read to load when relevant):"));
+        assert!(result
+            .text
+            .contains("- rust: Conventions for Rust code [/home/.imp/skills/rust/SKILL.md]"));
+        assert!(result
+            .text
+            .contains("- testing: Write and review tests [/home/.imp/skills/testing/SKILL.md]"));
     }
 
     #[test]
@@ -372,13 +401,23 @@ mod tests {
     fn system_prompt_facts_included() {
         let reg = make_registry();
         let facts = vec![
-            Fact { text: "Uses JWT for auth".into(), verified_ago: "2h ago".into() },
-            Fact { text: "Test suite requires Docker".into(), verified_ago: "1d ago".into() },
+            Fact {
+                text: "Uses JWT for auth".into(),
+                verified_ago: "2h ago".into(),
+            },
+            Fact {
+                text: "Test suite requires Docker".into(),
+                verified_ago: "1d ago".into(),
+            },
         ];
         let result = assemble(&reg, &[], &[], &facts, None, None);
         assert!(result.text.contains("Project facts:"));
-        assert!(result.text.contains("\"Uses JWT for auth\" [verified 2h ago]"));
-        assert!(result.text.contains("\"Test suite requires Docker\" [verified 1d ago]"));
+        assert!(result
+            .text
+            .contains("\"Uses JWT for auth\" [verified 2h ago]"));
+        assert!(result
+            .text
+            .contains("\"Test suite requires Docker\" [verified 1d ago]"));
     }
 
     #[test]
@@ -403,7 +442,9 @@ mod tests {
         let result = assemble(&reg, &[], &[], &[], Some(&task), None);
         assert!(result.text.contains("## Task"));
         assert!(result.text.contains("Title: Fix the failing auth test"));
-        assert!(result.text.contains("Description: The JWT validation test panics"));
+        assert!(result
+            .text
+            .contains("Description: The JWT validation test panics"));
         assert!(result.text.contains("Verify: cargo test auth::jwt_test"));
     }
 
@@ -415,15 +456,27 @@ mod tests {
             description: "Something is broken".into(),
             verify: None,
             attempts: vec![
-                Attempt { number: 1, outcome: "failed".into(), summary: "Tried X, got error Y".into() },
-                Attempt { number: 2, outcome: "failed".into(), summary: "Tried Z, still broken".into() },
+                Attempt {
+                    number: 1,
+                    outcome: "failed".into(),
+                    summary: "Tried X, got error Y".into(),
+                },
+                Attempt {
+                    number: 2,
+                    outcome: "failed".into(),
+                    summary: "Tried Z, still broken".into(),
+                },
             ],
             dependencies: vec![],
         };
         let result = assemble(&reg, &[], &[], &[], Some(&task), None);
         assert!(result.text.contains("## Previous attempts"));
-        assert!(result.text.contains("Attempt 1 (failed): Tried X, got error Y"));
-        assert!(result.text.contains("Attempt 2 (failed): Tried Z, still broken"));
+        assert!(result
+            .text
+            .contains("Attempt 1 (failed): Tried X, got error Y"));
+        assert!(result
+            .text
+            .contains("Attempt 2 (failed): Tried Z, still broken"));
     }
 
     #[test]
@@ -434,13 +487,17 @@ mod tests {
             description: "New feature".into(),
             verify: None,
             attempts: vec![],
-            dependencies: vec![
-                Dependency { name: "Schema types".into(), status: "completed".into(), detail: "defined in src/schema.rs".into() },
-            ],
+            dependencies: vec![Dependency {
+                name: "Schema types".into(),
+                status: "completed".into(),
+                detail: "defined in src/schema.rs".into(),
+            }],
         };
         let result = assemble(&reg, &[], &[], &[], Some(&task), None);
         assert!(result.text.contains("## Dependencies"));
-        assert!(result.text.contains("- Schema types (completed): defined in src/schema.rs"));
+        assert!(result
+            .text
+            .contains("- Schema types (completed): defined in src/schema.rs"));
     }
 
     #[test]
@@ -485,7 +542,9 @@ mod tests {
         let reg = make_registry();
         let role = make_readonly_role();
         let result = assemble(&reg, &[], &[], &[], None, Some(&role));
-        assert!(result.text.contains("Review code carefully. Do not modify files."));
+        assert!(result
+            .text
+            .contains("Review code carefully. Do not modify files."));
     }
 
     #[test]
@@ -506,9 +565,7 @@ mod tests {
         let result = assemble(&reg, &[], &[], &[], None, Some(&role));
         // Worker has no instructions, so the prompt shouldn't have extra instruction text
         let lines: Vec<&str> = result.text.lines().collect();
-        let after_tools = lines.iter()
-            .position(|l| l.starts_with("- grep:"))
-            .unwrap();
+        let after_tools = lines.iter().position(|l| l.starts_with("- grep:")).unwrap();
         // Next non-empty line after the last tool should be end of identity layer
         // (no instructions appended)
         let remaining = &lines[after_tools + 1..];
@@ -533,15 +590,27 @@ mod tests {
 
         let minimal = assemble(&reg, &[], &[], &[], None, None);
 
-        let agents = vec![make_agents_md("Lots of project context here with many words.")];
-        let skills = vec![make_skill("rust", "Rust conventions", "/skills/rust/SKILL.md")];
-        let facts = vec![Fact { text: "Uses Postgres".into(), verified_ago: "1h ago".into() }];
+        let agents = vec![make_agents_md(
+            "Lots of project context here with many words.",
+        )];
+        let skills = vec![make_skill(
+            "rust",
+            "Rust conventions",
+            "/skills/rust/SKILL.md",
+        )];
+        let facts = vec![Fact {
+            text: "Uses Postgres".into(),
+            verified_ago: "1h ago".into(),
+        }];
 
         let full = assemble(&reg, &agents, &skills, &facts, None, None);
 
-        assert!(full.estimated_tokens > minimal.estimated_tokens,
+        assert!(
+            full.estimated_tokens > minimal.estimated_tokens,
             "full ({}) should have more tokens than minimal ({})",
-            full.estimated_tokens, minimal.estimated_tokens);
+            full.estimated_tokens,
+            minimal.estimated_tokens
+        );
     }
 
     // -- Full assembly --
@@ -550,18 +619,29 @@ mod tests {
     fn system_prompt_all_layers_present() {
         let reg = make_registry();
         let agents = vec![make_agents_md("Be concise.")];
-        let skills = vec![make_skill("rust", "Rust code conventions", "/skills/rust/SKILL.md")];
-        let facts = vec![Fact { text: "Uses SQLite".into(), verified_ago: "30m ago".into() }];
+        let skills = vec![make_skill(
+            "rust",
+            "Rust code conventions",
+            "/skills/rust/SKILL.md",
+        )];
+        let facts = vec![Fact {
+            text: "Uses SQLite".into(),
+            verified_ago: "30m ago".into(),
+        }];
         let task = TaskContext {
             title: "Add caching".into(),
             description: "Add Redis caching layer".into(),
             verify: Some("cargo test cache".into()),
-            attempts: vec![
-                Attempt { number: 1, outcome: "failed".into(), summary: "Wrong key format".into() },
-            ],
-            dependencies: vec![
-                Dependency { name: "Config".into(), status: "done".into(), detail: "src/config.rs".into() },
-            ],
+            attempts: vec![Attempt {
+                number: 1,
+                outcome: "failed".into(),
+                summary: "Wrong key format".into(),
+            }],
+            dependencies: vec![Dependency {
+                name: "Config".into(),
+                status: "done".into(),
+                detail: "src/config.rs".into(),
+            }],
         };
 
         let result = assemble(&reg, &agents, &skills, &facts, Some(&task), None);

@@ -15,8 +15,12 @@ pub struct ReadTool;
 
 #[async_trait]
 impl Tool for ReadTool {
-    fn name(&self) -> &str { "read" }
-    fn label(&self) -> &str { "Read File" }
+    fn name(&self) -> &str {
+        "read"
+    }
+    fn label(&self) -> &str {
+        "Read File"
+    }
     fn description(&self) -> &str {
         "Read the contents of a file. Supports text files and images."
     }
@@ -31,7 +35,9 @@ impl Tool for ReadTool {
             "required": ["path"]
         })
     }
-    fn is_readonly(&self) -> bool { true }
+    fn is_readonly(&self) -> bool {
+        true
+    }
 
     async fn execute(
         &self,
@@ -94,10 +100,7 @@ impl Tool for ReadTool {
         if result.truncated {
             let note = format!(
                 "\n[…truncated: showing {}/{} lines, {}/{} bytes",
-                result.output_lines,
-                result.total_lines,
-                result.output_bytes,
-                result.total_bytes,
+                result.output_lines, result.total_lines, result.output_bytes, result.total_bytes,
             );
             if let Some(ref tf) = result.temp_file {
                 output.push_str(&format!("{note}, full output: {}]", tf.display()));
@@ -163,8 +166,7 @@ async fn read_image(path: &Path) -> Result<ToolOutput> {
     use std::io::Write;
     let mut encoded = Vec::new();
     {
-        let mut encoder =
-            base64_encoder(&mut encoded);
+        let mut encoder = base64_encoder(&mut encoded);
         encoder.write_all(&bytes)?;
         encoder.finish()?;
     }
@@ -186,7 +188,11 @@ async fn read_image(path: &Path) -> Result<ToolOutput> {
 
 /// Simple base64 encoder without adding a dependency. We only need this for images.
 fn base64_encoder(output: &mut Vec<u8>) -> Base64Writer<'_> {
-    Base64Writer { output, buffer: [0; 3], buffer_len: 0 }
+    Base64Writer {
+        output,
+        buffer: [0; 3],
+        buffer_len: 0,
+    }
 }
 
 const BASE64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -217,8 +223,10 @@ impl<'a> Base64Writer<'a> {
     fn encode_block(&mut self) {
         let b = &self.buffer;
         self.output.push(BASE64_CHARS[(b[0] >> 2) as usize]);
-        self.output.push(BASE64_CHARS[((b[0] & 0x03) << 4 | b[1] >> 4) as usize]);
-        self.output.push(BASE64_CHARS[((b[1] & 0x0f) << 2 | b[2] >> 6) as usize]);
+        self.output
+            .push(BASE64_CHARS[((b[0] & 0x03) << 4 | b[1] >> 4) as usize]);
+        self.output
+            .push(BASE64_CHARS[((b[1] & 0x0f) << 2 | b[2] >> 6) as usize]);
         self.output.push(BASE64_CHARS[(b[2] & 0x3f) as usize]);
         self.buffer_len = 0;
     }
@@ -236,7 +244,8 @@ impl<'a> Base64Writer<'a> {
                 let b0 = self.buffer[0];
                 let b1 = self.buffer[1];
                 self.output.push(BASE64_CHARS[(b0 >> 2) as usize]);
-                self.output.push(BASE64_CHARS[((b0 & 0x03) << 4 | b1 >> 4) as usize]);
+                self.output
+                    .push(BASE64_CHARS[((b0 & 0x03) << 4 | b1 >> 4) as usize]);
                 self.output.push(BASE64_CHARS[((b1 & 0x0f) << 2) as usize]);
                 self.output.push(b'=');
             }
@@ -296,10 +305,12 @@ fn levenshtein(a: &str, b: &str) -> usize {
     for i in 1..=m {
         curr[0] = i;
         for j in 1..=n {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -411,6 +422,64 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(extract_text(&result).contains("content"));
+    }
+
+    #[tokio::test]
+    async fn read_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("empty.txt");
+        std::fs::write(&file, "").unwrap();
+
+        let tool = ReadTool;
+        let result = tool
+            .execute("c6", json!({"path": "empty.txt"}), test_ctx(dir.path()))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn read_large_file_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("big.txt");
+        let mut content = String::new();
+        for i in 0..3000 {
+            content.push_str(&format!("line {i}\n"));
+        }
+        std::fs::write(&file, &content).unwrap();
+
+        let tool = ReadTool;
+        let result = tool
+            .execute("c7", json!({"path": "big.txt"}), test_ctx(dir.path()))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let text = extract_text(&result);
+        assert!(text.contains("truncated"));
+        // Should have the first lines
+        assert!(text.contains("line 0"));
+        // Details should indicate truncation
+        assert_eq!(result.details["truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn read_directory_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+
+        let tool = ReadTool;
+        let result = tool
+            .execute("c8", json!({"path": "subdir"}), test_ctx(dir.path()))
+            .await;
+
+        // Reading a directory should either error or produce an error output
+        match result {
+            Ok(output) => assert!(output.is_error),
+            Err(_) => {} // Also acceptable
+        }
     }
 
     fn extract_text(output: &ToolOutput) -> String {

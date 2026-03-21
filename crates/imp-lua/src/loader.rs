@@ -10,7 +10,10 @@ pub struct LuaExtension {
 }
 
 /// Discover Lua extensions from user and project directories.
-pub fn discover_extensions(user_config_dir: &Path, project_dir: Option<&Path>) -> Vec<LuaExtension> {
+pub fn discover_extensions(
+    user_config_dir: &Path,
+    project_dir: Option<&Path>,
+) -> Vec<LuaExtension> {
     let mut extensions = Vec::new();
 
     let mut dirs = vec![user_config_dir.join("lua")];
@@ -25,7 +28,8 @@ pub fn discover_extensions(user_config_dir: &Path, project_dir: Option<&Path>) -
 
                 // Direct .lua file
                 if path.extension().is_some_and(|e| e == "lua") {
-                    let name = path.file_stem()
+                    let name = path
+                        .file_stem()
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_default();
                     extensions.push(LuaExtension { name, path });
@@ -36,7 +40,8 @@ pub fn discover_extensions(user_config_dir: &Path, project_dir: Option<&Path>) -
                 if path.is_dir() {
                     let init = path.join("init.lua");
                     if init.exists() {
-                        let name = path.file_name()
+                        let name = path
+                            .file_name()
                             .map(|s| s.to_string_lossy().to_string())
                             .unwrap_or_default();
                         extensions.push(LuaExtension { name, path: init });
@@ -50,7 +55,10 @@ pub fn discover_extensions(user_config_dir: &Path, project_dir: Option<&Path>) -
 }
 
 /// Load all discovered extensions into a Lua runtime.
-pub fn load_extensions(runtime: &LuaRuntime, extensions: &[LuaExtension]) -> Vec<(String, Result<(), LuaError>)> {
+pub fn load_extensions(
+    runtime: &LuaRuntime,
+    extensions: &[LuaExtension],
+) -> Vec<(String, Result<(), LuaError>)> {
     extensions
         .iter()
         .map(|ext| {

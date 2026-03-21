@@ -331,7 +331,51 @@ mod tests {
 
         let result = handle.await.unwrap().unwrap();
         assert!(!result.is_error);
-        assert!(!updates.is_empty(), "should have received streaming updates");
+        assert!(
+            !updates.is_empty(),
+            "should have received streaming updates"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_stdout_and_stderr_merged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = test_ctx(tmp.path());
+
+        let result = run_command(
+            "echo stdout_line; echo stderr_line >&2",
+            DEFAULT_TIMEOUT_SECS,
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        // exit code 0 → not an error
+        assert!(!result.is_error);
+        let text = match &result.content[0] {
+            imp_llm::ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("stdout_line"));
+        assert!(text.contains("stderr_line"));
+    }
+
+    #[tokio::test]
+    async fn bash_writes_file_side_effect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = test_ctx(tmp.path());
+
+        let result = run_command(
+            "echo 'side effect content' > side_effect.txt",
+            DEFAULT_TIMEOUT_SECS,
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.is_error);
+        let written = std::fs::read_to_string(tmp.path().join("side_effect.txt")).unwrap();
+        assert!(written.contains("side effect content"));
     }
 
     #[tokio::test]

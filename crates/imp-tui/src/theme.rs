@@ -89,9 +89,7 @@ impl Theme {
     }
 
     pub fn selected_style(&self) -> Style {
-        Style::default()
-            .fg(self.selection_fg)
-            .bg(self.selection_bg)
+        Style::default().fg(self.selection_fg).bg(self.selection_bg)
     }
 
     /// Border color based on thinking level.

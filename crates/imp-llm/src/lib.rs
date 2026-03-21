@@ -19,7 +19,9 @@ pub use message::{
     AssistantMessage, ContentBlock, Message, StopReason, ToolResultMessage, UserMessage,
 };
 pub use model::{Capabilities, Model, ModelMeta, ModelPricing, ModelRegistry};
-pub use provider::{CacheOptions, Context, Provider, RequestOptions, ThinkingLevel, ToolDefinition};
+pub use provider::{
+    CacheOptions, Context, Provider, RequestOptions, ThinkingLevel, ToolDefinition,
+};
 pub use stream::{ProviderError, StreamEvent};
 pub use usage::{Cost, Usage};
 

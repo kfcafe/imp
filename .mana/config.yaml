@@ -1,6 +1,7 @@
 project: imp
-next_id: 15
+next_id: 16
 auto_close_parent: true
+run: 'pi -p "Read the unit with: cat .mana/{id}-*.md && then implement everything described. Working dir: /Users/asher/tower/imp. Workspace root: /Users/asher/tower. Run verify. If pass: mana close {id}"'
 max_loops: 10
-max_concurrent: 10
+max_concurrent: 4
 poll_interval: 30

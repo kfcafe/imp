@@ -325,7 +325,9 @@ mod tests {
     #[test]
     fn find_by_alias_resolves_sonnet() {
         let reg = ModelRegistry::with_builtins();
-        let model = reg.find_by_alias("sonnet").expect("sonnet alias should resolve");
+        let model = reg
+            .find_by_alias("sonnet")
+            .expect("sonnet alias should resolve");
         assert_eq!(model.id, "claude-sonnet-4-20250514");
         assert_eq!(model.provider, "anthropic");
     }
@@ -333,21 +335,27 @@ mod tests {
     #[test]
     fn find_by_alias_resolves_haiku() {
         let reg = ModelRegistry::with_builtins();
-        let model = reg.find_by_alias("haiku").expect("haiku alias should resolve");
+        let model = reg
+            .find_by_alias("haiku")
+            .expect("haiku alias should resolve");
         assert_eq!(model.id, "claude-haiku-3-5-20241022");
     }
 
     #[test]
     fn find_by_alias_resolves_opus() {
         let reg = ModelRegistry::with_builtins();
-        let model = reg.find_by_alias("opus").expect("opus alias should resolve");
+        let model = reg
+            .find_by_alias("opus")
+            .expect("opus alias should resolve");
         assert_eq!(model.id, "claude-opus-4-20250514");
     }
 
     #[test]
     fn find_by_alias_resolves_gpt4o() {
         let reg = ModelRegistry::with_builtins();
-        let model = reg.find_by_alias("gpt4o").expect("gpt4o alias should resolve");
+        let model = reg
+            .find_by_alias("gpt4o")
+            .expect("gpt4o alias should resolve");
         assert_eq!(model.id, "gpt-4o");
     }
 

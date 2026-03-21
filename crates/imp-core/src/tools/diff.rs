@@ -13,8 +13,12 @@ pub struct DiffShowTool;
 
 #[async_trait]
 impl Tool for DiffShowTool {
-    fn name(&self) -> &str { "diff_show" }
-    fn label(&self) -> &str { "Show Diff" }
+    fn name(&self) -> &str {
+        "diff_show"
+    }
+    fn label(&self) -> &str {
+        "Show Diff"
+    }
     fn description(&self) -> &str {
         "Show a unified diff between a file's current content and proposed new content."
     }
@@ -29,7 +33,9 @@ impl Tool for DiffShowTool {
             "required": ["file", "newContent"]
         })
     }
-    fn is_readonly(&self) -> bool { true }
+    fn is_readonly(&self) -> bool {
+        true
+    }
 
     async fn execute(
         &self,
@@ -50,7 +56,10 @@ impl Tool for DiffShowTool {
         let path = resolve_path(&ctx.cwd, raw_path);
 
         if !path.exists() {
-            return Ok(ToolOutput::error(format!("File not found: {}", path.display())));
+            return Ok(ToolOutput::error(format!(
+                "File not found: {}",
+                path.display()
+            )));
         }
 
         let old_content = tokio::fs::read_to_string(&path).await?;
@@ -70,8 +79,12 @@ pub struct DiffApplyTool;
 
 #[async_trait]
 impl Tool for DiffApplyTool {
-    fn name(&self) -> &str { "diff_apply" }
-    fn label(&self) -> &str { "Apply Diff" }
+    fn name(&self) -> &str {
+        "diff_apply"
+    }
+    fn label(&self) -> &str {
+        "Apply Diff"
+    }
     fn description(&self) -> &str {
         "Apply a unified diff patch to a file."
     }
@@ -86,7 +99,9 @@ impl Tool for DiffApplyTool {
             "required": ["file", "patch"]
         })
     }
-    fn is_readonly(&self) -> bool { false }
+    fn is_readonly(&self) -> bool {
+        false
+    }
 
     async fn execute(
         &self,
@@ -107,7 +122,10 @@ impl Tool for DiffApplyTool {
         let path = resolve_path(&ctx.cwd, raw_path);
 
         if !path.exists() {
-            return Ok(ToolOutput::error(format!("File not found: {}", path.display())));
+            return Ok(ToolOutput::error(format!(
+                "File not found: {}",
+                path.display()
+            )));
         }
 
         let content = tokio::fs::read_to_string(&path).await?;
@@ -130,10 +148,8 @@ impl Tool for DiffApplyTool {
             match hr {
                 HunkResult::Applied { offset } => {
                     if *offset != 0 {
-                        report.push_str(&format!(
-                            "Hunk {}: applied with offset {offset:+}\n",
-                            i + 1
-                        ));
+                        report
+                            .push_str(&format!("Hunk {}: applied with offset {offset:+}\n", i + 1));
                     } else {
                         report.push_str(&format!("Hunk {}: applied cleanly\n", i + 1));
                     }
@@ -183,7 +199,10 @@ pub fn generate_unified_diff(
     let diff = TextDiff::from_lines(old, new);
 
     // Check if there are any changes
-    let has_changes = diff.ops().iter().any(|op| !matches!(op, similar::DiffOp::Equal { .. }));
+    let has_changes = diff
+        .ops()
+        .iter()
+        .any(|op| !matches!(op, similar::DiffOp::Equal { .. }));
     if !has_changes {
         return String::new();
     }
@@ -192,7 +211,11 @@ pub fn generate_unified_diff(
     output.push_str(&format!("--- {file_path}\n"));
     output.push_str(&format!("+++ {file_path}\n"));
 
-    for hunk in diff.unified_diff().context_radius(context_lines).iter_hunks() {
+    for hunk in diff
+        .unified_diff()
+        .context_radius(context_lines)
+        .iter_hunks()
+    {
         output.push_str(&format!("{hunk}"));
     }
 
@@ -232,8 +255,8 @@ fn parse_unified_diff(patch: &str) -> std::result::Result<Vec<Hunk>, String> {
 
         // Parse @@ header
         if line.starts_with("@@") {
-            let (old_start, _) = parse_hunk_header(line)
-                .ok_or_else(|| format!("Invalid hunk header: {line}"))?;
+            let (old_start, _) =
+                parse_hunk_header(line).ok_or_else(|| format!("Invalid hunk header: {line}"))?;
 
             let mut hunk_lines = Vec::new();
             i += 1;
@@ -320,10 +343,14 @@ fn apply_hunks(original_lines: &[&str], hunks: &[Hunk]) -> ApplyResult {
         let target_start = (hunk.old_start as i64 + cumulative_offset) as usize;
 
         // Extract context and removed lines from the hunk (what we expect in the old file)
-        let expected: Vec<&str> = hunk.lines.iter().filter_map(|l| match l {
-            DiffLine::Context(s) | DiffLine::Remove(s) => Some(s.as_str()),
-            DiffLine::Add(_) => None,
-        }).collect();
+        let expected: Vec<&str> = hunk
+            .lines
+            .iter()
+            .filter_map(|l| match l {
+                DiffLine::Context(s) | DiffLine::Remove(s) => Some(s.as_str()),
+                DiffLine::Add(_) => None,
+            })
+            .collect();
 
         // Try exact match at the target location
         let match_result = find_hunk_location(&output, &expected, target_start);
@@ -355,17 +382,16 @@ fn apply_hunks(original_lines: &[&str], hunks: &[Hunk]) -> ApplyResult {
         }
     }
 
-    ApplyResult { output, hunk_results }
+    ApplyResult {
+        output,
+        hunk_results,
+    }
 }
 
 /// Find where a hunk's expected lines exist in the output.
 /// First tries exact position, then searches ±MAX_FUZZY_OFFSET lines.
 /// Returns (actual_start_index, offset_from_target).
-fn find_hunk_location(
-    lines: &[String],
-    expected: &[&str],
-    target: usize,
-) -> Option<(usize, i64)> {
+fn find_hunk_location(lines: &[String], expected: &[&str], target: usize) -> Option<(usize, i64)> {
     if expected.is_empty() {
         return Some((target.min(lines.len()), 0));
     }
@@ -412,10 +438,13 @@ fn matches_at(lines: &[String], expected: &[&str], start: usize) -> bool {
 
 /// Build the replacement lines from a hunk (context + add lines).
 fn build_replacement(hunk_lines: &[DiffLine]) -> Vec<String> {
-    hunk_lines.iter().filter_map(|l| match l {
-        DiffLine::Context(s) | DiffLine::Add(s) => Some(s.clone()),
-        DiffLine::Remove(_) => None,
-    }).collect()
+    hunk_lines
+        .iter()
+        .filter_map(|l| match l {
+            DiffLine::Context(s) | DiffLine::Add(s) => Some(s.clone()),
+            DiffLine::Remove(_) => None,
+        })
+        .collect()
 }
 
 fn resolve_path(cwd: &Path, raw: &str) -> std::path::PathBuf {
@@ -444,10 +473,15 @@ mod tests {
     }
 
     fn extract_text(output: &ToolOutput) -> String {
-        output.content.iter().filter_map(|b| match b {
-            imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        }).collect::<Vec<_>>().join("\n")
+        output
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     // ── diff_show tests ─────────────────────────────────────────────
@@ -510,7 +544,11 @@ mod tests {
     async fn diff_show_custom_context_lines() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("ctx.txt");
-        let content = (1..=20).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n") + "\n";
+        let content = (1..=20)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
         std::fs::write(&file, &content).unwrap();
 
         let new_content = content.replace("line10", "CHANGED");
@@ -585,7 +623,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.is_error, "Expected success: {}", extract_text(&result));
+        assert!(
+            !result.is_error,
+            "Expected success: {}",
+            extract_text(&result)
+        );
         let written = std::fs::read_to_string(&file).unwrap();
         assert!(written.contains("modified"));
         assert!(!written.contains("line3"));
@@ -660,7 +702,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.is_error, "Expected success: {}", extract_text(&result));
+        assert!(
+            !result.is_error,
+            "Expected success: {}",
+            extract_text(&result)
+        );
         let text = extract_text(&result);
         // Should mention the offset
         assert!(text.contains("offset"));
@@ -740,7 +786,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.is_error, "Expected success: {}", extract_text(&result));
+        assert!(
+            !result.is_error,
+            "Expected success: {}",
+            extract_text(&result)
+        );
         let written = std::fs::read_to_string(&file).unwrap();
         assert!(written.contains("FIRST"));
         assert!(written.contains("SECOND"));
@@ -778,7 +828,7 @@ mod tests {
         let hunks = parse_unified_diff(patch).unwrap();
         assert_eq!(hunks.len(), 1);
         assert_eq!(hunks[0].old_start, 0); // 1-indexed -> 0-indexed
-        // 3 diff lines + 1 trailing empty context line from the heredoc
+                                           // 3 diff lines + 1 trailing empty context line from the heredoc
         assert_eq!(hunks[0].lines.len(), 4);
     }
 

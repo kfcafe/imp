@@ -279,8 +279,16 @@ mod tests {
 
     fn setup_test_dir() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("hello.txt"), "Hello World\nfoo bar\nHello Again\n").unwrap();
-        std::fs::write(tmp.path().join("data.rs"), "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
+        std::fs::write(
+            tmp.path().join("hello.txt"),
+            "Hello World\nfoo bar\nHello Again\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("data.rs"),
+            "fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
         std::fs::write(tmp.path().join("sub/nested.txt"), "nested hello\n").unwrap();
         tmp
@@ -331,7 +339,11 @@ mod tests {
         let ctx = test_ctx(tmp.path());
 
         let result = GrepTool
-            .execute("1", json!({ "pattern": "hello", "glob": "*.rs", "ignoreCase": true }), ctx)
+            .execute(
+                "1",
+                json!({ "pattern": "hello", "glob": "*.rs", "ignoreCase": true }),
+                ctx,
+            )
             .await
             .unwrap();
 

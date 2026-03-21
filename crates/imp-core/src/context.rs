@@ -111,7 +111,9 @@ mod tests {
     use futures_core::Stream;
     use imp_llm::model::{Capabilities, ModelMeta, ModelPricing};
     use imp_llm::provider::Provider;
-    use imp_llm::{AssistantMessage, RequestOptions, StopReason, StreamEvent, ToolResultMessage};
+    use imp_llm::{AssistantMessage, RequestOptions, StopReason, StreamEvent, ToolResultMessage, Usage};
+
+    use crate::compaction::{compact, CompactionOptions};
 
     // -- helpers --
 
@@ -138,9 +140,7 @@ mod tests {
 
     fn make_assistant_text(text: &str) -> Message {
         Message::Assistant(AssistantMessage {
-            content: vec![ContentBlock::Text {
-                text: text.into(),
-            }],
+            content: vec![ContentBlock::Text { text: text.into() }],
             usage: None,
             stop_reason: StopReason::EndTurn,
             timestamp: 1000,
@@ -400,10 +400,7 @@ mod tests {
 
     #[test]
     fn mask_observations_noop_when_few_turns() {
-        let mut messages = vec![
-            make_user("hi"),
-            make_assistant_text("hello"),
-        ];
+        let mut messages = vec![make_user("hi"), make_assistant_text("hello")];
         let original = messages.clone();
 
         mask_observations(&mut messages, 10);
@@ -417,10 +414,7 @@ mod tests {
     #[test]
     fn context_usage_basic_calculation() {
         let model = test_model();
-        let messages = vec![
-            make_user("Hello world"),
-            make_assistant_text("Hi there!"),
-        ];
+        let messages = vec![make_user("Hello world"), make_assistant_text("Hi there!")];
 
         let usage = context_usage(&messages, &model);
 
@@ -458,6 +452,292 @@ mod tests {
             "masking should reduce token count: before={}, after={}",
             usage_before.used,
             usage_after.used
+        );
+    }
+
+    // -- mock provider for compact flow test --
+
+    /// Returns a fixed summary text. Used only for mask_then_compact_flow.
+    struct MockSummaryProvider {
+        text: String,
+    }
+
+    #[async_trait]
+    impl Provider for MockSummaryProvider {
+        fn stream(
+            &self,
+            _model: &Model,
+            _context: imp_llm::Context,
+            _options: RequestOptions,
+            _api_key: &str,
+        ) -> Pin<Box<dyn Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
+            let text = self.text.clone();
+            let events = vec![
+                StreamEvent::MessageStart {
+                    model: "mock".into(),
+                },
+                StreamEvent::TextDelta { text: text.clone() },
+                StreamEvent::MessageEnd {
+                    message: AssistantMessage {
+                        content: vec![ContentBlock::Text { text }],
+                        usage: Some(Usage {
+                            input_tokens: 100,
+                            output_tokens: 50,
+                            cache_read_tokens: 0,
+                            cache_write_tokens: 0,
+                        }),
+                        stop_reason: StopReason::EndTurn,
+                        timestamp: 3000,
+                    },
+                },
+            ];
+            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
+        }
+
+        async fn resolve_auth(
+            &self,
+            _auth: &imp_llm::auth::AuthStore,
+        ) -> imp_llm::Result<imp_llm::auth::ApiKey> {
+            Ok("mock".into())
+        }
+
+        fn id(&self) -> &str {
+            "mock-summary"
+        }
+
+        fn models(&self) -> &[ModelMeta] {
+            &[]
+        }
+    }
+
+    // -- edge case tests --
+
+    #[test]
+    fn estimate_tokens_empty_string() {
+        assert_eq!(estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn context_usage_with_zero_messages() {
+        let model = test_model();
+        let messages: Vec<Message> = vec![];
+
+        let usage = context_usage(&messages, &model);
+
+        assert_eq!(usage.used, 0);
+        assert_eq!(usage.ratio, 0.0);
+        assert_eq!(usage.limit, 100_000);
+    }
+
+    #[test]
+    fn context_usage_near_limit() {
+        // Create a message with enough text to approach the limit.
+        let big_text = "a".repeat(400);
+        let messages = vec![make_user(&big_text)];
+
+        // Compute estimated tokens for this message, then set context_window = estimated + 1
+        // so ratio is just under 1.0.
+        let json = serde_json::to_string(&messages[0]).unwrap();
+        let estimated = estimate_tokens(&json);
+        let window = estimated + 1;
+
+        let model = Model {
+            meta: ModelMeta {
+                id: "test".into(),
+                provider: "test".into(),
+                name: "Test".into(),
+                context_window: window,
+                max_output_tokens: 4096,
+                pricing: ModelPricing::default(),
+                capabilities: Capabilities::default(),
+            },
+            provider: Arc::new(NullProvider),
+        };
+
+        let usage = context_usage(&messages, &model);
+
+        assert!(usage.ratio > 0.95, "ratio {} should be > 0.95", usage.ratio);
+        assert!(usage.ratio < 1.0, "ratio {} should be < 1.0", usage.ratio);
+    }
+
+    #[test]
+    fn mask_observations_replaces_content_with_placeholder() {
+        let mut messages = vec![make_user("prompt")];
+        let args = serde_json::json!({"path": "/src/lib.rs"});
+        messages.push(make_assistant_tool_call("c1", "read_file", args));
+        messages.push(make_tool_result("c1", "read_file", "fn main() { println!(\"hello\"); }"));
+        // Second turn stays recent.
+        messages.push(make_assistant_text("Done reading."));
+
+        // Keep only last 1 turn → the tool turn gets masked.
+        mask_observations(&mut messages, 1);
+
+        let text = tool_result_text(&messages[2]);
+        // Verify exact placeholder format.
+        assert!(
+            text.starts_with("[Output omitted — ran read_file("),
+            "placeholder should start correctly, got: {text}"
+        );
+        assert!(
+            text.contains("/src/lib.rs"),
+            "placeholder should contain args summary, got: {text}"
+        );
+        assert!(
+            text.ends_with("bytes]"),
+            "placeholder should end with byte count, got: {text}"
+        );
+        // Verify byte count matches original content length.
+        let original_len = "fn main() { println!(\"hello\"); }".len();
+        assert!(
+            text.contains(&format!("{original_len} bytes")),
+            "placeholder should contain correct byte count {original_len}, got: {text}"
+        );
+    }
+
+    #[test]
+    fn mask_observations_preserves_all_assistant_reasoning() {
+        let mut messages = vec![make_user("help me refactor")];
+
+        // Turn 0: assistant text + tool call.
+        messages.push(Message::Assistant(AssistantMessage {
+            content: vec![
+                ContentBlock::Text {
+                    text: "Let me read the file first.".into(),
+                },
+                ContentBlock::ToolCall {
+                    id: "c0".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "a.rs"}),
+                },
+            ],
+            usage: None,
+            stop_reason: StopReason::ToolUse,
+            timestamp: 1000,
+        }));
+        messages.push(make_tool_result("c0", "read", "file contents A"));
+
+        // Turn 1: assistant reasoning text.
+        messages.push(make_assistant_text("I see the issue — the struct is missing a field."));
+
+        // Turn 2: another tool call.
+        messages.push(make_assistant_tool_call(
+            "c2",
+            "edit",
+            serde_json::json!({"file": "a.rs"}),
+        ));
+        messages.push(make_tool_result("c2", "edit", "ok"));
+
+        // Keep last 1 turn → turns 0 and 1 get masked.
+        mask_observations(&mut messages, 1);
+
+        // Collect ALL assistant text blocks — they should all be intact.
+        let assistant_texts: Vec<&str> = messages
+            .iter()
+            .filter_map(|m| {
+                if let Message::Assistant(a) = m {
+                    Some(a.content.iter().filter_map(|b| {
+                        if let ContentBlock::Text { text } = b {
+                            Some(text.as_str())
+                        } else {
+                            None
+                        }
+                    }))
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+
+        assert!(
+            assistant_texts.contains(&"Let me read the file first."),
+            "early assistant reasoning must survive masking"
+        );
+        assert!(
+            assistant_texts.contains(&"I see the issue — the struct is missing a field."),
+            "mid-conversation assistant reasoning must survive masking"
+        );
+    }
+
+    #[tokio::test]
+    async fn mask_then_compact_flow() {
+        // Simulate the two-stage context management pipeline:
+        // 1. mask_observations at keep_recent=3
+        // 2. compact at keep_recent=2
+        let mut messages = vec![make_user("Build the authentication module")];
+        for i in 0..8 {
+            let cid = format!("c{i}");
+            messages.push(make_assistant_tool_call(
+                &cid,
+                "edit",
+                serde_json::json!({"file": format!("auth_{i}.rs")}),
+            ));
+            messages.push(make_tool_result(
+                &cid,
+                "edit",
+                &"fn auth() { /* impl */ } ".repeat(20),
+            ));
+        }
+
+        // Stage 1: Mask old observations (keep recent 3 turns).
+        mask_observations(&mut messages, 3);
+
+        // First 5 tool turns should be masked.
+        for i in 0..5 {
+            let tr_idx = 2 + i * 2;
+            let text = tool_result_text(&messages[tr_idx]);
+            assert!(
+                text.starts_with("[Output omitted"),
+                "turn {i} should be masked after stage 1"
+            );
+        }
+        // Last 3 tool turns should be intact.
+        for i in 5..8 {
+            let tr_idx = 2 + i * 2;
+            let text = tool_result_text(&messages[tr_idx]);
+            assert!(
+                text.contains("auth()"),
+                "turn {i} should be intact after stage 1"
+            );
+        }
+
+        // Stage 2: Compact (keep recent 2 turns).
+        let provider = Arc::new(MockSummaryProvider {
+            text: "Summary: building auth module, 8 files edited.".into(),
+        });
+        let model = Model {
+            meta: ModelMeta {
+                id: "mock".into(),
+                provider: "mock".into(),
+                name: "Mock".into(),
+                context_window: 200_000,
+                max_output_tokens: 4096,
+                pricing: ModelPricing::default(),
+                capabilities: Capabilities::default(),
+            },
+            provider,
+        };
+        let options = CompactionOptions {
+            keep_recent_turns: 2,
+            ..Default::default()
+        };
+
+        let result = compact(&messages, &model, options, "test-key")
+            .await
+            .unwrap();
+
+        // Compact should produce a valid result without data corruption.
+        assert_eq!(
+            result.summary,
+            "Summary: building auth module, 8 files edited."
+        );
+        assert!(result.tokens_before > 0);
+        assert!(result.tokens_after > 0);
+        assert!(
+            result.tokens_after < result.tokens_before,
+            "compacted should be smaller: after={}, before={}",
+            result.tokens_after,
+            result.tokens_before
         );
     }
 }

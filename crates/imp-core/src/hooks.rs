@@ -31,7 +31,9 @@ pub enum HookAction {
 impl std::fmt::Debug for HookAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HookAction::Shell { command } => f.debug_struct("Shell").field("command", command).finish(),
+            HookAction::Shell { command } => {
+                f.debug_struct("Shell").field("command", command).finish()
+            }
             HookAction::Callback(_) => f.write_str("Callback(...)"),
         }
     }
@@ -49,16 +51,33 @@ pub struct HookDefinition {
 
 /// Runtime hook events.
 pub enum HookEvent<'a> {
-    AfterFileWrite { file: &'a Path },
-    BeforeToolCall { tool_name: &'a str, args: &'a serde_json::Value },
-    AfterToolCall { tool_name: &'a str, result: &'a ToolResultMessage },
+    AfterFileWrite {
+        file: &'a Path,
+    },
+    BeforeToolCall {
+        tool_name: &'a str,
+        args: &'a serde_json::Value,
+    },
+    AfterToolCall {
+        tool_name: &'a str,
+        result: &'a ToolResultMessage,
+    },
     BeforeLlmCall,
-    OnContextThreshold { ratio: f64 },
+    OnContextThreshold {
+        ratio: f64,
+    },
     OnSessionStart,
     OnSessionShutdown,
-    OnAgentStart { prompt: &'a str },
-    OnAgentEnd { messages: &'a [Message] },
-    OnTurnEnd { index: u32, message: &'a AssistantMessage },
+    OnAgentStart {
+        prompt: &'a str,
+    },
+    OnAgentEnd {
+        messages: &'a [Message],
+    },
+    OnTurnEnd {
+        index: u32,
+        message: &'a AssistantMessage,
+    },
 }
 
 impl<'a> HookEvent<'a> {
@@ -161,11 +180,7 @@ impl HookRunner {
                 if let HookAction::Shell { command } = &hook.action {
                     let cmd = interpolate_command(command, event);
                     tokio::spawn(async move {
-                        let _ = Command::new("sh")
-                            .arg("-c")
-                            .arg(&cmd)
-                            .output()
-                            .await;
+                        let _ = Command::new("sh").arg("-c").arg(&cmd).output().await;
                     });
                 }
                 // Non-blocking hooks don't contribute results
@@ -215,7 +230,8 @@ fn matches_event(hook: &HookDefinition, event: &HookEvent<'_>) -> bool {
                 let file_str = file.to_string_lossy();
                 // Try glob matching against the full path and filename
                 if let Ok(glob) = Pattern::new(pattern) {
-                    let file_name = file.file_name()
+                    let file_name = file
+                        .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
                     if !glob.matches(&file_str) && !glob.matches(&file_name) {
@@ -225,8 +241,8 @@ fn matches_event(hook: &HookDefinition, event: &HookEvent<'_>) -> bool {
                     return false;
                 }
             }
-            HookEvent::BeforeToolCall { tool_name, .. } |
-            HookEvent::AfterToolCall { tool_name, .. } => {
+            HookEvent::BeforeToolCall { tool_name, .. }
+            | HookEvent::AfterToolCall { tool_name, .. } => {
                 if pattern != *tool_name {
                     // Also try glob matching on tool name
                     if let Ok(glob) = Pattern::new(pattern) {
@@ -264,8 +280,8 @@ fn interpolate_command(command: &str, event: &HookEvent<'_>) -> String {
         HookEvent::AfterFileWrite { file } => {
             result = result.replace("{file}", &file.to_string_lossy());
         }
-        HookEvent::BeforeToolCall { tool_name, .. } |
-        HookEvent::AfterToolCall { tool_name, .. } => {
+        HookEvent::BeforeToolCall { tool_name, .. }
+        | HookEvent::AfterToolCall { tool_name, .. } => {
             result = result.replace("{tool_name}", tool_name);
         }
         HookEvent::OnContextThreshold { ratio } => {
@@ -295,7 +311,11 @@ async fn execute_hook(hook: &HookDefinition, event: &HookEvent<'_>) -> HookResul
                         && !output.status.success();
 
                     let reason = if block {
-                        Some(if stderr.is_empty() { stdout.clone() } else { stderr })
+                        Some(if stderr.is_empty() {
+                            stdout.clone()
+                        } else {
+                            stderr
+                        })
                     } else {
                         None
                     };
@@ -305,7 +325,9 @@ async fn execute_hook(hook: &HookDefinition, event: &HookEvent<'_>) -> HookResul
                         && !stdout.trim().is_empty()
                         && output.status.success()
                     {
-                        Some(vec![ContentBlock::Text { text: stdout.trim().to_string() }])
+                        Some(vec![ContentBlock::Text {
+                            text: stdout.trim().to_string(),
+                        }])
                     } else {
                         None
                     };
@@ -401,11 +423,20 @@ threshold = 0.8
     #[test]
     fn hook_event_name_mapping() {
         let path = PathBuf::from("/tmp/test.rs");
-        assert_eq!(HookEvent::AfterFileWrite { file: &path }.event_name(), "after_file_write");
+        assert_eq!(
+            HookEvent::AfterFileWrite { file: &path }.event_name(),
+            "after_file_write"
+        );
         assert_eq!(HookEvent::BeforeLlmCall.event_name(), "before_llm_call");
         assert_eq!(HookEvent::OnSessionStart.event_name(), "on_session_start");
-        assert_eq!(HookEvent::OnSessionShutdown.event_name(), "on_session_shutdown");
-        assert_eq!(HookEvent::OnContextThreshold { ratio: 0.5 }.event_name(), "on_context_threshold");
+        assert_eq!(
+            HookEvent::OnSessionShutdown.event_name(),
+            "on_session_shutdown"
+        );
+        assert_eq!(
+            HookEvent::OnContextThreshold { ratio: 0.5 }.event_name(),
+            "on_context_threshold"
+        );
     }
 
     #[test]
@@ -413,7 +444,9 @@ threshold = 0.8
         let hook = HookDefinition {
             event: "after_file_write".into(),
             match_pattern: None,
-            action: HookAction::Shell { command: "echo hi".into() },
+            action: HookAction::Shell {
+                command: "echo hi".into(),
+            },
             blocking: false,
             threshold: None,
         };
@@ -430,7 +463,9 @@ threshold = 0.8
         let hook = HookDefinition {
             event: "after_file_write".into(),
             match_pattern: Some("*.rs".into()),
-            action: HookAction::Shell { command: "echo hi".into() },
+            action: HookAction::Shell {
+                command: "echo hi".into(),
+            },
             blocking: false,
             threshold: None,
         };
@@ -449,16 +484,24 @@ threshold = 0.8
         let hook = HookDefinition {
             event: "before_tool_call".into(),
             match_pattern: Some("bash".into()),
-            action: HookAction::Shell { command: "echo hi".into() },
+            action: HookAction::Shell {
+                command: "echo hi".into(),
+            },
             blocking: true,
             threshold: None,
         };
 
         let args = serde_json::json!({});
-        let match_event = HookEvent::BeforeToolCall { tool_name: "bash", args: &args };
+        let match_event = HookEvent::BeforeToolCall {
+            tool_name: "bash",
+            args: &args,
+        };
         assert!(matches_event(&hook, &match_event));
 
-        let no_match_event = HookEvent::BeforeToolCall { tool_name: "read", args: &args };
+        let no_match_event = HookEvent::BeforeToolCall {
+            tool_name: "read",
+            args: &args,
+        };
         assert!(!matches_event(&hook, &no_match_event));
     }
 
@@ -467,7 +510,9 @@ threshold = 0.8
         let hook = HookDefinition {
             event: "on_context_threshold".into(),
             match_pattern: None,
-            action: HookAction::Shell { command: "echo hi".into() },
+            action: HookAction::Shell {
+                command: "echo hi".into(),
+            },
             blocking: true,
             threshold: Some(0.8),
         };
@@ -577,7 +622,10 @@ threshold = 0.8
         }]);
 
         let args = serde_json::json!({"command": "rm -rf /"});
-        let event = HookEvent::BeforeToolCall { tool_name: "bash", args: &args };
+        let event = HookEvent::BeforeToolCall {
+            tool_name: "bash",
+            args: &args,
+        };
         let results = runner.fire(&event).await;
         assert_eq!(results.len(), 1);
         assert!(results[0].block);
@@ -596,7 +644,10 @@ threshold = 0.8
         }]);
 
         let args = serde_json::json!({});
-        let event = HookEvent::BeforeToolCall { tool_name: "read", args: &args };
+        let event = HookEvent::BeforeToolCall {
+            tool_name: "read",
+            args: &args,
+        };
         let results = runner.fire(&event).await;
         assert_eq!(results.len(), 1);
         assert!(!results[0].block);
@@ -617,15 +668,23 @@ threshold = 0.8
         let result_msg = ToolResultMessage {
             tool_call_id: "call_1".into(),
             tool_name: "test".into(),
-            content: vec![ContentBlock::Text { text: "original".into() }],
+            content: vec![ContentBlock::Text {
+                text: "original".into(),
+            }],
             is_error: false,
             details: serde_json::Value::Null,
             timestamp: 0,
         };
-        let event = HookEvent::AfterToolCall { tool_name: "test", result: &result_msg };
+        let event = HookEvent::AfterToolCall {
+            tool_name: "test",
+            result: &result_msg,
+        };
         let results = runner.fire(&event).await;
         assert_eq!(results.len(), 1);
-        let modified = results[0].modified_content.as_ref().expect("should have modified content");
+        let modified = results[0]
+            .modified_content
+            .as_ref()
+            .expect("should have modified content");
         assert_eq!(modified.len(), 1);
         if let ContentBlock::Text { text } = &modified[0] {
             assert_eq!(text, "modified output");
@@ -715,7 +774,10 @@ threshold = 0.8
         );
 
         let args = serde_json::json!({});
-        let event = HookEvent::BeforeToolCall { tool_name: "bash", args: &args };
+        let event = HookEvent::BeforeToolCall {
+            tool_name: "bash",
+            args: &args,
+        };
         let results = runner.fire(&event).await;
         assert_eq!(results.len(), 1);
         assert!(results[0].block);

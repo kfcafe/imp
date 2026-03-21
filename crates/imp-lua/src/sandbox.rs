@@ -133,11 +133,21 @@ impl LuaRuntime {
 
     /// Get tool names.
     pub fn tool_names(&self) -> Vec<String> {
-        self.tools.lock().unwrap().iter().map(|t| t.name.clone()).collect()
+        self.tools
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect()
     }
 
     /// Get hook event names.
     pub fn hook_events(&self) -> Vec<String> {
-        self.hooks.lock().unwrap().iter().map(|h| h.event.clone()).collect()
+        self.hooks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|h| h.event.clone())
+            .collect()
     }
 }

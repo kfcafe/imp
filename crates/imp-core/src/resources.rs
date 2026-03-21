@@ -227,9 +227,9 @@ mod tests {
         let results = discover_agents_md(&cwd, &user_dir);
         // May have results from walk-up finding nothing — just not our test files
         // In temp dir there should be no AGENTS.md above it
-        assert!(results.iter().all(|a| {
-            a.path.starts_with(dir.path()) || !a.path.exists()
-        }));
+        assert!(results
+            .iter()
+            .all(|a| { a.path.starts_with(dir.path()) || !a.path.exists() }));
     }
 
     // -- Skills discovery --
@@ -243,7 +243,8 @@ mod tests {
         fs::write(
             skills_dir.join("SKILL.md"),
             "# My Skill\n\nDoes useful things for you.\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let cwd = dir.path().join("project");
         fs::create_dir_all(&cwd).unwrap();
@@ -266,7 +267,8 @@ mod tests {
         fs::write(
             skills_dir.join("SKILL.md"),
             "# Project Skill\n\nProject-specific automation.\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let skills = discover_skills(&cwd, &user_dir);
         assert_eq!(skills.len(), 1);
@@ -329,10 +331,7 @@ mod tests {
         let user_dir = dir.path().join("config");
         let prompts_dir = user_dir.join("prompts");
         fs::create_dir_all(&prompts_dir).unwrap();
-        fs::write(
-            prompts_dir.join("review.md"),
-            "Review this code: {{code}}",
-        ).unwrap();
+        fs::write(prompts_dir.join("review.md"), "Review this code: {{code}}").unwrap();
 
         let cwd = dir.path().join("project");
         fs::create_dir_all(&cwd).unwrap();
@@ -355,7 +354,8 @@ mod tests {
         fs::write(
             prompts_dir.join("deploy.md"),
             "Deploy {{service}} to {{env}}",
-        ).unwrap();
+        )
+        .unwrap();
 
         let prompts = discover_prompts(&cwd, &user_dir).unwrap();
         assert_eq!(prompts.len(), 1);
