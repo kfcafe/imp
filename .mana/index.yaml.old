@@ -1,0 +1,717 @@
+units:
+# ============================================================================
+# FEATURE: imp v0.1 — First usable release
+# ============================================================================
+- id: '1'
+  title: "imp v0.1 — First usable release"
+  status: open
+  priority: 0
+  feature: true
+  description: |
+    Get imp to the point where it can have real multi-turn conversations with
+    tool use, across providers, with a clean TUI. Validated by Mario's pi blog
+    post: a minimal agent with core tools, <1K token system prompt, YOLO mode,
+    and full observability is competitive with the best coding agents.
+
+    Done when:
+    - imp starts, connects to Anthropic, has a conversation with tool use
+    - All tools work (no "not yet implemented" stubs remaining)
+    - Unit tests exist for critical paths (tools, providers, agent loop, session)
+    - Can switch providers mid-session (Anthropic → OpenAI → Google)
+    - System prompt + tool definitions < 1K tokens (baseline, before AGENTS.md)
+    - Headless and RPC modes work for orchestration
+
+# ============================================================================
+# PHASE 1: Stub tool implementations (parallelizable, no deps on each other)
+# ============================================================================
+
+- id: '1.1'
+  title: "Implement find tool"
+  status: open
+  priority: 0
+  parent: '1'
+  produces:
+    - find-tool
+  has_verify: true
+  verify: "cd /Users/asher/imp && cargo test --lib tools::find -- --nocapture 2>&1 | grep -q 'test result: ok' && ! grep -q 'not yet implemented' crates/imp-core/src/tools/find.rs"
+  description: |
+    ## Task
+    Implement the `find` tool — search for files by glob pattern, respecting .gitignore.
+
+    ## Steps
+    1. Open `crates/imp-core/src/tools/find.rs`
+    2. Replace the stub `execute` with real implementation:
+       - Extract `pattern` (required), `path` (optional, defaults to cwd), `limit` (optional, default 1000)
+       - Use `walkdir` crate to walk the directory tree
+       - Match files against the glob pattern using the `glob` or `globset` crate (check what's available or use basic matching)
+       - Respect `.gitignore` by checking `ignore` crate or manually skipping `.git/`, `node_modules/`, `target/`, etc.
+       - Apply limit, sort results alphabetically
+       - Apply output truncation (1000 results max, 50KB max)
+       - Return matched paths relative to the search directory
+    3. Add unit tests in the same file (test with a temp directory)
+
+    ## Context
+    ```rust
+    // from crates/imp-core/src/tools/mod.rs
+    pub struct ToolOutput {
+        pub content: Vec<imp_llm::ContentBlock>,
+        pub details: serde_json::Value,
+        pub is_error: bool,
+    }
+    impl ToolOutput {
+        pub fn text(text: impl Into<String>) -> Self { ... }
+        pub fn error(msg: impl Into<String>) -> Self { ... }
+    }
+    pub struct ToolContext {
+        pub cwd: PathBuf,
+        pub signal: tokio_util::sync::CancellationToken,
+    }
+    ```
+
+    ## Files
+    - crates/imp-core/src/tools/find.rs (modify — full implementation)
+    - crates/imp-core/src/tools/mod.rs (read — ToolOutput, ToolContext types)
+    - crates/imp-core/src/tools/grep.rs (read — reference implementation for similar tool)
+    - crates/imp-core/Cargo.toml (modify — add `globset` dep if needed)
+
+    ## Don't
+    - Don't shell out to `fd` — implement natively with walkdir
+    - Don't change the Tool trait or ToolOutput types
+
+- id: '1.2'
+  title: "Implement ls tool"
+  status: open
+  priority: 0
+  parent: '1'
+  produces:
+    - ls-tool
+  has_verify: true
+  verify: "cd /Users/asher/imp && cargo test --lib tools::ls -- --nocapture 2>&1 | grep -q 'test result: ok' && ! grep -q 'not yet implemented' crates/imp-core/src/tools/ls.rs"
+  description: |
+    ## Task
+    Implement the `ls` tool — list directory contents with '/' suffix for directories.
+
+    ## Steps
+    1. Open `crates/imp-core/src/tools/ls.rs`
+    2. Replace the stub `execute` with real implementation:
+       - Extract `path` (optional, defaults to cwd), `limit` (optional, default 500)
+       - Read directory entries with `std::fs::read_dir`
+       - Sort alphabetically, append '/' to directories
+       - Include dotfiles
+       - Apply limit and 50KB truncation
+       - Return one entry per line
+    3. Add unit tests (test with temp directory containing files and subdirectories)
+
+    ## Context
+    ```rust
+    pub struct ToolContext {
+        pub cwd: PathBuf,
+        pub signal: tokio_util::sync::CancellationToken,
+    }
+    ```
+
+    ## Files
+    - crates/imp-core/src/tools/ls.rs (modify — full implementation)
+    - crates/imp-core/src/tools/mod.rs (read — types)
+
+    ## Don't
+    - Don't shell out to `ls` or `eza`
+    - Don't add recursive listing — this is a single-directory tool
+
+- id: '1.3'
+  title: "Implement shell tool loader"
+  status: open
+  priority: 1
+  parent: '1'
+  produces:
+    - shell-tool-loader
+  has_verify: true
+  verify: "cd /Users/asher/imp && cargo test --lib tools::shell -- --nocapture 2>&1 | grep -q 'test result: ok' && ! grep -q 'TODO' crates/imp-core/src/tools/shell.rs"
+  description: |
+    ## Task
+    Implement the shell tool loader — parse TOML tool definitions and register them as tools.
+
+    ## Steps
+    1. Open `crates/imp-core/src/tools/shell.rs`
+    2. Implement `load_shell_tools(dir, registry)`:
+       - Walk the directory for `*.toml` files
+       - Parse each as `ShellToolDef` (types already defined in the file)
+       - Create a `ShellTool` struct that implements the `Tool` trait
+       - `execute` should:
+         a. Validate params against the schema
+         b. Interpolate `{param}` and `{param|default}` placeholders into args
+         c. Run the command with `tokio::process::Command`
+         d. Capture stdout/stderr, apply truncation
+         e. Return as ToolOutput
+       - If command binary not found, return helpful error with install_hint if available
+       - Register each tool in the registry
+    3. Add unit tests:
+       - Create a temp dir with a test TOML tool definition
+       - Load it, verify it registers
+       - Execute it, verify interpolation works
+
+    ## Context
+    The TOML format is already defined:
+    ```toml
+    name = "my_tool"
+    label = "My Tool"
+    description = "Does something"
+    readonly = true
+    [params]
+    url = { type = "string", description = "The URL" }
+    [exec]
+    command = "echo"
+    args = ["{url}"]
+    timeout = 30
+    ```
+
+    ## Files
+    - crates/imp-core/src/tools/shell.rs (modify — full implementation)
+    - crates/imp-core/src/tools/mod.rs (read — Tool trait, ToolRegistry)
+    - crates/imp-core/src/tools/bash.rs (read — reference for command execution)
+
+    ## Don't
+    - Don't change ShellToolDef/ShellExecDef types (already correct)
+    - Don't add new dependencies — use tokio::process::Command
+
+# ============================================================================
+# PHASE 2: Google provider (lower priority than tools)
+# ============================================================================
+
+- id: '1.4'
+  title: "Implement Google Gemini provider"
+  status: open
+  priority: 1
+  parent: '1'
+  dependencies:
+    - '1.7'
+  produces:
+    - google-provider
+  has_verify: true
+  verify: "cd /Users/asher/imp && cargo test --lib providers::google -- --nocapture 2>&1 | grep -q 'test result: ok' && ! grep -q 'TODO' crates/imp-llm/src/providers/google.rs"
+  description: |
+    ## Task
+    Implement the Google Gemini API provider with SSE streaming, tool calling, and thinking support.
+
+    ## Steps
+    1. Open `crates/imp-llm/src/providers/google.rs` (currently a stub returning empty stream)
+    2. Implement the full provider following the same pattern as `anthropic.rs`:
+       a. Define Gemini wire-format types (request/response)
+       b. Implement `build_request` to convert unified types to Gemini API format
+       c. Implement `stream` with SSE parsing (Gemini uses `generateContent` with `streamGenerateContent`)
+       d. Handle tool call accumulation (Google streams tool calls incrementally)
+       e. Map thinking/reasoning (Gemini's `thinkingConfig` with `thinkingBudget`)
+       f. Map stop reasons, usage tracking
+    3. Add the full model registry (Gemini 2.5 Pro, 2.5 Flash, etc.)
+    4. Add unit tests for request serialization and SSE event parsing
+
+    ## API Reference
+    - Endpoint: `https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent`
+    - Auth: API key as query parameter `?key={api_key}`
+    - Content format: `contents[].parts[].text`, `functionCall`, `functionResponse`
+    - Thinking: `generationConfig.thinkingConfig.thinkingBudget`
+
+    ## Context
+    The Anthropic provider (1442 lines) is the reference implementation. Study:
+    - How it builds requests from unified types
+    - How it parses SSE events via state machine
+    - How it accumulates tool call arguments from deltas
+    - How it tracks usage
+
+    ## Files
+    - crates/imp-llm/src/providers/google.rs (modify — full implementation)
+    - crates/imp-llm/src/providers/anthropic.rs (read — reference implementation)
+    - crates/imp-llm/src/provider.rs (read — Provider trait)
+    - crates/imp-llm/src/message.rs (read — unified message types)
+    - crates/imp-llm/src/stream.rs (read — StreamEvent types)
+
+    ## Don't
+    - Don't change the Provider trait or unified message types
+    - Don't add image support yet if it complicates things — text + tools first
+
+    ## Quirks from pi blog
+    - Google doesn't support tool call streaming (as of pi's blog post — verify if still true)
+    - If still true, accumulate the full tool call response before emitting StreamEvent::ToolCall
+
+# ============================================================================
+# PHASE 3: Code intelligence (tree-sitter)
+# ============================================================================
+
+- id: '1.5'
+  title: "Tree-sitter engine + probe_search, probe_extract, scan, ast_grep tools"
+  status: open
+  priority: 1
+  parent: '1'
+  produces:
+    - tree-sitter-engine
+    - tree-sitter-tools
+  has_verify: true
+  verify: "cd /Users/asher/imp && cargo test --lib tools::tree_sitter -- --nocapture 2>&1 | grep -q 'test result: ok' && ! grep -q 'not yet implemented' crates/imp-core/src/tools/tree_sitter.rs"
+  description: |
+    ## Task
+    Add tree-sitter as a native dependency and implement the 4 code intelligence tools:
+    probe_search, probe_extract, scan, ast_grep.
+
+    ## Steps
+    1. Add tree-sitter + language grammar crates to `crates/imp-core/Cargo.toml`:
+       - `tree-sitter = "0.24"` (or latest)
+       - Language grammars: `tree-sitter-rust`, `tree-sitter-typescript`, `tree-sitter-javascript`,
+         `tree-sitter-python`, `tree-sitter-go`, `tree-sitter-c`, `tree-sitter-cpp`, `tree-sitter-java`,
+         `tree-sitter-ruby`, `tree-sitter-bash`, `tree-sitter-json`, `tree-sitter-toml`,
+         `tree-sitter-yaml`, `tree-sitter-html`, `tree-sitter-css`, `tree-sitter-markdown`
+       - Also add `grep` crate (for in-process ripgrep in probe_search)
+    2. Create a `TreeSitterEngine` struct with methods:
+       - `parse(source, language) -> Tree`
+       - `extract_block(tree, source, line) -> Option<CodeBlock>` — find enclosing function/class/struct
+       - `extract_structure(tree, source) -> FileStructure` — all top-level symbols
+       - `pattern_search(tree, source, pattern) -> Vec<Match>` — ast-grep style
+       - `detect_language(path) -> Option<&str>` — from file extension
+    3. Implement each tool in `crates/imp-core/src/tools/tree_sitter.rs`:
+       - **probe_search**: Use `grep` crate for text matching, then tree-sitter to expand to complete blocks
+       - **probe_extract**: Parse file, find block at line/symbol, return complete code block
+       - **scan**: Parse file(s), extract top-level structure (functions, types, imports)
+       - **ast_grep**: Parse file, match AST pattern, optionally apply replacement
+    4. Add unit tests with small Rust/Python/TypeScript source snippets
+
+    ## Files
+    - crates/imp-core/Cargo.toml (modify — add tree-sitter deps)
+    - crates/imp-core/src/tools/tree_sitter.rs (modify — full implementation, likely 500-800 lines)
+    - crates/imp-core/src/tools/mod.rs (read — Tool trait)
+
+    ## Don't
+    - Don't try to support all 18 languages in v1 — start with Rust, TypeScript, Python, Go, C
+    - Don't shell out to `probe` or `ast-grep` CLIs — this is native
+
+# ============================================================================
+# PHASE 4: Testing (parallelizable, critical for pi's lesson of "test early")
+# ============================================================================
+
+- id: '1.6'
+  title: "imp-core tool unit tests"
+  status: open
+  priority: 0
+  parent: '1'
+  produces:
+    - tool-tests
+  has_verify: true
+  verify: "cd /Users/asher/imp && cargo test --lib tools -- --nocapture 2>&1 | grep -q 'test result: ok'"
+  description: |
+    ## Task
+    Write unit tests for all implemented tools: read, write, edit, multi_edit, bash, grep, diff_show, diff_apply.
+
+    ## Steps
+    For each tool, add a `#[cfg(test)] mod tests` block in the tool's file with tests:
+
+    1. **read.rs**: Test reading a text file, reading with offset/limit, reading nonexistent file (error),
+       reading an image file (returns image content block), large file truncation
+    2. **write.rs**: Test writing new file, overwriting existing, creating parent directories,
+       verify content matches after write
+    3. **edit.rs**: Test exact match replace, multiple occurrences (should fail or replace first?),
+       match not found (error), whitespace sensitivity
+    4. **multi_edit.rs**: Test sequential edits, edit that depends on previous edit's result,
+       atomic failure (if one edit fails, no edits applied)
+    5. **bash.rs**: Test simple command (`echo hello`), command with stderr, exit code handling,
+       timeout, working directory
+    6. **grep.rs**: Test pattern matching, case insensitive, glob filter, context lines, limit
+    7. **diff.rs**: Test diff_show (generate diff), diff_apply (apply patch), dry run,
+       patch that doesn't apply (error)
+
+    Each test should:
+    - Create a temp directory with test fixtures
+    - Construct params as serde_json::Value
+    - Call execute with a ToolContext pointing at the temp dir
+    - Assert the output content and is_error flag
+
+    ## Context
+    ```rust
+    // All tools follow this pattern:
+    async fn execute(&self, call_id: &str, params: serde_json::Value, ctx: ToolContext) -> Result<ToolOutput>
+
+    // ToolContext provides:
+    pub struct ToolContext {
+        pub cwd: PathBuf,
+        pub signal: tokio_util::sync::CancellationToken,
+    }
+    ```
+
+    ## Files
+    - crates/imp-core/src/tools/read.rs (modify — add tests)
+    - crates/imp-core/src/tools/write.rs (modify — add tests)
+    - crates/imp-core/src/tools/edit.rs (modify — add tests)
+    - crates/imp-core/src/tools/multi_edit.rs (modify — add tests)
+    - crates/imp-core/src/tools/bash.rs (modify — add tests)
+    - crates/imp-core/src/tools/grep.rs (modify — add tests)
+    - crates/imp-core/src/tools/diff.rs (modify — add tests)
+
+    ## Don't
+    - Don't test find/ls/tree_sitter (those have their own beans)
+    - Don't mock the filesystem — use real temp dirs
+    - Don't skip error cases — test what happens with bad inputs
+
+- id: '1.7'
+  title: "imp-llm provider tests (serialization + SSE parsing)"
+  status: open
+  priority: 0
+  parent: '1'
+  produces:
+    - provider-tests
+  has_verify: true
+  verify: "cd /Users/asher/imp && cargo test --lib providers -- --nocapture 2>&1 | grep -q 'test result: ok'"
+  description: |
+    ## Task
+    Write unit tests for the Anthropic and OpenAI providers. Focus on serialization
+    (unified types → wire format) and SSE event parsing (wire format → StreamEvents).
+    No live API calls — use fixture data.
+
+    ## Steps
+    1. **Anthropic tests** (in `providers/anthropic.rs`):
+       - Test `build_request`: verify JSON structure matches Anthropic API spec
+       - Test `convert_message` for each message type (user, assistant with tool calls, tool result)
+       - Test `process_sse_event` state machine with fixture SSE event sequences:
+         a. Simple text response
+         b. Response with thinking + text
+         c. Response with tool call (including incremental JSON accumulation)
+         d. Error event
+         e. Usage tracking (input tokens from MessageStart, output from MessageDelta)
+       - Test cache_control placement (system prompt, last tool, recent turns)
+
+    2. **OpenAI tests** (in `providers/openai.rs`):
+       - Test request building (map ThinkingLevel → reasoning_effort)
+       - Test SSE event parsing for text, tool calls, errors
+       - Test message conversion (especially tool results → user messages if needed)
+
+    3. **Message round-trip tests** (in `message.rs`):
+       - Serialize Message to JSON, deserialize back, verify equality
+       - Test cross-provider context: Anthropic thinking traces → tagged text for OpenAI
+
+    ## Files
+    - crates/imp-llm/src/providers/anthropic.rs (modify — add tests module)
+    - crates/imp-llm/src/providers/openai.rs (modify — add tests module)
+    - crates/imp-llm/src/message.rs (modify — add round-trip tests)
+
+    ## Don't
+    - Don't make live API calls — use canned SSE event sequences
+    - Don't test Google provider here (it has its own bean)
+
+- id: '1.8'
+  title: "Agent loop integration tests"
+  status: open
+  priority: 1
+  parent: '1'
+  dependencies:
+    - '1.6'
+    - '1.7'
+  produces:
+    - agent-tests
+  has_verify: true
+  verify: "cd /Users/asher/imp && cargo test --lib agent -- --nocapture 2>&1 | grep -q 'test result: ok'"
+  description: |
+    ## Task
+    Write integration tests for the agent loop using a mock provider that returns
+    canned responses with tool calls, verifying the full ReAct cycle.
+
+    ## Steps
+    1. Create a `MockProvider` in the test module of `agent.rs`:
+       ```rust
+       struct MockProvider {
+           responses: VecDeque<Vec<StreamEvent>>,
+       }
+       ```
+       Each call to `stream()` pops the next response sequence.
+
+    2. Write test scenarios:
+       a. **Simple text response**: Provider returns text, agent emits events, loop ends
+       b. **Single tool call**: Provider returns tool_call → tool executes → tool result sent →
+          provider returns text → loop ends. Verify tool result is in messages.
+       c. **Multi-turn tool calls**: Provider returns tool calls for 3 turns, then text.
+          Verify all tool results accumulated.
+       d. **Cancel mid-stream**: Send AgentCommand::Cancel during streaming,
+          verify partial message saved, loop exits
+       e. **Steer mid-loop**: Send AgentCommand::Steer between turns,
+          verify steering message injected into context
+       f. **Max turns exceeded**: Set max_turns=2, have provider always return tool calls,
+          verify Error::MaxTurns returned
+       g. **Stream error**: Provider returns StreamEvent::Error,
+          verify agent emits error event and returns error
+
+    3. Each test should:
+       - Create an Agent with MockProvider + real tools (at minimum read/write)
+       - Use a temp directory as cwd
+       - Spawn agent.run() and collect events from AgentHandle
+       - Assert event sequence and final message state
+
+    ## Files
+    - crates/imp-core/src/agent.rs (modify — add tests module with MockProvider)
+
+    ## Don't
+    - Don't use real LLM providers
+    - Don't test tool execution correctness (that's covered by tool tests)
+    - Focus on the loop orchestration: event emission, tool call → result flow, cancellation
+
+- id: '1.9'
+  title: "Session manager tests"
+  status: open
+  priority: 1
+  parent: '1'
+  produces:
+    - session-tests
+  has_verify: true
+  verify: "cd /Users/asher/imp && cargo test --lib session -- --nocapture 2>&1 | grep -q 'test result: ok'"
+  description: |
+    ## Task
+    Write unit tests for the session manager: JSONL persistence, tree branching, navigation.
+
+    ## Steps
+    1. Open `crates/imp-core/src/session.rs`, add `#[cfg(test)] mod tests`
+    2. Test scenarios:
+       a. **Create + append**: New session, append messages, verify file written as JSONL
+       b. **Open + read**: Write a JSONL file manually, open it, verify entries parsed correctly
+       c. **Round-trip**: Create session, append various entry types, close, reopen, verify identical
+       d. **Branching**: Append entries A→B→C, navigate to B, append D. Verify:
+          - get_branch() from D returns A→B→D
+          - get_branch() from C returns A→B→C
+          - get_tree() shows the fork
+       e. **get_messages**: Verify only Message entries returned (not compaction/custom)
+       f. **In-memory mode**: Create in_memory(), append entries, verify no file written
+       g. **continue_recent**: Create multiple sessions for same cwd, verify most recent returned
+       h. **Fork**: Fork from entry B into new session file, verify new file has A→B
+
+    ## Files
+    - crates/imp-core/src/session.rs (modify — add tests module)
+
+    ## Don't
+    - Don't test session interactions with the agent loop (that's integration testing)
+    - Use temp directories for all file operations
+
+# ============================================================================
+# PHASE 5: System prompt + context engineering (pi's core insight)
+# ============================================================================
+
+- id: '1.10'
+  title: "System prompt token budget and measurement"
+  status: open
+  priority: 0
+  parent: '1'
+  dependencies:
+    - '1.6'
+  produces:
+    - prompt-budget
+  has_verify: true
+  verify: "cd /Users/asher/imp && cargo test --lib system_prompt::tests -- --nocapture 2>&1 | grep -q 'test result: ok'"
+  description: |
+    ## Task
+    Add tests that measure and enforce the system prompt token budget.
+    Pi's lesson: system prompt + tool definitions should be < 1K tokens baseline.
+
+    ## Steps
+    1. Open `crates/imp-core/src/system_prompt.rs`
+    2. Add a test that:
+       a. Assembles the default system prompt (identity layer + tool descriptions for the core 4 tools)
+       b. Counts tokens using the estimate_tokens function from context.rs
+       c. Asserts the total is < 1000 tokens
+    3. Add a test that:
+       a. Assembles the full system prompt with ALL tools enabled
+       b. Measures the token count
+       c. Asserts it's < 2000 tokens (reasonable budget even with code intelligence tools)
+    4. Add a test for each system prompt layer:
+       - Layer 1 (identity + tools): measure separately
+       - Layer 3 (skills index): measure with sample skills
+       - Verify layers concatenate correctly
+
+    ## Context
+    ```rust
+    // from context.rs
+    pub fn estimate_tokens(text: &str) -> u32 {
+        (text.len() as u32) / 4
+    }
+    ```
+    Pi achieves < 1K tokens total for system prompt + tool definitions.
+
+    ## Files
+    - crates/imp-core/src/system_prompt.rs (modify — add tests)
+    - crates/imp-core/src/context.rs (read — estimate_tokens)
+    - crates/imp-core/src/tools/mod.rs (read — tool definitions)
+
+    ## Don't
+    - Don't change the token estimator to be exact (4 chars/token is good enough for budget checks)
+    - Don't add AGENTS.md content to baseline measurement — that's user-controlled
+
+# ============================================================================
+# PHASE 6: CLI modes (for orchestration — needed for mana/headless use)
+# ============================================================================
+
+- id: '1.11'
+  title: "CLI headless mode (imp run)"
+  status: open
+  priority: 2
+  parent: '1'
+  dependencies:
+    - '1.8'
+  produces:
+    - headless-mode
+  has_verify: true
+  verify: "cd /Users/asher/imp && cargo build && ! grep -q 'not yet implemented' crates/imp-cli/src/main.rs"
+  description: |
+    ## Task
+    Implement headless mode: `imp run <unit-id>` reads a task from mana,
+    runs the agent, outputs JSON-lines events to stdout, runs verify, exits.
+
+    ## Steps
+    1. Open `crates/imp-cli/src/main.rs`
+    2. In the `Run` subcommand handler:
+       a. Read the mana unit file (from `.beans/` or `.mana/` — check what format imp uses)
+       b. Extract: title, description, verify command, notes from previous attempts
+       c. Assemble a task prompt from the unit context
+       d. Create an Agent with no TUI (NullInterface)
+       e. Run the agent loop with the task prompt
+       f. Stream AgentEvents as JSON lines to stdout
+       g. After agent completes, run the verify command if present
+       h. Exit with 0 if verify passes, 1 if not
+    3. Handle the case where unit-id doesn't exist (error message, exit 1)
+
+    ## Context
+    The blog post emphasizes that headless mode should emit structured events
+    so orchestrators can track progress. The existing AgentEvent enum already
+    has all the event types needed.
+
+    ## Files
+    - crates/imp-cli/src/main.rs (modify — implement Run handler)
+    - crates/imp-core/src/agent.rs (read — Agent, AgentEvent types)
+
+    ## Don't
+    - Don't implement mana integration as a library dependency yet — just read YAML files directly
+    - Don't add interactive prompts in headless mode
+
+- id: '1.12'
+  title: "CLI RPC mode (JSON-lines stdin/stdout)"
+  status: open
+  priority: 2
+  parent: '1'
+  dependencies:
+    - '1.8'
+  produces:
+    - rpc-mode
+  has_verify: true
+  verify: "cd /Users/asher/imp && cargo build && ! grep -q 'not yet implemented' crates/imp-cli/src/main.rs"
+  description: |
+    ## Task
+    Implement RPC mode: `imp --mode rpc` speaks JSON-lines over stdin/stdout.
+    Client sends commands, receives events. For building custom UIs and integrations.
+
+    ## Steps
+    1. Open `crates/imp-cli/src/main.rs`
+    2. In the RPC mode handler:
+       a. Create an Agent (no TUI)
+       b. Spawn two tasks:
+          - **Reader**: Read JSON lines from stdin, parse as AgentCommand variants
+          - **Writer**: Receive AgentEvents from the agent handle, serialize as JSON lines to stdout
+       c. Support commands: `{"type":"prompt","content":"..."}`, `{"type":"cancel"}`,
+          `{"type":"steer","content":"..."}`, `{"type":"followup","content":"..."}`
+       d. Support events: serialize each AgentEvent variant as JSON with a `type` field
+       e. Handle UI requests (from ask tool): emit `{"type":"ui_request",...}` on stdout,
+          wait for `{"type":"ui_response",...}` on stdin
+       f. Clean shutdown when stdin closes or cancel received
+
+    ## Context
+    This is how pi works in headless mode too — structured JSON protocol.
+    The StdioInterface from imp_core/ui.rs is designed for this.
+
+    ## Files
+    - crates/imp-cli/src/main.rs (modify — implement RPC handler)
+    - crates/imp-core/src/ui.rs (read — UserInterface trait, StdioInterface if exists)
+    - crates/imp-core/src/agent.rs (read — AgentEvent, AgentCommand)
+
+    ## Don't
+    - Don't add authentication to the RPC protocol
+    - Don't add WebSocket support — stdin/stdout only
+
+# ============================================================================
+# PHASE 7: Performance (pi's key insight: concurrent reads)
+# ============================================================================
+
+- id: '1.13'
+  title: "Concurrent read-only tool execution"
+  status: open
+  priority: 1
+  parent: '1'
+  dependencies:
+    - '1.6'
+  produces:
+    - concurrent-tools
+  has_verify: true
+  verify: "cd /Users/asher/imp && cargo test --lib agent::tests::test_concurrent -- --nocapture 2>&1 | grep -q 'test result: ok'"
+  description: |
+    ## Task
+    Execute read-only tools concurrently instead of sequentially.
+    Currently agent.rs has a comment: "Read-only tools run sequentially for now (concurrent TODO)".
+
+    ## Steps
+    1. Open `crates/imp-core/src/agent.rs`, find the `execute_tools` method
+    2. Partition tool calls into readonly vs mutable (using `tool.is_readonly()`)
+    3. Run readonly tools concurrently using `futures::stream::FuturesUnordered` or similar
+    4. Run mutable tools sequentially, in order, after all readonly tools complete
+    5. Preserve the original order of results (match tool_call_id order)
+    6. Add a test:
+       - Create 3 read-only tool calls (e.g., 3 file reads)
+       - Verify they all execute and results come back in order
+       - Time the execution to verify concurrency (optional)
+
+    ## Context
+    The plan specifies this behavior:
+    > Read-only tools (read, grep, find, ls, probe_search, probe_extract, scan) — execute concurrently
+    > Write tools (write, edit, multi_edit, bash) — execute sequentially, in order
+    > Mixed batches: read-only tools run concurrently first, then writes sequentially
+
+    ## Files
+    - crates/imp-core/src/agent.rs (modify — execute_tools method)
+    - crates/imp-core/src/tools/mod.rs (read — is_readonly() on Tool trait)
+
+    ## Don't
+    - Don't change tool execution order for mutable tools
+    - Don't add parallelism limits yet (the number of concurrent tool calls is bounded by what the LLM returns)
+
+# ============================================================================
+# PHASE 8: Lua tool bridge (connects imp-lua to tool system)
+# ============================================================================
+
+- id: '1.14'
+  title: "Lua tool bridge"
+  status: open
+  priority: 2
+  parent: '1'
+  dependencies:
+    - '1.3'
+  produces:
+    - lua-tool-bridge
+  has_verify: true
+  verify: "cd /Users/asher/imp && cargo test --lib tools::lua -- --nocapture 2>&1 | grep -q 'test result: ok' && ! grep -q 'TODO' crates/imp-core/src/tools/lua.rs"
+  description: |
+    ## Task
+    Connect the imp-lua extension runtime to the tool registry, so Lua extensions
+    can register custom tools via `imp.register_tool()`.
+
+    ## Steps
+    1. Open `crates/imp-core/src/tools/lua.rs`
+    2. Create a `LuaTool` struct that implements the `Tool` trait:
+       - Stores: name, label, description, parameters schema, readonly flag, and a reference
+         to the Lua function to call
+       - `execute` bridges to the Lua function, converting params to Lua table and result back
+    3. Implement `load_lua_tools(lua_runtime, registry)`:
+       - Query the Lua runtime for registered tools
+       - Create LuaTool instances and register them
+    4. In `crates/imp-lua/src/bridge.rs`, verify `imp.register_tool()` stores the tool definition
+       so it can be queried by the Rust side
+    5. Add a test:
+       - Create a Lua runtime with a simple tool registered
+       - Load it into a ToolRegistry
+       - Execute the tool, verify it calls the Lua function
+
+    ## Files
+    - crates/imp-core/src/tools/lua.rs (modify — full implementation)
+    - crates/imp-lua/src/bridge.rs (read/modify — ensure register_tool stores definitions)
+    - crates/imp-lua/src/lib.rs (read — LuaRuntime API)
+    - crates/imp-core/src/tools/mod.rs (read — Tool trait)
+
+    ## Don't
+    - Don't change the Lua API surface (imp.register_tool format is already defined)
+    - Don't add async Lua execution yet — keep it simple with sync bridge

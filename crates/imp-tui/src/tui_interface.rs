@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use imp_core::ui::{
-    ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent,
-};
+use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
 use tokio::sync::mpsc;
 
 /// Events sent from the TuiInterface to the main App event loop.

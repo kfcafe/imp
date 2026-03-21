@@ -354,4 +354,81 @@ mod tests {
         std::env::remove_var("ANTHROPIC_API_KEY");
         assert!(store.resolve("anthropic").is_err());
     }
+
+    #[test]
+    fn test_resolve_order_runtime_over_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::new(path);
+
+        // Store a credential
+        store
+            .store(
+                "anthropic",
+                StoredCredential::ApiKey {
+                    key: "stored-key".into(),
+                },
+            )
+            .unwrap();
+
+        // Set a runtime override
+        store.set_runtime_key("anthropic", "runtime-key".into());
+
+        // Runtime should win
+        let key = store.resolve("anthropic").unwrap();
+        assert_eq!(key, "runtime-key");
+    }
+
+    #[test]
+    fn test_resolve_stored_api_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::new(path);
+
+        store
+            .store(
+                "openai",
+                StoredCredential::ApiKey {
+                    key: "sk-stored".into(),
+                },
+            )
+            .unwrap();
+
+        let key = store.resolve("openai").unwrap();
+        assert_eq!(key, "sk-stored");
+    }
+
+    #[test]
+    fn test_remove_then_resolve_falls_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::new(path);
+
+        store
+            .store(
+                "google",
+                StoredCredential::ApiKey {
+                    key: "google-key".into(),
+                },
+            )
+            .unwrap();
+        assert!(store.resolve("google").is_ok());
+
+        store.remove("google").unwrap();
+        // Without env var set, should error
+        std::env::remove_var("GOOGLE_API_KEY");
+        let result = store.resolve("google");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unknown_provider_returns_auth_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let store = AuthStore::new(path);
+        let result = store.resolve("unknown_provider");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, crate::error::Error::Auth(_)));
+    }
 }

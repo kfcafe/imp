@@ -86,7 +86,9 @@ impl TreeViewState {
 
     pub fn cycle_filter(&mut self) {
         self.filter_mode = self.filter_mode.next();
-        self.selected = self.selected.min(self.filtered_nodes().len().saturating_sub(1));
+        self.selected = self
+            .selected
+            .min(self.filtered_nodes().len().saturating_sub(1));
     }
 
     fn filtered_nodes(&self) -> Vec<&FlatTreeNode> {
@@ -167,13 +169,18 @@ impl Widget for TreeView<'_> {
         // Clear area and draw border
         Clear.render(area, buf);
         let block = Block::default()
-            .title(format!(" Session Tree [{}] ", self.state.filter_mode.label()))
+            .title(format!(
+                " Session Tree [{}] ",
+                self.state.filter_mode.label()
+            ))
             .borders(Borders::ALL)
             .border_style(self.theme.border_style());
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let filtered = self.state.nodes
+        let filtered = self
+            .state
+            .nodes
             .iter()
             .filter(|n| match self.state.filter_mode {
                 TreeFilterMode::All => true,

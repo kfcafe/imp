@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -9,11 +10,25 @@ use crossterm::event::{
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use imp_core::agent::{AgentCommand, AgentEvent, AgentHandle};
+use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use imp_core::config::Config;
 use imp_core::session::{SessionEntry, SessionManager};
+use imp_core::system_prompt;
+use imp_core::tools::ask::AskTool;
+use imp_core::tools::bash::BashTool;
+use imp_core::tools::diff::{DiffApplyTool, DiffShowTool};
+use imp_core::tools::edit::EditTool;
+use imp_core::tools::find::FindTool;
+use imp_core::tools::grep::GrepTool;
+use imp_core::tools::ls::LsTool;
+use imp_core::tools::multi_edit::MultiEditTool;
+use imp_core::tools::read::ReadTool;
+use imp_core::tools::tree_sitter::{AstGrepTool, ProbeExtractTool, ProbeSearchTool, ScanTool};
+use imp_core::tools::write::WriteTool;
+use imp_llm::auth::AuthStore;
 use imp_llm::model::ModelRegistry;
-use imp_llm::{Cost, StreamEvent, ThinkingLevel, Usage};
+use imp_llm::providers::create_provider;
+use imp_llm::{Cost, Message, Model, StreamEvent, ThinkingLevel, Usage};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
@@ -240,9 +255,9 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(3),              // messages area
+                Constraint::Min(3),                // messages area
                 Constraint::Length(editor_height), // editor
-                Constraint::Length(1),            // status bar
+                Constraint::Length(1),             // status bar
             ])
             .split(area);
 
@@ -349,18 +364,16 @@ impl App {
         self.needs_redraw = true;
 
         // Reset ctrl+c counter on non-ctrl+c keypress
-        if !(key.code == KeyCode::Char('c')
-            && key.modifiers.contains(KeyModifiers::CONTROL))
-        {
+        if !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
             self.ctrl_c_count = 0;
         }
 
         // Route based on current UI mode
         match &self.mode {
             UiMode::Normal => self.handle_normal_key(key)?,
-            UiMode::ModelSelector(_)
-            | UiMode::CommandPalette(_)
-            | UiMode::FileFinder(_) => self.handle_overlay_key(key),
+            UiMode::ModelSelector(_) | UiMode::CommandPalette(_) | UiMode::FileFinder(_) => {
+                self.handle_overlay_key(key)
+            }
             UiMode::TreeView(_) => self.handle_tree_key(key),
         }
 
@@ -381,10 +394,13 @@ impl App {
                         // Send to agent
                         if let Some(ref handle) = self.agent_handle {
                             let _ = handle.command_tx.try_send(AgentCommand::Steer(
-                                self.message_queue.last().map(|m| match m {
-                                    QueuedMessage::Steer(s) => s.clone(),
-                                    QueuedMessage::FollowUp(s) => s.clone(),
-                                }).unwrap_or_default(),
+                                self.message_queue
+                                    .last()
+                                    .map(|m| match m {
+                                        QueuedMessage::Steer(s) => s.clone(),
+                                        QueuedMessage::FollowUp(s) => s.clone(),
+                                    })
+                                    .unwrap_or_default(),
                             ));
                         }
                     }
@@ -631,6 +647,75 @@ impl App {
 
     // ── Commands ────────────────────────────────────────────────
 
+    fn spawn_agent_for_prompt(&mut self, prompt: &str) -> Result<(), String> {
+        let meta = self
+            .model_registry
+            .find_by_alias(&self.model_name)
+            .cloned()
+            .ok_or_else(|| format!("Unknown model: {}", self.model_name))?;
+
+        let provider_name = meta.provider.clone();
+        let provider = create_provider(&provider_name)
+            .ok_or_else(|| format!("Unknown provider: {provider_name}"))?;
+
+        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_store =
+            AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+        let api_key = auth_store
+            .resolve(&provider_name)
+            .map_err(|error| error.to_string())?;
+
+        let model = Model {
+            meta,
+            provider: Arc::from(provider),
+        };
+
+        let (mut agent, handle) = Agent::new(model, self.cwd.clone());
+        agent.thinking_level = self.thinking_level;
+        agent.api_key = api_key;
+        Self::register_native_tools(&mut agent);
+        agent.system_prompt = system_prompt::assemble(&agent.tools, &[], &[], &[], None, None).text;
+
+        let mut messages: Vec<Message> = self.session.get_messages().into_iter().cloned().collect();
+        if matches!(
+            messages.last(),
+            Some(Message::User(user))
+                if matches!(
+                    user.content.as_slice(),
+                    [imp_llm::ContentBlock::Text { text }] if text == prompt
+                )
+        ) {
+            messages.pop();
+        }
+        agent.messages = messages;
+
+        let prompt = prompt.to_string();
+        tokio::spawn(async move {
+            let _ = agent.run(prompt).await;
+        });
+
+        self.agent_handle = Some(handle);
+        Ok(())
+    }
+
+    fn register_native_tools(agent: &mut Agent) {
+        agent.tools.register(Arc::new(AskTool));
+        agent.tools.register(Arc::new(BashTool));
+        agent.tools.register(Arc::new(DiffApplyTool));
+        agent.tools.register(Arc::new(DiffShowTool));
+        agent.tools.register(Arc::new(EditTool));
+        agent.tools.register(Arc::new(FindTool));
+        agent.tools.register(Arc::new(GrepTool));
+        agent.tools.register(Arc::new(LsTool));
+        agent.tools.register(Arc::new(MultiEditTool));
+        agent.tools.register(Arc::new(ReadTool));
+        agent.tools.register(Arc::new(WriteTool));
+        agent.tools.register(Arc::new(ProbeSearchTool));
+        agent.tools.register(Arc::new(ProbeExtractTool));
+        agent.tools.register(Arc::new(ScanTool));
+        agent.tools.register(Arc::new(AstGrepTool));
+    }
+
     fn send_message(&mut self) {
         let text = self.editor.content().to_string();
         if text.trim().is_empty() {
@@ -679,6 +764,19 @@ impl App {
         self.scroll_offset = 0;
         self.editor.push_history();
         self.editor.clear();
+
+        if let Err(error) = self.spawn_agent_for_prompt(&text) {
+            self.is_streaming = false;
+            self.messages.pop();
+            self.messages.push(DisplayMessage {
+                role: MessageRole::Error,
+                content: error,
+                thinking: None,
+                tool_calls: Vec::new(),
+                is_streaming: false,
+                timestamp: imp_llm::now(),
+            });
+        }
     }
 
     fn execute_command(&mut self, cmd: &str) {
@@ -745,10 +843,7 @@ impl App {
 
     fn open_model_selector(&mut self) {
         let models = self.model_registry.list().to_vec();
-        self.mode = UiMode::ModelSelector(ModelSelectorState::new(
-            models,
-            self.model_name.clone(),
-        ));
+        self.mode = UiMode::ModelSelector(ModelSelectorState::new(models, self.model_name.clone()));
     }
 
     fn open_file_finder(&mut self) {
@@ -834,12 +929,10 @@ impl App {
                         StreamEvent::TextDelta { text } => {
                             last.content.push_str(&text);
                         }
-                        StreamEvent::ThinkingDelta { text } => {
-                            match &mut last.thinking {
-                                Some(t) => t.push_str(&text),
-                                None => last.thinking = Some(text),
-                            }
-                        }
+                        StreamEvent::ThinkingDelta { text } => match &mut last.thinking {
+                            Some(t) => t.push_str(&text),
+                            None => last.thinking = Some(text),
+                        },
                         StreamEvent::ToolCall {
                             id,
                             name,
@@ -847,9 +940,7 @@ impl App {
                         } => {
                             last.tool_calls.push(DisplayToolCall {
                                 id,
-                                args_summary: DisplayToolCall::make_args_summary(
-                                    &name, &arguments,
-                                ),
+                                args_summary: DisplayToolCall::make_args_summary(&name, &arguments),
                                 name,
                                 output: None,
                                 is_error: false,
@@ -871,8 +962,7 @@ impl App {
                 if let Some(last) = self.messages.last_mut() {
                     if let Some(tc) = last.tool_calls.last_mut() {
                         if tc.name == tool_name {
-                            tc.args_summary =
-                                DisplayToolCall::make_args_summary(&tool_name, &args);
+                            tc.args_summary = DisplayToolCall::make_args_summary(&tool_name, &args);
                         }
                     }
                 }

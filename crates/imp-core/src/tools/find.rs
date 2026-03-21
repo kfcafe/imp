@@ -8,8 +8,12 @@ pub struct FindTool;
 
 #[async_trait]
 impl Tool for FindTool {
-    fn name(&self) -> &str { "find" }
-    fn label(&self) -> &str { "Find Files" }
+    fn name(&self) -> &str {
+        "find"
+    }
+    fn label(&self) -> &str {
+        "Find Files"
+    }
     fn description(&self) -> &str {
         "Search for files by glob pattern. Returns matching file paths."
     }
@@ -24,9 +28,16 @@ impl Tool for FindTool {
             "required": ["pattern"]
         })
     }
-    fn is_readonly(&self) -> bool { true }
+    fn is_readonly(&self) -> bool {
+        true
+    }
 
-    async fn execute(&self, _call_id: &str, _params: serde_json::Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(
+        &self,
+        _call_id: &str,
+        _params: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolOutput> {
         Ok(ToolOutput::error("find tool not yet implemented"))
     }
 }

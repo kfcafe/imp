@@ -36,7 +36,7 @@ pub struct Config {
     pub context: ContextConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContextConfig {
     /// Mask old tool outputs at this ratio (default: 0.6).
     pub observation_mask_threshold: f64,
@@ -70,10 +70,7 @@ impl Config {
     }
 
     /// Resolve the full config by merging: defaults < user < project < env < CLI.
-    pub fn resolve(
-        user_config_dir: &Path,
-        project_dir: Option<&Path>,
-    ) -> Result<Self> {
+    pub fn resolve(user_config_dir: &Path, project_dir: Option<&Path>) -> Result<Self> {
         let mut config = Self::default();
 
         // User config
@@ -104,10 +101,21 @@ impl Config {
     }
 
     fn merge(&mut self, other: Config) {
-        if other.model.is_some() { self.model = other.model; }
-        if other.thinking.is_some() { self.thinking = other.thinking; }
-        if other.max_turns.is_some() { self.max_turns = other.max_turns; }
-        if other.tools.is_some() { self.tools = other.tools; }
+        if other.model.is_some() {
+            self.model = other.model;
+        }
+        if other.thinking.is_some() {
+            self.thinking = other.thinking;
+        }
+        if other.max_turns.is_some() {
+            self.max_turns = other.max_turns;
+        }
+        if other.tools.is_some() {
+            self.tools = other.tools;
+        }
+        if other.context != ContextConfig::default() {
+            self.context = other.context;
+        }
         self.roles.extend(other.roles);
         self.hooks.extend(other.hooks);
     }
@@ -143,7 +151,7 @@ fn dirs_path(kind: &str) -> PathBuf {
                 PathBuf::from(".local").join("share").join("imp")
             }
         }
-        _ => PathBuf::from(".")
+        _ => PathBuf::from("."),
     }
 }
 
@@ -183,7 +191,9 @@ mod tests {
     fn config_load_from_toml() {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
 model = "sonnet"
 thinking = "high"
 max_turns = 50
@@ -193,7 +203,9 @@ tools = ["read", "write", "bash"]
 observation_mask_threshold = 0.5
 compaction_threshold = 0.9
 mask_window = 5
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let config = Config::load(&config_path).unwrap();
         assert_eq!(config.model.as_deref(), Some("sonnet"));
@@ -233,26 +245,32 @@ mask_window = 5
     #[test]
     fn config_merge_roles_extend() {
         let mut base = Config::default();
-        base.roles.insert("worker".into(), RoleDef {
-            model: Some("haiku".into()),
-            thinking: None,
-            tools: None,
-            readonly: false,
-            instructions: None,
-            max_turns: None,
-        });
+        base.roles.insert(
+            "worker".into(),
+            RoleDef {
+                model: Some("haiku".into()),
+                thinking: None,
+                tools: None,
+                readonly: false,
+                instructions: None,
+                max_turns: None,
+            },
+        );
 
         let overlay = Config {
             roles: {
                 let mut m = HashMap::new();
-                m.insert("reviewer".into(), RoleDef {
-                    model: Some("sonnet".into()),
-                    thinking: Some(ThinkingLevel::High),
-                    tools: None,
-                    readonly: true,
-                    instructions: None,
-                    max_turns: None,
-                });
+                m.insert(
+                    "reviewer".into(),
+                    RoleDef {
+                        model: Some("sonnet".into()),
+                        thinking: Some(ThinkingLevel::High),
+                        tools: None,
+                        readonly: true,
+                        instructions: None,
+                        max_turns: None,
+                    },
+                );
                 m
             },
             ..Default::default()
@@ -292,6 +310,25 @@ mask_window = 5
     }
 
     #[test]
+    fn config_merge_context_overrides_default() {
+        let mut base = Config::default();
+
+        let overlay = Config {
+            context: ContextConfig {
+                observation_mask_threshold: 0.5,
+                compaction_threshold: 0.9,
+                mask_window: 5,
+            },
+            ..Default::default()
+        };
+
+        base.merge(overlay);
+        assert!((base.context.observation_mask_threshold - 0.5).abs() < f64::EPSILON);
+        assert!((base.context.compaction_threshold - 0.9).abs() < f64::EPSILON);
+        assert_eq!(base.context.mask_window, 5);
+    }
+
+    #[test]
     fn config_resolve_user_then_project() {
         // Clean env to avoid interference from parallel tests
         std::env::remove_var("IMP_MODEL");
@@ -303,20 +340,41 @@ mask_window = 5
         fs::create_dir_all(&user_dir).unwrap();
         fs::create_dir_all(project_dir.join(".imp")).unwrap();
 
-        // User config: model=haiku, max_turns=20
-        fs::write(user_dir.join("config.toml"), r#"
+        // User config: model=haiku, max_turns=20, custom context
+        fs::write(
+            user_dir.join("config.toml"),
+            r#"
 model = "haiku"
 max_turns = 20
-"#).unwrap();
 
-        // Project config: model=sonnet (overrides user)
-        fs::write(project_dir.join(".imp").join("config.toml"), r#"
+[context]
+observation_mask_threshold = 0.55
+compaction_threshold = 0.85
+mask_window = 9
+"#,
+        )
+        .unwrap();
+
+        // Project config: model=sonnet (overrides user), custom context overrides user context
+        fs::write(
+            project_dir.join(".imp").join("config.toml"),
+            r#"
 model = "sonnet"
-"#).unwrap();
+
+[context]
+observation_mask_threshold = 0.5
+compaction_threshold = 0.9
+mask_window = 5
+"#,
+        )
+        .unwrap();
 
         let config = Config::resolve(&user_dir, Some(&project_dir)).unwrap();
         assert_eq!(config.model.as_deref(), Some("sonnet"));
         assert_eq!(config.max_turns, Some(20));
+        assert!((config.context.observation_mask_threshold - 0.5).abs() < f64::EPSILON);
+        assert!((config.context.compaction_threshold - 0.9).abs() < f64::EPSILON);
+        assert_eq!(config.context.mask_window, 5);
     }
 
     #[test]
@@ -353,7 +411,9 @@ model = "sonnet"
     fn config_load_with_roles_and_hooks() {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
 model = "sonnet"
 
 [roles.coder]
@@ -368,7 +428,9 @@ readonly = true
 event = "after_file_write"
 action = "log"
 blocking = false
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let config = Config::load(&config_path).unwrap();
         assert_eq!(config.roles.len(), 2);
@@ -383,7 +445,10 @@ blocking = false
     #[test]
     fn config_parse_thinking_levels() {
         assert_eq!(parse_thinking_level("off"), Some(ThinkingLevel::Off));
-        assert_eq!(parse_thinking_level("minimal"), Some(ThinkingLevel::Minimal));
+        assert_eq!(
+            parse_thinking_level("minimal"),
+            Some(ThinkingLevel::Minimal)
+        );
         assert_eq!(parse_thinking_level("low"), Some(ThinkingLevel::Low));
         assert_eq!(parse_thinking_level("medium"), Some(ThinkingLevel::Medium));
         assert_eq!(parse_thinking_level("high"), Some(ThinkingLevel::High));
@@ -398,9 +463,13 @@ blocking = false
     fn config_partial_toml_fills_defaults() {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
 model = "sonnet"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let config = Config::load(&config_path).unwrap();
         assert_eq!(config.model.as_deref(), Some("sonnet"));

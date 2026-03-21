@@ -2,7 +2,7 @@ pub mod bridge;
 pub mod loader;
 pub mod sandbox;
 
-pub use bridge::{json_to_lua_value, lua_value_to_json, setup_host_api};
+pub use bridge::{json_to_lua_value, load_lua_tools, lua_value_to_json, setup_host_api, LuaTool};
 pub use loader::{discover_extensions, load_extensions, reload, LuaExtension};
 pub use sandbox::{LuaCommandHandle, LuaError, LuaHookHandle, LuaRuntime, LuaToolHandle};
 
@@ -10,6 +10,10 @@ pub use sandbox::{LuaCommandHandle, LuaError, LuaHookHandle, LuaRuntime, LuaTool
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    use imp_core::tools::{ToolContext, ToolRegistry};
+    use imp_core::ui::NullInterface;
     use tempfile::TempDir;
 
     /// Helper: create a runtime with host API set up.
@@ -24,6 +28,16 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, content).unwrap();
         path
+    }
+
+    fn test_ctx() -> ToolContext {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        ToolContext {
+            cwd: PathBuf::from("/tmp/lua-tools"),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            ui: Arc::new(NullInterface),
+        }
     }
 
     // ── Discovery ────────────────────────────────────────────────
@@ -82,11 +96,14 @@ mod tests {
     #[test]
     fn on_registers_hook() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             imp.on("on_session_start", function(event, ctx)
                 -- handler
             end)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         assert_eq!(rt.hook_count(), 1);
         let events = rt.hook_events();
@@ -96,11 +113,14 @@ mod tests {
     #[test]
     fn on_registers_multiple_hooks() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             imp.on("on_session_start", function() end)
             imp.on("after_file_write", function() end)
             imp.on("before_tool_call", function() end)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         assert_eq!(rt.hook_count(), 3);
         let events = rt.hook_events();
@@ -112,19 +132,25 @@ mod tests {
     #[test]
     fn hook_handler_fires_on_correct_event() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             _test_fired = false
             imp.on("on_session_start", function()
                 _test_fired = true
             end)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         // Simulate firing the hook by calling the stored handler
         let hooks = rt.hooks();
         let hooks_guard = hooks.lock().unwrap();
         assert_eq!(hooks_guard.len(), 1);
 
-        let handler: mlua::Function = rt.lua().registry_value(&hooks_guard[0].handler_key).unwrap();
+        let handler: mlua::Function = rt
+            .lua()
+            .registry_value(&hooks_guard[0].handler_key)
+            .unwrap();
         handler.call::<()>(()).unwrap();
 
         let fired: bool = rt.lua().globals().get("_test_fired").unwrap();
@@ -136,7 +162,8 @@ mod tests {
     #[test]
     fn register_tool_creates_handle() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             imp.register_tool({
                 name = "greet",
                 label = "Greeting Tool",
@@ -152,7 +179,9 @@ mod tests {
                     return { content = "Hello, " .. (params.name or "world") }
                 end
             })
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         assert_eq!(rt.tool_count(), 1);
         let names = rt.tool_names();
@@ -162,27 +191,103 @@ mod tests {
     #[test]
     fn register_tool_execute_callable() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             imp.register_tool({
                 name = "add",
                 execute = function(call_id, params, ctx)
                     return { content = tostring(params.a + params.b), is_error = false }
                 end
             })
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         // Call the execute function directly
         let tools = rt.tools();
         let tools_guard = tools.lock().unwrap();
-        let execute_fn: mlua::Function = rt.lua().registry_value(&tools_guard[0].execute_key).unwrap();
+        let execute_fn: mlua::Function = rt
+            .lua()
+            .registry_value(&tools_guard[0].execute_key)
+            .unwrap();
 
         let params = rt.lua().create_table().unwrap();
         params.set("a", 3).unwrap();
         params.set("b", 4).unwrap();
 
-        let result: mlua::Table = execute_fn.call(("call_1", params, mlua::Value::Nil)).unwrap();
+        let result: mlua::Table = execute_fn
+            .call(("call_1", params, mlua::Value::Nil))
+            .unwrap();
         let content: String = result.get("content").unwrap();
         assert_eq!(content, "7");
+    }
+
+    #[tokio::test]
+    async fn load_lua_tools_registers_and_executes_bridge() {
+        let rt = make_runtime();
+        rt.exec(
+            r#"
+            imp.register_tool({
+                name = "greet",
+                label = "Greeting Tool",
+                description = "Greets from Lua",
+                readonly = true,
+                params = {
+                    name = { type = "string", description = "Who to greet", required = true },
+                    excited = { type = "boolean" }
+                },
+                execute = function(call_id, params, ctx)
+                    local suffix = params.excited and "!" or "."
+                    return {
+                        content = {
+                            { type = "text", text = "hello " .. params.name .. suffix },
+                        },
+                        details = {
+                            call_id = call_id,
+                            cwd = ctx.cwd,
+                            cancelled = ctx.cancelled,
+                        },
+                    }
+                end
+            })
+        "#,
+        )
+        .unwrap();
+
+        let runtime = Arc::new(Mutex::new(rt));
+        let mut registry = ToolRegistry::new();
+        load_lua_tools(Arc::clone(&runtime), &mut registry);
+
+        let tool = registry
+            .get("greet")
+            .expect("lua tool should be registered");
+        assert_eq!(tool.label(), "Greeting Tool");
+        assert_eq!(tool.description(), "Greets from Lua");
+        assert!(tool.is_readonly());
+        assert_eq!(tool.parameters()["properties"]["name"]["type"], "string");
+        assert_eq!(tool.parameters()["required"], serde_json::json!(["name"]));
+
+        let output = tool
+            .execute(
+                "call_123",
+                serde_json::json!({ "name": "Ada", "excited": true }),
+                test_ctx(),
+            )
+            .await
+            .unwrap();
+
+        let text = output
+            .content
+            .iter()
+            .find_map(|block| match block {
+                imp_core::imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("lua tool should return text");
+        assert_eq!(text, "hello Ada!");
+        assert_eq!(output.details["call_id"], "call_123");
+        assert_eq!(output.details["cwd"], "/tmp/lua-tools");
+        assert_eq!(output.details["cancelled"], false);
     }
 
     // ── imp.exec() — Shell execution ────────────────────────────
@@ -190,11 +295,14 @@ mod tests {
     #[test]
     fn exec_runs_command_returns_stdout() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             local result = imp.exec("echo hello")
             _test_stdout = result.stdout
             _test_exit = result.exit_code
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let stdout: String = rt.lua().globals().get("_test_stdout").unwrap();
         let exit_code: i32 = rt.lua().globals().get("_test_exit").unwrap();
@@ -205,10 +313,13 @@ mod tests {
     #[test]
     fn exec_captures_stderr() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             local result = imp.exec("echo error >&2")
             _test_stderr = result.stderr
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let stderr: String = rt.lua().globals().get("_test_stderr").unwrap();
         assert_eq!(stderr.trim(), "error");
@@ -217,10 +328,13 @@ mod tests {
     #[test]
     fn exec_returns_nonzero_exit_code() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             local result = imp.exec("exit 42")
             _test_exit = result.exit_code
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let exit_code: i32 = rt.lua().globals().get("_test_exit").unwrap();
         assert_eq!(exit_code, 42);
@@ -229,10 +343,13 @@ mod tests {
     #[test]
     fn exec_with_cwd() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             local result = imp.exec("pwd", nil, { cwd = "/tmp" })
             _test_cwd = result.stdout
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let cwd: String = rt.lua().globals().get("_test_cwd").unwrap();
         // /tmp may resolve to /private/tmp on macOS
@@ -247,11 +364,14 @@ mod tests {
     fn null_interface_confirm_returns_nil() {
         let rt = make_runtime();
         // Simulate what ctx.ui.confirm would do with NullInterface — just return nil
-        rt.exec(r#"
+        rt.exec(
+            r#"
             -- When NullInterface returns None, the bridge maps it to nil
             _confirm_result = nil  -- This is what NullInterface.confirm() produces
             _is_nil = (_confirm_result == nil)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let is_nil: bool = rt.lua().globals().get("_is_nil").unwrap();
         assert!(is_nil);
@@ -265,10 +385,14 @@ mod tests {
         let lua_dir = user_dir.path().join("lua");
         std::fs::create_dir_all(&lua_dir).unwrap();
 
-        write_lua(&lua_dir, "ext.lua", r#"
+        write_lua(
+            &lua_dir,
+            "ext.lua",
+            r#"
             imp.on("on_session_start", function() end)
             imp.register_tool({ name = "my_tool", execute = function() end })
-        "#);
+        "#,
+        );
 
         // First load
         let (rt1, exts1) = reload(user_dir.path(), None).unwrap();
@@ -277,12 +401,16 @@ mod tests {
         assert_eq!(exts1.len(), 1);
 
         // Modify the extension
-        write_lua(&lua_dir, "ext.lua", r#"
+        write_lua(
+            &lua_dir,
+            "ext.lua",
+            r#"
             imp.on("on_session_start", function() end)
             imp.on("after_file_write", function() end)
             imp.register_tool({ name = "tool_a", execute = function() end })
             imp.register_tool({ name = "tool_b", execute = function() end })
-        "#);
+        "#,
+        );
 
         // Reload — old state is dropped, new state picks up changes
         let (rt2, exts2) = reload(user_dir.path(), None).unwrap();
@@ -327,10 +455,12 @@ mod tests {
         assert!(r1.is_err());
 
         // Second extension still loads fine
-        let r2 = rt.exec(r#"
+        let r2 = rt.exec(
+            r#"
             imp.on("on_session_start", function() end)
             _ext2_loaded = true
-        "#);
+        "#,
+        );
         assert!(r2.is_ok());
         assert_eq!(rt.hook_count(), 1);
 
@@ -345,20 +475,26 @@ mod tests {
         let rt = make_runtime();
 
         // Extension 1
-        rt.exec(r#"
+        rt.exec(
+            r#"
             imp.on("on_session_start", function()
                 _ext1_fired = true
             end)
             imp.register_tool({ name = "ext1_tool", execute = function() end })
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         // Extension 2
-        rt.exec(r#"
+        rt.exec(
+            r#"
             imp.on("after_file_write", function()
                 _ext2_fired = true
             end)
             imp.register_tool({ name = "ext2_tool", execute = function() end })
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         assert_eq!(rt.hook_count(), 2);
         assert_eq!(rt.tool_count(), 2);
@@ -380,10 +516,13 @@ mod tests {
         rt.exec("shared_counter = 1").unwrap();
 
         // Extension 2 reads and increments it
-        rt.exec(r#"
+        rt.exec(
+            r#"
             shared_counter = shared_counter + 1
             _final = shared_counter
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let val: i64 = rt.lua().globals().get("_final").unwrap();
         assert_eq!(val, 2);
@@ -394,13 +533,16 @@ mod tests {
     #[test]
     fn events_on_and_emit() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             _received = nil
             imp.events.on("custom_event", function(data)
                 _received = data
             end)
             imp.events.emit("custom_event", "hello from event")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let received: String = rt.lua().globals().get("_received").unwrap();
         assert_eq!(received, "hello from event");
@@ -409,12 +551,15 @@ mod tests {
     #[test]
     fn events_multiple_handlers() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             _count = 0
             imp.events.on("tick", function() _count = _count + 1 end)
             imp.events.on("tick", function() _count = _count + 1 end)
             imp.events.emit("tick", nil)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let count: i64 = rt.lua().globals().get("_count").unwrap();
         assert_eq!(count, 2);
@@ -423,12 +568,15 @@ mod tests {
     #[test]
     fn events_handler_error_doesnt_crash() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             _after_error = false
             imp.events.on("test", function() error("boom") end)
             imp.events.on("test", function() _after_error = true end)
             imp.events.emit("test", nil)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let after: bool = rt.lua().globals().get("_after_error").unwrap();
         assert!(after, "second handler should still fire after first errors");
@@ -439,14 +587,17 @@ mod tests {
     #[test]
     fn register_command_creates_handle() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             imp.register_command("greet", {
                 description = "Say hello",
                 handler = function(args, ctx)
                     return "Hello!"
                 end
             })
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         assert_eq!(rt.command_count(), 1);
     }
@@ -459,20 +610,35 @@ mod tests {
         let lua = rt.lua();
 
         assert_eq!(lua_value_to_json(mlua::Value::Nil), serde_json::Value::Null);
-        assert_eq!(lua_value_to_json(mlua::Value::Boolean(true)), serde_json::json!(true));
-        assert_eq!(lua_value_to_json(mlua::Value::Integer(42)), serde_json::json!(42));
-        assert_eq!(lua_value_to_json(mlua::Value::Number(3.14)), serde_json::json!(3.14));
+        assert_eq!(
+            lua_value_to_json(mlua::Value::Boolean(true)),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            lua_value_to_json(mlua::Value::Integer(42)),
+            serde_json::json!(42)
+        );
+        assert_eq!(
+            lua_value_to_json(mlua::Value::Number(3.14)),
+            serde_json::json!(3.14)
+        );
 
         let s = lua.create_string("hello").unwrap();
-        assert_eq!(lua_value_to_json(mlua::Value::String(s)), serde_json::json!("hello"));
+        assert_eq!(
+            lua_value_to_json(mlua::Value::String(s)),
+            serde_json::json!("hello")
+        );
     }
 
     #[test]
     fn lua_table_to_json_object() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             _test_table = { name = "Alice", age = 30 }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let val: mlua::Value = rt.lua().globals().get("_test_table").unwrap();
         let json = lua_value_to_json(val);
@@ -483,9 +649,12 @@ mod tests {
     #[test]
     fn lua_array_to_json_array() {
         let rt = make_runtime();
-        rt.exec(r#"
+        rt.exec(
+            r#"
             _test_arr = { 1, 2, 3 }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         let val: mlua::Value = rt.lua().globals().get("_test_arr").unwrap();
         let json = lua_value_to_json(val);
@@ -518,8 +687,16 @@ mod tests {
         let lua_dir = user_dir.path().join("lua");
         std::fs::create_dir_all(&lua_dir).unwrap();
 
-        write_lua(&lua_dir, "a.lua", r#"imp.on("on_session_start", function() end)"#);
-        write_lua(&lua_dir, "b.lua", r#"imp.register_tool({ name = "b_tool", execute = function() end })"#);
+        write_lua(
+            &lua_dir,
+            "a.lua",
+            r#"imp.on("on_session_start", function() end)"#,
+        );
+        write_lua(
+            &lua_dir,
+            "b.lua",
+            r#"imp.register_tool({ name = "b_tool", execute = function() end })"#,
+        );
 
         let exts = discover_extensions(user_dir.path(), None);
         assert_eq!(exts.len(), 2);
@@ -543,7 +720,11 @@ mod tests {
         std::fs::create_dir_all(&lua_dir).unwrap();
 
         write_lua(&lua_dir, "bad.lua", "error('bad extension')");
-        write_lua(&lua_dir, "good.lua", r#"imp.on("on_session_start", function() end)"#);
+        write_lua(
+            &lua_dir,
+            "good.lua",
+            r#"imp.on("on_session_start", function() end)"#,
+        );
 
         let exts = discover_extensions(user_dir.path(), None);
         let rt = make_runtime();

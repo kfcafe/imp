@@ -75,10 +75,7 @@ impl DisplayToolCall {
                 .unwrap_or("")
                 .to_string(),
             "bash" => {
-                let cmd = args
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
                 let truncated = if cmd.len() > 60 {
                     format!("{}…", &cmd[..57])
                 } else {
@@ -153,10 +150,7 @@ impl Widget for ToolCallView<'_> {
                     if y >= area.y + area.height {
                         break;
                     }
-                    let line = Line::from(Span::styled(
-                        format!("    {line_str}"),
-                        output_style,
-                    ));
+                    let line = Line::from(Span::styled(format!("    {line_str}"), output_style));
                     buf.set_line(area.x, y, &line, area.width);
                 }
             }

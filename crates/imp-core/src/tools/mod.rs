@@ -74,9 +74,7 @@ pub struct ToolOutput {
 impl ToolOutput {
     pub fn text(text: impl Into<String>) -> Self {
         Self {
-            content: vec![ContentBlock::Text {
-                text: text.into(),
-            }],
+            content: vec![ContentBlock::Text { text: text.into() }],
             details: serde_json::Value::Null,
             is_error: false,
         }
@@ -84,9 +82,7 @@ impl ToolOutput {
 
     pub fn error(text: impl Into<String>) -> Self {
         Self {
-            content: vec![ContentBlock::Text {
-                text: text.into(),
-            }],
+            content: vec![ContentBlock::Text { text: text.into() }],
             details: serde_json::Value::Null,
             is_error: true,
         }
@@ -134,7 +130,8 @@ impl ToolRegistry {
 
     /// Get all tool definitions (for LLM context).
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        let mut defs: Vec<_> = self.tools
+        let mut defs: Vec<_> = self
+            .tools
             .values()
             .map(|t| ToolDefinition {
                 name: t.name().to_string(),
@@ -148,7 +145,8 @@ impl ToolRegistry {
 
     /// Get only readonly tool definitions (for readonly roles).
     pub fn readonly_definitions(&self) -> Vec<ToolDefinition> {
-        let mut defs: Vec<_> = self.tools
+        let mut defs: Vec<_> = self
+            .tools
             .values()
             .filter(|t| t.is_readonly())
             .map(|t| ToolDefinition {

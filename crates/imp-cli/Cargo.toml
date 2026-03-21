@@ -12,7 +12,13 @@ path = "src/main.rs"
 imp-llm.workspace = true
 imp-core.workspace = true
 imp-tui.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 tokio.workspace = true
 clap.workspace = true
 futures.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

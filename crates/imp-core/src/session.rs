@@ -180,13 +180,18 @@ impl SessionManager {
                 continue;
             }
             // Check modification time first (cheap) before parsing
-            let modified = dir_entry.metadata()?.modified().unwrap_or(std::time::UNIX_EPOCH);
+            let modified = dir_entry
+                .metadata()?
+                .modified()
+                .unwrap_or(std::time::UNIX_EPOCH);
 
             // Only parse if this could be newer than our current best
             if best.as_ref().is_none_or(|(t, _)| modified > *t) {
                 // Read just the first line to check cwd without parsing the whole file
                 if let Ok(first_line) = read_first_line(&path) {
-                    if let Ok(SessionEntry::Header { cwd, .. }) = serde_json::from_str::<SessionEntry>(&first_line).as_ref() {
+                    if let Ok(SessionEntry::Header { cwd, .. }) =
+                        serde_json::from_str::<SessionEntry>(&first_line).as_ref()
+                    {
                         if *cwd == cwd_str {
                             best = Some((modified, path));
                         }
@@ -316,11 +321,7 @@ impl SessionManager {
             .collect()
     }
 
-    fn build_subtree(
-        &self,
-        idx: usize,
-        children_map: &HashMap<&str, Vec<usize>>,
-    ) -> TreeNode {
+    fn build_subtree(&self, idx: usize, children_map: &HashMap<&str, Vec<usize>>) -> TreeNode {
         let entry = &self.entries[idx];
         let children = entry
             .id()
@@ -417,7 +418,11 @@ impl SessionManager {
             }
         }
 
-        let leaf_id = forked_entries.iter().rev().find_map(|e| e.id()).map(String::from);
+        let leaf_id = forked_entries
+            .iter()
+            .rev()
+            .find_map(|e| e.id())
+            .map(String::from);
 
         Ok(SessionManager {
             entries: forked_entries,
@@ -623,13 +628,7 @@ mod tests {
         let main_ids: Vec<Option<&str>> = main_branch.iter().map(|e| e.id()).collect();
         assert_eq!(
             main_ids,
-            vec![
-                Some("m1"),
-                Some("m2"),
-                Some("m3"),
-                Some("m4"),
-                Some("m5")
-            ]
+            vec![Some("m1"), Some("m2"), Some("m3"), Some("m4"), Some("m5")]
         );
     }
 

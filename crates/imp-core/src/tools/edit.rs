@@ -11,8 +11,12 @@ pub struct EditTool;
 
 #[async_trait]
 impl Tool for EditTool {
-    fn name(&self) -> &str { "edit" }
-    fn label(&self) -> &str { "Edit File" }
+    fn name(&self) -> &str {
+        "edit"
+    }
+    fn label(&self) -> &str {
+        "Edit File"
+    }
     fn description(&self) -> &str {
         "Edit a file by replacing exact text."
     }
@@ -27,7 +31,9 @@ impl Tool for EditTool {
             "required": ["path", "oldText", "newText"]
         })
     }
-    fn is_readonly(&self) -> bool { false }
+    fn is_readonly(&self) -> bool {
+        false
+    }
 
     async fn execute(
         &self,
@@ -53,7 +59,10 @@ impl Tool for EditTool {
         };
 
         if !path.exists() {
-            return Ok(ToolOutput::error(format!("File not found: {}", path.display())));
+            return Ok(ToolOutput::error(format!(
+                "File not found: {}",
+                path.display()
+            )));
         }
 
         let raw_content = tokio::fs::read_to_string(&path).await?;
@@ -64,7 +73,8 @@ impl Tool for EditTool {
         let old_normalized = old_text.replace("\r\n", "\n");
         let new_normalized = new_text.replace("\r\n", "\n");
 
-        let (new_content, was_fuzzy) = match apply_edit(&content, &old_normalized, &new_normalized) {
+        let (new_content, was_fuzzy) = match apply_edit(&content, &old_normalized, &new_normalized)
+        {
             Ok(v) => v,
             Err(output) => return Ok(output),
         };
@@ -81,7 +91,9 @@ impl Tool for EditTool {
         tokio::fs::write(&path, &final_content).await?;
         let mut msg = diff;
         if was_fuzzy {
-            msg.push_str("\n(matched using fuzzy matching: trailing whitespace/unicode normalized)");
+            msg.push_str(
+                "\n(matched using fuzzy matching: trailing whitespace/unicode normalized)",
+            );
         }
 
         Ok(ToolOutput {
@@ -225,6 +237,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edit_crlf_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("crlf.txt");
+        std::fs::write(&file, "line1\r\nline2\r\nline3\r\n").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(
+                "c5",
+                json!({
+                    "path": "crlf.txt",
+                    "oldText": "line2",
+                    "newText": "replaced"
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert!(written.contains("replaced"));
+        // CRLF line endings should be preserved
+        assert!(written.contains("\r\n"));
+        assert!(!written.contains("line2"));
+    }
+
+    #[tokio::test]
+    async fn edit_replaces_first_occurrence_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("multi.txt");
+        std::fs::write(&file, "foo bar foo baz foo\n").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(
+                "c6",
+                json!({
+                    "path": "multi.txt",
+                    "oldText": "foo",
+                    "newText": "REPLACED"
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let written = std::fs::read_to_string(&file).unwrap();
+        // Should replace only the first occurrence
+        assert_eq!(written, "REPLACED bar foo baz foo\n");
+    }
+
+    #[tokio::test]
+    async fn edit_empty_old_text_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("empty.txt");
+        std::fs::write(&file, "some content\n").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(
+                "c7",
+                json!({
+                    "path": "empty.txt",
+                    "oldText": "",
+                    "newText": "replacement"
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        let text = result
+            .content
+            .iter()
+            .find_map(|b| match b {
+                imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(text.contains("oldText"));
+    }
+
+    #[tokio::test]
+    async fn edit_nonexistent_file_error() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(
+                "c8",
+                json!({
+                    "path": "does_not_exist.txt",
+                    "oldText": "hello",
+                    "newText": "world"
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        let text = result
+            .content
+            .iter()
+            .find_map(|b| match b {
+                imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(text.contains("File not found"));
+    }
+
+    #[tokio::test]
+    async fn edit_missing_path_error() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(
+                "c9",
+                json!({
+                    "oldText": "hello",
+                    "newText": "world"
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        let text = result
+            .content
+            .iter()
+            .find_map(|b| match b {
+                imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(text.contains("path"));
+    }
+
+    #[tokio::test]
     async fn edit_no_match_error() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("nope.txt");
@@ -245,10 +402,14 @@ mod tests {
             .unwrap();
 
         assert!(result.is_error);
-        let text = result.content.iter().find_map(|b| match b {
-            imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        }).unwrap();
+        let text = result
+            .content
+            .iter()
+            .find_map(|b| match b {
+                imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
         assert!(text.contains("Could not find"));
     }
 }

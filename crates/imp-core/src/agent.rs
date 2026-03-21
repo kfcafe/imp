@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use futures::StreamExt;
+use futures::{future::join_all, StreamExt};
 use imp_llm::{
     AssistantMessage, ContentBlock, Context, Cost, Message, Model, RequestOptions, StopReason,
     StreamEvent, ThinkingLevel, Usage,
@@ -9,25 +9,53 @@ use imp_llm::{
 use tokio::sync::mpsc;
 
 use crate::error::Result;
-use crate::hooks::HookRunner;
+use crate::hooks::{HookEvent, HookRunner};
 use crate::roles::Role;
 use crate::tools::ToolRegistry;
 
 /// Events emitted by the agent during execution.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    AgentStart { model: String, timestamp: u64 },
-    AgentEnd { usage: Usage, cost: Cost },
-    TurnStart { index: u32 },
-    TurnEnd { index: u32, message: AssistantMessage },
-    MessageStart { message: Message },
-    MessageDelta { delta: StreamEvent },
-    MessageEnd { message: Message },
-    ToolExecutionStart { tool_call_id: String, tool_name: String, args: serde_json::Value },
-    ToolExecutionEnd { tool_call_id: String, result: imp_llm::ToolResultMessage },
+    AgentStart {
+        model: String,
+        timestamp: u64,
+    },
+    AgentEnd {
+        usage: Usage,
+        cost: Cost,
+    },
+    TurnStart {
+        index: u32,
+    },
+    TurnEnd {
+        index: u32,
+        message: AssistantMessage,
+    },
+    MessageStart {
+        message: Message,
+    },
+    MessageDelta {
+        delta: StreamEvent,
+    },
+    MessageEnd {
+        message: Message,
+    },
+    ToolExecutionStart {
+        tool_call_id: String,
+        tool_name: String,
+        args: serde_json::Value,
+    },
+    ToolExecutionEnd {
+        tool_call_id: String,
+        result: imp_llm::ToolResultMessage,
+    },
     CompactionStart,
-    CompactionEnd { summary: String },
-    Error { error: String },
+    CompactionEnd {
+        summary: String,
+    },
+    Error {
+        error: String,
+    },
 }
 
 /// Commands sent to the agent (from UI or orchestrator).
@@ -50,6 +78,7 @@ pub struct Agent {
     pub role: Option<Role>,
     pub hooks: HookRunner,
     pub api_key: String,
+    pub ui: Arc<dyn crate::ui::UserInterface>,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_rx: mpsc::Receiver<AgentCommand>,
@@ -77,6 +106,7 @@ impl Agent {
             role: None,
             hooks: HookRunner::new(),
             api_key: String::new(),
+            ui: Arc::new(crate::ui::NullInterface),
             event_tx,
             command_rx,
         };
@@ -138,6 +168,44 @@ impl Agent {
 
             self.emit(AgentEvent::TurnStart { index: turn }).await;
 
+            let usage = crate::context::context_usage(&self.messages, &self.model);
+            if usage.ratio >= 0.6 {
+                crate::context::mask_observations(&mut self.messages, 10);
+                self.hooks
+                    .fire(&HookEvent::OnContextThreshold { ratio: usage.ratio })
+                    .await;
+            }
+
+            if usage.ratio >= 0.8 {
+                self.emit(AgentEvent::CompactionStart).await;
+                match crate::compaction::compact(
+                    &self.messages,
+                    &self.model,
+                    Default::default(),
+                    &self.api_key,
+                )
+                .await
+                {
+                    Ok(result) => {
+                        replace_with_compacted_messages(
+                            &mut self.messages,
+                            &result.summary,
+                            &result.first_kept_id,
+                        );
+                        self.emit(AgentEvent::CompactionEnd {
+                            summary: result.summary,
+                        })
+                        .await;
+                    }
+                    Err(error) => {
+                        self.emit(AgentEvent::Error {
+                            error: format!("Compaction failed: {error}"),
+                        })
+                        .await;
+                    }
+                }
+            }
+
             // Build context and options for the LLM
             let context = Context {
                 messages: self.messages.clone(),
@@ -152,8 +220,13 @@ impl Agent {
                 cache_options: Default::default(),
             };
 
+            self.hooks.fire(&HookEvent::BeforeLlmCall).await;
+
             // Stream the LLM response
-            let mut stream = self.model.provider.stream(&self.model, context, options, &self.api_key);
+            let mut stream =
+                self.model
+                    .provider
+                    .stream(&self.model, context, options, &self.api_key);
 
             let mut text_parts: Vec<String> = Vec::new();
             let mut thinking_parts: Vec<String> = Vec::new();
@@ -170,8 +243,10 @@ impl Agent {
                 match event_result {
                     Ok(event) => {
                         // Forward as delta
-                        self.emit(AgentEvent::MessageDelta { delta: event.clone() })
-                            .await;
+                        self.emit(AgentEvent::MessageDelta {
+                            delta: event.clone(),
+                        })
+                        .await;
 
                         match event {
                             StreamEvent::TextDelta { text } => {
@@ -203,13 +278,10 @@ impl Agent {
                                 let err_msg = AssistantMessage {
                                     content: vec![ContentBlock::Text { text: error }],
                                     usage: None,
-                                    stop_reason: StopReason::Error(
-                                        "Stream error".to_string(),
-                                    ),
+                                    stop_reason: StopReason::Error("Stream error".to_string()),
                                     timestamp: imp_llm::now(),
                                 };
-                                self.messages
-                                    .push(Message::Assistant(err_msg.clone()));
+                                self.messages.push(Message::Assistant(err_msg.clone()));
                                 self.emit(AgentEvent::TurnEnd {
                                     index: turn,
                                     message: err_msg,
@@ -221,9 +293,9 @@ impl Agent {
                                     cost,
                                 })
                                 .await;
-                                return Err(crate::error::Error::Llm(
-                                    imp_llm::Error::Provider("Stream error".to_string()),
-                                ));
+                                return Err(crate::error::Error::Llm(imp_llm::Error::Provider(
+                                    "Stream error".to_string(),
+                                )));
                             }
                         }
                     }
@@ -314,28 +386,32 @@ impl Agent {
         &self,
         calls: Vec<(String, String, serde_json::Value)>,
     ) -> Vec<imp_llm::ToolResultMessage> {
-        let (readonly, mutable): (Vec<_>, Vec<_>) =
-            calls
-                .into_iter()
-                .partition(|(_, name, _)| {
-                    self.tools.get(name).is_some_and(|t| t.is_readonly())
-                });
+        let mut readonly = Vec::new();
+        let mut mutable = Vec::new();
 
-        let mut results = Vec::new();
-
-        // Read-only tools run sequentially for now (concurrent TODO)
-        for (id, name, args) in readonly {
-            let result = self.execute_one_tool(&id, &name, args).await;
-            results.push(result);
+        for (index, (id, name, args)) in calls.into_iter().enumerate() {
+            if self.tools.get(&name).is_some_and(|tool| tool.is_readonly()) {
+                readonly.push((index, id, name, args));
+            } else {
+                mutable.push((index, id, name, args));
+            }
         }
 
-        // Mutable tools run sequentially
-        for (id, name, args) in mutable {
+        let mut results = join_all(readonly.into_iter().map(
+            |(index, id, name, args)| async move {
+                let result = self.execute_one_tool(&id, &name, args).await;
+                (index, result)
+            },
+        ))
+        .await;
+
+        for (index, id, name, args) in mutable {
             let result = self.execute_one_tool(&id, &name, args).await;
-            results.push(result);
+            results.push((index, result));
         }
 
-        results
+        results.sort_by_key(|(index, _)| *index);
+        results.into_iter().map(|(_, result)| result).collect()
     }
 
     async fn execute_one_tool(
@@ -351,16 +427,38 @@ impl Agent {
         })
         .await;
 
-        let result = match self.tools.get(tool_name) {
+        let before_results = self
+            .hooks
+            .fire(&HookEvent::BeforeToolCall {
+                tool_name,
+                args: &args,
+            })
+            .await;
+
+        if let Some(blocking_result) = before_results.into_iter().find(|result| result.block) {
+            let reason = blocking_result
+                .reason
+                .unwrap_or_else(|| format!("Tool call blocked by hook: {tool_name}"));
+            let result =
+                crate::tools::ToolOutput::error(reason).into_tool_result(call_id, tool_name);
+            self.emit(AgentEvent::ToolExecutionEnd {
+                tool_call_id: call_id.to_string(),
+                result: result.clone(),
+            })
+            .await;
+            return result;
+        }
+
+        let mut result = match self.tools.get(tool_name) {
             Some(tool) => {
                 let (update_tx, _update_rx) = mpsc::channel(64);
                 let ctx = crate::tools::ToolContext {
                     cwd: self.cwd.clone(),
                     cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     update_tx,
-                    ui: Arc::new(crate::ui::NullInterface),
+                    ui: self.ui.clone(),
                 };
-                match tool.execute(call_id, args, ctx).await {
+                match tool.execute(call_id, args.clone(), ctx).await {
                     Ok(output) => output.into_tool_result(call_id, tool_name),
                     Err(e) => crate::tools::ToolOutput::error(e.to_string())
                         .into_tool_result(call_id, tool_name),
@@ -370,6 +468,32 @@ impl Agent {
                 .into_tool_result(call_id, tool_name),
         };
 
+        let after_results = self
+            .hooks
+            .fire(&HookEvent::AfterToolCall {
+                tool_name,
+                result: &result,
+            })
+            .await;
+
+        if let Some(modified_content) = after_results
+            .into_iter()
+            .filter_map(|hook_result| hook_result.modified_content)
+            .next_back()
+        {
+            result.content = modified_content;
+        }
+
+        if !result.is_error && matches!(tool_name, "write" | "edit" | "multi_edit") {
+            if let Some(path) = extract_file_path(self.cwd.as_path(), &args) {
+                self.hooks
+                    .fire(&HookEvent::AfterFileWrite {
+                        file: path.as_path(),
+                    })
+                    .await;
+            }
+        }
+
         self.emit(AgentEvent::ToolExecutionEnd {
             tool_call_id: call_id.to_string(),
             result: result.clone(),
@@ -377,6 +501,33 @@ impl Agent {
         .await;
 
         result
+    }
+}
+
+fn replace_with_compacted_messages(
+    messages: &mut Vec<Message>,
+    summary: &str,
+    first_kept_id: &str,
+) {
+    let keep_from = messages
+        .iter()
+        .position(|message| message_matches_compaction_id(message, first_kept_id))
+        .unwrap_or(messages.len());
+
+    let mut compacted = vec![Message::user(summary)];
+    compacted.extend(messages.drain(keep_from..));
+    *messages = compacted;
+}
+
+fn message_matches_compaction_id(message: &Message, first_kept_id: &str) -> bool {
+    match message {
+        Message::ToolResult(result) => result.tool_call_id == first_kept_id,
+        Message::Assistant(assistant) => {
+            assistant.content.iter().any(
+                |block| matches!(block, ContentBlock::ToolCall { id, .. } if id == first_kept_id),
+            ) || format!("assistant_{}", assistant.timestamp) == first_kept_id
+        }
+        Message::User(user) => format!("user_{}", user.timestamp) == first_kept_id,
     }
 }
 
@@ -423,18 +574,36 @@ fn build_assistant_message(
     }
 }
 
+fn extract_file_path(cwd: &Path, args: &serde_json::Value) -> Option<PathBuf> {
+    let raw_path = args.get("path")?.as_str()?;
+    if raw_path.is_empty() {
+        return None;
+    }
+
+    let path = PathBuf::from(raw_path);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(cwd.join(path))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::pin::Pin;
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex as StdMutex,
+    };
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use futures_core::Stream;
     use imp_llm::auth::{ApiKey, AuthStore};
     use imp_llm::model::{Capabilities, ModelMeta, ModelPricing};
     use imp_llm::provider::Provider;
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, Notify};
 
     /// A mock provider that returns pre-programmed responses.
     /// Each call to `stream()` pops the next response from the queue.
@@ -487,12 +656,16 @@ mod tests {
     }
 
     fn test_model(provider: Arc<dyn Provider>) -> Model {
+        test_model_with_context_window(provider, 200_000)
+    }
+
+    fn test_model_with_context_window(provider: Arc<dyn Provider>, context_window: u32) -> Model {
         Model {
             meta: ModelMeta {
                 id: "test-model".to_string(),
                 provider: "mock".to_string(),
                 name: "Test Model".to_string(),
-                context_window: 200_000,
+                context_window,
                 max_output_tokens: 16_384,
                 pricing: ModelPricing {
                     input_per_mtok: 3.0,
@@ -612,6 +785,46 @@ mod tests {
         events
     }
 
+    fn make_assistant_tool_call(
+        call_id: &str,
+        tool_name: &str,
+        args: serde_json::Value,
+    ) -> Message {
+        Message::Assistant(AssistantMessage {
+            content: vec![ContentBlock::ToolCall {
+                id: call_id.to_string(),
+                name: tool_name.to_string(),
+                arguments: args,
+            }],
+            usage: None,
+            stop_reason: StopReason::ToolUse,
+            timestamp: imp_llm::now(),
+        })
+    }
+
+    fn make_tool_result(call_id: &str, tool_name: &str, output: &str) -> Message {
+        Message::ToolResult(imp_llm::ToolResultMessage {
+            tool_call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            content: vec![ContentBlock::Text {
+                text: output.to_string(),
+            }],
+            is_error: false,
+            details: serde_json::Value::Null,
+            timestamp: imp_llm::now(),
+        })
+    }
+
+    fn tool_result_text(message: &Message) -> Option<&str> {
+        match message {
+            Message::ToolResult(result) => result.content.iter().find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
     /// A simple echo tool for testing.
     struct EchoTool;
 
@@ -687,6 +900,136 @@ mod tests {
         }
     }
 
+    struct ConcurrentReadonlyState {
+        readonly_expected: usize,
+        readonly_started: AtomicUsize,
+        readonly_finished: AtomicUsize,
+        mutable_observed_finished: AtomicUsize,
+        log: StdMutex<Vec<String>>,
+        notify: Notify,
+    }
+
+    impl ConcurrentReadonlyState {
+        fn new(readonly_expected: usize) -> Self {
+            Self {
+                readonly_expected,
+                readonly_started: AtomicUsize::new(0),
+                readonly_finished: AtomicUsize::new(0),
+                mutable_observed_finished: AtomicUsize::new(0),
+                log: StdMutex::new(Vec::new()),
+                notify: Notify::new(),
+            }
+        }
+
+        fn record(&self, entry: impl Into<String>) {
+            self.log
+                .lock()
+                .expect("concurrent log lock")
+                .push(entry.into());
+        }
+
+        async fn wait_for_all_readonly_to_start(&self) {
+            while self.readonly_started.load(Ordering::SeqCst) < self.readonly_expected {
+                self.notify.notified().await;
+            }
+        }
+    }
+
+    struct CoordinatedReadonlyTool {
+        name: &'static str,
+        shared: Arc<ConcurrentReadonlyState>,
+    }
+
+    #[async_trait]
+    impl crate::tools::Tool for CoordinatedReadonlyTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn label(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "Read-only tool used to verify concurrent execution"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string" }
+                },
+                "required": ["text"]
+            })
+        }
+        fn is_readonly(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            _call_id: &str,
+            params: serde_json::Value,
+            _ctx: crate::tools::ToolContext,
+        ) -> crate::error::Result<crate::tools::ToolOutput> {
+            self.shared.record(format!("{}:start", self.name));
+            self.shared.readonly_started.fetch_add(1, Ordering::SeqCst);
+            self.shared.notify.notify_waiters();
+            self.shared.wait_for_all_readonly_to_start().await;
+            self.shared.record(format!("{}:end", self.name));
+            self.shared.readonly_finished.fetch_add(1, Ordering::SeqCst);
+
+            let text = params["text"].as_str().unwrap_or(self.name);
+            Ok(crate::tools::ToolOutput::text(format!(
+                "{}: {text}",
+                self.name
+            )))
+        }
+    }
+
+    struct CoordinatedMutableTool {
+        shared: Arc<ConcurrentReadonlyState>,
+    }
+
+    #[async_trait]
+    impl crate::tools::Tool for CoordinatedMutableTool {
+        fn name(&self) -> &str {
+            "write_after_reads"
+        }
+        fn label(&self) -> &str {
+            "Write After Reads"
+        }
+        fn description(&self) -> &str {
+            "Mutable tool used to verify read-only tools finish first"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "data": { "type": "string" }
+                },
+                "required": ["data"]
+            })
+        }
+        fn is_readonly(&self) -> bool {
+            false
+        }
+        async fn execute(
+            &self,
+            _call_id: &str,
+            params: serde_json::Value,
+            _ctx: crate::tools::ToolContext,
+        ) -> crate::error::Result<crate::tools::ToolOutput> {
+            let finished = self.shared.readonly_finished.load(Ordering::SeqCst);
+            self.shared
+                .mutable_observed_finished
+                .store(finished, Ordering::SeqCst);
+            self.shared.record("write_after_reads:start");
+
+            let data = params["data"].as_str().unwrap_or("no data");
+            Ok(crate::tools::ToolOutput::text(format!(
+                "wrote after reads: {data}"
+            )))
+        }
+    }
+
     /// Collect all events from the handle until the channel closes.
     async fn collect_events(mut handle: AgentHandle) -> Vec<AgentEvent> {
         let mut events = Vec::new();
@@ -718,14 +1061,20 @@ mod tests {
         // Verify event order: AgentStart → TurnStart → deltas → TurnEnd → AgentEnd
         assert!(matches!(events[0], AgentEvent::AgentStart { .. }));
 
-        let turn_start = events.iter().position(|e| matches!(e, AgentEvent::TurnStart { index: 0 }));
+        let turn_start = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::TurnStart { index: 0 }));
         assert!(turn_start.is_some());
 
-        let turn_end = events.iter().position(|e| matches!(e, AgentEvent::TurnEnd { index: 0, .. }));
+        let turn_end = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::TurnEnd { index: 0, .. }));
         assert!(turn_end.is_some());
         assert!(turn_end.unwrap() > turn_start.unwrap());
 
-        let agent_end = events.iter().position(|e| matches!(e, AgentEvent::AgentEnd { .. }));
+        let agent_end = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::AgentEnd { .. }));
         assert!(agent_end.is_some());
         assert!(agent_end.unwrap() > turn_end.unwrap());
 
@@ -794,8 +1143,9 @@ mod tests {
         assert_eq!(tool_ends.len(), 1);
 
         // Verify accumulated usage across turns (100 + 200 input, 30 + 25 output)
-        if let Some(AgentEvent::AgentEnd { usage, .. }) =
-            events.iter().find(|e| matches!(e, AgentEvent::AgentEnd { .. }))
+        if let Some(AgentEvent::AgentEnd { usage, .. }) = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::AgentEnd { .. }))
         {
             assert_eq!(usage.input_tokens, 300);
             assert_eq!(usage.output_tokens, 55);
@@ -855,8 +1205,9 @@ mod tests {
         assert_eq!(tool_starts.len(), 3);
 
         // Total usage: 100+200+300=600 input, 40+20+10=70 output
-        if let Some(AgentEvent::AgentEnd { usage, .. }) =
-            events.iter().find(|e| matches!(e, AgentEvent::AgentEnd { .. }))
+        if let Some(AgentEvent::AgentEnd { usage, .. }) = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::AgentEnd { .. }))
         {
             assert_eq!(usage.input_tokens, 600);
             assert_eq!(usage.output_tokens, 70);
@@ -899,7 +1250,9 @@ mod tests {
         let events = events_task.await.unwrap();
 
         // Should have AgentEnd
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
 
         // Should NOT have a second turn
         let turn_starts: Vec<_> = events
@@ -941,17 +1294,20 @@ mod tests {
         let events = events_task.await.unwrap();
 
         // Should have error event about max turns
-        let has_error = events.iter().any(|e| {
-            matches!(e, AgentEvent::Error { error } if error.contains("Max turns"))
-        });
+        let has_error = events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Error { error } if error.contains("Max turns")));
         assert!(has_error);
 
         // Should still have AgentEnd
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
 
         // Verify usage accumulated for the 3 turns that did execute
-        if let Some(AgentEvent::AgentEnd { usage, .. }) =
-            events.iter().find(|e| matches!(e, AgentEvent::AgentEnd { .. }))
+        if let Some(AgentEvent::AgentEnd { usage, .. }) = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::AgentEnd { .. }))
         {
             assert_eq!(usage.input_tokens, 150); // 3 * 50
             assert_eq!(usage.output_tokens, 30); // 3 * 10
@@ -986,7 +1342,9 @@ mod tests {
         let events = events_task.await.unwrap();
 
         // The tool execution should produce an error result
-        let tool_end = events.iter().find(|e| matches!(e, AgentEvent::ToolExecutionEnd { .. }));
+        let tool_end = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::ToolExecutionEnd { .. }));
         assert!(tool_end.is_some());
         if let Some(AgentEvent::ToolExecutionEnd { result, .. }) = tool_end {
             assert!(result.is_error);
@@ -1008,7 +1366,82 @@ mod tests {
         assert_eq!(turn_starts.len(), 2);
 
         // Should complete successfully
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+    }
+
+    #[tokio::test]
+    async fn agent_concurrent_readonly() {
+        let shared = Arc::new(ConcurrentReadonlyState::new(3));
+        let provider = Arc::new(MockProvider::new(vec![
+            multi_tool_call_response(
+                &[
+                    ("call_ro_1", "echo_a", serde_json::json!({"text": "first"})),
+                    (
+                        "call_write",
+                        "write_after_reads",
+                        serde_json::json!({"data": "mutate"}),
+                    ),
+                    ("call_ro_2", "echo_b", serde_json::json!({"text": "second"})),
+                    ("call_ro_3", "echo_c", serde_json::json!({"text": "third"})),
+                ],
+                100,
+                40,
+            ),
+            text_response("All tools finished", 150, 20),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        drop(handle);
+
+        agent.tools.register(Arc::new(CoordinatedReadonlyTool {
+            name: "echo_a",
+            shared: shared.clone(),
+        }));
+        agent.tools.register(Arc::new(CoordinatedReadonlyTool {
+            name: "echo_b",
+            shared: shared.clone(),
+        }));
+        agent.tools.register(Arc::new(CoordinatedReadonlyTool {
+            name: "echo_c",
+            shared: shared.clone(),
+        }));
+        agent.tools.register(Arc::new(CoordinatedMutableTool {
+            shared: shared.clone(),
+        }));
+
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            agent.run("Run all tools".to_string()),
+        )
+        .await
+        .expect("read-only tools should not block each other")
+        .expect("agent should complete successfully");
+
+        let tool_result_ids: Vec<_> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResult(result) => Some(result.tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tool_result_ids,
+            vec!["call_ro_1", "call_write", "call_ro_2", "call_ro_3"]
+        );
+
+        assert_eq!(shared.readonly_started.load(Ordering::SeqCst), 3);
+        assert_eq!(shared.readonly_finished.load(Ordering::SeqCst), 3);
+        assert_eq!(shared.mutable_observed_finished.load(Ordering::SeqCst), 3);
+
+        let log = shared.log.lock().expect("concurrent log lock").clone();
+        assert_eq!(
+            log.last().map(String::as_str),
+            Some("write_after_reads:start")
+        );
     }
 
     // ── Event ordering validation ──────────────────────────────────
@@ -1083,6 +1516,73 @@ mod tests {
         assert!(tool_start.unwrap() < tool_end.unwrap());
     }
 
+    #[tokio::test]
+    async fn agent_fires_hooks() {
+        let provider = Arc::new(MockProvider::new(vec![text_response("hooked", 100, 20)]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        drop(handle);
+
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls_for_callback = hook_calls.clone();
+        agent.hooks.register(crate::hooks::HookDefinition {
+            event: "before_llm_call".to_string(),
+            match_pattern: None,
+            action: crate::hooks::HookAction::Callback(Arc::new(move |_event| {
+                hook_calls_for_callback.fetch_add(1, Ordering::SeqCst);
+                crate::hooks::HookResult::default()
+            })),
+            blocking: true,
+            threshold: None,
+        });
+
+        agent.run("Run once".to_string()).await.unwrap();
+
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn agent_context_masking() {
+        let provider = Arc::new(MockProvider::new(vec![text_response("done", 100, 20)]));
+
+        let mut seeded_messages = Vec::new();
+        for index in 0..12 {
+            let call_id = format!("call_{index}");
+            seeded_messages.push(make_assistant_tool_call(
+                &call_id,
+                "read",
+                serde_json::json!({"path": format!("src/file_{index}.rs")}),
+            ));
+            seeded_messages.push(make_tool_result(
+                &call_id,
+                "read",
+                &format!("{}", "x".repeat(400)),
+            ));
+        }
+
+        let mut usage_messages = seeded_messages.clone();
+        usage_messages.push(Message::user("trigger masking"));
+        let provisional_model = test_model(provider.clone());
+        let usage = crate::context::context_usage(&usage_messages, &provisional_model);
+        let context_window = ((usage.used as f64) / 0.7).ceil() as u32;
+
+        let model = test_model_with_context_window(provider, context_window.max(1));
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        drop(handle);
+        agent.messages = seeded_messages;
+
+        agent.run("trigger masking".to_string()).await.unwrap();
+
+        let masked = tool_result_text(&agent.messages[1]).expect("first tool result text");
+        assert!(masked.starts_with("[Output omitted"));
+
+        let recent_index = (10 * 2) + 1;
+        let recent =
+            tool_result_text(&agent.messages[recent_index]).expect("recent tool result text");
+        let expected_recent = "x".repeat(400);
+        assert_eq!(recent, expected_recent.as_str());
+    }
+
     // ── Usage/cost accumulation ────────────────────────────────────
 
     #[tokio::test]
@@ -1108,8 +1608,9 @@ mod tests {
 
         let events = events_task.await.unwrap();
 
-        if let Some(AgentEvent::AgentEnd { usage, cost }) =
-            events.iter().find(|e| matches!(e, AgentEvent::AgentEnd { .. }))
+        if let Some(AgentEvent::AgentEnd { usage, cost }) = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::AgentEnd { .. }))
         {
             // 2M input, 1M output
             assert_eq!(usage.input_tokens, 2_000_000);
@@ -1122,5 +1623,471 @@ mod tests {
         } else {
             panic!("Expected AgentEnd");
         }
+    }
+}
+
+// ── Integration tests: full ReAct cycle with real tools ─────────────
+
+#[cfg(test)]
+mod integration {
+    use super::*;
+    use std::path::PathBuf;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use futures_core::Stream;
+    use imp_llm::auth::{ApiKey, AuthStore};
+    use imp_llm::model::{Capabilities, ModelMeta, ModelPricing};
+    use imp_llm::provider::Provider;
+    use tokio::sync::Mutex;
+
+    use crate::tools::{
+        bash::BashTool, edit::EditTool, grep::GrepTool, read::ReadTool, write::WriteTool,
+    };
+
+    // ── Shared test helpers (duplicated from unit tests to keep modules independent) ──
+
+    struct MockProvider {
+        responses: Mutex<Vec<Vec<StreamEvent>>>,
+    }
+
+    impl MockProvider {
+        fn new(responses: Vec<Vec<StreamEvent>>) -> Self {
+            Self {
+                responses: Mutex::new(responses),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for MockProvider {
+        fn stream(
+            &self,
+            _model: &Model,
+            _context: Context,
+            _options: RequestOptions,
+            _api_key: &str,
+        ) -> Pin<Box<dyn Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
+            let mut responses = self.responses.try_lock().expect("MockProvider lock");
+            let events = if responses.is_empty() {
+                vec![StreamEvent::Error {
+                    error: "No more mock responses".to_string(),
+                }]
+            } else {
+                responses.remove(0)
+            };
+            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
+        }
+
+        async fn resolve_auth(&self, _auth: &AuthStore) -> imp_llm::Result<ApiKey> {
+            Ok("mock-key".to_string())
+        }
+
+        fn id(&self) -> &str {
+            "mock"
+        }
+
+        fn models(&self) -> &[ModelMeta] {
+            &[]
+        }
+    }
+
+    fn test_model(provider: Arc<dyn Provider>) -> Model {
+        Model {
+            meta: ModelMeta {
+                id: "test-model".to_string(),
+                provider: "mock".to_string(),
+                name: "Test Model".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 16_384,
+                pricing: ModelPricing {
+                    input_per_mtok: 3.0,
+                    output_per_mtok: 15.0,
+                    cache_read_per_mtok: 0.3,
+                    cache_write_per_mtok: 3.75,
+                },
+                capabilities: Capabilities {
+                    reasoning: true,
+                    images: false,
+                    tool_use: true,
+                },
+            },
+            provider,
+        }
+    }
+
+    fn text_response(text: &str, input_tokens: u32, output_tokens: u32) -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::MessageStart {
+                model: "test-model".to_string(),
+            },
+            StreamEvent::TextDelta {
+                text: text.to_string(),
+            },
+            StreamEvent::MessageEnd {
+                message: AssistantMessage {
+                    content: vec![ContentBlock::Text {
+                        text: text.to_string(),
+                    }],
+                    usage: Some(Usage {
+                        input_tokens,
+                        output_tokens,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    }),
+                    stop_reason: StopReason::EndTurn,
+                    timestamp: 1000,
+                },
+            },
+        ]
+    }
+
+    fn tool_call_response(
+        call_id: &str,
+        tool_name: &str,
+        args: serde_json::Value,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::MessageStart {
+                model: "test-model".to_string(),
+            },
+            StreamEvent::ToolCall {
+                id: call_id.to_string(),
+                name: tool_name.to_string(),
+                arguments: args.clone(),
+            },
+            StreamEvent::MessageEnd {
+                message: AssistantMessage {
+                    content: vec![ContentBlock::ToolCall {
+                        id: call_id.to_string(),
+                        name: tool_name.to_string(),
+                        arguments: args,
+                    }],
+                    usage: Some(Usage {
+                        input_tokens,
+                        output_tokens,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    }),
+                    stop_reason: StopReason::ToolUse,
+                    timestamp: 1000,
+                },
+            },
+        ]
+    }
+
+    /// Create an agent pre-loaded with all native filesystem and shell tools.
+    fn create_agent_with_tools(
+        provider: Arc<dyn Provider>,
+        cwd: PathBuf,
+    ) -> (Agent, AgentHandle) {
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, cwd);
+        agent.tools.register(Arc::new(WriteTool));
+        agent.tools.register(Arc::new(ReadTool));
+        agent.tools.register(Arc::new(EditTool));
+        agent.tools.register(Arc::new(GrepTool));
+        agent.tools.register(Arc::new(BashTool));
+        (agent, handle)
+    }
+
+    // ── Test 1: Write then read a file ─────────────────────────────
+
+    #[tokio::test]
+    async fn agent_reads_and_writes_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_write",
+                "write",
+                serde_json::json!({"path": "test.txt", "content": "hello world"}),
+                100,
+                20,
+            ),
+            tool_call_response(
+                "call_read",
+                "read",
+                serde_json::json!({"path": "test.txt"}),
+                100,
+                20,
+            ),
+            text_response("The file contains: hello world", 100, 20),
+        ]));
+
+        let (mut agent, handle) = create_agent_with_tools(provider, tmp.path().to_path_buf());
+        drop(handle);
+
+        agent
+            .run("Write and read a file".to_string())
+            .await
+            .unwrap();
+
+        // File should exist on disk with correct content
+        let on_disk = std::fs::read_to_string(tmp.path().join("test.txt")).unwrap();
+        assert_eq!(on_disk, "hello world");
+
+        // Read tool result should contain the file content
+        let read_result = agent
+            .messages
+            .iter()
+            .find_map(|m| match m {
+                Message::ToolResult(r) if r.tool_call_id == "call_read" => Some(r),
+                _ => None,
+            })
+            .expect("should have a read tool result");
+        let read_text = read_result
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            read_text.contains("hello world"),
+            "read result should contain file content, got: {read_text}"
+        );
+
+        // 3 assistant messages = 3 turns (write, read, final text)
+        let assistant_count = agent
+            .messages
+            .iter()
+            .filter(|m| matches!(m, Message::Assistant(_)))
+            .count();
+        assert_eq!(assistant_count, 3);
+    }
+
+    // ── Test 2: Edit tool modifies a file ──────────────────────────
+
+    #[tokio::test]
+    async fn agent_edit_tool_modifies_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_write",
+                "write",
+                serde_json::json!({
+                    "path": "src/main.rs",
+                    "content": "fn main() {\n    println!(\"old\");\n}"
+                }),
+                100,
+                20,
+            ),
+            tool_call_response(
+                "call_edit",
+                "edit",
+                serde_json::json!({
+                    "path": "src/main.rs",
+                    "oldText": "old",
+                    "newText": "new"
+                }),
+                100,
+                20,
+            ),
+            tool_call_response(
+                "call_read",
+                "read",
+                serde_json::json!({"path": "src/main.rs"}),
+                100,
+                20,
+            ),
+            text_response("Done", 100, 20),
+        ]));
+
+        let (mut agent, handle) = create_agent_with_tools(provider, tmp.path().to_path_buf());
+        drop(handle);
+
+        agent.run("Edit a file".to_string()).await.unwrap();
+
+        // File should contain "new" not "old"
+        let on_disk = std::fs::read_to_string(tmp.path().join("src/main.rs")).unwrap();
+        assert!(on_disk.contains("new"), "file should contain 'new'");
+        assert!(!on_disk.contains("old"), "file should not contain 'old'");
+
+        // Edit tool result should include a diff
+        let edit_result = agent
+            .messages
+            .iter()
+            .find_map(|m| match m {
+                Message::ToolResult(r) if r.tool_call_id == "call_edit" => Some(r),
+                _ => None,
+            })
+            .expect("should have an edit tool result");
+        let edit_text = edit_result
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            edit_text.contains("---") || edit_text.contains("+++"),
+            "edit result should include a diff, got: {edit_text}"
+        );
+    }
+
+    // ── Test 3: Grep finds a pattern ───────────────────────────────
+
+    #[tokio::test]
+    async fn agent_grep_finds_pattern() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_write",
+                "write",
+                serde_json::json!({
+                    "path": "search_me.txt",
+                    "content": "line one\nunique_pattern_xyz here\nline three"
+                }),
+                100,
+                20,
+            ),
+            tool_call_response(
+                "call_grep",
+                "grep",
+                serde_json::json!({"pattern": "unique_pattern_xyz", "path": "."}),
+                100,
+                20,
+            ),
+            text_response("Found it!", 100, 20),
+        ]));
+
+        let (mut agent, handle) = create_agent_with_tools(provider, tmp.path().to_path_buf());
+        drop(handle);
+
+        agent
+            .run("Search for a pattern".to_string())
+            .await
+            .unwrap();
+
+        // Grep result should contain the file path and matching line
+        let grep_result = agent
+            .messages
+            .iter()
+            .find_map(|m| match m {
+                Message::ToolResult(r) if r.tool_call_id == "call_grep" => Some(r),
+                _ => None,
+            })
+            .expect("should have a grep tool result");
+        let grep_text = grep_result
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            grep_text.contains("search_me.txt"),
+            "grep should show file path, got: {grep_text}"
+        );
+        assert!(
+            grep_text.contains("unique_pattern_xyz"),
+            "grep should show matching text, got: {grep_text}"
+        );
+    }
+
+    // ── Test 4: Bash runs a command ────────────────────────────────
+
+    #[tokio::test]
+    async fn agent_bash_runs_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_bash",
+                "bash",
+                serde_json::json!({"command": "echo hello && echo world"}),
+                100,
+                20,
+            ),
+            text_response("Done", 100, 20),
+        ]));
+
+        let (mut agent, handle) = create_agent_with_tools(provider, tmp.path().to_path_buf());
+        drop(handle);
+
+        agent.run("Run a command".to_string()).await.unwrap();
+
+        // Bash result should contain the command output
+        let bash_result = agent
+            .messages
+            .iter()
+            .find_map(|m| match m {
+                Message::ToolResult(r) if r.tool_call_id == "call_bash" => Some(r),
+                _ => None,
+            })
+            .expect("should have a bash tool result");
+        let bash_text = bash_result
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            bash_text.contains("hello"),
+            "bash output should contain 'hello', got: {bash_text}"
+        );
+        assert!(
+            bash_text.contains("world"),
+            "bash output should contain 'world', got: {bash_text}"
+        );
+
+        // Details should include exit_code: 0
+        assert_eq!(bash_result.details["exit_code"], 0);
+    }
+
+    // ── Test 5: Tool error → agent self-corrects ───────────────────
+
+    #[tokio::test]
+    async fn agent_handles_tool_error_gracefully() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_read",
+                "read",
+                serde_json::json!({"path": "nonexistent.txt"}),
+                100,
+                20,
+            ),
+            text_response("File not found, let me try something else", 100, 20),
+        ]));
+
+        let (mut agent, handle) = create_agent_with_tools(provider, tmp.path().to_path_buf());
+        drop(handle);
+
+        agent.run("Read a file".to_string()).await.unwrap();
+
+        // Read tool result should have is_error=true
+        let read_result = agent
+            .messages
+            .iter()
+            .find_map(|m| match m {
+                Message::ToolResult(r) if r.tool_call_id == "call_read" => Some(r),
+                _ => None,
+            })
+            .expect("should have a read tool result");
+        assert!(
+            read_result.is_error,
+            "reading nonexistent file should produce an error result"
+        );
+
+        // Agent should continue to turn 1 and self-correct with text
+        let assistant_count = agent
+            .messages
+            .iter()
+            .filter(|m| matches!(m, Message::Assistant(_)))
+            .count();
+        assert_eq!(
+            assistant_count, 2,
+            "agent should have 2 turns: error + recovery"
+        );
+
+        // Agent completed successfully (no Err return)
     }
 }

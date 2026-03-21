@@ -54,13 +54,9 @@ enum ApiContentBlock {
         cache_control: Option<CacheControl>,
     },
     #[serde(rename = "thinking")]
-    Thinking {
-        thinking: String,
-    },
+    Thinking { thinking: String },
     #[serde(rename = "image")]
-    Image {
-        source: ImageSource,
-    },
+    Image { source: ImageSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -484,17 +480,14 @@ fn parse_sse_event(data: &str) -> Result<Option<SseEvent>> {
     }
     // SSE sends "event: <type>\ndata: <json>" — we only care about data lines
     // But the data may contain the type field, so we parse the JSON directly.
-    serde_json::from_str(trimmed).map(Some).map_err(|e| {
-        Error::Stream(format!("Failed to parse SSE data: {e}: {trimmed}"))
-    })
+    serde_json::from_str(trimmed)
+        .map(Some)
+        .map_err(|e| Error::Stream(format!("Failed to parse SSE data: {e}: {trimmed}")))
 }
 
 /// Process a sequence of SSE events into StreamEvents.
 /// This is the core state machine for Anthropic's streaming protocol.
-fn process_sse_event(
-    event: SseEvent,
-    state: &mut StreamState,
-) -> Vec<StreamEvent> {
+fn process_sse_event(event: SseEvent, state: &mut StreamState) -> Vec<StreamEvent> {
     let mut out = Vec::new();
 
     match event {
@@ -556,15 +549,9 @@ fn process_sse_event(
         SseEvent::ContentBlockStop { index } => {
             if index < state.blocks.len() {
                 match &state.blocks[index] {
-                    BlockState::ToolUse {
-                        id,
-                        name,
-                        json_buf,
-                    } => {
-                        let arguments: serde_json::Value =
-                            serde_json::from_str(json_buf).unwrap_or(serde_json::Value::Object(
-                                serde_json::Map::new(),
-                            ));
+                    BlockState::ToolUse { id, name, json_buf } => {
+                        let arguments: serde_json::Value = serde_json::from_str(json_buf)
+                            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                         let tc = StreamEvent::ToolCall {
                             id: id.clone(),
                             name: name.clone(),
@@ -629,10 +616,7 @@ fn process_sse_event(
 ///
 /// We extract "data:" lines and parse them as JSON.
 #[cfg(test)]
-fn parse_sse_stream(
-    raw: &str,
-    state: &mut StreamState,
-) -> Vec<Result<StreamEvent>> {
+fn parse_sse_stream(raw: &str, state: &mut StreamState) -> Vec<Result<StreamEvent>> {
     let mut events = Vec::new();
 
     for line in raw.lines() {
@@ -679,16 +663,16 @@ fn stream_response(
         if is_oauth {
             req = req
                 .header("authorization", format!("Bearer {api_key}"))
-                .header("anthropic-beta", "oauth-2025-04-20,interleaved-thinking-2025-05-14")
+                .header(
+                    "anthropic-beta",
+                    "oauth-2025-04-20,interleaved-thinking-2025-05-14",
+                )
                 .header("anthropic-dangerous-direct-browser-access", "true");
         } else {
             req = req.header("x-api-key", &api_key);
         }
 
-        let result = req
-            .json(&request)
-            .send()
-            .await;
+        let result = req.json(&request).send().await;
 
         let resp = match result {
             Ok(r) => r,
@@ -763,7 +747,8 @@ impl Provider for AnthropicProvider {
         // OAuth tokens require a system prompt; provide a default if empty
         let mut options = options;
         if api_key.starts_with("sk-ant-oat") && options.system_prompt.is_empty() {
-            options.system_prompt = "You are Claude Code, Anthropic's official CLI for Claude.".into();
+            options.system_prompt =
+                "You are Claude Code, Anthropic's official CLI for Claude.".into();
         }
         let request = build_request(model, context, options);
         let client = self.client.clone();
@@ -1168,7 +1153,9 @@ mod tests {
         let mut state = StreamState::new();
         let events = process_sse_event(event, &mut state);
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], StreamEvent::MessageStart { model } if model == "claude-sonnet-4-20250514"));
+        assert!(
+            matches!(&events[0], StreamEvent::MessageStart { model } if model == "claude-sonnet-4-20250514")
+        );
         assert_eq!(state.usage.input_tokens, 100);
         assert_eq!(state.usage.cache_read_tokens, 50);
         assert_eq!(state.usage.cache_write_tokens, 10);
@@ -1254,7 +1241,9 @@ mod tests {
         let event = parse_sse_event(stop).unwrap().unwrap();
         let events = process_sse_event(event, &mut state);
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], StreamEvent::MessageEnd { message } if message.stop_reason == StopReason::EndTurn));
+        assert!(
+            matches!(&events[0], StreamEvent::MessageEnd { message } if message.stop_reason == StopReason::EndTurn)
+        );
     }
 
     #[test]
@@ -1317,7 +1306,10 @@ data: {\"type\":\"message_stop\"}\n\
 ";
         let mut state = StreamState::new();
         let events = parse_sse_stream(raw, &mut state);
-        let events: Vec<_> = events.into_iter().collect::<std::result::Result<Vec<_>, _>>().unwrap();
+        let events: Vec<_> = events
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
 
         // MessageStart, TextDelta("Hi!"), MessageEnd
         assert_eq!(events.len(), 3);
@@ -1434,9 +1426,185 @@ data: {\"type\":\"message_stop\"}\n\
         assert_eq!(json["name"], "read_file");
         assert_eq!(json["description"], "Read a file from disk");
         assert_eq!(json["input_schema"]["type"], "object");
-        assert_eq!(
-            json["input_schema"]["properties"]["path"]["type"],
-            "string"
-        );
+        assert_eq!(json["input_schema"]["properties"]["path"]["type"], "string");
+    }
+
+    // -- Edge case: SSE parsing --
+
+    #[test]
+    fn parse_sse_event_empty_string_returns_none() {
+        let result = parse_sse_event("").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_sse_event_whitespace_only_returns_none() {
+        let result = parse_sse_event("   \n  ").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_sse_event_malformed_json_returns_error() {
+        let result = parse_sse_event("{not valid json}");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::Stream(_)));
+    }
+
+    #[test]
+    fn sse_stream_skips_non_data_lines() {
+        // Lines without "data: " prefix should be ignored
+        let raw = "\
+event: message_start\n\
+: this is a comment\n\
+data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-20250514\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}}\n\
+\n\
+some random line\n\
+data: {\"type\":\"message_stop\"}\n";
+        let mut state = StreamState::new();
+        let events = parse_sse_stream(raw, &mut state);
+        let events: Vec<_> = events.into_iter().filter_map(|e| e.ok()).collect();
+        // Should get MessageStart and MessageEnd only
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], StreamEvent::MessageStart { .. }));
+        assert!(matches!(&events[1], StreamEvent::MessageEnd { .. }));
+    }
+
+    #[test]
+    fn tool_call_with_empty_json_arguments() {
+        let mut state = StreamState::new();
+
+        let start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_empty","name":"noop","input":{}}}"#;
+        let event = parse_sse_event(start).unwrap().unwrap();
+        process_sse_event(event, &mut state);
+
+        // Empty JSON object as the accumulated buffer
+        let d1 = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#;
+        let event = parse_sse_event(d1).unwrap().unwrap();
+        process_sse_event(event, &mut state);
+
+        let stop = r#"{"type":"content_block_stop","index":0}"#;
+        let event = parse_sse_event(stop).unwrap().unwrap();
+        let events = process_sse_event(event, &mut state);
+
+        assert_eq!(events.len(), 1);
+        if let StreamEvent::ToolCall { arguments, .. } = &events[0] {
+            assert!(arguments.is_object());
+            assert!(arguments.as_object().unwrap().is_empty());
+        } else {
+            panic!("expected ToolCall");
+        }
+    }
+
+    #[test]
+    fn message_delta_missing_usage_defaults_to_zero() {
+        let mut state = StreamState::new();
+        let data = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#;
+        let event = parse_sse_event(data).unwrap().unwrap();
+        process_sse_event(event, &mut state);
+        // output_tokens should remain 0 since no usage was provided
+        assert_eq!(state.usage.output_tokens, 0);
+        assert_eq!(state.stop_reason, StopReason::EndTurn);
+    }
+
+    #[test]
+    fn unknown_stop_reason_maps_to_error() {
+        let mut state = StreamState::new();
+        let data = r#"{"type":"message_delta","delta":{"stop_reason":"content_filter"},"usage":{"output_tokens":0}}"#;
+        let event = parse_sse_event(data).unwrap().unwrap();
+        process_sse_event(event, &mut state);
+        assert!(matches!(state.stop_reason, StopReason::Error(ref s) if s == "content_filter"));
+    }
+
+    #[test]
+    fn content_block_delta_out_of_range_ignored() {
+        let mut state = StreamState::new();
+        // index 5, but no blocks exist — should not panic
+        let data = r#"{"type":"content_block_delta","index":5,"delta":{"type":"text_delta","text":"oops"}}"#;
+        let event = parse_sse_event(data).unwrap().unwrap();
+        let events = process_sse_event(event, &mut state);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn content_block_stop_out_of_range_ignored() {
+        let mut state = StreamState::new();
+        // index 3, but no blocks — should not panic
+        let data = r#"{"type":"content_block_stop","index":3}"#;
+        let event = parse_sse_event(data).unwrap().unwrap();
+        let events = process_sse_event(event, &mut state);
+        assert!(events.is_empty());
+    }
+
+    // -- Edge case: request building --
+
+    #[test]
+    fn build_request_empty_system_prompt_produces_no_system_blocks() {
+        let model_meta = ModelMeta {
+            id: "claude-sonnet-4-20250514".into(),
+            provider: "anthropic".into(),
+            name: "test".into(),
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let provider = AnthropicProvider::new();
+        let model = Model {
+            meta: model_meta,
+            provider: Arc::new(provider),
+        };
+        let options = RequestOptions {
+            system_prompt: "".into(),
+            ..Default::default()
+        };
+        let req = build_request(&model, Context::default(), options);
+        assert!(req.system.is_empty());
+    }
+
+    #[test]
+    fn build_request_empty_tools_produces_no_tools() {
+        let model_meta = ModelMeta {
+            id: "claude-sonnet-4-20250514".into(),
+            provider: "anthropic".into(),
+            name: "test".into(),
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let provider = AnthropicProvider::new();
+        let model = Model {
+            meta: model_meta,
+            provider: Arc::new(provider),
+        };
+        let options = RequestOptions {
+            tools: vec![],
+            ..Default::default()
+        };
+        let req = build_request(&model, Context::default(), options);
+        assert!(req.tools.is_empty());
+        // Verify it serializes without a "tools" key
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("tools").is_none());
+    }
+
+    #[test]
+    fn cache_zero_recent_turns_adds_no_breakpoints() {
+        let messages = vec![
+            Message::user("first"),
+            Message::user("second"),
+        ];
+        let cache = CacheOptions {
+            cache_system_prompt: false,
+            cache_tools: false,
+            cache_recent_turns: 0,
+        };
+        let api_msgs = build_messages(&messages, &cache);
+        for msg in &api_msgs {
+            for block in &msg.content {
+                let json = serde_json::to_value(block).unwrap();
+                assert!(json.get("cache_control").is_none());
+            }
+        }
     }
 }

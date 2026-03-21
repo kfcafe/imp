@@ -74,10 +74,7 @@ pub enum ContentBlock {
     },
     /// Base64-encoded image data.
     #[serde(rename = "image")]
-    Image {
-        media_type: String,
-        data: String,
-    },
+    Image { media_type: String, data: String },
 }
 
 /// Reason the model stopped generating tokens.
@@ -217,6 +214,115 @@ mod tests {
             assert_eq!(arguments["command"], "ls");
         } else {
             panic!("expected ToolCall variant");
+        }
+    }
+
+    #[test]
+    fn image_content_block_round_trip() {
+        let block = ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "iVBORw0KGgo=".into(),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        let restored: ContentBlock = serde_json::from_str(&json).unwrap();
+        if let ContentBlock::Image { media_type, data } = restored {
+            assert_eq!(media_type, "image/png");
+            assert_eq!(data, "iVBORw0KGgo=");
+        } else {
+            panic!("expected Image variant");
+        }
+    }
+
+    #[test]
+    fn empty_content_assistant_message_round_trip() {
+        let msg = Message::Assistant(AssistantMessage {
+            content: vec![],
+            usage: None,
+            stop_reason: StopReason::EndTurn,
+            timestamp: 1700000000,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let restored: Message = serde_json::from_str(&json).unwrap();
+        if let Message::Assistant(a) = restored {
+            assert!(a.content.is_empty());
+            assert!(a.usage.is_none());
+            assert_eq!(a.stop_reason, StopReason::EndTurn);
+        } else {
+            panic!("expected Assistant variant");
+        }
+    }
+
+    #[test]
+    fn tool_result_with_is_error_round_trip() {
+        let msg = Message::ToolResult(ToolResultMessage {
+            tool_call_id: "call_err".into(),
+            tool_name: "bash".into(),
+            content: vec![ContentBlock::Text {
+                text: "command not found".into(),
+            }],
+            is_error: true,
+            details: serde_json::Value::Null,
+            timestamp: 1700000003,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let restored: Message = serde_json::from_str(&json).unwrap();
+        if let Message::ToolResult(tr) = restored {
+            assert!(tr.is_error);
+            assert_eq!(tr.tool_call_id, "call_err");
+        } else {
+            panic!("expected ToolResult variant");
+        }
+    }
+
+    #[test]
+    fn message_user_helper() {
+        let msg = Message::user("test prompt");
+        assert!(msg.is_user());
+        assert!(!msg.is_assistant());
+        assert!(!msg.is_tool_result());
+        if let Message::User(u) = msg {
+            assert_eq!(u.content.len(), 1);
+            if let ContentBlock::Text { text } = &u.content[0] {
+                assert_eq!(text, "test prompt");
+            } else {
+                panic!("expected Text block");
+            }
+        }
+    }
+
+    #[test]
+    fn content_block_variant_discrimination() {
+        // All four variants should deserialize to the correct type
+        let text_json = r#"{"type":"text","text":"hello"}"#;
+        let thinking_json = r#"{"type":"thinking","text":"hmm"}"#;
+        let tool_json = r#"{"type":"tool_call","id":"t1","name":"bash","arguments":{}}"#;
+        let image_json = r#"{"type":"image","media_type":"image/jpeg","data":"abc"}"#;
+
+        let text: ContentBlock = serde_json::from_str(text_json).unwrap();
+        assert!(matches!(text, ContentBlock::Text { .. }));
+
+        let thinking: ContentBlock = serde_json::from_str(thinking_json).unwrap();
+        assert!(matches!(thinking, ContentBlock::Thinking { .. }));
+
+        let tool: ContentBlock = serde_json::from_str(tool_json).unwrap();
+        assert!(matches!(tool, ContentBlock::ToolCall { .. }));
+
+        let image: ContentBlock = serde_json::from_str(image_json).unwrap();
+        assert!(matches!(image, ContentBlock::Image { .. }));
+    }
+
+    #[test]
+    fn stop_reason_round_trip() {
+        let reasons = vec![
+            StopReason::EndTurn,
+            StopReason::ToolUse,
+            StopReason::MaxTokens,
+            StopReason::Error("rate_limit".into()),
+        ];
+        for reason in reasons {
+            let json = serde_json::to_string(&reason).unwrap();
+            let restored: StopReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, reason);
         }
     }
 }
