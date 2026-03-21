@@ -8,7 +8,7 @@ use crate::provider::Provider;
 /// Static metadata describing a model's capabilities and pricing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelMeta {
-    /// Canonical model identifier (e.g. "claude-sonnet-4-20250514").
+    /// Canonical model identifier (e.g. "claude-sonnet-4-6").
     pub id: String,
     /// Provider that serves this model (e.g. "anthropic").
     pub provider: String,
@@ -151,6 +151,24 @@ impl Default for ModelRegistry {
 fn builtin_models() -> Vec<ModelMeta> {
     vec![
         // -- Anthropic --
+        ModelMeta {
+            id: "claude-sonnet-4-6".into(),
+            provider: "anthropic".into(),
+            name: "Claude Sonnet 4.6".into(),
+            context_window: 200_000,
+            max_output_tokens: 128_000,
+            pricing: ModelPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cache_read_per_mtok: 0.3,
+                cache_write_per_mtok: 3.75,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
         ModelMeta {
             id: "claude-sonnet-4-20250514".into(),
             provider: "anthropic".into(),
@@ -303,8 +321,10 @@ fn builtin_models() -> Vec<ModelMeta> {
 fn builtin_aliases() -> Vec<(String, String)> {
     vec![
         // Anthropic
-        ("sonnet".into(), "claude-sonnet-4-20250514".into()),
-        ("claude-sonnet".into(), "claude-sonnet-4-20250514".into()),
+        ("sonnet".into(), "claude-sonnet-4-6".into()),
+        ("claude-sonnet".into(), "claude-sonnet-4-6".into()),
+        ("sonnet-4".into(), "claude-sonnet-4-20250514".into()),
+        ("sonnet-4.6".into(), "claude-sonnet-4-6".into()),
         ("haiku".into(), "claude-haiku-3-5-20241022".into()),
         ("claude-haiku".into(), "claude-haiku-3-5-20241022".into()),
         ("opus".into(), "claude-opus-4-20250514".into()),
@@ -328,7 +348,7 @@ mod tests {
         let model = reg
             .find_by_alias("sonnet")
             .expect("sonnet alias should resolve");
-        assert_eq!(model.id, "claude-sonnet-4-20250514");
+        assert_eq!(model.id, "claude-sonnet-4-6");
         assert_eq!(model.provider, "anthropic");
     }
 
@@ -387,7 +407,7 @@ mod tests {
     fn list_by_provider_filters_correctly() {
         let reg = ModelRegistry::with_builtins();
         let anthropic = reg.list_by_provider("anthropic");
-        assert_eq!(anthropic.len(), 3);
+        assert_eq!(anthropic.len(), 4);
         assert!(anthropic.iter().all(|m| m.provider == "anthropic"));
 
         let openai = reg.list_by_provider("openai");
