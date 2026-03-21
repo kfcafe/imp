@@ -1780,10 +1780,7 @@ mod integration {
     }
 
     /// Create an agent pre-loaded with all native filesystem and shell tools.
-    fn create_agent_with_tools(
-        provider: Arc<dyn Provider>,
-        cwd: PathBuf,
-    ) -> (Agent, AgentHandle) {
+    fn create_agent_with_tools(provider: Arc<dyn Provider>, cwd: PathBuf) -> (Agent, AgentHandle) {
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, cwd);
         agent.tools.register(Arc::new(WriteTool));
@@ -1959,10 +1956,7 @@ mod integration {
         let (mut agent, handle) = create_agent_with_tools(provider, tmp.path().to_path_buf());
         drop(handle);
 
-        agent
-            .run("Search for a pattern".to_string())
-            .await
-            .unwrap();
+        agent.run("Search for a pattern".to_string()).await.unwrap();
 
         // Grep result should contain the file path and matching line
         let grep_result = agent

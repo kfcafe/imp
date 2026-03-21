@@ -226,8 +226,7 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        let written =
-            std::fs::read_to_string(dir.path().join("x/y/z/w/v/deep.txt")).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("x/y/z/w/v/deep.txt")).unwrap();
         assert_eq!(written, "deep content");
     }
 

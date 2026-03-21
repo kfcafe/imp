@@ -111,7 +111,9 @@ mod tests {
     use futures_core::Stream;
     use imp_llm::model::{Capabilities, ModelMeta, ModelPricing};
     use imp_llm::provider::Provider;
-    use imp_llm::{AssistantMessage, RequestOptions, StopReason, StreamEvent, ToolResultMessage, Usage};
+    use imp_llm::{
+        AssistantMessage, RequestOptions, StopReason, StreamEvent, ToolResultMessage, Usage,
+    };
 
     use crate::compaction::{compact, CompactionOptions};
 
@@ -565,7 +567,11 @@ mod tests {
         let mut messages = vec![make_user("prompt")];
         let args = serde_json::json!({"path": "/src/lib.rs"});
         messages.push(make_assistant_tool_call("c1", "read_file", args));
-        messages.push(make_tool_result("c1", "read_file", "fn main() { println!(\"hello\"); }"));
+        messages.push(make_tool_result(
+            "c1",
+            "read_file",
+            "fn main() { println!(\"hello\"); }",
+        ));
         // Second turn stays recent.
         messages.push(make_assistant_text("Done reading."));
 
@@ -617,7 +623,9 @@ mod tests {
         messages.push(make_tool_result("c0", "read", "file contents A"));
 
         // Turn 1: assistant reasoning text.
-        messages.push(make_assistant_text("I see the issue — the struct is missing a field."));
+        messages.push(make_assistant_text(
+            "I see the issue — the struct is missing a field.",
+        ));
 
         // Turn 2: another tool call.
         messages.push(make_assistant_tool_call(
