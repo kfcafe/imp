@@ -678,6 +678,7 @@ fn stream_response(
     tokio::spawn(async move {
         let is_oauth = api_key.starts_with("sk-ant-oat");
 
+
         // Retry loop for transient failures (connection drops, 429, 5xx)
         let mut attempt = 0u32;
         let resp = loop {
@@ -801,11 +802,39 @@ impl Provider for AnthropicProvider {
         options: RequestOptions,
         api_key: &str,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> {
-        // OAuth tokens require a system prompt; provide a default if empty
+        // OAuth tokens are scoped to Claude Code's identity. Anthropic rejects
+        // requests with custom system prompts or tool definitions that don't match
+        // the expected Claude Code format. When using OAuth:
+        // 1. Always use the required system prompt
+        // 2. Prepend any custom instructions to the first user message
         let mut options = options;
-        if api_key.starts_with("sk-ant-oat") && options.system_prompt.is_empty() {
-            options.system_prompt =
-                "You are Claude Code, Anthropic's official CLI for Claude.".into();
+        let mut context = context;
+        let oauth_system = "You are Claude Code, Anthropic's official CLI for Claude.".to_string();
+        if api_key.starts_with("sk-ant-oat") {
+            if !options.system_prompt.is_empty() && options.system_prompt != oauth_system {
+                // Move custom system prompt into user message context
+                let prefix = format!(
+                    "<instructions>\n{}\n</instructions>\n\n",
+                    options.system_prompt
+                );
+                if let Some(first_msg) = context.messages.first_mut() {
+                    if let crate::message::Message::User(user_msg) = first_msg {
+                        let original = user_msg
+                            .content
+                            .iter()
+                            .filter_map(|b| match b {
+                                crate::message::ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        user_msg.content = vec![crate::message::ContentBlock::Text {
+                            text: format!("{prefix}{original}"),
+                        }];
+                    }
+                }
+            }
+            options.system_prompt = oauth_system;
         }
         let request = build_request(model, context, options);
         let client = self.client.clone();
