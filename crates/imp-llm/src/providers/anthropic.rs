@@ -257,8 +257,18 @@ impl Default for AnthropicProvider {
 
 impl AnthropicProvider {
     pub fn new() -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            // No overall request timeout — SSE streams run for minutes.
+            // Instead, read_timeout catches hung connections where the
+            // server stops sending data entirely.
+            .read_timeout(std::time::Duration::from_secs(300)) // 5 min max silence
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
-            client: reqwest::Client::new(),
+            client,
             retry_policy: RetryPolicy::default(),
             models: builtin_models(),
         }
