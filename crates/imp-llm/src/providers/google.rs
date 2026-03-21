@@ -990,7 +990,10 @@ mod tests {
 
         let mut state = StreamState::new("gemini-2.5-pro".into());
         let events = parse_sse_stream(raw, &mut state);
-        let events: Vec<_> = events.into_iter().collect::<std::result::Result<Vec<_>, _>>().unwrap();
+        let events: Vec<_> = events
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
 
         // MessageStart, TextDelta, ToolCall, MessageEnd
         assert_eq!(events.len(), 4);
@@ -1011,7 +1014,10 @@ mod tests {
 
         let mut state = StreamState::new("gemini-2.5-pro".into());
         let events = parse_sse_stream(raw, &mut state);
-        let events: Vec<_> = events.into_iter().collect::<std::result::Result<Vec<_>, _>>().unwrap();
+        let events: Vec<_> = events
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
 
         if let StreamEvent::MessageEnd { message } = events.last().unwrap() {
             let usage = message.usage.as_ref().unwrap();
@@ -1049,7 +1055,10 @@ mod tests {
 
         let mut state = StreamState::new("gemini-2.5-pro".into());
         let events = parse_sse_stream(raw, &mut state);
-        let events: Vec<_> = events.into_iter().collect::<std::result::Result<Vec<_>, _>>().unwrap();
+        let events: Vec<_> = events
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
 
         // Only MessageStart (no content deltas, no MessageEnd since no finishReason)
         assert_eq!(events.len(), 1);

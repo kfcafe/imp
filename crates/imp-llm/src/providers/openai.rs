@@ -913,11 +913,23 @@ mod tests {
 
     #[test]
     fn openai_reasoning_effort_levels() {
-        assert_eq!(reasoning_effort(ThinkingLevel::Minimal).as_deref(), Some("low"));
+        assert_eq!(
+            reasoning_effort(ThinkingLevel::Minimal).as_deref(),
+            Some("low")
+        );
         assert_eq!(reasoning_effort(ThinkingLevel::Low).as_deref(), Some("low"));
-        assert_eq!(reasoning_effort(ThinkingLevel::Medium).as_deref(), Some("medium"));
-        assert_eq!(reasoning_effort(ThinkingLevel::High).as_deref(), Some("high"));
-        assert_eq!(reasoning_effort(ThinkingLevel::XHigh).as_deref(), Some("high"));
+        assert_eq!(
+            reasoning_effort(ThinkingLevel::Medium).as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            reasoning_effort(ThinkingLevel::High).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            reasoning_effort(ThinkingLevel::XHigh).as_deref(),
+            Some("high")
+        );
     }
 
     #[test]

@@ -1590,10 +1590,7 @@ data: {\"type\":\"message_stop\"}\n";
 
     #[test]
     fn cache_zero_recent_turns_adds_no_breakpoints() {
-        let messages = vec![
-            Message::user("first"),
-            Message::user("second"),
-        ];
+        let messages = vec![Message::user("first"), Message::user("second")];
         let cache = CacheOptions {
             cache_system_prompt: false,
             cache_tools: false,
