@@ -476,7 +476,9 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
         agent.max_turns = max_turns;
     }
 
-    register_native_tools(&mut agent);
+    if !cli.no_tools {
+        register_headless_tools(&mut agent);
+    }
 
     let task_context = unit.task_context();
     let user_config_dir = Config::user_config_dir();
@@ -699,7 +701,17 @@ fn format_attempt(attempt: &UnitAttempt) -> String {
 }
 
 fn register_native_tools(agent: &mut Agent) {
-    agent.tools.register(Arc::new(AskTool));
+    register_native_tools_with_ui(agent, true);
+}
+
+fn register_headless_tools(agent: &mut Agent) {
+    register_native_tools_with_ui(agent, false);
+}
+
+fn register_native_tools_with_ui(agent: &mut Agent, include_ui_tools: bool) {
+    if include_ui_tools {
+        agent.tools.register(Arc::new(AskTool));
+    }
     agent.tools.register(Arc::new(BashTool));
     agent.tools.register(Arc::new(DiffApplyTool));
     agent.tools.register(Arc::new(DiffShowTool));
@@ -1597,19 +1609,13 @@ mod tests {
 
     #[test]
     fn parse_thinking_level_unknown_defaults_to_off() {
-        assert!(matches!(
-            parse_thinking_level("turbo"),
-            ThinkingLevel::Off
-        ));
+        assert!(matches!(parse_thinking_level("turbo"), ThinkingLevel::Off));
         assert!(matches!(parse_thinking_level(""), ThinkingLevel::Off));
     }
 
     #[test]
     fn parse_thinking_level_case_insensitive() {
-        assert!(matches!(
-            parse_thinking_level("HIGH"),
-            ThinkingLevel::High
-        ));
+        assert!(matches!(parse_thinking_level("HIGH"), ThinkingLevel::High));
         assert!(matches!(
             parse_thinking_level("Medium"),
             ThinkingLevel::Medium
@@ -1623,10 +1629,12 @@ mod tests {
         let cli = default_cli();
         let config = Config::default();
         let registry = ModelRegistry::with_builtins();
-        let (model_id, provider) =
-            resolve_model_and_provider(&cli, &config, &registry).unwrap();
+        let (model_id, provider) = resolve_model_and_provider(&cli, &config, &registry).unwrap();
         // Default is "sonnet"
-        assert!(model_id.contains("sonnet"), "expected sonnet, got {model_id}");
+        assert!(
+            model_id.contains("sonnet"),
+            "expected sonnet, got {model_id}"
+        );
         assert_eq!(provider, "anthropic");
     }
 
@@ -1636,8 +1644,7 @@ mod tests {
         cli.model = Some("haiku".to_string());
         let config = Config::default();
         let registry = ModelRegistry::with_builtins();
-        let (model_id, provider) =
-            resolve_model_and_provider(&cli, &config, &registry).unwrap();
+        let (model_id, provider) = resolve_model_and_provider(&cli, &config, &registry).unwrap();
         assert!(model_id.contains("haiku"), "expected haiku, got {model_id}");
         assert_eq!(provider, "anthropic");
     }
@@ -1660,9 +1667,11 @@ mod tests {
         let mut config = Config::default();
         config.model = Some("sonnet".to_string());
         let registry = ModelRegistry::with_builtins();
-        let (model_id, _) =
-            resolve_model_and_provider(&cli, &config, &registry).unwrap();
-        assert!(model_id.contains("haiku"), "CLI --model should override config");
+        let (model_id, _) = resolve_model_and_provider(&cli, &config, &registry).unwrap();
+        assert!(
+            model_id.contains("haiku"),
+            "CLI --model should override config"
+        );
     }
 
     #[test]
@@ -1672,8 +1681,7 @@ mod tests {
         // Use default sonnet — provider override just changes provider name
         let config = Config::default();
         let registry = ModelRegistry::with_builtins();
-        let (_, provider) =
-            resolve_model_and_provider(&cli, &config, &registry).unwrap();
+        let (_, provider) = resolve_model_and_provider(&cli, &config, &registry).unwrap();
         assert_eq!(provider, "openai");
     }
 
