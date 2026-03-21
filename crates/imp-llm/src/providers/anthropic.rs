@@ -678,7 +678,6 @@ fn stream_response(
     tokio::spawn(async move {
         let is_oauth = api_key.starts_with("sk-ant-oat");
 
-
         // Retry loop for transient failures (connection drops, 429, 5xx)
         let mut attempt = 0u32;
         let resp = loop {
@@ -817,21 +816,20 @@ impl Provider for AnthropicProvider {
                     "<instructions>\n{}\n</instructions>\n\n",
                     options.system_prompt
                 );
-                if let Some(first_msg) = context.messages.first_mut() {
-                    if let crate::message::Message::User(user_msg) = first_msg {
-                        let original = user_msg
-                            .content
-                            .iter()
-                            .filter_map(|b| match b {
-                                crate::message::ContentBlock::Text { text } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        user_msg.content = vec![crate::message::ContentBlock::Text {
-                            text: format!("{prefix}{original}"),
-                        }];
-                    }
+                if let Some(crate::message::Message::User(user_msg)) = context.messages.first_mut()
+                {
+                    let original = user_msg
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            crate::message::ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    user_msg.content = vec![crate::message::ContentBlock::Text {
+                        text: format!("{prefix}{original}"),
+                    }];
                 }
             }
             options.system_prompt = oauth_system;
