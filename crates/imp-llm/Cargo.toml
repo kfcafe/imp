@@ -1,5 +1,6 @@
 [package]
 name = "imp-llm"
+license = "Apache-2.0"
 version.workspace = true
 edition.workspace = true
 description = "Standalone multi-provider LLM streaming client"
