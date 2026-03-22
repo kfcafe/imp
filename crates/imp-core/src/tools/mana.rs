@@ -161,6 +161,7 @@ impl Tool for ManaTool {
                 let opts = mana_core::ops::close::CloseOpts {
                     reason: params["reason"].as_str().map(|s| s.to_string()),
                     force: params["force"].as_bool().unwrap_or(false),
+                    defer_verify: false,
                 };
                 match mana_core::api::close_unit(&mana_dir, id, opts) {
                     Ok(outcome) => {
@@ -184,6 +185,9 @@ impl Tool for ManaTool {
                             } => format!("Circuit breaker: {unit_id} ({total_attempts}/{max})"),
                             CloseOutcome::MergeConflict { files, .. } => {
                                 format!("Merge conflict: {}", files.join(", "))
+                            }
+                            CloseOutcome::DeferredVerify { unit_id } => {
+                                format!("Deferred verify for {unit_id}")
                             }
                         };
                         Ok(ToolOutput::text(msg))

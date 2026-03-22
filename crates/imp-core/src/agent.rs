@@ -1963,52 +1963,6 @@ mod tests {
         }
     }
 
-    /// Build an agent where compaction fires on turn 1 (not turn 0).
-    ///
-    /// Strategy: pre-seed `agent.messages` with a large tool-call exchange so the
-    /// context is already high when `run()` is called.  The first LLM call (turn 0)
-    /// makes a tool call, pushing usage over the threshold, so compaction fires at
-    /// the start of turn 1.
-    ///
-    /// Response ordering (all through the same provider):
-    ///   call 0 — agent turn 0: tool call
-    ///   call 1 — compaction LLM: returns summary text
-    ///   call 2+ — agent turns after compaction
-    fn make_compaction_agent(
-        compaction_summary: &str,
-        post_compaction_responses: Vec<Vec<StreamEvent>>,
-    ) -> (Agent, AgentHandle, Arc<CapturingMockProvider>) {
-        let mut all_responses = vec![
-            // Turn 0: LLM makes a tool call so we advance to turn 1
-            tool_call_response(
-                "call_warmup",
-                "echo",
-                serde_json::json!({"text": "warmup"}),
-                100,
-                20,
-            ),
-            // Compaction LLM call (fires at start of turn 1)
-            text_response(compaction_summary, 400, 80),
-        ];
-        all_responses.extend(post_compaction_responses);
-
-        let provider = Arc::new(CapturingMockProvider::new(all_responses));
-
-        // Context window large enough that the prompt alone doesn't trigger
-        // compaction, but small enough that after the tool call + result it does.
-        // context_window=300 with compaction_threshold=0.5 means we need ~150 tokens.
-        // The tool call + result easily exceeds that.
-        let model = test_model_with_context_window(provider.clone(), 300);
-
-        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.tools.register(Arc::new(EchoTool));
-        // Set threshold above what the initial single-message context triggers
-        // but below what the post-turn-0 context triggers.
-        agent.context_config.compaction_threshold = 0.5;
-
-        (agent, handle, provider)
-    }
-
     fn user_message_text(msg: &Message) -> Option<&str> {
         match msg {
             Message::User(u) => u.content.iter().find_map(|b| match b {
@@ -2019,6 +1973,71 @@ mod tests {
         }
     }
 
+    /// Build a large tool-result message to bulk up context.
+    ///
+    /// JSON size: "x".repeat(2000) → ~2100 chars → ~525 estimated tokens
+    /// (estimate_tokens uses chars/4).
+    fn make_big_tool_result(call_id: &str) -> Message {
+        Message::ToolResult(imp_llm::ToolResultMessage {
+            tool_call_id: call_id.to_string(),
+            tool_name: "read".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "x".repeat(2000),
+            }],
+            is_error: false,
+            details: serde_json::Value::Null,
+            timestamp: imp_llm::now(),
+        })
+    }
+
+    /// Build an agent whose pre-seeded history puts context just BELOW the
+    /// compaction threshold, so that turn 0's tool call + result pushes it over.
+    ///
+    /// Token budget (context_window=6000, threshold=0.5 → fires at 3000 tokens):
+    ///   - 5 pre-seeded exchanges × ~575 tokens = ~2875 tokens  (< 3000 ✓)
+    ///   - After turn 0 adds prompt (~15) + assistant (~50) + result (~150):
+    ///     2875 + 215 = 3090 tokens  (> 3000 ✓ → compaction fires at turn 1)
+    ///   - After compaction keeps last 3 turns (~1725 tokens) + summary (~10):
+    ///     ~1735 tokens  (< 3000 ✓ → no second compaction)
+    ///
+    /// Provider call ordering:
+    ///   call 0 — agent turn 0: tool call
+    ///   call 1 — compaction LLM: summary text
+    ///   call 2 — agent turn 1: text response (ends run)
+    fn make_compaction_agent_turn1(
+        compaction_summary: &str,
+        post_compaction_response: Vec<StreamEvent>,
+    ) -> (Agent, AgentHandle, Arc<CapturingMockProvider>) {
+        let provider = Arc::new(CapturingMockProvider::new(vec![
+            tool_call_response(
+                "call_t0",
+                "echo",
+                serde_json::json!({"text": "check"}),
+                50,
+                10,
+            ),
+            text_response(compaction_summary, 400, 80),
+            post_compaction_response,
+        ]));
+
+        let model = test_model_with_context_window(provider.clone(), 6000);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(EchoTool));
+        agent.context_config.compaction_threshold = 0.5;
+
+        for i in 0..5 {
+            let cid = format!("pre_{i}");
+            agent.messages.push(make_assistant_tool_call(
+                &cid,
+                "read",
+                serde_json::json!({"path": format!("file_{i}.rs")}),
+            ));
+            agent.messages.push(make_big_tool_result(&cid));
+        }
+
+        (agent, handle, provider)
+    }
+
     /// After compaction fires mid-run (turn > 0), a resume message containing
     /// the original prompt must be present in agent.messages.
     #[tokio::test]
@@ -2026,9 +2045,9 @@ mod tests {
         let original_prompt = "Please implement the authentication module";
         let compaction_summary = "Summary: user wants to implement auth.";
 
-        let (mut agent, handle, _provider) = make_compaction_agent(
+        let (mut agent, handle, _provider) = make_compaction_agent_turn1(
             compaction_summary,
-            vec![text_response("Resuming work on auth module.", 100, 20)],
+            text_response("Resuming work on auth.", 50, 20),
         );
 
         let events_task = tokio::spawn(collect_events(handle));
@@ -2065,9 +2084,9 @@ mod tests {
     async fn compaction_resume_preserves_prompt_verbatim() {
         let original_prompt = "Refactor src/auth.rs to use JWT tokens and update all 42 call sites";
 
-        let (mut agent, handle, _provider) = make_compaction_agent(
+        let (mut agent, handle, _provider) = make_compaction_agent_turn1(
             "Summary of auth refactor progress.",
-            vec![text_response("Continuing refactor.", 100, 20)],
+            text_response("Continuing refactor.", 50, 20),
         );
 
         let events_task = tokio::spawn(collect_events(handle));
@@ -2091,26 +2110,38 @@ mod tests {
     /// is just too big, re-queueing the prompt won't help.
     #[tokio::test]
     async fn compaction_resume_no_inject_on_turn_zero() {
-        // Use threshold 0.001 so compaction fires immediately on turn 0.
+        // Pre-seed MORE messages so context already exceeds threshold before the
+        // new prompt is added, ensuring compaction fires on turn 0.
         let compaction_summary = "Summary: nothing done yet.";
 
         let provider = Arc::new(CapturingMockProvider::new(vec![
-            // Call 0: compaction LLM (fires on turn 0)
+            // call 0: compaction LLM (fires on turn 0)
             text_response(compaction_summary, 400, 80),
-            // Call 1: agent LLM turn 0 (after compaction)
-            text_response("Starting fresh.", 100, 20),
+            // call 1: agent turn 0 after compaction
+            text_response("Starting work.", 50, 20),
         ]));
 
-        let model = test_model_with_context_window(provider.clone(), 800);
+        let model = test_model_with_context_window(provider.clone(), 4000);
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.context_config.compaction_threshold = 0.001; // fires on turn 0
+        agent.context_config.compaction_threshold = 0.9;
+
+        // Pre-seed with enough to exceed the threshold on turn 0 (before any LLM call)
+        for i in 0..10 {
+            let cid = format!("pre_{i}");
+            agent.messages.push(make_assistant_tool_call(
+                &cid,
+                "read",
+                serde_json::json!({"path": format!("file_{i}.rs")}),
+            ));
+            agent.messages.push(make_big_tool_result(&cid));
+        }
 
         let events_task = tokio::spawn(collect_events(handle));
         agent.run("Do the task".to_string()).await.unwrap();
 
         let _events = events_task.await.unwrap();
 
-        // No resume message should appear — compaction fired before any real work
+        // No resume message should appear — compaction fired on turn 0 before any real work
         let has_resume = agent.messages.iter().any(|m| {
             user_message_text(m)
                 .map(|t| t.contains("original request was"))

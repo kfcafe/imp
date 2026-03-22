@@ -5,3 +5,4 @@ run: 'pi -p "Read the unit with: cat .mana/{id}-*.md && then implement everythin
 max_loops: 10
 max_concurrent: 8
 poll_interval: 30
+batch_verify: true

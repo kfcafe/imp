@@ -12,6 +12,7 @@ pub mod probe;
 pub mod read;
 pub mod scan;
 pub mod shell;
+pub mod web;
 pub mod write;
 
 use std::collections::HashMap;
