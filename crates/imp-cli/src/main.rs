@@ -727,14 +727,10 @@ fn register_native_tools_with_ui(agent: &mut Agent, include_ui_tools: bool) {
     agent.tools.register(Arc::new(ScanTool));
     agent.tools.register(Arc::new(AstGrepTool));
 
-    // Mana integration tools
-    use imp_core::tools::mana::*;
-    agent.tools.register(Arc::new(ManaStatusTool));
-    agent.tools.register(Arc::new(ManaListTool));
-    agent.tools.register(Arc::new(ManaShowTool));
-    agent.tools.register(Arc::new(ManaCreateTool));
-    agent.tools.register(Arc::new(ManaCloseTool));
-    agent.tools.register(Arc::new(ManaUpdateTool));
+    // Mana integration
+    agent
+        .tools
+        .register(Arc::new(imp_core::tools::mana::ManaTool));
 }
 
 fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>> {
