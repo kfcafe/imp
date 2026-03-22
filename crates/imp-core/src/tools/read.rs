@@ -3,7 +3,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use serde_json::json;
 
-use super::{truncate_head, Tool, ToolContext, ToolOutput};
+use super::{suggest_similar_files, truncate_head, Tool, ToolContext, ToolOutput};
 use crate::error::Result;
 
 const MAX_LINES: usize = 2000;
@@ -253,69 +253,6 @@ impl<'a> Base64Writer<'a> {
         }
         Ok(())
     }
-}
-
-/// Find files with similar names to suggest when a file isn't found.
-fn suggest_similar_files(cwd: &Path, target: &str) -> Vec<String> {
-    let target_name = Path::new(target)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(target);
-
-    let mut candidates: Vec<(usize, String)> = Vec::new();
-
-    let walker = walkdir::WalkDir::new(cwd)
-        .max_depth(4)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok());
-
-    for entry in walker {
-        if entry.file_type().is_file() {
-            if let Some(name) = entry.file_name().to_str() {
-                let dist = levenshtein(target_name, name);
-                if dist <= 3 {
-                    let rel = entry
-                        .path()
-                        .strip_prefix(cwd)
-                        .unwrap_or(entry.path())
-                        .display()
-                        .to_string();
-                    candidates.push((dist, rel));
-                }
-            }
-        }
-    }
-
-    candidates.sort_by_key(|(d, _)| *d);
-    candidates.truncate(3);
-    candidates.into_iter().map(|(_, p)| p).collect()
-}
-
-/// Simple Levenshtein distance.
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a_chars: Vec<char> = a.chars().collect();
-    let b_chars: Vec<char> = b.chars().collect();
-    let m = a_chars.len();
-    let n = b_chars.len();
-
-    let mut prev = (0..=n).collect::<Vec<_>>();
-    let mut curr = vec![0; n + 1];
-
-    for i in 1..=m {
-        curr[0] = i;
-        for j in 1..=n {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] {
-                0
-            } else {
-                1
-            };
-            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-
-    prev[n]
 }
 
 #[cfg(test)]

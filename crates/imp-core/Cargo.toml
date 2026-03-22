@@ -20,6 +20,7 @@ similar.workspace = true
 walkdir.workspace = true
 glob = "0.3"
 regex = "1"
+jsonschema = "0.45"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

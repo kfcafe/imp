@@ -7,6 +7,53 @@ use similar::TextDiff;
 use super::{Tool, ToolContext, ToolOutput};
 use crate::error::Result;
 
+// ── unified diff tool ───────────────────────────────────────────────
+
+pub struct DiffTool;
+
+#[async_trait]
+impl Tool for DiffTool {
+    fn name(&self) -> &str {
+        "diff"
+    }
+    fn label(&self) -> &str {
+        "Diff"
+    }
+    fn description(&self) -> &str {
+        "Show or apply unified diffs. action=show previews changes, action=apply patches a file."
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["show", "apply"], "description": "show: preview diff. apply: patch file." },
+                "file": { "type": "string", "description": "File path" },
+                "newContent": { "type": "string", "description": "Proposed new content (show)" },
+                "contextLines": { "type": "number", "description": "Context lines, default 3 (show)" },
+                "patch": { "type": "string", "description": "Unified diff patch (apply)" },
+                "dryRun": { "type": "boolean", "description": "Preview without modifying (apply)" }
+            },
+            "required": ["action", "file"]
+        })
+    }
+    fn is_readonly(&self) -> bool {
+        false
+    }
+    async fn execute(
+        &self,
+        call_id: &str,
+        params: serde_json::Value,
+        ctx: ToolContext,
+    ) -> Result<ToolOutput> {
+        match params["action"].as_str() {
+            Some("show") => DiffShowTool.execute(call_id, params, ctx).await,
+            Some("apply") => DiffApplyTool.execute(call_id, params, ctx).await,
+            Some(other) => Ok(ToolOutput::error(format!("Unknown diff action: {other}"))),
+            None => Ok(ToolOutput::error("Missing 'action' parameter")),
+        }
+    }
+}
+
 // ── diff_show ───────────────────────────────────────────────────────
 
 pub struct DiffShowTool;

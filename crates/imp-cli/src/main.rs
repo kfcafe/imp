@@ -16,14 +16,13 @@ use imp_core::session::SessionManager;
 use imp_core::system_prompt::{self, Attempt as TaskAttempt, TaskContext};
 use imp_core::tools::ask::AskTool;
 use imp_core::tools::bash::BashTool;
-use imp_core::tools::diff::{DiffApplyTool, DiffShowTool};
+use imp_core::tools::diff::DiffTool;
 use imp_core::tools::edit::EditTool;
 use imp_core::tools::find::FindTool;
 use imp_core::tools::grep::GrepTool;
 use imp_core::tools::ls::LsTool;
-use imp_core::tools::multi_edit::MultiEditTool;
 use imp_core::tools::read::ReadTool;
-use imp_core::tools::tree_sitter::{AstGrepTool, ProbeExtractTool, ProbeSearchTool, ScanTool};
+use imp_core::tools::tree_sitter::{AstGrepTool, ScanTool};
 use imp_core::tools::write::WriteTool;
 use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
 use imp_llm::auth::AuthStore;
@@ -463,39 +462,32 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
         provider: Arc::from(provider),
     };
 
-    let (mut agent, mut handle) = Agent::new(model, cwd.clone());
-    agent.thinking_level = cli
-        .thinking
-        .as_deref()
-        .map(parse_thinking_level)
-        .or(config.thinking)
-        .unwrap_or(ThinkingLevel::Off);
-    agent.api_key = api_key;
-
-    if let Some(max_turns) = config.max_turns {
-        agent.max_turns = max_turns;
-    }
-
-    if !cli.no_tools {
-        register_headless_tools(&mut agent);
+    // Apply CLI thinking level override to config.
+    let mut agent_config = config.clone();
+    if let Some(ref thinking) = cli.thinking {
+        agent_config.thinking = Some(parse_thinking_level(thinking));
     }
 
     let task_context = unit.task_context();
-    let user_config_dir = Config::user_config_dir();
-    let agents_md = resources::discover_agents_md(&cwd, &user_config_dir);
-    let skills = resources::discover_skills(&cwd, &user_config_dir);
-
-    agent.system_prompt = cli.system_prompt.clone().unwrap_or_else(|| {
-        system_prompt::assemble(
-            &agent.tools,
-            &agents_md,
-            &skills,
-            &[],
-            Some(&task_context),
-            None,
-        )
-        .text
-    });
+    let (mut agent, mut handle) = if cli.no_tools {
+        // No tools: build manually without native tools registered.
+        let (mut a, h) = imp_core::agent::Agent::new(model, cwd.clone());
+        a.api_key = api_key;
+        a.thinking_level = agent_config.thinking.unwrap_or(ThinkingLevel::Off);
+        if let Some(max_turns) = agent_config.max_turns {
+            a.max_turns = max_turns;
+        }
+        a.system_prompt = cli.system_prompt.clone().unwrap_or_default();
+        (a, h)
+    } else {
+        let mut builder =
+            imp_core::builder::AgentBuilder::new(agent_config, cwd.clone(), model, api_key)
+                .task(task_context.clone());
+        if let Some(ref prompt) = cli.system_prompt {
+            builder = builder.system_prompt(prompt.clone());
+        }
+        builder.build().map_err(io::Error::other)?
+    };
 
     let prompt = unit.task_prompt();
     let agent_task = tokio::spawn(async move { agent.run(prompt).await });
@@ -713,17 +705,16 @@ fn register_native_tools_with_ui(agent: &mut Agent, include_ui_tools: bool) {
         agent.tools.register(Arc::new(AskTool));
     }
     agent.tools.register(Arc::new(BashTool));
-    agent.tools.register(Arc::new(DiffApplyTool));
-    agent.tools.register(Arc::new(DiffShowTool));
-    agent.tools.register(Arc::new(EditTool));
+    agent.tools.register(Arc::new(DiffTool));
+    agent.tools.register(Arc::new(EditTool)); // handles both single and multi-edit
     agent.tools.register(Arc::new(FindTool));
     agent.tools.register(Arc::new(GrepTool));
     agent.tools.register(Arc::new(LsTool));
-    agent.tools.register(Arc::new(MultiEditTool));
     agent.tools.register(Arc::new(ReadTool));
     agent.tools.register(Arc::new(WriteTool));
-    agent.tools.register(Arc::new(ProbeSearchTool));
-    agent.tools.register(Arc::new(ProbeExtractTool));
+    agent
+        .tools
+        .register(Arc::new(imp_core::tools::tree_sitter::ProbeTool));
     agent.tools.register(Arc::new(ScanTool));
     agent.tools.register(Arc::new(AstGrepTool));
 
@@ -1189,30 +1180,21 @@ fn create_rpc_agent(
         provider: Arc::from(provider),
     };
 
-    let (mut agent, handle) = Agent::new(model, cwd.to_path_buf());
-    agent.thinking_level = cli
-        .thinking
-        .as_deref()
-        .map(parse_thinking_level)
-        .or(config.thinking)
-        .unwrap_or(ThinkingLevel::Off);
-    agent.api_key = api_key;
-    agent.ui = rpc_ui as Arc<dyn UserInterface>;
-    agent.messages = history;
-
-    if let Some(max_turns) = config.max_turns {
-        agent.max_turns = max_turns;
+    // Apply CLI thinking level override to config.
+    let mut agent_config = config.clone();
+    if let Some(ref thinking) = cli.thinking {
+        agent_config.thinking = Some(parse_thinking_level(thinking));
     }
 
-    register_native_tools(&mut agent);
-
-    let user_config_dir = Config::user_config_dir();
-    let agents_md = resources::discover_agents_md(cwd, &user_config_dir);
-    let skills = resources::discover_skills(cwd, &user_config_dir);
-
-    agent.system_prompt = cli.system_prompt.clone().unwrap_or_else(|| {
-        system_prompt::assemble(&agent.tools, &agents_md, &skills, &[], None, None).text
-    });
+    let rpc_ui_clone = rpc_ui.clone() as Arc<dyn UserInterface>;
+    let mut builder =
+        imp_core::builder::AgentBuilder::new(agent_config, cwd.to_path_buf(), model, api_key);
+    if let Some(ref prompt) = cli.system_prompt {
+        builder = builder.system_prompt(prompt.clone());
+    }
+    let (mut agent, handle) = builder.build()?;
+    agent.ui = rpc_ui_clone;
+    agent.messages = history;
 
     Ok((agent, handle))
 }

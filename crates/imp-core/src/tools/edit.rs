@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::fuzzy;
-use super::{generate_diff, Tool, ToolContext, ToolOutput};
+use super::{generate_diff, suggest_similar_files, Tool, ToolContext, ToolOutput};
 use crate::error::Result;
 
 pub struct EditTool;
@@ -18,17 +18,18 @@ impl Tool for EditTool {
         "Edit File"
     }
     fn description(&self) -> &str {
-        "Edit a file by replacing exact text."
+        "Edit a file. Single: pass oldText+newText. Multiple: pass edits array of {oldText, newText} pairs applied sequentially."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Path to the file to edit" },
-                "oldText": { "type": "string", "description": "Exact text to find and replace" },
-                "newText": { "type": "string", "description": "Replacement text" }
+                "oldText": { "type": "string", "description": "Exact text to find and replace (single edit)" },
+                "newText": { "type": "string", "description": "Replacement text (single edit)" },
+                "edits": { "type": "array", "description": "Array of {oldText, newText} pairs, applied sequentially (multi edit)", "items": { "type": "object", "properties": { "oldText": { "type": "string" }, "newText": { "type": "string" } }, "required": ["oldText", "newText"] } }
             },
-            "required": ["path", "oldText", "newText"]
+            "required": ["path"]
         })
     }
     fn is_readonly(&self) -> bool {
@@ -37,10 +38,17 @@ impl Tool for EditTool {
 
     async fn execute(
         &self,
-        _call_id: &str,
+        call_id: &str,
         params: serde_json::Value,
         ctx: ToolContext,
     ) -> Result<ToolOutput> {
+        // Multi-edit mode: if `edits` array is present, delegate to MultiEditTool
+        if params.get("edits").is_some_and(|v| v.is_array()) {
+            return super::multi_edit::MultiEditTool
+                .execute(call_id, params, ctx)
+                .await;
+        }
+
         let raw_path = params["path"].as_str().unwrap_or("");
         let old_text = params["oldText"].as_str().unwrap_or("");
         let new_text = params["newText"].as_str().unwrap_or("");
@@ -59,10 +67,15 @@ impl Tool for EditTool {
         };
 
         if !path.exists() {
-            return Ok(ToolOutput::error(format!(
-                "File not found: {}",
-                path.display()
-            )));
+            let suggestions = suggest_similar_files(&ctx.cwd, raw_path);
+            let mut msg = format!("File not found: {}", path.display());
+            if !suggestions.is_empty() {
+                msg.push_str("\n\nDid you mean:");
+                for s in &suggestions {
+                    msg.push_str(&format!("\n  {s}"));
+                }
+            }
+            return Ok(ToolOutput::error(msg));
         }
 
         let raw_content = tokio::fs::read_to_string(&path).await?;

@@ -141,6 +141,16 @@ impl HookRunner {
         self.programmatic_hooks.push(hook);
     }
 
+    /// Returns the total number of registered hooks (TOML + programmatic).
+    pub fn len(&self) -> usize {
+        self.toml_hooks.len() + self.programmatic_hooks.len()
+    }
+
+    /// Returns true if no hooks are registered.
+    pub fn is_empty(&self) -> bool {
+        self.toml_hooks.is_empty() && self.programmatic_hooks.is_empty()
+    }
+
     /// Register a callback hook for a specific event.
     pub fn register_callback(
         &mut self,

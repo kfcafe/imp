@@ -9,6 +9,55 @@ use tokio::process::Command;
 use super::{truncate_head, truncate_line, Tool, ToolContext, ToolOutput, TruncationResult};
 use crate::error::{Error, Result};
 
+// ── unified probe tool ──────────────────────────────────────────────
+
+pub struct ProbeTool;
+
+#[async_trait]
+impl Tool for ProbeTool {
+    fn name(&self) -> &str {
+        "probe"
+    }
+    fn label(&self) -> &str {
+        "Probe"
+    }
+    fn description(&self) -> &str {
+        "Code search and extraction via tree-sitter AST. action=search for semantic search, action=extract to get complete code blocks by file:line or file#symbol."
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["search", "extract"], "description": "search: find code matching query. extract: get blocks by location." },
+                "query": { "type": "string", "description": "Search query with AND/OR/NOT (search)" },
+                "targets": { "type": "array", "items": { "type": "string" }, "description": "file:line or file#symbol targets (extract)" },
+                "path": { "type": "string", "description": "Directory or file to search" },
+                "language": { "type": "string", "description": "Filter by language" },
+                "maxResults": { "type": "number", "description": "Max results (default: 10)" },
+                "exact": { "type": "boolean", "description": "Exact match without stemming" },
+                "context": { "type": "number", "description": "Context lines (extract)" }
+            },
+            "required": ["action"]
+        })
+    }
+    fn is_readonly(&self) -> bool {
+        true
+    }
+    async fn execute(
+        &self,
+        call_id: &str,
+        params: serde_json::Value,
+        ctx: ToolContext,
+    ) -> Result<ToolOutput> {
+        match params["action"].as_str() {
+            Some("search") => ProbeSearchTool.execute(call_id, params, ctx).await,
+            Some("extract") => ProbeExtractTool.execute(call_id, params, ctx).await,
+            Some(other) => Ok(ToolOutput::error(format!("Unknown probe action: {other}"))),
+            None => Ok(ToolOutput::error("Missing 'action' parameter")),
+        }
+    }
+}
+
 const DEFAULT_MAX_RESULTS: usize = 10;
 const MAX_OUTPUT_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
