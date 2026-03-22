@@ -23,6 +23,7 @@ use imp_core::tools::grep::GrepTool;
 use imp_core::tools::ls::LsTool;
 use imp_core::tools::read::ReadTool;
 use imp_core::tools::scan::ScanTool;
+use imp_core::tools::web::WebTool;
 use imp_core::tools::write::WriteTool;
 use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
 use imp_llm::auth::AuthStore;
@@ -714,6 +715,7 @@ fn register_native_tools_with_ui(agent: &mut Agent, include_ui_tools: bool) {
         .tools
         .register(Arc::new(imp_core::tools::probe::ProbeTool));
     agent.tools.register(Arc::new(ScanTool));
+    agent.tools.register(Arc::new(WebTool));
 
     // Mana integration
     agent
