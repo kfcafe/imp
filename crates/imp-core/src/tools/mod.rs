@@ -8,9 +8,10 @@ pub mod ls;
 pub mod lua;
 pub mod mana;
 pub mod multi_edit;
+pub mod probe;
 pub mod read;
+pub mod scan;
 pub mod shell;
-pub mod tree_sitter;
 pub mod write;
 
 use std::collections::HashMap;

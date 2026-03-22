@@ -11,9 +11,9 @@ use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use imp_core::config::Config;
-use imp_core::resources;
+
 use imp_core::session::SessionManager;
-use imp_core::system_prompt::{self, Attempt as TaskAttempt, TaskContext};
+use imp_core::system_prompt::{Attempt as TaskAttempt, TaskContext};
 use imp_core::tools::ask::AskTool;
 use imp_core::tools::bash::BashTool;
 use imp_core::tools::diff::DiffTool;
@@ -22,7 +22,7 @@ use imp_core::tools::find::FindTool;
 use imp_core::tools::grep::GrepTool;
 use imp_core::tools::ls::LsTool;
 use imp_core::tools::read::ReadTool;
-use imp_core::tools::tree_sitter::{AstGrepTool, ScanTool};
+use imp_core::tools::scan::ScanTool;
 use imp_core::tools::write::WriteTool;
 use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
 use imp_llm::auth::AuthStore;
@@ -502,13 +502,19 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
 
     agent_result?;
 
-    if let Some(verify) = unit
-        .verify
-        .as_deref()
-        .map(str::trim)
-        .filter(|verify| !verify.is_empty())
-    {
-        return run_verify_command(verify, &unit.workspace_root).await;
+    // When MANA_BATCH_VERIFY is set the runner handles verification after all
+    // agents complete.  Skip inline verify and exit 0 so the runner can batch
+    // the shared verify commands once per unique command string.
+    let batch_verify = std::env::var("MANA_BATCH_VERIFY").is_ok();
+    if !batch_verify {
+        if let Some(verify) = unit
+            .verify
+            .as_deref()
+            .map(str::trim)
+            .filter(|verify| !verify.is_empty())
+        {
+            return run_verify_command(verify, &unit.workspace_root).await;
+        }
     }
 
     Ok(true)
@@ -692,14 +698,6 @@ fn format_attempt(attempt: &UnitAttempt) -> String {
     }
 }
 
-fn register_native_tools(agent: &mut Agent) {
-    register_native_tools_with_ui(agent, true);
-}
-
-fn register_headless_tools(agent: &mut Agent) {
-    register_native_tools_with_ui(agent, false);
-}
-
 fn register_native_tools_with_ui(agent: &mut Agent, include_ui_tools: bool) {
     if include_ui_tools {
         agent.tools.register(Arc::new(AskTool));
@@ -714,9 +712,8 @@ fn register_native_tools_with_ui(agent: &mut Agent, include_ui_tools: bool) {
     agent.tools.register(Arc::new(WriteTool));
     agent
         .tools
-        .register(Arc::new(imp_core::tools::tree_sitter::ProbeTool));
+        .register(Arc::new(imp_core::tools::probe::ProbeTool));
     agent.tools.register(Arc::new(ScanTool));
-    agent.tools.register(Arc::new(AstGrepTool));
 
     // Mana integration
     agent
