@@ -404,6 +404,33 @@ pub enum RetryCondition {
 
 Exponential backoff with jitter. If the server sends a `Retry-After` header, respect it (but cap at `max_delay` — if the server asks for 5 minutes, fail immediately).
 
+The retry layer wraps the `Provider::stream()` call inside the agent loop. On retryable errors (429, 5xx, timeout, connection reset), the agent loop retries the LLM call transparently — the consumer never sees the retry. Non-retryable errors (400, 401, 403) fail immediately. After max retries are exhausted, the error propagates as a stream error.
+
+```rust
+pub async fn stream_with_retry(
+    provider: &dyn Provider,
+    model: &Model,
+    context: Context,
+    options: RequestOptions,
+    api_key: &str,
+    policy: &RetryPolicy,
+) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> {
+    // Attempts loop: try stream, on retryable error wait and retry.
+    // Jitter: random 0-50% of delay added to prevent thundering herd.
+    // Retry-After: if header present and <= max_delay, use it. If > max_delay, fail.
+}
+```
+
+### Provider Media Workarounds
+
+Some providers can't accept images in tool results — only in user messages.
+
+- **Anthropic**: native image support in tool results. No workaround needed.
+- **OpenAI**: images in tool results not supported. Before serialization, extract images from tool results, replace with text placeholder `[Image: {media_type}, {width}x{height}]`, and inject a user message after the tool result containing the image as content.
+- **Google**: same workaround as OpenAI.
+
+Handled transparently in each provider's message serialization. The agent and consumer never see the transformation.
+
 ---
 
 ## 2. Agent Loop
@@ -588,7 +615,7 @@ Tool calls from a single assistant message execute with controlled concurrency:
 - Mixed batches: read-only tools run concurrently first, then writes sequentially
 
 Before execution, each tool call is:
-1. Validated against the tool's JSON schema
+1. **Validated against the tool's JSON schema** — required fields present, types correct, no unknown fields. Validation errors returned as tool results with `is_error: true` so the model can self-correct. Uses the `jsonschema` crate.
 2. Passed through `before_tool_call` hooks (can block)
 3. Executed with timeout and cancellation support
 
@@ -618,6 +645,42 @@ async fn execute_tools(&self, calls: Vec<(String, String, Value)>) -> Vec<ToolRe
     results
 }
 ```
+
+### Loop Detection
+
+Prevent the agent from burning tokens in an infinite retry loop (calling the same failing tool with the same args repeatedly).
+
+```rust
+pub struct LoopDetector {
+    /// Sliding window of recent tool call signatures.
+    window: VecDeque<u64>,
+    /// Max window size (default: 20).
+    window_size: usize,
+    /// Max occurrences of same signature before stopping (default: 5).
+    max_repeats: usize,
+}
+
+impl LoopDetector {
+    /// Hash a tool call signature: SHA-256 of (tool_name + serialized_args + is_error + output_prefix).
+    /// output_prefix is first 200 chars of tool output to distinguish identical calls with different results.
+    pub fn record(&mut self, tool_name: &str, args: &Value, result: &ToolResultMessage) -> bool { ... }
+
+    /// Returns true if the agent appears stuck.
+    pub fn is_looping(&self) -> bool { ... }
+}
+```
+
+Checked after each tool execution in the agent loop. If looping is detected, emit `AgentEvent::Error` with a descriptive message and break the loop. The agent's final text output will include context about the loop for the user.
+
+### Auto-Resume After Compaction
+
+When context compaction fires mid-task (the agent had pending work), the original user prompt is re-queued with a prefix so the agent resumes seamlessly:
+
+```
+[Context was compacted. The original request was: "{original_prompt}". Continue where you left off.]
+```
+
+This is injected as a user message after the compaction summary, before the next LLM call. The agent sees the compacted history plus the reminder and continues working.
 
 ---
 
@@ -747,6 +810,74 @@ impl TreeSitterEngine {
 ```
 
 `probe_search` combines ripgrep (for fast text matching) with tree-sitter (to expand matches to complete code blocks). The ripgrep step uses the `grep` crate for in-process execution — no subprocess needed.
+
+#### File-Not-Found Suggestions
+
+When the `read`, `edit`, or `multi_edit` tools receive a path that doesn't exist, search the project for similar filenames and suggest alternatives:
+
+1. Extract the filename from the path
+2. Run `fd` (or walkdir fallback) to find files with similar names
+3. Rank by Levenshtein edit distance
+4. Include up to 3 suggestions in the error message
+
+```
+File not found: src/atuh/middleware.rs
+Did you mean:
+  - src/auth/middleware.rs
+  - src/auth/middleware_test.rs
+  - src/auth/mod.rs
+```
+
+Saves a round trip — the model can self-correct from the suggestion without a separate `find` call.
+
+#### File Read Tracking & Staleness Detection
+
+Track every file read per session. Enforce two invariants in write tools:
+
+1. **Read-before-edit** — `edit` and `multi_edit` warn (but don't block) if the file hasn't been read in this session. The warning is included in the tool result so the model is aware.
+2. **Staleness check** — before applying an edit, compare the file's mtime to the last read timestamp. If the file was modified externally (by user, hook, formatter, or another process) since the agent last read it, include a warning in the result: `"Warning: {file} was modified externally since last read. Re-read to verify."`
+
+```rust
+pub struct FileTracker {
+    /// Map of file path → last read timestamp.
+    reads: HashMap<PathBuf, std::time::SystemTime>,
+}
+
+impl FileTracker {
+    pub fn record_read(&mut self, path: &Path) { ... }
+    pub fn was_read(&self, path: &Path) -> bool { ... }
+    pub fn is_stale(&self, path: &Path) -> bool { ... }
+}
+```
+
+Stored in the `Agent` struct, scoped to a single session/run.
+
+#### File Version History
+
+Before the first edit to any file in a session, store the original content. Enables rollback to the pre-session state if the agent makes bad edits.
+
+```rust
+pub struct FileHistory {
+    /// Map of file path → original content (before first edit in this session).
+    originals: HashMap<PathBuf, String>,
+}
+
+impl FileHistory {
+    /// Store original content if not already stored for this file.
+    pub fn snapshot_before_edit(&mut self, path: &Path) -> Result<()> { ... }
+
+    /// Get the original content of a file (before any edits).
+    pub fn original(&self, path: &Path) -> Option<&str> { ... }
+
+    /// Rollback a file to its original content.
+    pub fn rollback(&self, path: &Path) -> Result<()> { ... }
+
+    /// List all files with snapshots.
+    pub fn tracked_files(&self) -> Vec<&Path> { ... }
+}
+```
+
+Lightweight safety net — not a full version history, just the "what was this file before the agent touched it" question.
 
 #### Output Truncation
 
@@ -909,7 +1040,7 @@ Two-stage approach to prevent context overflow.
 
 ### Stage 1: Observation Masking (~60% context usage)
 
-Replace old tool results with lightweight placeholders. Tool observations are 80%+ of context volume but become noise after a few turns.
+Replace old tool results with lightweight placeholders. Tool observations are 80%+ of context volume but become noise after a few turns. Research (JetBrains, NeurIPS 2025) shows that simple observation masking outperforms LLM summarization alone — cutting costs by 52% while actually improving solve rates.
 
 ```rust
 pub fn mask_observations(messages: &mut Vec<Message>, window: usize) {
@@ -919,7 +1050,7 @@ pub fn mask_observations(messages: &mut Vec<Message>, window: usize) {
 }
 ```
 
-Triggered by a hook at configurable threshold (default: 60% of context window).
+Triggered at a configurable threshold (default: 60% of context window). The threshold, window size, and behavior are read from `Config.context`.
 
 **What's preserved:** All reasoning (assistant text), all actions (tool calls with arguments), the user's messages. Only raw tool output is masked.
 
@@ -944,10 +1075,13 @@ pub async fn compact(
 ```
 
 The compaction prompt preserves:
-- The user's original request (verbatim)
-- Files touched, changes made
-- Work remaining and blockers
-- Things explicitly forbidden or that failed (negative constraints)
+- The user's original request (verbatim, quoted — not paraphrased)
+- The current goal and what has been accomplished
+- Files read, written, and edited (all paths)
+- Tests added, commands run
+- Work remaining: next steps, blockers
+- **Negative constraints: things explicitly forbidden or that failed** — critical for preventing re-attempts of known-bad approaches
+- Things the user explicitly said NOT to do
 
 ### Token Estimation
 
@@ -1409,7 +1543,78 @@ mask_window = 10                        # keep last N turns unmasked
 
 ---
 
-## 12. CLI Modes
+## 12. Wiring: Config → Agent Integration
+
+The config, resource discovery, and hook systems exist as independent modules. This section specifies how they're wired together at agent startup — the glue that makes config values actually affect agent behavior.
+
+### Agent Initialization
+
+When an agent is created (whether by TUI, CLI print mode, or headless mode), the caller must:
+
+1. **Load config** via `Config::resolve(user_config_dir, project_dir)` — merges user/project/env.
+2. **Apply config to agent**:
+   - `agent.max_turns = config.max_turns.unwrap_or(50)`
+   - `agent.thinking_level = config.thinking.unwrap_or(ThinkingLevel::Medium)`
+3. **Load hooks from config** — `agent.hooks.load_from_config(config.hooks)`
+4. **Discover resources**:
+   - `discover_agents_md(cwd, user_config_dir)` → for system prompt
+   - `discover_skills(cwd, user_config_dir)` → for system prompt
+   - `discover_prompts(cwd, user_config_dir)` → for slash command expansion
+5. **Assemble system prompt** with all discovered resources:
+   ```rust
+   agent.system_prompt = system_prompt::assemble(
+       &agent.tools, &agents_md, &skills, &facts, task_context, role
+   ).text;
+   ```
+6. **Wire context thresholds** — the agent loop reads `config.context.observation_mask_threshold`, `config.context.compaction_threshold`, and `config.context.mask_window` instead of hardcoded values.
+
+This initialization sequence should be extracted into a builder or factory function so that TUI, print mode, and headless mode all use the same path:
+
+```rust
+pub struct AgentBuilder {
+    config: Config,
+    cwd: PathBuf,
+    model: Model,
+    api_key: String,
+    role: Option<Role>,
+    task: Option<TaskContext>,
+}
+
+impl AgentBuilder {
+    pub fn build(self) -> Result<(Agent, AgentHandle)> {
+        // Loads config, discovers resources, registers tools,
+        // assembles system prompt, wires hooks and thresholds.
+    }
+}
+```
+
+### StdioInterface
+
+For headless and RPC modes, a `StdioInterface` implements `UserInterface` by sending JSON events to stdout and waiting for responses on stdin:
+
+```rust
+pub struct StdioInterface {
+    timeout: Duration,  // default: 60s
+}
+
+#[async_trait]
+impl UserInterface for StdioInterface {
+    fn has_ui(&self) -> bool { true }  // parent process handles UI
+
+    async fn confirm(&self, title: &str, message: &str) -> Option<bool> {
+        // Write: {"type":"ui_request","id":"q1","method":"confirm","params":{...}}
+        // Read:  {"type":"ui_response","id":"q1","result":true}
+        // Timeout → return None
+    }
+    // ... other methods follow same pattern
+}
+```
+
+This enables wizard-orch (or any parent process) to handle UI requests on behalf of headless agents.
+
+---
+
+## 13. CLI Modes
 
 ### Interactive (default)
 
@@ -1440,7 +1645,7 @@ mask_window = 10                        # keep last N turns unmasked
 
 ---
 
-## 13. Mana Integration
+## 14. Mana Integration
 
 imp_core links `mana-core` as a Rust dependency. Mana operations are native function calls, not CLI invocations.
 
@@ -1468,7 +1673,7 @@ Facts from mana are injected into Layer 4 of the system prompt (see §9). All pr
 
 ---
 
-## 14. Performance Targets
+## 15. Performance Targets
 
 The motivation for Rust. These should be noticeably better than pi (Node.js).
 
@@ -1487,7 +1692,7 @@ The big wins: startup time (no V8 boot), memory (no GC overhead), and tree-sitte
 
 ---
 
-## 15. Testing Strategy
+## 16. Testing Strategy
 
 ### Unit Tests
 - Each tool: test execution with known inputs, verify output format and truncation
@@ -1512,7 +1717,7 @@ The big wins: startup time (no V8 boot), memory (no GC overhead), and tree-sitte
 
 ---
 
-## 16. Build Order
+## 17. Build Order
 
 Sequential, each step produces a testable artifact:
 
@@ -1536,9 +1741,11 @@ Sequential, each step produces a testable artifact:
 
 Steps 1-6 produce a working agent that can have a conversation and use tools. Steps 7-12 make it production-ready. Steps 13-17 make it a pi replacement.
 
+18. **imp-core Hardening** — LLM retry with backoff, tool argument validation, loop detection, file tracking, auto-resume after compaction, config→agent wiring, StdioInterface, provider media workarounds, file-not-found suggestions, file version history. These are the production hardening steps from the Elixir plan that make imp reliable for daily use.
+
 ---
 
-## 17. Crate Name
+## 18. Crate Name
 
 `imp` on crates.io is taken by a 6-year-old crate (v0.1.0, last updated 2019). Crates.io policy allows reclaiming abandoned crates — file a support request at help@crates.io. If that fails:
 - `imp-agent` as the published crate name
@@ -1546,7 +1753,7 @@ Steps 1-6 produce a working agent that can have a conversation and use tools. St
 
 ---
 
-## 18. User Interface Abstraction
+## 19. User Interface Abstraction
 
 Tools and Lua extensions interact with the user through a `UserInterface` trait.
 The implementation varies by mode — tools don't know or care which mode they're in.

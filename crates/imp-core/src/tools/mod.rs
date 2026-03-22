@@ -6,6 +6,7 @@ pub mod find;
 pub mod grep;
 pub mod ls;
 pub mod lua;
+pub mod mana;
 pub mod multi_edit;
 pub mod read;
 pub mod shell;
