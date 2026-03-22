@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::edit::apply_edit;
-use super::{generate_diff, Tool, ToolContext, ToolOutput};
+use super::{generate_diff, suggest_similar_files, Tool, ToolContext, ToolOutput};
 use crate::error::Result;
 
 pub struct MultiEditTool;
@@ -70,10 +70,15 @@ impl Tool for MultiEditTool {
         };
 
         if !path.exists() {
-            return Ok(ToolOutput::error(format!(
-                "File not found: {}",
-                path.display()
-            )));
+            let suggestions = suggest_similar_files(&ctx.cwd, raw_path);
+            let mut msg = format!("File not found: {}", path.display());
+            if !suggestions.is_empty() {
+                msg.push_str("\n\nDid you mean:");
+                for s in &suggestions {
+                    msg.push_str(&format!("\n  {s}"));
+                }
+            }
+            return Ok(ToolOutput::error(msg));
         }
 
         let raw_content = tokio::fs::read_to_string(&path).await?;

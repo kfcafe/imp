@@ -8,6 +8,9 @@ use imp_llm::{
 };
 use tokio::sync::mpsc;
 
+use imp_llm::provider::RetryPolicy;
+
+use crate::config::ContextConfig;
 use crate::error::Result;
 use crate::hooks::{HookEvent, HookRunner};
 use crate::roles::Role;
@@ -79,6 +82,12 @@ pub struct Agent {
     pub hooks: HookRunner,
     pub api_key: String,
     pub ui: Arc<dyn crate::ui::UserInterface>,
+    /// Context management thresholds (wired from Config via AgentBuilder).
+    pub context_config: ContextConfig,
+    /// Retry policy for transient LLM stream failures.
+    pub retry_policy: RetryPolicy,
+    /// The original prompt passed to `run()`, used to re-orient the model after compaction.
+    pub original_prompt: Option<String>,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_rx: mpsc::Receiver<AgentCommand>,
@@ -107,6 +116,9 @@ impl Agent {
             hooks: HookRunner::new(),
             api_key: String::new(),
             ui: Arc::new(crate::ui::NullInterface),
+            context_config: ContextConfig::default(),
+            retry_policy: RetryPolicy::default(),
+            original_prompt: None,
             event_tx,
             command_rx,
         };
@@ -127,6 +139,7 @@ impl Agent {
         })
         .await;
 
+        self.original_prompt = Some(prompt.clone());
         self.messages.push(Message::user(&prompt));
 
         let mut turn: u32 = 0;
@@ -169,14 +182,17 @@ impl Agent {
             self.emit(AgentEvent::TurnStart { index: turn }).await;
 
             let usage = crate::context::context_usage(&self.messages, &self.model);
-            if usage.ratio >= 0.6 {
-                crate::context::mask_observations(&mut self.messages, 10);
+            if usage.ratio >= self.context_config.observation_mask_threshold {
+                crate::context::mask_observations(
+                    &mut self.messages,
+                    self.context_config.mask_window,
+                );
                 self.hooks
                     .fire(&HookEvent::OnContextThreshold { ratio: usage.ratio })
                     .await;
             }
 
-            if usage.ratio >= 0.8 {
+            if usage.ratio >= self.context_config.compaction_threshold {
                 self.emit(AgentEvent::CompactionStart).await;
                 match crate::compaction::compact(
                     &self.messages,
@@ -192,6 +208,21 @@ impl Agent {
                             &result.summary,
                             &result.first_kept_id,
                         );
+                        // Re-orient the model after compaction so it resumes
+                        // the original task rather than losing its thread.
+                        // Skip turn 0 — if compaction fires on the first turn,
+                        // the task itself is too large and re-queueing won't help.
+                        if turn > 0 {
+                            if let Some(ref original) = self.original_prompt {
+                                let resume_msg = format!(
+                                    "[Context was compacted to manage the conversation length. \
+                                     The original request was: \"{original}\". \
+                                     Continue where you left off — check what's already been \
+                                     done and proceed with remaining work.]"
+                                );
+                                self.messages.push(Message::user(&resume_msg));
+                            }
+                        }
                         self.emit(AgentEvent::CompactionEnd {
                             summary: result.summary,
                         })
@@ -447,6 +478,22 @@ impl Agent {
             })
             .await;
             return result;
+        }
+
+        // Validate args against the tool's JSON schema before execution so the
+        // model can self-correct on bad types or missing required fields.
+        if let Some(tool) = self.tools.get(tool_name) {
+            let schema = tool.parameters();
+            if let Err(e) = crate::tools::validate_tool_args(&schema, &args) {
+                let result = crate::tools::ToolOutput::error(e.to_string())
+                    .into_tool_result(call_id, tool_name);
+                self.emit(AgentEvent::ToolExecutionEnd {
+                    tool_call_id: call_id.to_string(),
+                    result: result.clone(),
+                })
+                .await;
+                return result;
+            }
         }
 
         let mut result = match self.tools.get(tool_name) {
@@ -1623,6 +1670,457 @@ mod tests {
         } else {
             panic!("Expected AgentEnd");
         }
+    }
+
+    // ── Retry policy tests ─────────────────────────────────────────
+
+    /// A mock provider that returns a fixed sequence of results. Each call to
+    /// `stream()` returns the next item: an `Err` for errors, or a pre-built
+    /// event sequence for success.
+    struct RetryMockProvider {
+        calls: Mutex<Vec<std::result::Result<Vec<StreamEvent>, imp_llm::Error>>>,
+    }
+
+    impl RetryMockProvider {
+        fn new(calls: Vec<std::result::Result<Vec<StreamEvent>, imp_llm::Error>>) -> Self {
+            Self {
+                calls: Mutex::new(calls),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for RetryMockProvider {
+        fn stream(
+            &self,
+            _model: &Model,
+            _context: Context,
+            _options: RequestOptions,
+            _api_key: &str,
+        ) -> Pin<Box<dyn Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
+            let mut calls = self.calls.try_lock().expect("RetryMockProvider lock");
+            let outcome = if calls.is_empty() {
+                Ok(vec![StreamEvent::Error {
+                    error: "No more mock responses".to_string(),
+                }])
+            } else {
+                calls.remove(0)
+            };
+            match outcome {
+                Ok(events) => Box::pin(futures::stream::iter(
+                    events.into_iter().map(|ev| imp_llm::Result::Ok(ev)),
+                )),
+                Err(e) => Box::pin(futures::stream::once(async move {
+                    imp_llm::Result::<StreamEvent>::Err(e)
+                })),
+            }
+        }
+
+        async fn resolve_auth(&self, _auth: &AuthStore) -> imp_llm::Result<ApiKey> {
+            Ok("mock-key".to_string())
+        }
+
+        fn id(&self) -> &str {
+            "retry-mock"
+        }
+
+        fn models(&self) -> &[ModelMeta] {
+            &[]
+        }
+    }
+
+    /// Provider that fails N times with a rate-limit error, then succeeds.
+    #[tokio::test]
+    async fn retry_succeeds_after_transient_failures() {
+        use imp_llm::provider::RetryPolicy;
+
+        let provider = Arc::new(RetryMockProvider::new(vec![
+            // First two calls fail with a rate-limit error
+            Err(imp_llm::Error::RateLimited {
+                retry_after_secs: Some(0),
+            }),
+            Err(imp_llm::Error::RateLimited {
+                retry_after_secs: Some(0),
+            }),
+            // Third call succeeds
+            Ok(text_response("Hello after retries", 100, 20)),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        // Zero delays so the test runs fast
+        agent.retry_policy = RetryPolicy {
+            max_retries: 3,
+            base_delay: std::time::Duration::from_millis(0),
+            max_delay: std::time::Duration::from_secs(30),
+            retry_on: vec![],
+        };
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Say hello".to_string()).await.unwrap();
+        drop(agent);
+
+        let events = events_task.await.unwrap();
+
+        // Agent should have completed successfully
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+
+        // The final text should be present in TurnEnd
+        let turn_end = events.iter().find_map(|e| match e {
+            AgentEvent::TurnEnd { message, .. } => Some(message),
+            _ => None,
+        });
+        assert!(turn_end.is_some());
+        let content_text = turn_end
+            .unwrap()
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        assert!(
+            content_text.contains("Hello after retries"),
+            "expected final text, got: {content_text}"
+        );
+    }
+
+    /// When max_retries is exhausted the agent returns an error.
+    #[tokio::test]
+    async fn retry_fails_when_max_retries_exhausted() {
+        use imp_llm::provider::RetryPolicy;
+
+        let provider = Arc::new(RetryMockProvider::new(vec![
+            Err(imp_llm::Error::RateLimited {
+                retry_after_secs: Some(0),
+            }),
+            Err(imp_llm::Error::RateLimited {
+                retry_after_secs: Some(0),
+            }),
+            Err(imp_llm::Error::RateLimited {
+                retry_after_secs: Some(0),
+            }),
+            Err(imp_llm::Error::RateLimited {
+                retry_after_secs: Some(0),
+            }),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.retry_policy = RetryPolicy {
+            max_retries: 2, // only 2 retries allowed
+            base_delay: std::time::Duration::from_millis(0),
+            max_delay: std::time::Duration::from_secs(30),
+            retry_on: vec![],
+        };
+        drop(handle);
+
+        let result = agent.run("Fail".to_string()).await;
+        assert!(
+            result.is_err(),
+            "should have failed after exhausting retries"
+        );
+    }
+
+    /// Auth errors (HTTP 401/403) must NOT be retried.
+    #[tokio::test]
+    async fn retry_does_not_retry_auth_errors() {
+        use imp_llm::provider::RetryPolicy;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
+
+        struct CountingAuthFailProvider {
+            calls: AtomicUsize,
+            success_after: usize,
+        }
+
+        #[async_trait]
+        impl Provider for CountingAuthFailProvider {
+            fn stream(
+                &self,
+                _model: &Model,
+                _context: Context,
+                _options: RequestOptions,
+                _api_key: &str,
+            ) -> Pin<Box<dyn Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n < self.success_after {
+                    Box::pin(futures::stream::once(async {
+                        Err(imp_llm::Error::Auth("Invalid API key".to_string()))
+                    }))
+                } else {
+                    Box::pin(futures::stream::iter(
+                        text_response("ok", 10, 5).into_iter().map(Ok),
+                    ))
+                }
+            }
+
+            async fn resolve_auth(&self, _auth: &AuthStore) -> imp_llm::Result<ApiKey> {
+                Ok("mock-key".to_string())
+            }
+
+            fn id(&self) -> &str {
+                "auth-fail-mock"
+            }
+
+            fn models(&self) -> &[ModelMeta] {
+                &[]
+            }
+        }
+
+        let _ = call_count_clone; // silence unused warning
+
+        let provider = Arc::new(CountingAuthFailProvider {
+            calls: AtomicUsize::new(0),
+            success_after: 999, // would succeed eventually, but we expect no retry
+        });
+        let call_ref = &provider.calls;
+
+        let model = test_model(provider.clone());
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.retry_policy = RetryPolicy {
+            max_retries: 5, // generous, to confirm auth errors bypass retry entirely
+            base_delay: std::time::Duration::from_millis(0),
+            max_delay: std::time::Duration::from_secs(30),
+            retry_on: vec![],
+        };
+        drop(handle);
+
+        let result = agent.run("Auth test".to_string()).await;
+        assert!(result.is_err(), "should fail on auth error");
+
+        // The provider should have been called exactly once — no retries.
+        assert_eq!(
+            call_ref.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "auth errors should not be retried"
+        );
+    }
+
+    // ── Compaction resume tests ────────────────────────────────────
+
+    /// A mock provider that intercepts the context passed to each call so tests
+    /// can inspect what messages the agent sent to the model.
+    struct CapturingMockProvider {
+        /// Pre-programmed responses, popped in order.
+        responses: Mutex<Vec<Vec<StreamEvent>>>,
+        /// All contexts ever sent to `stream()`.
+        captured_contexts: Mutex<Vec<Vec<Message>>>,
+    }
+
+    impl CapturingMockProvider {
+        fn new(responses: Vec<Vec<StreamEvent>>) -> Self {
+            Self {
+                responses: Mutex::new(responses),
+                captured_contexts: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for CapturingMockProvider {
+        fn stream(
+            &self,
+            _model: &Model,
+            context: Context,
+            _options: RequestOptions,
+            _api_key: &str,
+        ) -> Pin<Box<dyn Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
+            self.captured_contexts
+                .try_lock()
+                .expect("capturing lock")
+                .push(context.messages.clone());
+
+            let mut responses = self.responses.try_lock().expect("responses lock");
+            let events = if responses.is_empty() {
+                vec![StreamEvent::Error {
+                    error: "No more mock responses".to_string(),
+                }]
+            } else {
+                responses.remove(0)
+            };
+            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
+        }
+
+        async fn resolve_auth(
+            &self,
+            _auth: &imp_llm::auth::AuthStore,
+        ) -> imp_llm::Result<imp_llm::auth::ApiKey> {
+            Ok("mock-key".to_string())
+        }
+
+        fn id(&self) -> &str {
+            "capturing-mock"
+        }
+
+        fn models(&self) -> &[ModelMeta] {
+            &[]
+        }
+    }
+
+    /// Build an agent where compaction fires on turn 1 (not turn 0).
+    ///
+    /// Strategy: pre-seed `agent.messages` with a large tool-call exchange so the
+    /// context is already high when `run()` is called.  The first LLM call (turn 0)
+    /// makes a tool call, pushing usage over the threshold, so compaction fires at
+    /// the start of turn 1.
+    ///
+    /// Response ordering (all through the same provider):
+    ///   call 0 — agent turn 0: tool call
+    ///   call 1 — compaction LLM: returns summary text
+    ///   call 2+ — agent turns after compaction
+    fn make_compaction_agent(
+        compaction_summary: &str,
+        post_compaction_responses: Vec<Vec<StreamEvent>>,
+    ) -> (Agent, AgentHandle, Arc<CapturingMockProvider>) {
+        let mut all_responses = vec![
+            // Turn 0: LLM makes a tool call so we advance to turn 1
+            tool_call_response(
+                "call_warmup",
+                "echo",
+                serde_json::json!({"text": "warmup"}),
+                100,
+                20,
+            ),
+            // Compaction LLM call (fires at start of turn 1)
+            text_response(compaction_summary, 400, 80),
+        ];
+        all_responses.extend(post_compaction_responses);
+
+        let provider = Arc::new(CapturingMockProvider::new(all_responses));
+
+        // Context window large enough that the prompt alone doesn't trigger
+        // compaction, but small enough that after the tool call + result it does.
+        // context_window=300 with compaction_threshold=0.5 means we need ~150 tokens.
+        // The tool call + result easily exceeds that.
+        let model = test_model_with_context_window(provider.clone(), 300);
+
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(EchoTool));
+        // Set threshold above what the initial single-message context triggers
+        // but below what the post-turn-0 context triggers.
+        agent.context_config.compaction_threshold = 0.5;
+
+        (agent, handle, provider)
+    }
+
+    fn user_message_text(msg: &Message) -> Option<&str> {
+        match msg {
+            Message::User(u) => u.content.iter().find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    /// After compaction fires mid-run (turn > 0), a resume message containing
+    /// the original prompt must be present in agent.messages.
+    #[tokio::test]
+    async fn compaction_resume_injects_original_prompt() {
+        let original_prompt = "Please implement the authentication module";
+        let compaction_summary = "Summary: user wants to implement auth.";
+
+        let (mut agent, handle, _provider) = make_compaction_agent(
+            compaction_summary,
+            vec![text_response("Resuming work on auth module.", 100, 20)],
+        );
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run(original_prompt.to_string()).await.unwrap();
+
+        let _events = events_task.await.unwrap();
+
+        // After compaction the messages list should contain a user message that
+        // re-states the original prompt.
+        let resume_msg = agent
+            .messages
+            .iter()
+            .find_map(|m| user_message_text(m).filter(|t| t.contains("original request was")));
+
+        assert!(
+            resume_msg.is_some(),
+            "expected a resume message in agent.messages after compaction, messages: {:?}",
+            agent
+                .messages
+                .iter()
+                .map(|m| format!("{m:?}"))
+                .collect::<Vec<_>>()
+        );
+
+        assert!(
+            resume_msg.unwrap().contains(original_prompt),
+            "resume message must contain the original prompt verbatim, got: {}",
+            resume_msg.unwrap()
+        );
+    }
+
+    /// The original prompt is preserved verbatim (not truncated or paraphrased).
+    #[tokio::test]
+    async fn compaction_resume_preserves_prompt_verbatim() {
+        let original_prompt = "Refactor src/auth.rs to use JWT tokens and update all 42 call sites";
+
+        let (mut agent, handle, _provider) = make_compaction_agent(
+            "Summary of auth refactor progress.",
+            vec![text_response("Continuing refactor.", 100, 20)],
+        );
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run(original_prompt.to_string()).await.unwrap();
+
+        let _events = events_task.await.unwrap();
+
+        let found = agent.messages.iter().any(|m| {
+            user_message_text(m)
+                .map(|t| t.contains(original_prompt))
+                .unwrap_or(false)
+        });
+
+        assert!(
+            found,
+            "original prompt must appear verbatim in agent.messages after compaction"
+        );
+    }
+
+    /// When compaction fires on turn 0 no resume message is injected — the task
+    /// is just too big, re-queueing the prompt won't help.
+    #[tokio::test]
+    async fn compaction_resume_no_inject_on_turn_zero() {
+        // Use threshold 0.001 so compaction fires immediately on turn 0.
+        let compaction_summary = "Summary: nothing done yet.";
+
+        let provider = Arc::new(CapturingMockProvider::new(vec![
+            // Call 0: compaction LLM (fires on turn 0)
+            text_response(compaction_summary, 400, 80),
+            // Call 1: agent LLM turn 0 (after compaction)
+            text_response("Starting fresh.", 100, 20),
+        ]));
+
+        let model = test_model_with_context_window(provider.clone(), 800);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.context_config.compaction_threshold = 0.001; // fires on turn 0
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Do the task".to_string()).await.unwrap();
+
+        let _events = events_task.await.unwrap();
+
+        // No resume message should appear — compaction fired before any real work
+        let has_resume = agent.messages.iter().any(|m| {
+            user_message_text(m)
+                .map(|t| t.contains("original request was"))
+                .unwrap_or(false)
+        });
+
+        assert!(
+            !has_resume,
+            "no resume message should be injected when compaction fires on turn 0"
+        );
     }
 }
 

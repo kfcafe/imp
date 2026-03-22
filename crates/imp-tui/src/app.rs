@@ -10,21 +10,10 @@ use crossterm::event::{
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
+use imp_core::agent::{AgentCommand, AgentEvent, AgentHandle};
+use imp_core::builder::AgentBuilder;
 use imp_core::config::Config;
 use imp_core::session::{SessionEntry, SessionManager};
-use imp_core::system_prompt;
-use imp_core::tools::ask::AskTool;
-use imp_core::tools::bash::BashTool;
-use imp_core::tools::diff::{DiffApplyTool, DiffShowTool};
-use imp_core::tools::edit::EditTool;
-use imp_core::tools::find::FindTool;
-use imp_core::tools::grep::GrepTool;
-use imp_core::tools::ls::LsTool;
-use imp_core::tools::multi_edit::MultiEditTool;
-use imp_core::tools::read::ReadTool;
-use imp_core::tools::tree_sitter::{AstGrepTool, ProbeExtractTool, ProbeSearchTool, ScanTool};
-use imp_core::tools::write::WriteTool;
 use imp_llm::auth::AuthStore;
 use imp_llm::model::ModelRegistry;
 use imp_llm::providers::create_provider;
@@ -670,11 +659,13 @@ impl App {
             provider: Arc::from(provider),
         };
 
-        let (mut agent, handle) = Agent::new(model, self.cwd.clone());
-        agent.thinking_level = self.thinking_level;
-        agent.api_key = api_key;
-        Self::register_native_tools(&mut agent);
-        agent.system_prompt = system_prompt::assemble(&agent.tools, &[], &[], &[], None, None).text;
+        // Override thinking level from the TUI's current selection.
+        let mut config = self.config.clone();
+        config.thinking = Some(self.thinking_level);
+
+        let (mut agent, handle) = AgentBuilder::new(config, self.cwd.clone(), model, api_key)
+            .build()
+            .map_err(|e: imp_core::error::Error| e.to_string())?;
 
         let mut messages: Vec<Message> = self.session.get_messages().into_iter().cloned().collect();
         if matches!(
@@ -696,24 +687,6 @@ impl App {
 
         self.agent_handle = Some(handle);
         Ok(())
-    }
-
-    fn register_native_tools(agent: &mut Agent) {
-        agent.tools.register(Arc::new(AskTool));
-        agent.tools.register(Arc::new(BashTool));
-        agent.tools.register(Arc::new(DiffApplyTool));
-        agent.tools.register(Arc::new(DiffShowTool));
-        agent.tools.register(Arc::new(EditTool));
-        agent.tools.register(Arc::new(FindTool));
-        agent.tools.register(Arc::new(GrepTool));
-        agent.tools.register(Arc::new(LsTool));
-        agent.tools.register(Arc::new(MultiEditTool));
-        agent.tools.register(Arc::new(ReadTool));
-        agent.tools.register(Arc::new(WriteTool));
-        agent.tools.register(Arc::new(ProbeSearchTool));
-        agent.tools.register(Arc::new(ProbeExtractTool));
-        agent.tools.register(Arc::new(ScanTool));
-        agent.tools.register(Arc::new(AstGrepTool));
     }
 
     fn send_message(&mut self) {

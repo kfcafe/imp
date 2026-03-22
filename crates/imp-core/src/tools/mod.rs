@@ -14,7 +14,7 @@ pub mod tree_sitter;
 pub mod write;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -407,6 +407,77 @@ pub(crate) mod fuzzy {
     }
 }
 
+// ── File-not-found suggestions ──────────────────────────────────────
+
+/// Compute the Levenshtein edit distance between two strings.
+///
+/// Uses a standard DP row-reduction approach — O(m*n) time, O(n) space.
+pub fn levenshtein(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let m = a_chars.len();
+    let n = b_chars.len();
+
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
+
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[n]
+}
+
+/// Search for files with names similar to the missing `target` path.
+///
+/// Extracts the filename component, walks up to 4 directory levels from `cwd`,
+/// and returns up to 3 candidates ranked by Levenshtein distance (closest first).
+/// Only files with distance ≤ 3 from the target filename are included.
+pub fn suggest_similar_files(cwd: &Path, target: &str) -> Vec<String> {
+    let target_name = Path::new(target)
+        .file_name()
+        .and_then(|n: &std::ffi::OsStr| n.to_str())
+        .unwrap_or(target);
+
+    let mut candidates: Vec<(usize, String)> = Vec::new();
+
+    let walker = walkdir::WalkDir::new(cwd)
+        .max_depth(4)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok());
+
+    for entry in walker {
+        if entry.file_type().is_file() {
+            if let Some(name) = entry.file_name().to_str() {
+                let dist = levenshtein(target_name, name);
+                if dist <= 3 {
+                    let rel = entry
+                        .path()
+                        .strip_prefix(cwd)
+                        .unwrap_or(entry.path())
+                        .display()
+                        .to_string();
+                    candidates.push((dist, rel));
+                }
+            }
+        }
+    }
+
+    candidates.sort_by_key(|(d, _)| *d);
+    candidates.truncate(3);
+    candidates.into_iter().map(|(_, p)| p).collect()
+}
+
 // ── Diff generation ─────────────────────────────────────────────────
 
 /// Generate a unified diff between old and new content.
@@ -423,4 +494,200 @@ pub fn generate_diff(file_path: &str, old: &str, new: &str) -> String {
     }
 
     output
+}
+
+// ── Tool argument validation ─────────────────────────────────────────
+
+/// Validate tool arguments against a JSON Schema.
+///
+/// Returns `Ok(())` if args are valid, or `Err` with a human-readable
+/// description of what failed. Extra/unknown fields are permitted — LLMs often
+/// include them and tools should be lenient on input.
+pub fn validate_tool_args(schema: &serde_json::Value, args: &serde_json::Value) -> Result<()> {
+    use jsonschema::Validator;
+
+    let validator = Validator::new(schema)
+        .map_err(|e| crate::error::Error::Tool(format!("Invalid tool schema: {e}")))?;
+
+    let errors: Vec<String> = validator
+        .iter_errors(args)
+        .map(|e| format!("{e}"))
+        .collect();
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(crate::error::Error::Tool(format!(
+            "Tool argument validation failed:\n{}",
+            errors.join("\n")
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── levenshtein ───────────────────────────────────────────────────
+
+    #[test]
+    fn suggest_similar_levenshtein_identical() {
+        assert_eq!(levenshtein("hello", "hello"), 0);
+    }
+
+    #[test]
+    fn suggest_similar_levenshtein_one_substitution() {
+        assert_eq!(levenshtein("auth", "aath"), 1);
+    }
+
+    #[test]
+    fn suggest_similar_levenshtein_one_insertion() {
+        assert_eq!(levenshtein("helo", "hello"), 1);
+    }
+
+    #[test]
+    fn suggest_similar_levenshtein_one_deletion() {
+        assert_eq!(levenshtein("hello", "helo"), 1);
+    }
+
+    #[test]
+    fn suggest_similar_levenshtein_empty_strings() {
+        assert_eq!(levenshtein("", ""), 0);
+        assert_eq!(levenshtein("abc", ""), 3);
+        assert_eq!(levenshtein("", "abc"), 3);
+    }
+
+    #[test]
+    fn suggest_similar_levenshtein_completely_different() {
+        // "abc" vs "xyz": 3 substitutions
+        assert_eq!(levenshtein("abc", "xyz"), 3);
+    }
+
+    #[test]
+    fn suggest_similar_levenshtein_transposition() {
+        // "atuh" vs "auth": swap two adjacent chars = distance 2
+        assert_eq!(levenshtein("atuh", "auth"), 2);
+    }
+
+    // ── suggest_similar_files ─────────────────────────────────────────
+
+    #[test]
+    fn suggest_similar_finds_close_match() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("middleware.rs"), "").unwrap();
+        std::fs::write(dir.path().join("unrelated.rs"), "").unwrap();
+
+        let suggestions = suggest_similar_files(dir.path(), "middlewar.rs");
+        assert!(
+            suggestions.iter().any(|s| s.contains("middleware.rs")),
+            "expected middleware.rs in suggestions, got: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_similar_returns_at_most_three() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create five files each 1 edit away from "xod.rs"
+        for name in &["mod.rs", "rod.rs", "cod.rs", "nod.rs", "pod.rs"] {
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
+
+        let suggestions = suggest_similar_files(dir.path(), "xod.rs");
+        assert!(suggestions.len() <= 3);
+    }
+
+    #[test]
+    fn suggest_similar_nothing_close_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("completely_different.rs"), "").unwrap();
+
+        // "a.rs" is far from "completely_different.rs"
+        let suggestions = suggest_similar_files(dir.path(), "a.rs");
+        assert!(
+            suggestions.is_empty(),
+            "expected no suggestions, got: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_similar_ranks_closer_matches_first() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("auth.rs"), "").unwrap();
+        std::fs::write(dir.path().join("autho.rs"), "").unwrap();
+
+        let suggestions = suggest_similar_files(dir.path(), "atuh.rs");
+        assert!(!suggestions.is_empty());
+        assert!(
+            suggestions.iter().any(|s| s.contains("auth.rs")),
+            "expected auth.rs, got: {suggestions:?}"
+        );
+    }
+
+    fn simple_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "count": { "type": "integer" }
+            },
+            "required": ["path"]
+        })
+    }
+
+    #[test]
+    fn validate_tool_args_valid_passes() {
+        let schema = simple_schema();
+        let args = serde_json::json!({ "path": "/tmp/foo.txt" });
+        assert!(validate_tool_args(&schema, &args).is_ok());
+    }
+
+    #[test]
+    fn validate_tool_args_valid_with_optional_passes() {
+        let schema = simple_schema();
+        let args = serde_json::json!({ "path": "/tmp/foo.txt", "count": 5 });
+        assert!(validate_tool_args(&schema, &args).is_ok());
+    }
+
+    #[test]
+    fn validate_tool_args_missing_required_returns_error() {
+        let schema = simple_schema();
+        // Missing the required "path" field
+        let args = serde_json::json!({ "count": 5 });
+        let result = validate_tool_args(&schema, &args);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("path") || msg.contains("required"),
+            "expected error mentioning 'path' or 'required', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_tool_args_wrong_type_returns_error() {
+        let schema = simple_schema();
+        // "count" must be integer, not string
+        let args = serde_json::json!({ "path": "/tmp/foo.txt", "count": "not-a-number" });
+        let result = validate_tool_args(&schema, &args);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("integer") || msg.contains("type"),
+            "expected type error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_tool_args_extra_fields_allowed() {
+        // LLMs often add extra fields — we should not reject them
+        let schema = simple_schema();
+        let args = serde_json::json!({
+            "path": "/tmp/foo.txt",
+            "llm_added_extra": "some value",
+            "another_unknown": 42
+        });
+        assert!(
+            validate_tool_args(&schema, &args).is_ok(),
+            "extra/unknown fields should be allowed"
+        );
+    }
 }
