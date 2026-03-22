@@ -8,6 +8,7 @@ pub mod ls;
 pub mod lua;
 pub mod mana;
 pub mod multi_edit;
+pub mod query;
 pub mod read;
 pub mod scan;
 pub mod shell;

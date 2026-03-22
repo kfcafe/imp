@@ -67,20 +67,23 @@ impl Tool for GrepTool {
         "Grep"
     }
     fn description(&self) -> &str {
-        "Search file contents for a pattern, or extract code blocks by location. Returns matching lines by default. Set blocks=true to return complete enclosing code blocks (functions, classes, structs) via tree-sitter. Use extract to get blocks at specific file:line or file#symbol locations."
+        "Search file contents or extract code blocks. Supports boolean queries (AND/OR/NOT), phrases, and stemming. Set blocks=true for complete code blocks via tree-sitter. Use extract for blocks at file:line or file#symbol."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "Search pattern (regex or literal)" },
+                "pattern": { "type": "string", "description": "Search query. Supports AND/OR/NOT and \"phrases\"." },
                 "path": { "type": "string", "description": "Directory or file to search" },
                 "glob": { "type": "string", "description": "Filter files by glob, e.g. '*.rs'" },
+                "language": { "type": "string", "description": "Filter by language: rust, typescript, python, go, etc." },
                 "ignoreCase": { "type": "boolean", "description": "Case-insensitive search" },
-                "literal": { "type": "boolean", "description": "Treat pattern as literal string" },
+                "exact": { "type": "boolean", "description": "Exact match without stemming (default: false)" },
+                "literal": { "type": "boolean", "description": "Treat pattern as literal string (no regex)" },
                 "context": { "type": "number", "description": "Context lines before/after match" },
                 "limit": { "type": "number", "description": "Max matches (default: 100, or 10 for blocks)" },
                 "blocks": { "type": "boolean", "description": "Return complete code blocks enclosing matches instead of lines" },
+                "allowTests": { "type": "boolean", "description": "Include test files (default: false)" },
                 "extract": {
                     "type": "array",
                     "items": { "type": "string" },
@@ -122,10 +125,13 @@ impl Tool for GrepTool {
             .unwrap_or_else(|| ctx.cwd.clone());
 
         let glob_filter = params["glob"].as_str();
+        let language = params["language"].as_str();
         let ignore_case = params["ignoreCase"].as_bool().unwrap_or(false);
+        let exact = params["exact"].as_bool().unwrap_or(false);
         let literal = params["literal"].as_bool().unwrap_or(false);
         let context_lines = params["context"].as_u64().map(|n| n as usize);
         let blocks = params["blocks"].as_bool().unwrap_or(false);
+        let allow_tests = params["allowTests"].as_bool().unwrap_or(false);
 
         let default_limit = if blocks {
             DEFAULT_BLOCK_LIMIT
@@ -137,15 +143,29 @@ impl Tool for GrepTool {
             .map(|n| n as usize)
             .unwrap_or(default_limit);
 
-        let re = build_regex(pattern, ignore_case, literal)?;
+        // Build the search query — supports boolean operators, phrases, stemming
+        let query = if literal {
+            // Literal mode: single exact term, no parsing
+            super::query::parse(&format!("\"{}\"", pattern), true, ignore_case)
+                .map_err(|e| crate::error::Error::Tool(e))?
+        } else {
+            super::query::parse(pattern, exact, ignore_case)
+                .map_err(|e| crate::error::Error::Tool(e))?
+        };
+
+        let file_filter = FileFilter {
+            glob: glob_filter.map(String::from),
+            language: language.map(String::from),
+            allow_tests,
+        };
 
         if blocks {
-            execute_block_search(&re, &search_path, glob_filter, limit, &ctx.cwd)
+            execute_block_search(&query, &search_path, &file_filter, limit, &ctx.cwd)
         } else {
             execute_line_search(
-                &re,
+                &query,
                 &search_path,
-                glob_filter,
+                &file_filter,
                 context_lines,
                 limit,
                 &ctx.cwd,
@@ -154,24 +174,41 @@ impl Tool for GrepTool {
     }
 }
 
-fn build_regex(pattern: &str, ignore_case: bool, literal: bool) -> Result<regex::Regex> {
-    let pat = if literal {
-        regex::escape(pattern)
-    } else {
-        pattern.to_string()
-    };
-    regex::RegexBuilder::new(&pat)
-        .case_insensitive(ignore_case)
-        .build()
-        .map_err(|e| crate::error::Error::Tool(format!("invalid regex: {e}")))
+use super::query::Query;
+
+struct FileFilter {
+    glob: Option<String>,
+    language: Option<String>,
+    allow_tests: bool,
+}
+
+impl FileFilter {
+    fn accepts(&self, path: &Path) -> bool {
+        // Language filter
+        if let Some(ref lang) = self.language {
+            if let Some(exts) = super::query::language_extensions(lang) {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if !exts.contains(&ext) {
+                    return false;
+                }
+            }
+        }
+
+        // Test file exclusion
+        if !self.allow_tests && super::query::is_test_file(path) {
+            return false;
+        }
+
+        true
+    }
 }
 
 // ── line search (classic grep) ──────────────────────────────────────
 
 fn execute_line_search(
-    re: &regex::Regex,
+    query: &Query,
     search_path: &Path,
-    glob_filter: Option<&str>,
+    file_filter: &FileFilter,
     context_lines: Option<usize>,
     limit: usize,
     cwd: &Path,
@@ -179,7 +216,7 @@ fn execute_line_search(
     let mut results = Vec::new();
     let mut match_count = 0;
 
-    for entry in walk_files(search_path, glob_filter) {
+    for entry in walk_files(search_path, file_filter) {
         if match_count >= limit {
             break;
         }
@@ -189,6 +226,11 @@ fn execute_line_search(
             None => continue,
         };
 
+        // For boolean AND queries, check file-level match first
+        if !query.must.is_empty() && !query.matches_file(&content) {
+            continue;
+        }
+
         let rel_path = entry.strip_prefix(cwd).unwrap_or(&entry);
         let lines: Vec<&str> = content.lines().collect();
 
@@ -196,7 +238,7 @@ fn execute_line_search(
             if match_count >= limit {
                 break;
             }
-            if !re.is_match(line) {
+            if !query.matches_line(line) {
                 continue;
             }
 
@@ -235,16 +277,16 @@ fn execute_line_search(
 // ── block search (grep + tree-sitter) ───────────────────────────────
 
 fn execute_block_search(
-    re: &regex::Regex,
+    query: &Query,
     search_path: &Path,
-    glob_filter: Option<&str>,
+    file_filter: &FileFilter,
     limit: usize,
     cwd: &Path,
 ) -> Result<ToolOutput> {
     let mut blocks: Vec<CodeBlock> = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    for entry in walk_files(search_path, glob_filter) {
+    for entry in walk_files(search_path, file_filter) {
         if blocks.len() >= limit {
             break;
         }
@@ -254,13 +296,13 @@ fn execute_block_search(
             None => continue,
         };
 
+        // For AND queries, check file-level match first
+        if !query.must.is_empty() && !query.matches_file(&content) {
+            continue;
+        }
+
         // Find matching line numbers
-        let match_lines: Vec<usize> = content
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| re.is_match(line))
-            .map(|(idx, _)| idx)
-            .collect();
+        let match_lines = query.matching_lines(&content);
 
         if match_lines.is_empty() {
             continue;
@@ -579,7 +621,7 @@ fn node_has_name(node: tree_sitter::Node, source: &str, name: &str) -> bool {
 
 // ── file walking ────────────────────────────────────────────────────
 
-fn walk_files(search_path: &Path, glob_filter: Option<&str>) -> Vec<PathBuf> {
+fn walk_files(search_path: &Path, filter: &FileFilter) -> Vec<PathBuf> {
     let mut builder = ignore::WalkBuilder::new(search_path);
     builder
         .hidden(true) // skip hidden files
@@ -587,8 +629,7 @@ fn walk_files(search_path: &Path, glob_filter: Option<&str>) -> Vec<PathBuf> {
         .git_global(true)
         .git_exclude(true);
 
-    if let Some(glob) = glob_filter {
-        // Add a type override to filter by glob
+    if let Some(ref glob) = filter.glob {
         let mut overrides = ignore::overrides::OverrideBuilder::new(search_path);
         if overrides.add(glob).is_ok() {
             if let Ok(built) = overrides.build() {
@@ -600,7 +641,10 @@ fn walk_files(search_path: &Path, glob_filter: Option<&str>) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for entry in builder.build().flatten() {
         if entry.file_type().is_some_and(|ft| ft.is_file()) {
-            files.push(entry.into_path());
+            let path = entry.into_path();
+            if filter.accepts(&path) {
+                files.push(path);
+            }
         }
     }
     files.sort();
