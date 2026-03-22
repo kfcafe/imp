@@ -8,7 +8,6 @@ pub mod ls;
 pub mod lua;
 pub mod mana;
 pub mod multi_edit;
-pub mod probe;
 pub mod read;
 pub mod scan;
 pub mod shell;
@@ -89,6 +88,14 @@ impl ToolOutput {
             details: serde_json::Value::Null,
             is_error: true,
         }
+    }
+
+    /// Extract the first text block, if any. Useful for tests.
+    pub fn text_content(&self) -> Option<&str> {
+        self.content.iter().find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
     }
 
     pub fn into_tool_result(self, call_id: &str, tool_name: &str) -> ToolResultMessage {

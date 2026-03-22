@@ -711,9 +711,6 @@ fn register_native_tools_with_ui(agent: &mut Agent, include_ui_tools: bool) {
     agent.tools.register(Arc::new(LsTool));
     agent.tools.register(Arc::new(ReadTool));
     agent.tools.register(Arc::new(WriteTool));
-    agent
-        .tools
-        .register(Arc::new(imp_core::tools::probe::ProbeTool));
     agent.tools.register(Arc::new(ScanTool));
     agent.tools.register(Arc::new(WebTool));
 
