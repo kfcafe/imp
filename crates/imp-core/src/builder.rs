@@ -25,6 +25,7 @@ pub struct AgentBuilder {
     /// Override the assembled system prompt entirely.
     system_prompt_override: Option<String>,
     /// Additional tool registrar called after native tools are registered.
+    #[allow(clippy::type_complexity)]
     extra_tools: Option<Box<dyn FnOnce(&mut ToolRegistry) + Send>>,
 }
 
@@ -143,34 +144,22 @@ impl AgentBuilder {
 /// This is the canonical list — update here when adding or removing tools.
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
-        ask::AskTool,
-        bash::BashTool,
-        diff::{DiffApplyTool, DiffShowTool},
-        edit::EditTool,
-        find::FindTool,
-        grep::GrepTool,
-        ls::LsTool,
-        multi_edit::MultiEditTool,
-        read::ReadTool,
-        tree_sitter::{AstGrepTool, ProbeExtractTool, ProbeSearchTool, ScanTool},
+        ask::AskTool, bash::BashTool, diff::DiffTool, edit::EditTool, find::FindTool,
+        grep::GrepTool, ls::LsTool, probe::ProbeTool, read::ReadTool, scan::ScanTool,
         write::WriteTool,
     };
 
     tools.register(Arc::new(AskTool));
     tools.register(Arc::new(BashTool));
-    tools.register(Arc::new(DiffApplyTool));
-    tools.register(Arc::new(DiffShowTool));
+    tools.register(Arc::new(DiffTool));
     tools.register(Arc::new(EditTool));
     tools.register(Arc::new(FindTool));
     tools.register(Arc::new(GrepTool));
     tools.register(Arc::new(LsTool));
-    tools.register(Arc::new(MultiEditTool));
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
-    tools.register(Arc::new(ProbeSearchTool));
-    tools.register(Arc::new(ProbeExtractTool));
+    tools.register(Arc::new(ProbeTool));
     tools.register(Arc::new(ScanTool));
-    tools.register(Arc::new(AstGrepTool));
 }
 
 #[cfg(test)]
