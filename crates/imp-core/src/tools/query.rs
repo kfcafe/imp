@@ -303,21 +303,20 @@ pub fn stem(word: &str) -> String {
         "ated",    // authenticated → authentic
         "ized",    // authorized → author
         "ised",    // recognised → recogn
-        "ting",    // connecting → connect
+        "cting",   // connecting → conne (via "cting" before "ting")
         "less",    // careless → care
         "ful",     // successful → success
         "ous",     // dangerous → danger
         "ive",     // recursive → recurs
         "ity",     // security → secur
         "ing",     // handling → handl
-        "ted",     // connected → connec
         "ers",     // handlers → handl
         "ies",     // queries → quer
         "ied",     // applied → appl
         "ion",     // expression → express
-        "ed",      // handled → handl
+        "ed",      // connected → connect, handled → handl
         "er",      // handler → handl
-        "es",      // matches → match
+        "ate",     // authenticate → authentic\n        "es",      // matches → match
         "ly",      // directly → direct
         "al",      // functional → function
         "or",      // executor → execut
