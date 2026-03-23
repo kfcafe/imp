@@ -15,14 +15,127 @@ AI agent engine. Tools, modes, context management, multi-provider LLM streaming.
 
 imp runs AI coding agents. You give it a task, it reasons through it, calls tools, and gets work done.
 
-- **Agent loop** — ReAct-style: think → act → observe → repeat
-- **Tool system** — file read/write/edit, shell execution, grep, web search, AST-aware code search
-- **Agent modes** — full, worker, orchestrator, planner, reviewer, auditor — each with different tool permissions and execution-time enforcement
-- **Context management** — observation masking, LLM compaction, sliding window — fits long sessions into finite context windows
-- **Multi-provider LLM** — Anthropic, OpenAI, Google, AWS Bedrock, xAI, Groq, and more via a unified streaming interface
-- **Session persistence** — conversations save to disk and can be resumed, forked, or replayed
-- **Hooks** — before/after tool calls, file writes, LLM calls — configurable via TOML or programmatic registration
-- **Shell backends** — traditional `sh -c` or in-process execution via [rush](https://github.com/kfcafe/rush) for zero-fork built-in commands
+## Features
+
+### Agent engine
+
+| Feature | Details |
+|---------|---------|
+| Agent loop | ReAct-style: think → act → observe → repeat until done or max turns |
+| Extended thinking | 6 levels (off → minimal → low → medium → high → xhigh) per model support |
+| Concurrent tool execution | Readonly tools run in parallel, mutable tools run sequentially |
+| Retry with backoff | Transient LLM errors (rate limits, overload, network) retry automatically with exponential backoff + jitter |
+| Cancellation | Cooperative cancellation — tools check a shared flag and bail cleanly |
+| Cost tracking | Per-turn and cumulative token usage and dollar cost |
+
+### Tools
+
+| Tool | What it does |
+|------|-------------|
+| `read` | Read files (text + images), with offset/limit for large files |
+| `write` | Create or overwrite files, auto-creates parent directories |
+| `edit` | Find-and-replace with exact text matching |
+| `multi_edit` | Multiple edits to one file in a single call |
+| `bash` | Shell execution with timeout, streaming output, process group cleanup |
+| `grep` | Regex search across files, respects .gitignore, line-truncation |
+| `find` | Glob-based file search, respects .gitignore |
+| `ls` | Directory listing with dotfiles |
+| `diff` | Unified diff preview and patch application |
+| `scan` | Tree-sitter AST extraction — types, functions, imports from source files |
+| `web` | Web search (Tavily/Exa) and page content extraction |
+| `ask` | Prompt the user for input or multiple-choice decisions |
+| `mana` | Unit management — status, list, show, create, close, update |
+| `memory` | Persistent key-value memory across sessions |
+| Shell tools | User-defined tools via TOML definitions (name, command template, params) |
+
+### Agent modes
+
+| Mode | Allowed tools | Mana actions | Purpose |
+|------|--------------|--------------|---------|
+| `full` | all | all | Interactive use, trusted user |
+| `worker` | read, write, bash, ask | show, update, status, list | Execute a scoped task |
+| `orchestrator` | read, mana, ask | all | Plan and delegate via units |
+| `planner` | read, mana, ask | status, list, show, create | Decompose work, human approves |
+| `reviewer` | read, ask | none | Read-only analysis |
+| `auditor` | read, mana | status, list, show | Inspect and report |
+
+Enforcement at two levels: disallowed tools are removed from the registry (never in the prompt), and an execution-time guard rejects hallucinated calls.
+
+### Context management
+
+| Feature | Details |
+|---------|---------|
+| Observation masking | Old tool outputs replaced with `[masked]` when context reaches threshold (default 60%) |
+| Sliding window | Last N turns always kept unmasked (default 10) |
+| LLM compaction | When context hits compaction threshold (default 80%), the conversation is summarized by the LLM and replaced with a compact version |
+| Token estimation | Fast character-based approximation for context budget decisions |
+| Original prompt re-injection | After compaction, the original user prompt is re-stated so the model doesn't lose the goal |
+
+### LLM client (imp-llm)
+
+| Feature | Details |
+|---------|---------|
+| Streaming | Server-sent events parsed into typed `StreamEvent` variants |
+| Multi-provider | Anthropic (native), OpenAI (responses API), Google (Gemini), with a shared `Provider` trait |
+| Model registry | Alias resolution (sonnet → claude-sonnet-4-20250514), pricing, capabilities, context window metadata |
+| Prompt caching | Anthropic `cache_control` on system prompt, tool definitions, and recent turns |
+| OAuth | Token storage, refresh flow, provider-specific auth |
+| Extended thinking | Maps thinking levels to provider-specific budget tokens |
+| Tool use | Structured tool definitions, argument schema, result messages |
+
+### Sessions
+
+| Feature | Details |
+|---------|---------|
+| Persistence | Append-only JSONL — every message, tool call, and result is saved |
+| Resume | Continue a previous session from where it left off |
+| Branching | Tree structure — fork from any point, navigate between branches |
+| In-memory mode | Ephemeral sessions for headless/testing use |
+
+### Hooks
+
+| Event | When it fires |
+|-------|--------------|
+| `before_tool_call` | Before any tool executes — can block the call |
+| `after_tool_call` | After tool completes — can modify the result |
+| `after_file_write` | After write/edit/multi_edit modifies a file |
+| `before_llm_call` | Before each LLM request |
+| `on_context_threshold` | When context usage crosses a configured ratio |
+| `on_session_start` | Session begins |
+| `on_session_shutdown` | Session ends |
+| `on_agent_start` | Agent loop starts |
+| `on_agent_end` | Agent loop completes |
+| `on_turn_end` | Each agent turn completes |
+
+Hooks can be shell commands (TOML config) or programmatic callbacks (Rust/Lua).
+
+### Shell backends
+
+| Backend | How it works |
+|---------|-------------|
+| `sh` (default) | Spawns `sh -c <command>` — standard process execution |
+| `rush` | In-process execution via [rush](https://github.com/kfcafe/rush) library — built-in commands (ls, grep, cat, find, git) run without fork/exec |
+| `rush-daemon` | Connects to a running rush daemon over Unix socket (planned) |
+
+### Configuration
+
+| Layer | Source | Scope |
+|-------|--------|-------|
+| 1 | Built-in defaults | Always |
+| 2 | `~/.config/imp/config.toml` | Personal |
+| 3 | `<project>/.imp/config.toml` | Per-repo |
+| 4 | Environment variables | Per-session |
+| 5 | CLI flags | Per-invocation |
+
+### System prompt assembly
+
+| Layer | Content |
+|-------|---------|
+| 1. Identity | "You are imp" + available tools list (filtered by mode/role) |
+| 2. Project context | AGENTS.md files discovered from project and user config |
+| 3. Skills | Available skill files with descriptions and paths |
+| 4. Facts | Project facts from mana with verification timestamps |
+| 5. Task | Unit title, description, verify command, previous attempts, dependencies (headless mode) |
 
 ## Crates
 
