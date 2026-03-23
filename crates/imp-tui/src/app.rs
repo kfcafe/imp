@@ -194,6 +194,24 @@ impl App {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         self.handle_key(key)?;
                     }
+                    Event::Mouse(mouse) => {
+                        use crossterm::event::MouseEventKind;
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => {
+                                self.scroll_offset += 3;
+                                self.auto_scroll = false;
+                                self.needs_redraw = true;
+                            }
+                            MouseEventKind::ScrollDown => {
+                                self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                                if self.scroll_offset == 0 {
+                                    self.auto_scroll = true;
+                                }
+                                self.needs_redraw = true;
+                            }
+                            _ => {}
+                        }
+                    }
                     Event::Resize(_, _) => {
                         self.needs_redraw = true;
                     }
@@ -510,14 +528,12 @@ impl App {
                 self.editor.delete_to_end();
             }
             Some(Action::ScrollUp) | Some(Action::PageUp) => {
-                self.scroll_offset += 5;
+                self.scroll_offset += 20;
                 self.auto_scroll = false;
             }
             Some(Action::ScrollDown) | Some(Action::PageDown) => {
-                if self.scroll_offset >= 5 {
-                    self.scroll_offset -= 5;
-                } else {
-                    self.scroll_offset = 0;
+                self.scroll_offset = self.scroll_offset.saturating_sub(20);
+                if self.scroll_offset == 0 {
                     self.auto_scroll = true;
                 }
             }

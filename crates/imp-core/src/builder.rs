@@ -134,15 +134,38 @@ impl AgentBuilder {
             let agents_md = resources::discover_agents_md(&self.cwd, &user_config_dir);
             let skills = resources::discover_skills(&self.cwd, &user_config_dir);
 
-            system_prompt::assemble_with_mode(
-                &agent.tools,
-                &agents_md,
-                &skills,
-                &[],
-                self.task.as_ref(),
-                self.role.as_ref(),
-                &agent.mode,
-            )
+            // Layer 6: Load agent memory if learning is enabled
+            let (memory_block, user_block) = if self.config.learning.enabled {
+                let mem = crate::memory::MemoryStore::load(
+                    &user_config_dir.join("memory.md"),
+                    self.config.learning.memory_char_limit,
+                )
+                .ok()
+                .map(|s| s.render("MEMORY (your personal notes)"));
+
+                let user = crate::memory::MemoryStore::load(
+                    &user_config_dir.join("user.md"),
+                    self.config.learning.user_char_limit,
+                )
+                .ok()
+                .map(|s| s.render("USER PROFILE"));
+
+                (mem, user)
+            } else {
+                (None, None)
+            };
+
+            system_prompt::assemble(&system_prompt::AssembleParams {
+                tools: &agent.tools,
+                agents_md: &agents_md,
+                skills: &skills,
+                facts: &[],
+                task: self.task.as_ref(),
+                role: self.role.as_ref(),
+                mode: &agent.mode,
+                memory: memory_block.as_deref(),
+                user_profile: user_block.as_deref(),
+            })
             .text
         };
 

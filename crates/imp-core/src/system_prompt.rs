@@ -52,66 +52,67 @@ impl fmt::Display for AssembledPrompt {
     }
 }
 
-/// Assemble the system prompt from five layers.
+/// All inputs needed to assemble a system prompt.
+pub struct AssembleParams<'a> {
+    pub tools: &'a ToolRegistry,
+    pub agents_md: &'a [AgentsMd],
+    pub skills: &'a [Skill],
+    pub facts: &'a [Fact],
+    pub task: Option<&'a TaskContext>,
+    pub role: Option<&'a Role>,
+    pub mode: &'a AgentMode,
+    pub memory: Option<&'a str>,
+    pub user_profile: Option<&'a str>,
+}
+
+/// Assemble the system prompt from six layers.
 ///
 /// - Layer 1: Identity + tool descriptions (+ role instructions if any)
 /// - Layer 2: Project context from AGENTS.md files
 /// - Layer 3: Skills index
 /// - Layer 4: Mana facts (skipped if empty)
 /// - Layer 5: Task context (only in headless/task mode)
-pub fn assemble(
-    tools: &ToolRegistry,
-    agents_md: &[AgentsMd],
-    skills: &[Skill],
-    facts: &[Fact],
-    task: Option<&TaskContext>,
-    role: Option<&Role>,
-) -> AssembledPrompt {
-    assemble_with_mode(
-        tools,
-        agents_md,
-        skills,
-        facts,
-        task,
-        role,
-        &AgentMode::Full,
-    )
+/// - Layer 6: Agent memory (if present)
+pub fn assemble(params: &AssembleParams<'_>) -> AssembledPrompt {
+    assemble_inner(params)
 }
 
-/// Same as `assemble` but also filters tool descriptions and appends mode
-/// instructions based on the active `AgentMode`.
-pub fn assemble_with_mode(
-    tools: &ToolRegistry,
-    agents_md: &[AgentsMd],
-    skills: &[Skill],
-    facts: &[Fact],
-    task: Option<&TaskContext>,
-    role: Option<&Role>,
-    mode: &AgentMode,
-) -> AssembledPrompt {
+fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
     let mut parts = Vec::new();
 
     // Layer 1: Identity + tool descriptions
-    parts.push(identity_layer(tools, role, mode));
+    parts.push(identity_layer(p.tools, p.role, p.mode));
 
     // Layer 2: Project context from AGENTS.md
-    if !agents_md.is_empty() {
-        parts.push(agents_md_layer(agents_md));
+    if !p.agents_md.is_empty() {
+        parts.push(agents_md_layer(p.agents_md));
     }
 
     // Layer 3: Skills index
-    if !skills.is_empty() {
-        parts.push(skills_layer(skills));
+    if !p.skills.is_empty() {
+        parts.push(skills_layer(p.skills));
     }
 
     // Layer 4: Mana facts
-    if !facts.is_empty() {
-        parts.push(facts_layer(facts));
+    if !p.facts.is_empty() {
+        parts.push(facts_layer(p.facts));
     }
 
     // Layer 5: Task context (headless mode only)
-    if let Some(task) = task {
+    if let Some(task) = p.task {
         parts.push(task_layer(task));
+    }
+
+    // Layer 6: Agent memory
+    if let Some(mem) = p.memory {
+        if !mem.is_empty() {
+            parts.push(mem.to_string());
+        }
+    }
+    if let Some(user) = p.user_profile {
+        if !user.is_empty() {
+            parts.push(user.to_string());
+        }
     }
 
     let text = parts.join("\n\n");
@@ -328,12 +329,34 @@ mod tests {
         }
     }
 
+    /// Test helper: shorthand for assemble() with no memory/user_profile.
+    fn test_assemble(
+        tools: &ToolRegistry,
+        agents_md: &[AgentsMd],
+        skills: &[Skill],
+        facts: &[Fact],
+        task: Option<&TaskContext>,
+        role: Option<&Role>,
+    ) -> AssembledPrompt {
+        assemble(&AssembleParams {
+            tools,
+            agents_md,
+            skills,
+            facts,
+            task,
+            role,
+            mode: &AgentMode::Full,
+            memory: None,
+            user_profile: None,
+        })
+    }
+
     // -- Layer 1: Identity --
 
     #[test]
     fn system_prompt_identity_includes_all_tools() {
         let reg = make_registry();
-        let result = assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None);
         assert!(result.text.contains("You are imp, a coding agent."));
         assert!(result.text.contains("- read: Read file contents"));
         assert!(result.text.contains("- write: Write content to a file"));
@@ -348,7 +371,7 @@ mod tests {
     #[test]
     fn system_prompt_identity_only_when_all_layers_empty() {
         let reg = make_registry();
-        let result = assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None);
         // Should have identity but no section headers for missing layers
         assert!(result.text.contains("You are imp"));
         assert!(!result.text.contains("# Project Context"));
@@ -363,7 +386,7 @@ mod tests {
     fn system_prompt_agents_md_included_verbatim() {
         let reg = make_registry();
         let agents = vec![make_agents_md("# Rules\n\nUse snake_case everywhere.")];
-        let result = assemble(&reg, &agents, &[], &[], None, None);
+        let result = test_assemble(&reg, &agents, &[], &[], None, None);
         assert!(result.text.contains("# Project Context"));
         assert!(result
             .text
@@ -377,7 +400,7 @@ mod tests {
             make_agents_md("Global rules here."),
             make_agents_md("Project rules here."),
         ];
-        let result = assemble(&reg, &agents, &[], &[], None, None);
+        let result = test_assemble(&reg, &agents, &[], &[], None, None);
         assert!(result.text.contains("Global rules here."));
         assert!(result.text.contains("Project rules here."));
     }
@@ -385,7 +408,7 @@ mod tests {
     #[test]
     fn system_prompt_empty_agents_md_skipped() {
         let reg = make_registry();
-        let result = assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None);
         assert!(!result.text.contains("# Project Context"));
     }
 
@@ -406,7 +429,7 @@ mod tests {
                 "/home/.imp/skills/testing/SKILL.md",
             ),
         ];
-        let result = assemble(&reg, &[], &skills, &[], None, None);
+        let result = test_assemble(&reg, &[], &skills, &[], None, None);
         assert!(result
             .text
             .contains("Available skills (use read to load when relevant):"));
@@ -421,7 +444,7 @@ mod tests {
     #[test]
     fn system_prompt_empty_skills_skipped() {
         let reg = make_registry();
-        let result = assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None);
         assert!(!result.text.contains("Available skills"));
     }
 
@@ -440,7 +463,7 @@ mod tests {
                 verified_ago: "1d ago".into(),
             },
         ];
-        let result = assemble(&reg, &[], &[], &facts, None, None);
+        let result = test_assemble(&reg, &[], &[], &facts, None, None);
         assert!(result.text.contains("Project facts:"));
         assert!(result
             .text
@@ -453,7 +476,7 @@ mod tests {
     #[test]
     fn system_prompt_empty_facts_skipped() {
         let reg = make_registry();
-        let result = assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None);
         assert!(!result.text.contains("Project facts"));
     }
 
@@ -469,7 +492,7 @@ mod tests {
             attempts: vec![],
             dependencies: vec![],
         };
-        let result = assemble(&reg, &[], &[], &[], Some(&task), None);
+        let result = test_assemble(&reg, &[], &[], &[], Some(&task), None);
         assert!(result.text.contains("## Task"));
         assert!(result.text.contains("Title: Fix the failing auth test"));
         assert!(result
@@ -499,7 +522,7 @@ mod tests {
             ],
             dependencies: vec![],
         };
-        let result = assemble(&reg, &[], &[], &[], Some(&task), None);
+        let result = test_assemble(&reg, &[], &[], &[], Some(&task), None);
         assert!(result.text.contains("## Previous attempts"));
         assert!(result
             .text
@@ -523,7 +546,7 @@ mod tests {
                 detail: "defined in src/schema.rs".into(),
             }],
         };
-        let result = assemble(&reg, &[], &[], &[], Some(&task), None);
+        let result = test_assemble(&reg, &[], &[], &[], Some(&task), None);
         assert!(result.text.contains("## Dependencies"));
         assert!(result
             .text
@@ -533,7 +556,7 @@ mod tests {
     #[test]
     fn system_prompt_no_task_skips_layer5() {
         let reg = make_registry();
-        let result = assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None);
         assert!(!result.text.contains("## Task"));
     }
 
@@ -547,7 +570,7 @@ mod tests {
             attempts: vec![],
             dependencies: vec![],
         };
-        let result = assemble(&reg, &[], &[], &[], Some(&task), None);
+        let result = test_assemble(&reg, &[], &[], &[], Some(&task), None);
         assert!(result.text.contains("Title: Do something"));
         assert!(!result.text.contains("Verify:"));
     }
@@ -558,7 +581,7 @@ mod tests {
     fn system_prompt_readonly_role_filters_tools() {
         let reg = make_registry();
         let role = make_readonly_role();
-        let result = assemble(&reg, &[], &[], &[], None, Some(&role));
+        let result = test_assemble(&reg, &[], &[], &[], None, Some(&role));
         // Should include readonly tools
         assert!(result.text.contains("- read:"));
         assert!(result.text.contains("- grep:"));
@@ -571,7 +594,7 @@ mod tests {
     fn system_prompt_role_instructions_appended() {
         let reg = make_registry();
         let role = make_readonly_role();
-        let result = assemble(&reg, &[], &[], &[], None, Some(&role));
+        let result = test_assemble(&reg, &[], &[], &[], None, Some(&role));
         assert!(result
             .text
             .contains("Review code carefully. Do not modify files."));
@@ -581,7 +604,7 @@ mod tests {
     fn system_prompt_worker_role_includes_all_tools() {
         let reg = make_registry();
         let role = make_worker_role();
-        let result = assemble(&reg, &[], &[], &[], None, Some(&role));
+        let result = test_assemble(&reg, &[], &[], &[], None, Some(&role));
         assert!(result.text.contains("- read:"));
         assert!(result.text.contains("- write:"));
         assert!(result.text.contains("- edit:"));
@@ -592,7 +615,7 @@ mod tests {
     fn system_prompt_no_role_instructions_when_none() {
         let reg = make_registry();
         let role = make_worker_role();
-        let result = assemble(&reg, &[], &[], &[], None, Some(&role));
+        let result = test_assemble(&reg, &[], &[], &[], None, Some(&role));
         // Worker has no instructions, so the prompt shouldn't have extra instruction text
         let lines: Vec<&str> = result.text.lines().collect();
         let after_tools = lines.iter().position(|l| l.starts_with("- grep:")).unwrap();
@@ -608,7 +631,7 @@ mod tests {
     #[test]
     fn system_prompt_tracks_estimated_tokens() {
         let reg = make_registry();
-        let result = assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None);
         assert!(result.estimated_tokens > 0);
         // Rough check: the text is at least ~100 chars, so >= 25 tokens
         assert!(result.estimated_tokens >= 10);
@@ -618,7 +641,7 @@ mod tests {
     fn system_prompt_more_layers_means_more_tokens() {
         let reg = make_registry();
 
-        let minimal = assemble(&reg, &[], &[], &[], None, None);
+        let minimal = test_assemble(&reg, &[], &[], &[], None, None);
 
         let agents = vec![make_agents_md(
             "Lots of project context here with many words.",
@@ -633,7 +656,7 @@ mod tests {
             verified_ago: "1h ago".into(),
         }];
 
-        let full = assemble(&reg, &agents, &skills, &facts, None, None);
+        let full = test_assemble(&reg, &agents, &skills, &facts, None, None);
 
         assert!(
             full.estimated_tokens > minimal.estimated_tokens,
@@ -674,7 +697,7 @@ mod tests {
             }],
         };
 
-        let result = assemble(&reg, &agents, &skills, &facts, Some(&task), None);
+        let result = test_assemble(&reg, &agents, &skills, &facts, Some(&task), None);
 
         // All layers present in order
         let identity_pos = result.text.find("You are imp").unwrap();
@@ -692,8 +715,108 @@ mod tests {
     #[test]
     fn system_prompt_display_impl() {
         let reg = make_registry();
-        let result = assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None);
         let displayed = format!("{result}");
         assert_eq!(displayed, result.text);
+    }
+
+    // -- Layer 6: Agent Memory --
+
+    #[test]
+    fn system_prompt_memory_included() {
+        let reg = make_registry();
+        let mem = "══════════════════\nMEMORY [50% — 100/200]\n══════════════════\nUser runs macOS";
+        let result = assemble(&AssembleParams {
+            tools: &reg,
+            agents_md: &[],
+            skills: &[],
+            facts: &[],
+            task: None,
+            role: None,
+            mode: &AgentMode::Full,
+            memory: Some(mem),
+            user_profile: None,
+        });
+        assert!(result.text.contains("MEMORY"));
+        assert!(result.text.contains("User runs macOS"));
+    }
+
+    #[test]
+    fn system_prompt_user_profile_included() {
+        let reg = make_registry();
+        let user =
+            "══════════════════\nUSER PROFILE [30% — 42/140]\n══════════════════\nPrefers concise";
+        let result = assemble(&AssembleParams {
+            tools: &reg,
+            agents_md: &[],
+            skills: &[],
+            facts: &[],
+            task: None,
+            role: None,
+            mode: &AgentMode::Full,
+            memory: None,
+            user_profile: Some(user),
+        });
+        assert!(result.text.contains("USER PROFILE"));
+        assert!(result.text.contains("Prefers concise"));
+    }
+
+    #[test]
+    fn system_prompt_empty_memory_skipped() {
+        let reg = make_registry();
+        let result = assemble(&AssembleParams {
+            tools: &reg,
+            agents_md: &[],
+            skills: &[],
+            facts: &[],
+            task: None,
+            role: None,
+            mode: &AgentMode::Full,
+            memory: Some(""),
+            user_profile: Some(""),
+        });
+        assert!(!result.text.contains("MEMORY"));
+        assert!(!result.text.contains("USER PROFILE"));
+    }
+
+    #[test]
+    fn system_prompt_memory_after_all_other_layers() {
+        let reg = make_registry();
+        let agents = vec![make_agents_md("Project context.")];
+        let skills = vec![make_skill("rust", "Rust", "/skills/rust/SKILL.md")];
+        let facts = vec![Fact {
+            text: "Uses SQLite".into(),
+            verified_ago: "1h".into(),
+        }];
+        let task = TaskContext {
+            title: "Fix bug".into(),
+            description: "Broken".into(),
+            verify: None,
+            attempts: vec![],
+            dependencies: vec![],
+        };
+        let mem = "══════\nMEMORY [50%]\n══════\nSome fact";
+        let result = assemble(&AssembleParams {
+            tools: &reg,
+            agents_md: &agents,
+            skills: &skills,
+            facts: &facts,
+            task: Some(&task),
+            role: None,
+            mode: &AgentMode::Full,
+            memory: Some(mem),
+            user_profile: None,
+        });
+
+        let identity_pos = result.text.find("You are imp").unwrap();
+        let context_pos = result.text.find("# Project Context").unwrap();
+        let facts_pos = result.text.find("Project facts").unwrap();
+        let task_pos = result.text.find("## Task").unwrap();
+        let memory_pos = result.text.find("MEMORY").unwrap();
+
+        assert!(identity_pos < context_pos);
+        assert!(context_pos < facts_pos);
+        assert!(facts_pos < task_pos);
+        assert!(task_pos < memory_pos, "memory should come after task");
     }
 }

@@ -1,4 +1,6 @@
 use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde_json::json;

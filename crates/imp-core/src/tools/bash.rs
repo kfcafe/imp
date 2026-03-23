@@ -223,7 +223,11 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
         }
     }
 
-    let status = child.wait().await.ok();
+    // Wait for child with a timeout — don't hang if process won't exit
+    let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+        .await
+        .ok()
+        .and_then(|r| r.ok());
     let exit_code = status.and_then(|s| s.code()).unwrap_or(-1);
 
     // Truncate from the tail (end matters more for command output).
