@@ -6,6 +6,7 @@ pub mod context;
 pub mod error;
 pub mod hooks;
 pub mod resources;
+pub mod retry;
 pub mod roles;
 pub mod session;
 pub mod system_prompt;

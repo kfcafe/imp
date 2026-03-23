@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use futures::{future::join_all, StreamExt};
+use futures::future::join_all;
 use imp_llm::{
     AssistantMessage, ContentBlock, Context, Cost, Message, Model, RequestOptions, StopReason,
     StreamEvent, ThinkingLevel, Usage,
@@ -260,19 +260,47 @@ impl Agent {
 
             self.hooks.fire(&HookEvent::BeforeLlmCall).await;
 
-            // Stream the LLM response
-            let mut stream =
-                self.model
-                    .provider
-                    .stream(&self.model, context, options, &self.api_key);
+            // Stream the LLM response with retry on transient errors.
+            let model_ref = &self.model;
+            let api_key_ref = &self.api_key;
+            let retry_result: imp_llm::Result<Vec<imp_llm::Result<StreamEvent>>> =
+                crate::retry::run_with_retry(
+                    || {
+                        model_ref.provider.stream(
+                            model_ref,
+                            context.clone(),
+                            options.clone(),
+                            api_key_ref,
+                        )
+                    },
+                    &self.retry_policy,
+                )
+                .await;
+
+            let stream_events = match retry_result {
+                Ok(events) => events,
+                Err(e) => {
+                    self.emit(AgentEvent::Error {
+                        error: e.to_string(),
+                    })
+                    .await;
+                    let cost = total_usage.cost(&self.model.meta.pricing);
+                    self.emit(AgentEvent::AgentEnd {
+                        usage: total_usage,
+                        cost,
+                    })
+                    .await;
+                    return Err(e.into());
+                }
+            };
 
             let mut text_parts: Vec<String> = Vec::new();
             let mut thinking_parts: Vec<String> = Vec::new();
             let mut tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
             let mut assistant_msg: Option<AssistantMessage> = None;
 
-            while let Some(event_result) = stream.next().await {
-                // Check for cancel during streaming
+            for event_result in stream_events {
+                // Check for cancel during event processing
                 if let Ok(AgentCommand::Cancel) = self.command_rx.try_recv() {
                     cancelled = true;
                     break;
@@ -338,6 +366,8 @@ impl Agent {
                         }
                     }
                     Err(e) => {
+                        // Errors here shouldn't happen (run_with_retry handles them)
+                        // but propagate just in case.
                         self.emit(AgentEvent::Error {
                             error: e.to_string(),
                         })

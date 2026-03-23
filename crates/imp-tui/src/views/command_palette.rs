@@ -69,6 +69,10 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
             description: "Show keyboard shortcuts".into(),
         },
         SlashCommand {
+            name: "login".into(),
+            description: "OAuth login (Anthropic)".into(),
+        },
+        SlashCommand {
             name: "quit".into(),
             description: "Quit".into(),
         },

@@ -811,6 +811,10 @@ impl App {
             "settings" => {
                 self.open_settings();
             }
+            "login" => {
+                let provider = cmd.split_whitespace().nth(1).unwrap_or("anthropic");
+                self.start_login(provider);
+            }
             _ => {
                 self.messages.push(DisplayMessage {
                     role: MessageRole::Error,
@@ -823,6 +827,58 @@ impl App {
             }
         }
         self.editor.clear();
+    }
+
+    fn start_login(&mut self, provider: &str) {
+        if provider != "anthropic" {
+            self.messages.push(DisplayMessage {
+                role: MessageRole::Error,
+                content: format!("Login for '{provider}' not supported. Set API key via env var."),
+                thinking: None,
+                tool_calls: Vec::new(),
+                is_streaming: false,
+                timestamp: imp_llm::now(),
+            });
+            return;
+        }
+
+        self.messages.push(DisplayMessage {
+            role: MessageRole::System,
+            content: "Opening browser for Anthropic login...".into(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            is_streaming: false,
+            timestamp: imp_llm::now(),
+        });
+
+        // Run OAuth flow in background
+        let auth_path = Config::user_config_dir().join("auth.json");
+        tokio::spawn(async move {
+            let oauth = imp_llm::oauth::anthropic::AnthropicOAuth::new();
+            match oauth
+                .login(
+                    |url| {
+                        let _ = open::that(url);
+                    },
+                    || async { None }, // No manual fallback in TUI — browser only
+                )
+                .await
+            {
+                Ok(credential) => {
+                    let mut store = AuthStore::load(&auth_path)
+                        .unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+                    let _ = store.store(
+                        "anthropic",
+                        imp_llm::auth::StoredCredential::OAuth(credential),
+                    );
+                    // Note: can't push messages from here without a channel.
+                    // The user will see it worked next time they send a message.
+                }
+                Err(e) => {
+                    eprintln!("OAuth login failed: {e}");
+                }
+            }
+        });
     }
 
     fn open_settings(&mut self) {

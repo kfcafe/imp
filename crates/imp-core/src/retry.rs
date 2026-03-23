@@ -57,7 +57,13 @@ pub fn backoff_delay(
     let capped_ms = exp_ms.min(policy.max_delay.as_millis() as u64);
 
     // Jitter: add up to 50% of the capped delay to spread retries.
-    let jitter_ms = rand::random::<u64>() % (capped_ms / 2 + 1);
+    // Use timestamp + attempt for cheap pseudo-randomness without a rand dependency.
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+        ^ (attempt as u64).wrapping_mul(0x517cc1b727220a95);
+    let jitter_ms = seed % (capped_ms / 2 + 1);
 
     Some(Duration::from_millis(capped_ms + jitter_ms))
 }
@@ -81,7 +87,7 @@ pub async fn run_with_retry<F, S>(
 ) -> imp_llm::Result<Vec<imp_llm::Result<StreamEvent>>>
 where
     F: FnMut() -> S,
-    S: futures_core::Stream<Item = imp_llm::Result<StreamEvent>>,
+    S: futures_core::Stream<Item = imp_llm::Result<StreamEvent>> + Unpin,
 {
     let mut attempt = 0u32;
     loop {
@@ -209,7 +215,7 @@ mod tests {
     #[test]
     fn backoff_capped_at_max_delay() {
         let policy = default_policy(); // max 100ms
-        // Attempt 10 would be base(10ms) * 2^10 = 10_240ms → capped at 100ms
+                                       // Attempt 10 would be base(10ms) * 2^10 = 10_240ms → capped at 100ms
         let delay = backoff_delay(10, &policy, None).unwrap();
         assert!(delay <= Duration::from_millis(200)); // cap + up to 50% jitter of cap
     }
@@ -265,7 +271,9 @@ mod tests {
                         Ok(StreamEvent::MessageStart {
                             model: "test".into(),
                         }),
-                        Ok(StreamEvent::TextDelta { text: "hello".into() }),
+                        Ok(StreamEvent::TextDelta {
+                            text: "hello".into(),
+                        }),
                     ];
                     futures::stream::iter(events)
                 }
@@ -277,14 +285,8 @@ mod tests {
 
         assert_eq!(*call_count.lock().unwrap(), 3);
         assert_eq!(result.len(), 2); // MessageStart + TextDelta from successful attempt
-        assert!(matches!(
-            result[0],
-            Ok(StreamEvent::MessageStart { .. })
-        ));
-        assert!(matches!(
-            result[1],
-            Ok(StreamEvent::TextDelta { .. })
-        ));
+        assert!(matches!(result[0], Ok(StreamEvent::MessageStart { .. })));
+        assert!(matches!(result[1], Ok(StreamEvent::TextDelta { .. })));
     }
 
     #[tokio::test]
