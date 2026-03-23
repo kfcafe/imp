@@ -48,12 +48,16 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
         .unwrap_or("")
         .to_string();
 
-    // Reject non-HTML content types
-    if !content_type.is_empty()
-        && !content_type.contains("text/html")
-        && !content_type.contains("application/xhtml")
-        && !content_type.contains("text/plain")
-    {
+    // Reject binary content types (images, video, audio, etc.)
+    let is_text = content_type.is_empty()
+        || content_type.contains("text/")
+        || content_type.contains("application/json")
+        || content_type.contains("application/xml")
+        || content_type.contains("application/xhtml")
+        || content_type.contains("application/javascript")
+        || content_type.contains("+xml")
+        || content_type.contains("+json");
+    if !is_text {
         return Err(ReadError::NotHtml(content_type));
     }
 

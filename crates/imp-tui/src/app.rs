@@ -36,6 +36,7 @@ use crate::views::settings::{SettingsState, SettingsView};
 use crate::views::status::{StatusBar, StatusInfo};
 use crate::views::tools::DisplayToolCall;
 use crate::views::tree::{flatten_tree, TreeView, TreeViewState};
+use crate::views::welcome::{WelcomeState, WelcomeStep, WelcomeView};
 
 type Tui = Terminal<CrosstermBackend<io::Stdout>>;
 
@@ -49,6 +50,7 @@ pub enum UiMode {
     TreeView(TreeViewState),
     Settings(SettingsState),
     SessionPicker(SessionPickerState),
+    Welcome(WelcomeState),
 }
 
 /// A queued message (steering or follow-up).
@@ -155,6 +157,14 @@ impl App {
 
     /// Run the TUI event loop. Sets up terminal, runs the loop, restores terminal.
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Check for first-run welcome flow
+        let config_dir = Config::user_config_dir();
+        let auth_path = config_dir.join("auth.json");
+        if crate::views::welcome::needs_welcome(&config_dir, &auth_path) {
+            let all_models = self.model_registry.list().to_vec();
+            self.mode = UiMode::Welcome(WelcomeState::new(&all_models));
+        }
+
         // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -336,6 +346,11 @@ impl App {
                 let view = SessionPickerView::new(state, &self.theme);
                 frame.render_widget(view, overlay_area);
             }
+            UiMode::Welcome(state) => {
+                let overlay_area = centered_rect(70, 80, area);
+                let view = WelcomeView::new(state, &self.theme);
+                frame.render_widget(view, overlay_area);
+            }
         }
 
         // Set cursor position (only in normal mode)
@@ -402,6 +417,7 @@ impl App {
             UiMode::TreeView(_) => self.handle_tree_key(key),
             UiMode::Settings(_) => self.handle_settings_key(key),
             UiMode::SessionPicker(_) => self.handle_session_picker_key(key),
+            UiMode::Welcome(_) => self.handle_welcome_key(key),
         }
 
         Ok(())
@@ -1148,6 +1164,173 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn handle_welcome_key(&mut self, key: KeyEvent) {
+        let step = match &self.mode {
+            UiMode::Welcome(s) => s.current_step(),
+            _ => return,
+        };
+
+        match step {
+            WelcomeStep::Welcome => match key.code {
+                KeyCode::Enter => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.advance();
+                    }
+                }
+                KeyCode::Esc => {
+                    self.mode = UiMode::Normal;
+                }
+                _ => {}
+            },
+            WelcomeStep::ProviderAuth => match key.code {
+                KeyCode::Up => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.provider_up();
+                        let all_models = self.model_registry.list().to_vec();
+                        state.update_models(&all_models);
+                    }
+                }
+                KeyCode::Down => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.provider_down();
+                        let all_models = self.model_registry.list().to_vec();
+                        state.update_models(&all_models);
+                    }
+                }
+                KeyCode::Enter => {
+                    let can_advance = if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.check_auth_resolved()
+                    } else {
+                        false
+                    };
+                    if can_advance {
+                        if let UiMode::Welcome(ref mut state) = self.mode {
+                            state.advance();
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.go_back();
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.pop_key_char();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.push_key_char(c);
+                    }
+                }
+                _ => {}
+            },
+            WelcomeStep::ModelThinking => match key.code {
+                KeyCode::Up => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.model_up();
+                    }
+                }
+                KeyCode::Down => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.model_down();
+                    }
+                }
+                KeyCode::Right => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.cycle_thinking();
+                    }
+                }
+                KeyCode::Left => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.cycle_thinking_back();
+                    }
+                }
+                KeyCode::Enter => {
+                    self.finish_welcome();
+                }
+                KeyCode::Esc => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.go_back();
+                    }
+                }
+                _ => {}
+            },
+            WelcomeStep::Done => match key.code {
+                KeyCode::Enter | KeyCode::Esc => {
+                    self.mode = UiMode::Normal;
+                }
+                _ => {}
+            },
+        }
+    }
+
+    /// Persist welcome flow choices to config and auth, then advance to Done step.
+    fn finish_welcome(&mut self) {
+        let (model_id, thinking, provider_id, resolved_key) = match &self.mode {
+            UiMode::Welcome(state) => {
+                let model_id = state
+                    .selected_model()
+                    .map(|m| m.id.clone())
+                    .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+                let thinking = state.thinking_level;
+                let provider_id = state.selected_provider_id();
+                let resolved_key = state.resolved_key.clone();
+                (model_id, thinking, provider_id, resolved_key)
+            }
+            _ => return,
+        };
+
+        // Update in-session config
+        self.config.model = Some(model_id.clone());
+        self.config.thinking = Some(thinking);
+        self.model_name = model_id;
+        self.thinking_level = thinking;
+
+        if let Some(meta) = self.model_registry.find_by_alias(&self.model_name) {
+            self.context_window = meta.context_window;
+        }
+
+        // Save config.toml
+        let config_path = Config::user_config_path();
+        if let Err(e) = self.config.save(&config_path) {
+            self.messages.push(DisplayMessage {
+                role: MessageRole::Error,
+                content: format!("Failed to save config: {e}"),
+                thinking: None,
+                tool_calls: Vec::new(),
+                is_streaming: false,
+                timestamp: imp_llm::now(),
+            });
+        }
+
+        // Save API key if one was manually entered
+        if let Some(key) = resolved_key {
+            let auth_path = Config::user_config_dir().join("auth.json");
+            let mut auth_store =
+                AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+            if let Err(e) = auth_store.store(
+                provider_id.provider_id(),
+                imp_llm::auth::StoredCredential::ApiKey { key },
+            ) {
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::Error,
+                    content: format!("Failed to save API key: {e}"),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+            }
+        }
+
+        // Advance to Done screen
+        if let UiMode::Welcome(ref mut state) = self.mode {
+            state.advance();
         }
     }
 

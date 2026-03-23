@@ -8,3 +8,4 @@ pub mod settings;
 pub mod status;
 pub mod tools;
 pub mod tree;
+pub mod welcome;
