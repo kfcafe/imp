@@ -2,6 +2,7 @@
 name = "imp-lua"
 version.workspace = true
 edition.workspace = true
+license = "Apache-2.0"
 description = "Lua extension runtime (mlua bridge)"
 
 [dependencies]
