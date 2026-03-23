@@ -59,6 +59,67 @@ pub struct ToolContext {
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
     pub update_tx: tokio::sync::mpsc::Sender<ToolUpdate>,
     pub ui: Arc<dyn UserInterface>,
+    pub file_cache: Arc<FileCache>,
+}
+
+/// In-session file content cache. Avoids re-reading files that haven't changed.
+pub struct FileCache {
+    entries: std::sync::Mutex<std::collections::HashMap<PathBuf, FileCacheEntry>>,
+}
+
+struct FileCacheEntry {
+    mtime: std::time::SystemTime,
+    content: String,
+}
+
+impl Default for FileCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FileCache {
+    pub fn new() -> Self {
+        Self {
+            entries: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Read a file, returning cached content if mtime hasn't changed.
+    pub fn read(&self, path: &Path) -> std::io::Result<String> {
+        let metadata = std::fs::metadata(path)?;
+        let mtime = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+
+        {
+            let cache = self.entries.lock().unwrap();
+            if let Some(entry) = cache.get(path) {
+                if entry.mtime == mtime {
+                    return Ok(entry.content.clone());
+                }
+            }
+        }
+
+        let content = std::fs::read_to_string(path)?;
+
+        {
+            let mut cache = self.entries.lock().unwrap();
+            cache.insert(
+                path.to_path_buf(),
+                FileCacheEntry {
+                    mtime,
+                    content: content.clone(),
+                },
+            );
+        }
+
+        Ok(content)
+    }
+
+    /// Invalidate a cache entry (call after write/edit).
+    pub fn invalidate(&self, path: &Path) {
+        let mut cache = self.entries.lock().unwrap();
+        cache.remove(path);
+    }
 }
 
 impl ToolContext {

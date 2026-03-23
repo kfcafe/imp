@@ -173,6 +173,7 @@ mod tests {
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_tx: tx,
             ui: Arc::new(NullInterface),
+            file_cache: Arc::new(crate::tools::FileCache::new()),
         }
     }
 
@@ -218,6 +219,7 @@ mod tests {
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_tx: tx,
             ui: Arc::new(MockUi),
+            file_cache: Arc::new(crate::tools::FileCache::new()),
         };
 
         let tool = AskTool;

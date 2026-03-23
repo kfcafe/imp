@@ -325,6 +325,7 @@ mod tests {
             cancelled: Arc::new(AtomicBool::new(false)),
             update_tx: tx,
             ui: Arc::new(NullInterface),
+            file_cache: Arc::new(crate::tools::FileCache::new()),
         };
         (ctx, rx)
     }
