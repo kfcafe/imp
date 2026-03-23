@@ -675,6 +675,9 @@ impl App {
             .build()
             .map_err(|e: imp_core::error::Error| e.to_string())?;
 
+        // Remove ask tool — TUI doesn't wire UserInterface to the agent yet
+        agent.tools.retain(|name| name != "ask");
+
         let mut messages: Vec<Message> = self.session.get_messages().into_iter().cloned().collect();
         if matches!(
             messages.last(),
