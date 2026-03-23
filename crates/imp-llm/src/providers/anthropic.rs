@@ -137,6 +137,9 @@ enum SseEvent {
     Ping,
     #[serde(rename = "error")]
     Error { error: SseError },
+    /// Catch-all for unknown event types (forward compatibility).
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -485,14 +488,19 @@ fn convert_tool_def(tool: &ToolDefinition) -> ApiToolDef {
 /// Returns None for non-data lines (comments, empty lines, event-type only lines).
 fn parse_sse_event(data: &str) -> Result<Option<SseEvent>> {
     let trimmed = data.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed == "[DONE]" {
         return Ok(None);
     }
-    // SSE sends "event: <type>\ndata: <json>" — we only care about data lines
-    // But the data may contain the type field, so we parse the JSON directly.
-    serde_json::from_str(trimmed)
-        .map(Some)
-        .map_err(|e| Error::Stream(format!("Failed to parse SSE data: {e}: {trimmed}")))
+    // SSE sends "event: <type>\ndata: <json>" — we only care about data lines.
+    // Parse as JSON; unknown event types are caught by #[serde(other)].
+    match serde_json::from_str(trimmed) {
+        Ok(event) => Ok(Some(event)),
+        Err(e) => {
+            // Log but don't fail on unparseable events — forward compatibility
+            eprintln!("[imp-llm] SSE parse warning: {e} (data: {:.200})", trimmed);
+            Ok(None)
+        }
+    }
 }
 
 /// Process a sequence of SSE events into StreamEvents.
@@ -602,7 +610,7 @@ fn process_sse_event(event: SseEvent, state: &mut StreamState) -> Vec<StreamEven
             };
             out.push(StreamEvent::MessageEnd { message });
         }
-        SseEvent::Ping => {}
+        SseEvent::Ping | SseEvent::Unknown => {}
         SseEvent::Error { error } => {
             out.push(StreamEvent::Error {
                 error: error.message,
