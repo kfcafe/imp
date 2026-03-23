@@ -109,6 +109,40 @@ Enforcement at two levels: disallowed tools are removed from the registry (never
 
 Hooks can be shell commands (TOML config) or programmatic callbacks (Rust/Lua).
 
+### Lua extensions (imp-lua)
+
+Extensions are Lua scripts that register tools, hooks, and commands at runtime. Drop a `.lua` file in `~/.config/imp/lua/` or `<project>/.imp/lua/` and it loads automatically.
+
+| Feature | Details |
+|---------|---------|
+| Custom tools | `imp.register_tool({ name, execute, params, ... })` — Lua functions that appear as native tools to the LLM |
+| Hook handlers | `imp.on("before_tool_call", fn)` — intercept any hook event from Lua |
+| Slash commands | `imp.register_command("name", { handler })` — add TUI slash commands |
+| Shell execution | `imp.exec("cmd")` — run shell commands from Lua, get stdout/stderr/exit code |
+| Inter-extension events | `imp.events.on("name", fn)` / `imp.events.emit("name", data)` — extensions communicate with each other |
+| Hot reload | `reload()` drops all state and re-discovers/re-loads extensions |
+| Error isolation | One extension crashing doesn't affect others — errors are reported, not fatal |
+| JSON bridge | Automatic Lua table ↔ JSON conversion for tool params and results |
+
+Discovery order:
+1. `~/.config/imp/lua/*.lua` — user extensions
+2. `~/.config/imp/lua/*/init.lua` — user extension directories
+3. `<project>/.imp/lua/*.lua` — project-local extensions
+
+```lua
+-- ~/.config/imp/lua/timestamp.lua
+imp.register_tool({
+    name = "timestamp",
+    description = "Returns the current Unix timestamp",
+    readonly = true,
+    params = {},
+    execute = function(call_id, params, ctx)
+        local result = imp.exec("date +%s")
+        return { content = result.stdout }
+    end
+})
+```
+
 ### Shell backends
 
 | Backend | How it works |
