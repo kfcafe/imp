@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use imp_llm::provider::ToolDefinition;
 use imp_llm::{ContentBlock, ToolResultMessage};
 
+use crate::config::AgentMode;
 use crate::error::Result;
 use crate::ui::UserInterface;
 
@@ -109,6 +110,8 @@ pub struct ToolContext {
     pub file_cache: Arc<FileCache>,
     /// Tracks file reads for staleness detection and unread-edit warnings.
     pub file_tracker: Arc<std::sync::Mutex<FileTracker>>,
+    /// Active agent mode — determines which actions are permitted.
+    pub mode: AgentMode,
 }
 
 /// In-session file content cache. Avoids re-reading files that haven't changed.
