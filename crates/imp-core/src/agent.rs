@@ -92,6 +92,8 @@ pub struct Agent {
     pub mode: AgentMode,
     /// In-session file content cache, shared across tool calls.
     pub file_cache: Arc<crate::tools::FileCache>,
+    /// Cache options for LLM requests.
+    pub cache_options: imp_llm::CacheOptions,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_rx: mpsc::Receiver<AgentCommand>,
@@ -125,6 +127,11 @@ impl Agent {
             original_prompt: None,
             mode: AgentMode::Full,
             file_cache: Arc::new(crate::tools::FileCache::new()),
+            cache_options: imp_llm::CacheOptions {
+                cache_system_prompt: true,
+                cache_tools: true,
+                cache_recent_turns: 2,
+            },
 
             event_tx,
             command_rx,
@@ -255,7 +262,7 @@ impl Agent {
                 temperature: None,
                 system_prompt: self.system_prompt.clone(),
                 tools: self.tools.definitions(),
-                cache_options: Default::default(),
+                cache_options: self.cache_options.clone(),
             };
 
             self.hooks.fire(&HookEvent::BeforeLlmCall).await;
