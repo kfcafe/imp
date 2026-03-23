@@ -78,6 +78,22 @@ impl Tool for EditTool {
             return Ok(ToolOutput::error(msg));
         }
 
+        // Check for unread or stale file — warn but don't block.
+        let tracker_warning = {
+            let tracker = ctx.file_tracker.lock().ok();
+            match tracker {
+                Some(t) if !t.was_read(&path) => Some(format!(
+                    "Warning: editing {} without reading it first. Consider reading to verify current content.",
+                    path.display()
+                )),
+                Some(t) if t.is_stale(&path) => Some(format!(
+                    "Warning: {} was modified externally since last read. Re-read to verify current content.",
+                    path.display()
+                )),
+                _ => None,
+            }
+        };
+
         let raw_content = tokio::fs::read_to_string(&path).await?;
 
         // Normalize to LF for internal processing
@@ -107,6 +123,10 @@ impl Tool for EditTool {
             msg.push_str(
                 "\n(matched using fuzzy matching: trailing whitespace/unicode normalized)",
             );
+        }
+        if let Some(warning) = tracker_warning {
+            msg.push('\n');
+            msg.push_str(&warning);
         }
 
         Ok(ToolOutput {
@@ -169,6 +189,7 @@ mod tests {
             update_tx: tx,
             ui: Arc::new(crate::ui::NullInterface),
             file_cache: Arc::new(crate::tools::FileCache::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
         }
     }
 
@@ -393,6 +414,45 @@ mod tests {
             })
             .unwrap();
         assert!(text.contains("path"));
+    }
+
+    #[tokio::test]
+    async fn edit_warns_on_unread_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("unread.txt");
+        std::fs::write(&file, "original content here\n").unwrap();
+
+        // Use a fresh tracker (file never read)
+        let tool = EditTool;
+        let result = tool
+            .execute(
+                "c10",
+                json!({
+                    "path": "unread.txt",
+                    "oldText": "original content",
+                    "newText": "changed content"
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !result.is_error,
+            "edit should succeed even without prior read"
+        );
+        let text = result
+            .content
+            .iter()
+            .find_map(|b| match b {
+                imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            text.contains("Warning"),
+            "expected unread-file warning in output, got: {text}"
+        );
     }
 
     #[tokio::test]

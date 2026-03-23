@@ -109,6 +109,11 @@ impl Tool for ReadTool {
             }
         }
 
+        // Record that this file was read (for staleness and unread-edit detection).
+        if let Ok(mut tracker) = ctx.file_tracker.lock() {
+            tracker.record_read(&path);
+        }
+
         Ok(ToolOutput {
             content: vec![imp_llm::ContentBlock::Text { text: output }],
             details: json!({
@@ -269,6 +274,7 @@ mod tests {
             update_tx: tx,
             ui: Arc::new(crate::ui::NullInterface),
             file_cache: Arc::new(crate::tools::FileCache::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
         }
     }
 

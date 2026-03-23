@@ -54,6 +54,24 @@ impl Tool for WriteTool {
 
         let existed = path.exists();
 
+        // Check for unread or stale file — warn but don't block (only relevant for overwrites).
+        let tracker_warning = if existed {
+            let tracker = ctx.file_tracker.lock().ok();
+            match tracker {
+                Some(t) if !t.was_read(&path) => Some(format!(
+                    "Warning: editing {} without reading it first. Consider reading to verify current content.",
+                    path.display()
+                )),
+                Some(t) if t.is_stale(&path) => Some(format!(
+                    "Warning: {} was modified externally since last read. Re-read to verify current content.",
+                    path.display()
+                )),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         // Create parent directories
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -84,10 +102,14 @@ impl Tool for WriteTool {
         let action = if existed { "overwritten" } else { "created" };
         let display = path.display().to_string();
 
+        let mut text = format!("{display}: {bytes_written} bytes {action}");
+        if let Some(warning) = tracker_warning {
+            text.push('\n');
+            text.push_str(&warning);
+        }
+
         Ok(ToolOutput {
-            content: vec![imp_llm::ContentBlock::Text {
-                text: format!("{display}: {bytes_written} bytes {action}"),
-            }],
+            content: vec![imp_llm::ContentBlock::Text { text }],
             details: json!({
                 "path": display,
                 "bytes": bytes_written,
@@ -112,6 +134,7 @@ mod tests {
             update_tx: tx,
             ui: Arc::new(crate::ui::NullInterface),
             file_cache: Arc::new(crate::tools::FileCache::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
         }
     }
 

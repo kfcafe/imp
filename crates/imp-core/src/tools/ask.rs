@@ -174,6 +174,7 @@ mod tests {
             update_tx: tx,
             ui: Arc::new(NullInterface),
             file_cache: Arc::new(crate::tools::FileCache::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
         }
     }
 
@@ -220,6 +221,7 @@ mod tests {
             update_tx: tx,
             ui: Arc::new(MockUi),
             file_cache: Arc::new(crate::tools::FileCache::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
         };
 
         let tool = AskTool;

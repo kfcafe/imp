@@ -81,6 +81,22 @@ impl Tool for MultiEditTool {
             return Ok(ToolOutput::error(msg));
         }
 
+        // Check for unread or stale file — warn but don't block.
+        let tracker_warning = {
+            let tracker = ctx.file_tracker.lock().ok();
+            match tracker {
+                Some(t) if !t.was_read(&path) => Some(format!(
+                    "Warning: editing {} without reading it first. Consider reading to verify current content.",
+                    path.display()
+                )),
+                Some(t) if t.is_stale(&path) => Some(format!(
+                    "Warning: {} was modified externally since last read. Re-read to verify current content.",
+                    path.display()
+                )),
+                _ => None,
+            }
+        };
+
         let raw_content = tokio::fs::read_to_string(&path).await?;
         let original = raw_content.replace("\r\n", "\n");
         let has_crlf = raw_content.contains("\r\n");
@@ -134,6 +150,10 @@ impl Tool for MultiEditTool {
         if any_fuzzy {
             msg.push_str("\n(some edits used fuzzy matching)");
         }
+        if let Some(warning) = tracker_warning {
+            msg.push('\n');
+            msg.push_str(&warning);
+        }
 
         Ok(ToolOutput {
             content: vec![imp_llm::ContentBlock::Text { text: msg }],
@@ -161,6 +181,7 @@ mod tests {
             update_tx: tx,
             ui: Arc::new(crate::ui::NullInterface),
             file_cache: Arc::new(crate::tools::FileCache::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
         }
     }
 

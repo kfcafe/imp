@@ -53,6 +53,53 @@ pub trait Tool: Send + Sync {
     ) -> Result<ToolOutput>;
 }
 
+/// Tracks which files have been read in the current session and when.
+///
+/// Used to warn on edits to unread files and detect external modifications.
+pub struct FileTracker {
+    reads: HashMap<PathBuf, std::time::SystemTime>,
+}
+
+impl Default for FileTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FileTracker {
+    pub fn new() -> Self {
+        Self {
+            reads: HashMap::new(),
+        }
+    }
+
+    /// Record that a file was read at the current time.
+    pub fn record_read(&mut self, path: &Path) {
+        let mtime = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        self.reads.insert(path.to_path_buf(), mtime);
+    }
+
+    /// Returns true if the file has been read in this session.
+    pub fn was_read(&self, path: &Path) -> bool {
+        self.reads.contains_key(path)
+    }
+
+    /// Returns true if the file's mtime differs from when it was last read,
+    /// indicating an external modification. Returns false if the file was
+    /// never read or if the mtime cannot be determined.
+    pub fn is_stale(&self, path: &Path) -> bool {
+        let Some(&recorded_mtime) = self.reads.get(path) else {
+            return false;
+        };
+        let Ok(current_mtime) = std::fs::metadata(path).and_then(|m| m.modified()) else {
+            return false;
+        };
+        current_mtime != recorded_mtime
+    }
+}
+
 /// Context provided to tools during execution.
 pub struct ToolContext {
     pub cwd: PathBuf,
@@ -60,6 +107,8 @@ pub struct ToolContext {
     pub update_tx: tokio::sync::mpsc::Sender<ToolUpdate>,
     pub ui: Arc<dyn UserInterface>,
     pub file_cache: Arc<FileCache>,
+    /// Tracks file reads for staleness detection and unread-edit warnings.
+    pub file_tracker: Arc<std::sync::Mutex<FileTracker>>,
 }
 
 /// In-session file content cache. Avoids re-reading files that haven't changed.
@@ -119,6 +168,64 @@ impl FileCache {
     pub fn invalidate(&self, path: &Path) {
         let mut cache = self.entries.lock().unwrap();
         cache.remove(path);
+    }
+}
+
+/// Pre-edit file snapshots for rollback safety.
+///
+/// Before the first edit to any file in a session, stores the original content.
+/// If the file didn't exist before the edit, nothing is stored.
+/// Enables rollback to pre-session state if the agent makes bad edits.
+pub struct FileHistory {
+    originals: std::sync::Mutex<HashMap<PathBuf, String>>,
+}
+
+impl Default for FileHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FileHistory {
+    pub fn new() -> Self {
+        Self {
+            originals: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Store original content if not already stored for this path (first edit wins).
+    /// Does nothing if the file doesn't exist (new file creation).
+    pub fn snapshot_before_edit(&self, path: &Path) -> std::io::Result<()> {
+        let canonical = path.to_path_buf();
+
+        let mut originals = self.originals.lock().unwrap();
+        if originals.contains_key(&canonical) {
+            return Ok(()); // first edit wins
+        }
+        if canonical.exists() {
+            let content = std::fs::read_to_string(&canonical)?;
+            originals.insert(canonical, content);
+        }
+        Ok(())
+    }
+
+    /// Get the original content of a file (before any edits in this session).
+    pub fn original(&self, path: &Path) -> Option<String> {
+        self.originals.lock().unwrap().get(path).cloned()
+    }
+
+    /// Rollback a file to its original content.
+    pub fn rollback(&self, path: &Path) -> std::io::Result<()> {
+        let originals = self.originals.lock().unwrap();
+        if let Some(content) = originals.get(path) {
+            std::fs::write(path, content)?;
+        }
+        Ok(())
+    }
+
+    /// List all files with snapshots.
+    pub fn tracked_files(&self) -> Vec<PathBuf> {
+        self.originals.lock().unwrap().keys().cloned().collect()
     }
 }
 
@@ -793,5 +900,150 @@ mod tests {
             validate_tool_args(&schema, &args).is_ok(),
             "extra/unknown fields should be allowed"
         );
+    }
+
+    // ── FileTracker ───────────────────────────────────────────────────
+
+    #[test]
+    fn file_track_was_read_false_for_unread_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        let tracker = FileTracker::new();
+        assert!(!tracker.was_read(&file), "unread file should return false");
+    }
+
+    #[test]
+    fn file_track_was_read_true_after_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        let mut tracker = FileTracker::new();
+        tracker.record_read(&file);
+        assert!(
+            tracker.was_read(&file),
+            "file should be marked as read after recording"
+        );
+    }
+
+    #[test]
+    fn file_track_is_stale_false_for_unread_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        let tracker = FileTracker::new();
+        // Unread file is never stale (no baseline to compare against)
+        assert!(!tracker.is_stale(&file));
+    }
+
+    #[test]
+    fn file_track_is_stale_false_immediately_after_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        let mut tracker = FileTracker::new();
+        tracker.record_read(&file);
+        // No modification since read — should not be stale
+        assert!(!tracker.is_stale(&file));
+    }
+
+    #[test]
+    fn file_track_is_stale_detects_external_modification() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "original content").unwrap();
+
+        let mut tracker = FileTracker::new();
+        tracker.record_read(&file);
+
+        // Set the file's mtime to 2 seconds in the future to guarantee a detectable change.
+        // std::fs::File::set_modified is stable since Rust 1.75 and needs no extra crate.
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&file) {
+            let _ = f.set_modified(future);
+        }
+
+        assert!(
+            tracker.is_stale(&file),
+            "file with advanced mtime should be stale"
+        );
+    }
+
+    // ── FileHistory tests ─────────────────────────────────────
+
+    #[test]
+    fn file_history_snapshot_stores_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        let history = FileHistory::new();
+        history.snapshot_before_edit(&file).unwrap();
+
+        assert_eq!(history.original(&file).unwrap(), "fn main() {}");
+    }
+
+    #[test]
+    fn file_history_second_snapshot_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "original").unwrap();
+
+        let history = FileHistory::new();
+        history.snapshot_before_edit(&file).unwrap();
+
+        // Modify the file and snapshot again — should keep original
+        std::fs::write(&file, "modified").unwrap();
+        history.snapshot_before_edit(&file).unwrap();
+
+        assert_eq!(history.original(&file).unwrap(), "original");
+    }
+
+    #[test]
+    fn file_history_rollback_restores_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "original content").unwrap();
+
+        let history = FileHistory::new();
+        history.snapshot_before_edit(&file).unwrap();
+
+        std::fs::write(&file, "agent wrote this").unwrap();
+        history.rollback(&file).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "original content");
+    }
+
+    #[test]
+    fn file_history_skips_nonexistent_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("does_not_exist.rs");
+
+        let history = FileHistory::new();
+        history.snapshot_before_edit(&file).unwrap();
+
+        assert!(history.original(&file).is_none());
+    }
+
+    #[test]
+    fn file_history_tracked_files_lists_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.rs");
+        let f2 = dir.path().join("b.rs");
+        std::fs::write(&f1, "a").unwrap();
+        std::fs::write(&f2, "b").unwrap();
+
+        let history = FileHistory::new();
+        history.snapshot_before_edit(&f1).unwrap();
+        history.snapshot_before_edit(&f2).unwrap();
+
+        let tracked = history.tracked_files();
+        assert_eq!(tracked.len(), 2);
+        assert!(tracked.contains(&f1));
+        assert!(tracked.contains(&f2));
     }
 }

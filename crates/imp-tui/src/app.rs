@@ -707,8 +707,16 @@ impl App {
 
         // Check for slash commands
         if let Some(cmd_text) = text.strip_prefix('/') {
-            let cmd = cmd_text.trim();
-            self.execute_command(cmd);
+            let typed = cmd_text.trim();
+            // Resolve prefix: exact match first, then unique prefix match
+            let commands = builtin_commands();
+            let cmd = commands
+                .iter()
+                .find(|c| c.name == typed)
+                .or_else(|| commands.iter().find(|c| c.name.starts_with(typed)))
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| typed.to_string());
+            self.execute_command(&cmd);
             self.editor.push_history();
             self.editor.clear();
             return;
