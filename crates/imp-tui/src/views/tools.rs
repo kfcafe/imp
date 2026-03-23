@@ -20,11 +20,26 @@ pub struct DisplayToolCall {
 impl DisplayToolCall {
     /// Build a compact one-line summary for the tool call header.
     pub fn header_line(&self, theme: &Theme) -> Line<'static> {
-        let icon = if self.is_error { "✗" } else { "▶" };
+        self.header_line_animated(theme, 0)
+    }
+
+    /// Header with animated spinner for running tools.
+    pub fn header_line_animated(&self, theme: &Theme, tick: u64) -> Line<'static> {
+        let is_running = self.output.is_none() && !self.is_error;
+        let icon = if self.is_error {
+            "✗".to_string()
+        } else if is_running {
+            const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            SPINNER[(tick / 2) as usize % SPINNER.len()].to_string()
+        } else {
+            "✓".to_string()
+        };
         let icon_style = if self.is_error {
             theme.error_style()
+        } else if is_running {
+            Style::default().fg(theme.accent)
         } else {
-            Style::default().fg(theme.tool_name)
+            theme.success_style()
         };
 
         let mut spans = vec![

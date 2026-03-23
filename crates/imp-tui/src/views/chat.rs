@@ -260,13 +260,24 @@ impl Widget for ChatView<'_> {
                         }
                     }
 
-                    // Streaming indicator
+                    // Streaming indicator with phase context
                     if msg.is_streaming {
                         const SPINNER: &[&str] =
                             &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                        let frame = SPINNER[(self.tick / 4) as usize % SPINNER.len()];
+                        let frame = SPINNER[(self.tick / 2) as usize % SPINNER.len()];
+                        let has_running_tool = msg
+                            .tool_calls
+                            .iter()
+                            .any(|tc| tc.output.is_none() && !tc.is_error);
+                        let label = if has_running_tool {
+                            ""
+                        } else if msg.content.is_empty() && !msg.tool_calls.is_empty() {
+                            " thinking…"
+                        } else {
+                            ""
+                        };
                         all_lines.push(Line::from(Span::styled(
-                            format!("  {frame}"),
+                            format!("  {frame}{label}"),
                             self.theme.accent_style(),
                         )));
                     }
@@ -297,7 +308,7 @@ impl Widget for ChatView<'_> {
 
             // Tool calls
             for tc in &msg.tool_calls {
-                all_lines.push(tc.header_line(self.theme));
+                all_lines.push(tc.header_line_animated(self.theme, self.tick));
                 if tc.expanded {
                     if let Some(ref output) = tc.output {
                         let output_style = if tc.is_error {
