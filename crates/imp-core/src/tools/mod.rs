@@ -12,6 +12,7 @@ pub mod multi_edit;
 pub mod query;
 pub mod read;
 pub mod scan;
+pub mod session_search;
 pub mod shell;
 pub mod skill_manage;
 pub mod web;
