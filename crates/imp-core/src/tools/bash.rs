@@ -60,6 +60,31 @@ fn run_via_rush(
     }
 }
 
+/// Detect which shell to use for command execution.
+/// Prefers rush if available on PATH, falls back to sh.
+fn detect_shell() -> String {
+    use std::sync::OnceLock;
+    static SHELL: OnceLock<String> = OnceLock::new();
+    SHELL
+        .get_or_init(|| {
+            // Check IMP_SHELL env var first
+            if let Ok(shell) = std::env::var("IMP_SHELL") {
+                return shell;
+            }
+            // Check if rush is on PATH
+            if let Ok(output) = std::process::Command::new("which").arg("rush").output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        return path;
+                    }
+                }
+            }
+            "sh".to_string()
+        })
+        .clone()
+}
+
 pub struct BashTool;
 
 #[async_trait]
@@ -155,7 +180,9 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
     }
 
     let mut child = {
-        let mut cmd = Command::new("sh");
+        // Use rush if available and configured, otherwise sh
+        let shell = detect_shell();
+        let mut cmd = Command::new(&shell);
         cmd.arg("-c")
             .arg(command)
             .current_dir(&ctx.cwd)
