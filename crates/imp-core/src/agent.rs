@@ -710,6 +710,7 @@ impl Agent {
                     ui: self.ui.clone(),
                     file_cache: self.file_cache.clone(),
                     file_tracker: self.file_tracker.clone(),
+                    mode: self.mode,
                 };
                 match tool.execute(call_id, args.clone(), ctx).await {
                     Ok(output) => output.into_tool_result(call_id, tool_name),

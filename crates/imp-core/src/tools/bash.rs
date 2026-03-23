@@ -8,7 +8,7 @@ use tokio::process::Command;
 use super::{truncate_tail, Tool, ToolContext, ToolOutput, ToolUpdate, TruncationResult};
 use crate::error::Result;
 
-const DEFAULT_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_OUTPUT_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 
