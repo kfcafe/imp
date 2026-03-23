@@ -87,6 +87,7 @@ pub struct App {
     pub ctrl_c_count: u8,
     pub needs_redraw: bool,
     pub last_esc: Option<Instant>,
+    pub tick: u64,
 
     // Accumulated stats
     pub accumulated_usage: Usage,
@@ -132,6 +133,7 @@ impl App {
             ctrl_c_count: 0,
             needs_redraw: true,
             last_esc: None,
+            tick: 0,
             accumulated_usage: Usage::default(),
             accumulated_cost: Cost::default(),
             status_items: HashMap::new(),
@@ -173,7 +175,7 @@ impl App {
     }
 
     async fn event_loop(&mut self, terminal: &mut Tui) -> Result<(), Box<dyn std::error::Error>> {
-        let tick_rate = Duration::from_millis(33); // ~30fps
+        let tick_rate = Duration::from_millis(16); // ~60fps
 
         loop {
             // Render
@@ -200,7 +202,8 @@ impl App {
             // Drain agent events (non-blocking)
             self.drain_agent_events();
 
-            // Periodic redraw for streaming
+            // Tick + periodic redraw for streaming/spinner
+            self.tick = self.tick.wrapping_add(1);
             if self.is_streaming {
                 self.needs_redraw = true;
             }
@@ -255,7 +258,8 @@ impl App {
         // Messages
         let chat = ChatView::new(&self.messages, &self.theme, &self.highlighter)
             .scroll(self.scroll_offset)
-            .thinking_visible(self.thinking_visible);
+            .thinking_visible(self.thinking_visible)
+            .tick(self.tick);
         frame.render_widget(chat, chunks[0]);
 
         // Editor

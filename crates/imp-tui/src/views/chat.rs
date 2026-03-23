@@ -157,6 +157,7 @@ pub struct ChatView<'a> {
     highlighter: &'a Highlighter,
     scroll_offset: usize,
     thinking_visible: bool,
+    tick: u64,
 }
 
 impl<'a> ChatView<'a> {
@@ -171,11 +172,17 @@ impl<'a> ChatView<'a> {
             highlighter,
             scroll_offset: 0,
             thinking_visible: true,
+            tick: 0,
         }
     }
 
     pub fn scroll(mut self, offset: usize) -> Self {
         self.scroll_offset = offset;
+        self
+    }
+
+    pub fn tick(mut self, tick: u64) -> Self {
+        self.tick = tick;
         self
     }
 
@@ -255,7 +262,13 @@ impl Widget for ChatView<'_> {
 
                     // Streaming indicator
                     if msg.is_streaming {
-                        all_lines.push(Line::from(Span::styled("  ▌", self.theme.accent_style())));
+                        const SPINNER: &[&str] =
+                            &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                        let frame = SPINNER[(self.tick / 4) as usize % SPINNER.len()];
+                        all_lines.push(Line::from(Span::styled(
+                            format!("  {frame}"),
+                            self.theme.accent_style(),
+                        )));
                     }
                 }
                 MessageRole::System => {

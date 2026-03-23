@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::{Tool, ToolContext, ToolOutput};
-use crate::config::AgentMode;
 use crate::error::Result;
 
 fn find_mana_dir(cwd: &Path) -> std::result::Result<std::path::PathBuf, String> {
@@ -67,13 +66,10 @@ impl Tool for ManaTool {
             .as_str()
             .ok_or_else(|| crate::error::Error::Tool("missing 'action' parameter".into()))?;
 
-        // Mode-based sub-action guard. The active mode is read from the IMP_MODE
-        // environment variable (set by the agent runner). Full mode (default) allows
+        // Mode-based sub-action guard. The active mode is read from the context so
+        // it always matches the Agent's actual mode. Full mode (default) allows
         // everything; restricted modes block specific sub-actions at execution time.
-        let mode = std::env::var("IMP_MODE")
-            .ok()
-            .and_then(|v| AgentMode::from_name(&v))
-            .unwrap_or(AgentMode::Full);
+        let mode = ctx.mode;
 
         if !mode.allows_mana_action(action) {
             let mode_name = format!("{mode:?}").to_lowercase();
@@ -289,6 +285,7 @@ mod tests {
             ui: Arc::new(NullInterface),
             file_cache: Arc::new(FileCache::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
+            mode: crate::config::AgentMode::Full,
         };
 
         let tool = ManaTool;
@@ -392,6 +389,112 @@ mod tests {
                 ManaResult::Attempted(_) => {} // correct
                 ManaResult::ModeBlocked(msg) => {
                     panic!("orchestrator should allow '{action}' but was blocked: {msg}")
+                }
+            }
+        }
+    }
+
+    // --- ctx.mode tests (no env var) ---
+
+    /// Build a ToolContext with the given mode directly — no env var involved.
+    fn ctx_with_mode(
+        dir: &std::path::Path,
+        mode: crate::config::AgentMode,
+    ) -> (ToolContext, tempfile::TempDir) {
+        // We need the tempdir to outlive the context, so return it too.
+        // The mana dir is created inside `dir` (caller owns it).
+        let mana_dir = dir.join(".mana");
+        std::fs::create_dir_all(&mana_dir).unwrap();
+        std::fs::write(mana_dir.join("config.yaml"), "next_id: 1\n").unwrap();
+        let (tx, _rx) = mpsc::channel::<ToolUpdate>(1);
+        let ctx = ToolContext {
+            cwd: dir.to_path_buf(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            ui: Arc::new(NullInterface),
+            file_cache: Arc::new(FileCache::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
+            mode,
+        };
+        // Return a dummy TempDir we can ignore; the real dir is passed in.
+        (ctx, tempfile::tempdir().unwrap())
+    }
+
+    /// Execute an action using ctx.mode to determine mode — no env var.
+    async fn run_with_ctx_mode(mode: crate::config::AgentMode, action: &str) -> ManaResult {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep) = ctx_with_mode(dir.path(), mode);
+        let tool = ManaTool;
+        let outcome = tool
+            .execute("call_ctx", json!({ "action": action }), ctx)
+            .await;
+        match outcome {
+            Err(crate::error::Error::Tool(msg)) => {
+                ManaResult::Attempted(crate::tools::ToolOutput::error(msg))
+            }
+            Err(e) => ManaResult::Attempted(crate::tools::ToolOutput::error(e.to_string())),
+            Ok(output) => {
+                if output.is_error {
+                    if let Some(text) = output.text_content() {
+                        if text.contains("mode") && text.contains(action) {
+                            return ManaResult::ModeBlocked(text.to_string());
+                        }
+                    }
+                }
+                ManaResult::Attempted(output)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_mode_mana_ctx_reads_from_context() {
+        // ManaTool reads mode from ctx.mode — not from any env var.
+        // Set IMP_MODE to something that *would* allow create, but ctx.mode is
+        // Worker which blocks it. The ctx wins.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var("IMP_MODE").ok();
+        std::env::set_var("IMP_MODE", "full"); // env says full (allow)
+
+        let result = run_with_ctx_mode(crate::config::AgentMode::Worker, "create").await;
+
+        match prev {
+            Some(v) => std::env::set_var("IMP_MODE", v),
+            None => std::env::remove_var("IMP_MODE"),
+        }
+
+        match result {
+            ManaResult::ModeBlocked(_) => {} // ctx.mode (Worker) blocked it — correct
+            ManaResult::Attempted(out) => {
+                panic!(
+                    "ctx.mode=Worker should block 'create' even when IMP_MODE=full, got: {:?}",
+                    out.text_content()
+                )
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_mode_mana_ctx_worker_blocks_create() {
+        // Worker mode via ctx blocks mana create (no env var involvement).
+        match run_with_ctx_mode(crate::config::AgentMode::Worker, "create").await {
+            ManaResult::ModeBlocked(_) => {} // correct
+            ManaResult::Attempted(out) => {
+                panic!(
+                    "ctx Worker mode should block 'create', got: {:?}",
+                    out.text_content()
+                )
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_mode_mana_ctx_full_allows_all() {
+        // Full mode via ctx allows every action (none should hit the mode guard).
+        for action in &["status", "list", "show", "create", "close", "update"] {
+            match run_with_ctx_mode(crate::config::AgentMode::Full, action).await {
+                ManaResult::Attempted(_) => {} // correct — mode guard passed
+                ManaResult::ModeBlocked(msg) => {
+                    panic!("ctx Full mode should allow '{action}' but was blocked: {msg}")
                 }
             }
         }
