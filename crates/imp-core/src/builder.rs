@@ -365,10 +365,10 @@ mod tests {
 
         let mut config = Config::default();
         config.hooks.push(HookDef {
-            event: "before_tool_call".into(),
-            match_pattern: None,
-            action: "log".into(),
-            command: None,
+            event: "after_file_write".into(),
+            match_pattern: Some("*.rs".into()),
+            action: "shell".into(),
+            command: Some("echo hook fired".into()),
             blocking: false,
             threshold: None,
         });

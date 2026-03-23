@@ -690,7 +690,9 @@ impl App {
 
         let prompt = prompt.to_string();
         tokio::spawn(async move {
-            let _ = agent.run(prompt).await;
+            if let Err(e) = agent.run(prompt).await {
+                eprintln!("[imp] agent error: {e}");
+            }
         });
 
         self.agent_handle = Some(handle);
@@ -814,6 +816,52 @@ impl App {
             "login" => {
                 let provider = cmd.split_whitespace().nth(1).unwrap_or("anthropic");
                 self.start_login(provider);
+            }
+            "copy" => {
+                // Copy last assistant message to clipboard
+                if let Some(last) = self
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == MessageRole::Assistant || m.role == MessageRole::Error)
+                {
+                    let text = last.content.clone();
+                    #[cfg(target_os = "macos")]
+                    {
+                        use std::io::Write;
+                        if let Ok(mut child) = std::process::Command::new("pbcopy")
+                            .stdin(std::process::Stdio::piped())
+                            .spawn()
+                        {
+                            if let Some(mut stdin) = child.stdin.take() {
+                                let _ = stdin.write_all(text.as_bytes());
+                            }
+                            let _ = child.wait();
+                        }
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        use std::io::Write;
+                        if let Ok(mut child) = std::process::Command::new("xclip")
+                            .args(["-selection", "clipboard"])
+                            .stdin(std::process::Stdio::piped())
+                            .spawn()
+                        {
+                            if let Some(mut stdin) = child.stdin.take() {
+                                let _ = stdin.write_all(text.as_bytes());
+                            }
+                            let _ = child.wait();
+                        }
+                    }
+                    self.messages.push(DisplayMessage {
+                        role: MessageRole::System,
+                        content: "Copied to clipboard.".into(),
+                        thinking: None,
+                        tool_calls: Vec::new(),
+                        is_streaming: false,
+                        timestamp: imp_llm::now(),
+                    });
+                }
             }
             _ => {
                 self.messages.push(DisplayMessage {
