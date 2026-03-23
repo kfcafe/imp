@@ -24,6 +24,9 @@ pub enum Error {
     #[error("TOML parse error: {0}")]
     Toml(#[from] toml::de::Error),
 
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+
     #[error("Max turns exceeded: {0}")]
     MaxTurns(u32),
 

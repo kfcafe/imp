@@ -11,6 +11,7 @@ pub mod resources;
 pub mod retry;
 pub mod roles;
 pub mod session;
+pub mod session_index;
 pub mod system_prompt;
 pub mod tools;
 pub mod ui;

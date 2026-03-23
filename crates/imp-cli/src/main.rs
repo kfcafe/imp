@@ -1407,7 +1407,8 @@ fn run_shell_command(command: &str, cwd: &Path) -> TokioCommand {
 }
 
 async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::resolve(&Config::user_config_dir(), Some(&std::env::current_dir()?))?;
+    let cwd = std::env::current_dir()?;
+    let mut config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
 
     let registry = ModelRegistry::with_builtins();
     let (model_id, provider_name) = resolve_model_and_provider(cli, &config, &registry)
@@ -1437,51 +1438,136 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         provider: Arc::from(provider),
     };
 
-    let thinking = cli
-        .thinking
-        .as_deref()
-        .map(parse_thinking_level)
-        .or(config.thinking)
-        .unwrap_or(ThinkingLevel::Off);
+    // Apply CLI overrides
+    if let Some(ref thinking) = cli.thinking {
+        config.thinking = Some(parse_thinking_level(thinking));
+    }
 
-    let system_prompt = cli.system_prompt.clone().unwrap_or_default();
+    // Use agent loop if tools are available (not --no-tools)
+    if cli.no_tools {
+        // Simple streaming — no tools, no agent loop
+        let thinking = config.thinking.unwrap_or(ThinkingLevel::Off);
+        let system_prompt = cli.system_prompt.clone().unwrap_or_default();
+        let context = Context {
+            messages: vec![Message::user(prompt)],
+        };
+        let options = RequestOptions {
+            thinking_level: thinking,
+            max_tokens: Some(model.meta.max_output_tokens),
+            system_prompt,
+            ..Default::default()
+        };
 
-    let context = Context {
-        messages: vec![Message::user(prompt)],
-    };
+        let mut stream = model.provider.stream(&model, context, options, &api_key);
+        while let Some(event_result) = stream.next().await {
+            match event_result {
+                Ok(StreamEvent::TextDelta { text }) => print!("{text}"),
+                Ok(StreamEvent::ThinkingDelta { text }) => eprint!("{text}"),
+                Ok(StreamEvent::Error { error }) => {
+                    eprintln!("Error: {error}");
+                    std::process::exit(1);
+                }
+                Ok(StreamEvent::MessageEnd { .. }) => println!(),
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("Stream error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    } else {
+        // Full agent loop with tools
+        let (mut agent, mut handle) =
+            imp_core::builder::AgentBuilder::new(config, cwd, model, api_key)
+                .build()
+                .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
-    let options = RequestOptions {
-        thinking_level: thinking,
-        max_tokens: Some(model.meta.max_output_tokens),
-        system_prompt,
-        ..Default::default()
-    };
+        // Remove ask tool in headless mode
+        agent.tools.retain(|name| name != "ask");
 
-    let mut stream = model.provider.stream(&model, context, options, &api_key);
+        let prompt_owned = prompt.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = agent.run(prompt_owned).await {
+                eprintln!("[imp] agent error: {e}");
+            }
+        });
 
-    while let Some(event_result) = stream.next().await {
-        match event_result {
-            Ok(StreamEvent::TextDelta { text }) => {
-                print!("{text}");
-            }
-            Ok(StreamEvent::ThinkingDelta { text }) => {
-                // Thinking goes to stderr
-                eprint!("{text}");
-            }
-            Ok(StreamEvent::ToolCall { name, .. }) => {
-                eprintln!("[tool: {name}]");
-            }
-            Ok(StreamEvent::Error { error }) => {
-                eprintln!("Error: {error}");
-                std::process::exit(1);
-            }
-            Ok(StreamEvent::MessageEnd { .. }) => {
-                println!();
-            }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("Stream error: {e}");
-                std::process::exit(1);
+        // Consume events and print output
+        use imp_core::agent::AgentEvent;
+        while let Some(event) = handle.event_rx.recv().await {
+            match event {
+                AgentEvent::MessageDelta { delta } => match delta {
+                    StreamEvent::TextDelta { text } => print!("{text}"),
+                    StreamEvent::ThinkingDelta { text } => eprint!("{text}"),
+                    _ => {}
+                },
+                AgentEvent::ToolExecutionStart {
+                    tool_name, args, ..
+                } => {
+                    let summary = match tool_name.as_str() {
+                        "bash" => args
+                            .get("command")
+                            .and_then(|v| v.as_str())
+                            .map(|c| {
+                                if c.len() > 60 {
+                                    format!("{}…", &c[..60])
+                                } else {
+                                    c.to_string()
+                                }
+                            })
+                            .unwrap_or_default(),
+                        "read" | "write" | "edit" => args
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        "grep" => args
+                            .get("pattern")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        _ => String::new(),
+                    };
+                    if summary.is_empty() {
+                        eprintln!("[tool: {tool_name}]");
+                    } else {
+                        eprintln!("[tool: {tool_name} {summary}]");
+                    }
+                }
+                AgentEvent::ToolExecutionEnd { result, .. } => {
+                    if result.is_error {
+                        let text: String = result
+                            .content
+                            .iter()
+                            .filter_map(|b| match b {
+                                imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("");
+                        if !text.is_empty() {
+                            eprintln!(
+                                "[error: {}]",
+                                if text.len() > 100 {
+                                    &text[..100]
+                                } else {
+                                    &text
+                                }
+                            );
+                        }
+                    }
+                }
+                AgentEvent::Error { error } => {
+                    eprintln!("Error: {error}");
+                }
+                AgentEvent::AgentEnd { usage, cost } => {
+                    eprintln!(
+                        "\n[tokens: ↑{} ↓{} | cost: ${:.4}]",
+                        usage.input_tokens, usage.output_tokens, cost.total
+                    );
+                    break;
+                }
+                _ => {}
             }
         }
     }
