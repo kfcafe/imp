@@ -36,6 +36,7 @@ pub enum Action {
     CycleThinking,
     ToggleToolExpand,
     ToggleThinking,
+    Peek,
     SessionTree,
     Reload,
     Quit,
@@ -77,6 +78,7 @@ pub fn resolve_normal(key: KeyEvent) -> Option<Action> {
         // Toggle tool/thinking
         KeyCode::Char('o') if ctrl => Some(Action::ToggleToolExpand),
         KeyCode::Char('t') if ctrl => Some(Action::ToggleThinking),
+        KeyCode::Tab => Some(Action::Peek),
 
         // Cursor movement
         KeyCode::Left if ctrl => Some(Action::WordLeft),
@@ -105,8 +107,6 @@ pub fn resolve_normal(key: KeyEvent) -> Option<Action> {
 
         // Character input
         KeyCode::Char(c) => Some(Action::InsertChar(c)),
-
-        KeyCode::Tab => None, // reserved for path completion
 
         _ => None,
     }
