@@ -75,6 +75,7 @@ impl DisplayMessage {
                                 output: None,
                                 is_error: false,
                                 expanded: false,
+                                streaming_lines: Vec::new(),
                             });
                         }
                         _ => {}
@@ -302,8 +303,27 @@ impl Widget for ChatView<'_> {
 
             // Tool calls
             for tc in &msg.tool_calls {
-                all_lines.push(tc.header_line_animated(self.theme, self.tick));
-                if tc.expanded {
+                let is_running = tc.output.is_none() && !tc.is_error;
+
+                if is_running && !tc.streaming_lines.is_empty() {
+                    // Running: show header + rolling 5-line output tail
+                    all_lines.push(tc.header_line_animated(self.theme, self.tick));
+                    for line in &tc.streaming_lines {
+                        all_lines.push(Line::from(Span::styled(
+                            format!("    {line}"),
+                            self.theme.muted_style(),
+                        )));
+                    }
+                } else if is_running {
+                    // Running but no output yet: just the spinner header
+                    all_lines.push(tc.header_line_animated(self.theme, self.tick));
+                } else {
+                    // Done: one-line header with ✓/✗
+                    all_lines.push(tc.header_line_animated(self.theme, self.tick));
+                }
+
+                // Expanded output (Tab peek)
+                if tc.expanded && !is_running {
                     if let Some(ref output) = tc.output {
                         let output_style = if tc.is_error {
                             self.theme.error_style()

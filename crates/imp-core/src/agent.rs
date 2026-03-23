@@ -96,7 +96,12 @@ impl LoopDetector {
         args.to_string().hash(&mut hasher);
         is_error.hash(&mut hasher);
         let truncated = if output_prefix.len() > 200 {
-            &output_prefix[..200]
+            // Find a valid char boundary at or before byte 200
+            let mut end = 200;
+            while !output_prefix.is_char_boundary(end) {
+                end -= 1;
+            }
+            &output_prefix[..end]
         } else {
             output_prefix
         };
@@ -142,6 +147,10 @@ pub enum AgentEvent {
         tool_call_id: String,
         tool_name: String,
         args: serde_json::Value,
+    },
+    ToolOutputDelta {
+        tool_call_id: String,
+        text: String,
     },
     ToolExecutionEnd {
         tool_call_id: String,
@@ -702,7 +711,7 @@ impl Agent {
 
         let mut result = match self.tools.get(tool_name) {
             Some(tool) => {
-                let (update_tx, _update_rx) = mpsc::channel(64);
+                let (update_tx, mut update_rx) = mpsc::channel(64);
                 let ctx = crate::tools::ToolContext {
                     cwd: self.cwd.clone(),
                     cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -712,11 +721,32 @@ impl Agent {
                     file_tracker: self.file_tracker.clone(),
                     mode: self.mode,
                 };
-                match tool.execute(call_id, args.clone(), ctx).await {
+
+                // Forward tool output deltas to event stream
+                let event_tx = self.event_tx.clone();
+                let delta_call_id = call_id.to_string();
+                let forwarder = tokio::spawn(async move {
+                    while let Some(update) = update_rx.recv().await {
+                        for block in &update.content {
+                            if let imp_llm::ContentBlock::Text { text } = block {
+                                let _ = event_tx
+                                    .send(AgentEvent::ToolOutputDelta {
+                                        tool_call_id: delta_call_id.clone(),
+                                        text: text.clone(),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+                });
+
+                let exec_result = match tool.execute(call_id, args.clone(), ctx).await {
                     Ok(output) => output.into_tool_result(call_id, tool_name),
                     Err(e) => crate::tools::ToolOutput::error(e.to_string())
                         .into_tool_result(call_id, tool_name),
-                }
+                };
+                forwarder.abort();
+                exec_result
             }
             None => crate::tools::ToolOutput::error(format!("Unknown tool: {tool_name}"))
                 .into_tool_result(call_id, tool_name),
