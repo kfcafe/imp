@@ -34,8 +34,6 @@ pub enum Action {
     CycleModelForward,
     CycleModelBackward,
     CycleThinking,
-    ToggleToolExpand,
-    ToggleThinking,
     Peek,
     SessionTree,
     Reload,
@@ -76,8 +74,6 @@ pub fn resolve_normal(key: KeyEvent) -> Option<Action> {
         KeyCode::BackTab => Some(Action::CycleThinking),
 
         // Toggle tool/thinking
-        KeyCode::Char('o') if ctrl => Some(Action::ToggleToolExpand),
-        KeyCode::Char('t') if ctrl => Some(Action::ToggleThinking),
         KeyCode::Tab => Some(Action::Peek),
 
         // Cursor movement
