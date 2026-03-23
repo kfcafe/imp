@@ -38,6 +38,9 @@ mod tests {
             update_tx: tx,
             ui: Arc::new(NullInterface),
             file_cache: Arc::new(imp_core::tools::FileCache::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(
+                imp_core::tools::FileTracker::default(),
+            )),
         }
     }
 
