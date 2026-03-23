@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::{Tool, ToolContext, ToolOutput};
+use crate::config::AgentMode;
 use crate::error::Result;
 
 fn find_mana_dir(cwd: &Path) -> std::result::Result<std::path::PathBuf, String> {
@@ -65,6 +66,21 @@ impl Tool for ManaTool {
         let action = params["action"]
             .as_str()
             .ok_or_else(|| crate::error::Error::Tool("missing 'action' parameter".into()))?;
+
+        // Mode-based sub-action guard. The active mode is read from the IMP_MODE
+        // environment variable (set by the agent runner). Full mode (default) allows
+        // everything; restricted modes block specific sub-actions at execution time.
+        let mode = std::env::var("IMP_MODE")
+            .ok()
+            .and_then(|v| AgentMode::from_name(&v))
+            .unwrap_or(AgentMode::Full);
+
+        if !mode.allows_mana_action(action) {
+            let mode_name = format!("{mode:?}").to_lowercase();
+            return Ok(ToolOutput::error(format!(
+                "Mana action '{action}' is not available in {mode_name} mode"
+            )));
+        }
 
         let mana_dir = find_mana_dir(&ctx.cwd).map_err(crate::error::Error::Tool)?;
 
@@ -220,6 +236,155 @@ impl Tool for ManaTool {
             other => Ok(ToolOutput::error(format!(
                 "Unknown action: {other}. Use: status, list, show, create, close, update"
             ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use tokio::sync::mpsc;
+
+    use super::ManaTool;
+    use crate::tools::{FileCache, Tool, ToolContext, ToolUpdate};
+    use crate::ui::NullInterface;
+
+    /// Outcome of a mana tool call in test context.
+    enum ManaResult {
+        /// Mode guard fired — action blocked.
+        ModeBlocked(String),
+        /// Mode guard passed — action was attempted (may fail for other reasons).
+        Attempted(crate::tools::ToolOutput),
+    }
+
+    /// Run the ManaTool with `IMP_MODE` set to `mode_name` for the duration of the call.
+    ///
+    /// Returns `ManaResult::ModeBlocked` if the mode guard fires, or
+    /// `ManaResult::Attempted` if the action was allowed and execution proceeded
+    /// (the inner ToolOutput may itself be an error from missing .mana/, etc.).
+    ///
+    /// The env var is reset afterwards so tests don't bleed into each other.
+    /// Tests in this module must run with `--test-threads=1` because env vars are
+    /// process-global (the verify gate enforces this).
+    async fn run_with_mode(mode_name: &str, action: &str) -> ManaResult {
+        let prev = std::env::var("IMP_MODE").ok();
+        std::env::set_var("IMP_MODE", mode_name);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel::<ToolUpdate>(1);
+        let ctx = ToolContext {
+            cwd: dir.path().to_path_buf(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            ui: Arc::new(NullInterface),
+            file_cache: Arc::new(FileCache::new()),
+        };
+
+        let tool = ManaTool;
+        let outcome = tool
+            .execute("call_1", json!({ "action": action }), ctx)
+            .await;
+
+        // Restore previous state
+        match prev {
+            Some(v) => std::env::set_var("IMP_MODE", v),
+            None => std::env::remove_var("IMP_MODE"),
+        }
+
+        match outcome {
+            // Infrastructure error (e.g. no .mana/ dir) — action was allowed, it just failed.
+            Err(crate::error::Error::Tool(msg)) => {
+                ManaResult::Attempted(crate::tools::ToolOutput::error(msg))
+            }
+            Err(e) => ManaResult::Attempted(crate::tools::ToolOutput::error(e.to_string())),
+            Ok(output) => {
+                // Distinguish mode guard errors from other ToolOutput errors.
+                if output.is_error {
+                    if let Some(text) = output.text_content() {
+                        if text.contains("mode") && text.contains(action) {
+                            return ManaResult::ModeBlocked(text.to_string());
+                        }
+                    }
+                }
+                ManaResult::Attempted(output)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_mode_mana_worker_blocks_create() {
+        match run_with_mode("worker", "create").await {
+            ManaResult::ModeBlocked(_) => {} // correct
+            ManaResult::Attempted(out) => {
+                panic!(
+                    "worker should block 'create', got: {:?}",
+                    out.text_content()
+                )
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_mode_mana_planner_allows_create() {
+        // Planner can create — it reaches find_mana_dir which fails (no .mana),
+        // but the mode guard must NOT fire.
+        match run_with_mode("planner", "create").await {
+            ManaResult::Attempted(_) => {} // correct — mode guard passed
+            ManaResult::ModeBlocked(msg) => {
+                panic!("planner should allow 'create' but was blocked: {msg}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_mode_mana_planner_blocks_close() {
+        match run_with_mode("planner", "close").await {
+            ManaResult::ModeBlocked(_) => {} // correct
+            ManaResult::Attempted(out) => {
+                panic!(
+                    "planner should block 'close', got: {:?}",
+                    out.text_content()
+                )
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_mode_mana_auditor_allows_show() {
+        // Auditor can show — error will be from missing .mana/, not mode guard.
+        match run_with_mode("auditor", "show").await {
+            ManaResult::Attempted(_) => {} // correct — mode guard passed
+            ManaResult::ModeBlocked(msg) => {
+                panic!("auditor should allow 'show' but was blocked: {msg}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_mode_mana_auditor_blocks_update() {
+        match run_with_mode("auditor", "update").await {
+            ManaResult::ModeBlocked(_) => {} // correct
+            ManaResult::Attempted(out) => {
+                panic!(
+                    "auditor should block 'update', got: {:?}",
+                    out.text_content()
+                )
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_mode_mana_orchestrator_allows_all() {
+        // Orchestrator allows all standard actions — none should hit the mode guard.
+        for action in &["status", "list", "show", "create", "close", "update"] {
+            match run_with_mode("orchestrator", action).await {
+                ManaResult::Attempted(_) => {} // correct
+                ManaResult::ModeBlocked(msg) => {
+                    panic!("orchestrator should allow '{action}' but was blocked: {msg}")
+                }
+            }
         }
     }
 }

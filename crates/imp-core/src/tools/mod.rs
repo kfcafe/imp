@@ -236,6 +236,39 @@ impl ToolRegistry {
         self.tools.keys().cloned().collect()
     }
 
+    /// Retain only tools whose names satisfy the predicate.
+    ///
+    /// Used by `AgentBuilder` to filter tools based on agent mode before the
+    /// agent is handed out to callers.
+    pub fn retain<F>(&mut self, predicate: F)
+    where
+        F: Fn(&str) -> bool,
+    {
+        self.tools.retain(|name, _| predicate(name));
+    }
+
+    /// Get tool definitions filtered to those allowed by an agent mode.
+    ///
+    /// For `Full` mode (empty allow-list), returns all definitions.
+    /// For all other modes, returns only the intersection.
+    pub fn definitions_for_mode(
+        &self,
+        mode: &crate::config::AgentMode,
+    ) -> Vec<imp_llm::provider::ToolDefinition> {
+        let mut defs: Vec<_> = self
+            .tools
+            .values()
+            .filter(|t| mode.allows_tool(t.name()))
+            .map(|t| imp_llm::provider::ToolDefinition {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                parameters: t.parameters(),
+            })
+            .collect();
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
+    }
+
     /// Number of registered tools.
     pub fn len(&self) -> usize {
         self.tools.len()

@@ -8,6 +8,170 @@ use crate::error::Result;
 use crate::hooks::HookDef;
 use crate::roles::RoleDef;
 
+/// Agent mode — controls which tools and mana actions the agent may use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentMode {
+    /// Default. Full access to all tools. No filtering.
+    #[default]
+    Full,
+    /// Unit executor. Read + write + bash. No mana create/run.
+    Worker,
+    /// Plans and executes via mana. Cannot touch files directly.
+    Orchestrator,
+    /// Decomposes work. Can read and create mana units. Cannot run them.
+    Planner,
+    /// Read-only inspector. No mutations, no mana.
+    Reviewer,
+    /// Batch inspector. Reads code and mana state, produces reports.
+    Auditor,
+}
+
+impl AgentMode {
+    /// Tool names this mode permits. An empty slice means "allow all" (Full).
+    pub fn allowed_tool_names(&self) -> &'static [&'static str] {
+        match self {
+            AgentMode::Full => &[],
+            AgentMode::Worker => &[
+                "read",
+                "grep",
+                "find",
+                "ls",
+                "scan",
+                "web",
+                "diff_show",
+                "write",
+                "edit",
+                "multi_edit",
+                "diff_apply",
+                "bash",
+                "mana",
+                "ask",
+            ],
+            AgentMode::Orchestrator => &[
+                "read",
+                "grep",
+                "find",
+                "ls",
+                "scan",
+                "web",
+                "diff_show",
+                "mana",
+                "ask",
+            ],
+            AgentMode::Planner => &[
+                "read",
+                "grep",
+                "find",
+                "ls",
+                "scan",
+                "web",
+                "diff_show",
+                "mana",
+                "ask",
+            ],
+            AgentMode::Reviewer => &[
+                "read",
+                "grep",
+                "find",
+                "ls",
+                "scan",
+                "web",
+                "diff_show",
+                "ask",
+            ],
+            AgentMode::Auditor => &[
+                "read",
+                "grep",
+                "find",
+                "ls",
+                "scan",
+                "web",
+                "diff_show",
+                "mana",
+            ],
+        }
+    }
+
+    /// Returns true if the mode allows the named tool.
+    pub fn allows_tool(&self, name: &str) -> bool {
+        match self {
+            AgentMode::Full => true,
+            _ => self.allowed_tool_names().contains(&name),
+        }
+    }
+
+    /// Mana sub-actions this mode permits. An empty slice means "allow all" (Full).
+    pub fn allowed_mana_actions(&self) -> &'static [&'static str] {
+        match self {
+            AgentMode::Full => &[],
+            AgentMode::Worker => &["show", "update", "status", "list"],
+            AgentMode::Orchestrator => {
+                &["status", "list", "show", "create", "close", "update", "run"]
+            }
+            AgentMode::Planner => &["status", "list", "show", "create"],
+            AgentMode::Reviewer => &[],
+            AgentMode::Auditor => &["status", "list", "show"],
+        }
+    }
+
+    /// Returns true if the mode allows the named mana action.
+    pub fn allows_mana_action(&self, action: &str) -> bool {
+        match self {
+            AgentMode::Full => true,
+            AgentMode::Reviewer => false,
+            _ => self.allowed_mana_actions().contains(&action),
+        }
+    }
+
+    /// Parse a mode from a string name (e.g. `"worker"`, `"full"`).
+    ///
+    /// Returns `None` for unrecognised names. Used to read `IMP_MODE` from the
+    /// environment without requiring a full `FromStr` implementation.
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "full" => Some(AgentMode::Full),
+            "worker" => Some(AgentMode::Worker),
+            "orchestrator" => Some(AgentMode::Orchestrator),
+            "planner" => Some(AgentMode::Planner),
+            "reviewer" => Some(AgentMode::Reviewer),
+            "auditor" => Some(AgentMode::Auditor),
+            _ => None,
+        }
+    }
+
+    /// Mode-specific behavioral instruction for the system prompt, if any.
+    pub fn instructions(&self) -> Option<&'static str> {
+        match self {
+            AgentMode::Full => None,
+            AgentMode::Worker => Some(
+                "You are a worker agent. Your job is to complete the assigned unit. \
+                You may read files, write files, and run shell commands. \
+                You may not create or run mana units — use `mana update` to report progress.",
+            ),
+            AgentMode::Orchestrator => Some(
+                "You are an orchestrator agent. Your job is to plan and execute work \
+                by creating and running mana units. You may not read or write files directly — \
+                delegate all file work to worker agents via mana.",
+            ),
+            AgentMode::Planner => Some(
+                "You are a planner agent. Your job is to decompose work into mana units. \
+                You may read files and create units, but you may not run them — \
+                a human or orchestrator will approve execution.",
+            ),
+            AgentMode::Reviewer => Some(
+                "You are a reviewer agent. Your job is to read code and report findings. \
+                You may not write files, run commands, or use mana.",
+            ),
+            AgentMode::Auditor => Some(
+                "You are an auditor agent. Your job is to inspect code and mana state \
+                and produce structured reports. You may read files and mana status, \
+                but you may not modify anything.",
+            ),
+        }
+    }
+}
+
 /// Shell backend selection for the Bash tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -69,6 +233,10 @@ pub struct Config {
     /// Shell backend settings.
     #[serde(default)]
     pub shell: ShellConfig,
+
+    /// Agent mode — controls tool and mana action access.
+    #[serde(default)]
+    pub mode: AgentMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -131,6 +299,11 @@ impl Config {
         if let Ok(thinking) = std::env::var("IMP_THINKING") {
             config.thinking = parse_thinking_level(&thinking);
         }
+        if let Ok(mode) = std::env::var("IMP_MODE") {
+            if let Some(m) = parse_agent_mode(&mode) {
+                config.mode = m;
+            }
+        }
 
         Ok(config)
     }
@@ -154,6 +327,9 @@ impl Config {
         if other.shell != ShellConfig::default() {
             self.shell = other.shell;
         }
+        if other.mode != AgentMode::default() {
+            self.mode = other.mode;
+        }
         self.roles.extend(other.roles);
         self.hooks.extend(other.hooks);
     }
@@ -166,6 +342,22 @@ impl Config {
     /// Default session directory.
     pub fn session_dir() -> PathBuf {
         dirs_path("data").join("sessions")
+    }
+
+    /// Save config to a TOML file. Creates parent directories if needed.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content =
+            toml::to_string_pretty(self).map_err(|e| crate::error::Error::Config(e.to_string()))?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Path to the user config.toml file.
+    pub fn user_config_path() -> PathBuf {
+        Self::user_config_dir().join("config.toml")
     }
 }
 
@@ -190,6 +382,18 @@ fn dirs_path(kind: &str) -> PathBuf {
             }
         }
         _ => PathBuf::from("."),
+    }
+}
+
+fn parse_agent_mode(s: &str) -> Option<AgentMode> {
+    match s.to_lowercase().as_str() {
+        "full" => Some(AgentMode::Full),
+        "worker" => Some(AgentMode::Worker),
+        "orchestrator" => Some(AgentMode::Orchestrator),
+        "planner" => Some(AgentMode::Planner),
+        "reviewer" => Some(AgentMode::Reviewer),
+        "auditor" => Some(AgentMode::Auditor),
+        _ => None,
     }
 }
 
@@ -515,5 +719,131 @@ model = "sonnet"
         assert!(config.thinking.is_none());
         assert!(config.max_turns.is_none());
         assert!((config.context.observation_mask_threshold - 0.6).abs() < f64::EPSILON);
+    }
+
+    // --- AgentMode tests ---
+
+    #[test]
+    fn agent_mode_default_is_full() {
+        let config = Config::default();
+        assert_eq!(config.mode, AgentMode::Full);
+        assert_eq!(AgentMode::default(), AgentMode::Full);
+    }
+
+    #[test]
+    fn agent_mode_full_allows_all_tools() {
+        let mode = AgentMode::Full;
+        assert!(mode.allows_tool("anything"));
+        assert!(mode.allows_tool("read"));
+        assert!(mode.allows_tool("bash"));
+        assert!(mode.allows_tool("nonexistent_future_tool"));
+        assert_eq!(mode.allowed_tool_names(), &[] as &[&str]);
+    }
+
+    #[test]
+    fn agent_mode_orchestrator_allows_read() {
+        let mode = AgentMode::Orchestrator;
+        assert!(mode.allows_tool("read"));
+        assert!(mode.allows_tool("grep"));
+        assert!(mode.allows_tool("find"));
+        assert!(mode.allows_tool("ls"));
+        assert!(mode.allows_tool("scan"));
+        assert!(mode.allows_tool("web"));
+        assert!(mode.allows_tool("diff_show"));
+        assert!(mode.allows_tool("mana"));
+        assert!(mode.allows_tool("ask"));
+    }
+
+    #[test]
+    fn agent_mode_orchestrator_blocks_write() {
+        let mode = AgentMode::Orchestrator;
+        assert!(!mode.allows_tool("write"));
+        assert!(!mode.allows_tool("edit"));
+        assert!(!mode.allows_tool("multi_edit"));
+        assert!(!mode.allows_tool("diff_apply"));
+        assert!(!mode.allows_tool("bash"));
+    }
+
+    #[test]
+    fn agent_mode_planner_allows_mana_create() {
+        let mode = AgentMode::Planner;
+        assert!(mode.allows_mana_action("create"));
+        assert!(mode.allows_mana_action("status"));
+        assert!(mode.allows_mana_action("list"));
+        assert!(mode.allows_mana_action("show"));
+    }
+
+    #[test]
+    fn agent_mode_planner_blocks_mana_close() {
+        let mode = AgentMode::Planner;
+        assert!(!mode.allows_mana_action("close"));
+        assert!(!mode.allows_mana_action("run"));
+        assert!(!mode.allows_mana_action("update"));
+    }
+
+    #[test]
+    fn agent_mode_worker_blocks_mana_create() {
+        let mode = AgentMode::Worker;
+        assert!(!mode.allows_mana_action("create"));
+        assert!(!mode.allows_mana_action("run"));
+        assert!(!mode.allows_mana_action("close"));
+    }
+
+    #[test]
+    fn agent_mode_worker_allows_mana_update() {
+        let mode = AgentMode::Worker;
+        assert!(mode.allows_mana_action("update"));
+        assert!(mode.allows_mana_action("show"));
+        assert!(mode.allows_mana_action("status"));
+        assert!(mode.allows_mana_action("list"));
+    }
+
+    #[test]
+    fn agent_mode_reviewer_no_mana() {
+        let mode = AgentMode::Reviewer;
+        assert!(!mode.allows_mana_action("status"));
+        assert!(!mode.allows_mana_action("list"));
+        assert!(!mode.allows_mana_action("show"));
+        assert!(!mode.allows_mana_action("create"));
+        assert!(!mode.allows_mana_action("run"));
+        // Reviewer also has no mana tool access
+        assert!(!mode.allows_tool("mana"));
+    }
+
+    #[test]
+    fn agent_mode_auditor_mana_readonly() {
+        let mode = AgentMode::Auditor;
+        assert!(mode.allows_mana_action("status"));
+        assert!(mode.allows_mana_action("list"));
+        assert!(mode.allows_mana_action("show"));
+        assert!(!mode.allows_mana_action("create"));
+        assert!(!mode.allows_mana_action("close"));
+        assert!(!mode.allows_mana_action("run"));
+        assert!(!mode.allows_mana_action("update"));
+    }
+
+    #[test]
+    fn agent_mode_config_deserialize() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, r#"mode = "orchestrator""#).unwrap();
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(config.mode, AgentMode::Orchestrator);
+    }
+
+    #[test]
+    fn agent_mode_instructions() {
+        assert!(AgentMode::Full.instructions().is_none());
+        assert!(AgentMode::Worker.instructions().is_some());
+        assert!(AgentMode::Orchestrator.instructions().is_some());
+        assert!(AgentMode::Planner.instructions().is_some());
+        assert!(AgentMode::Reviewer.instructions().is_some());
+        assert!(AgentMode::Auditor.instructions().is_some());
+
+        // Spot-check content is mode-specific
+        let worker = AgentMode::Worker.instructions().unwrap();
+        assert!(worker.contains("worker"));
+        let reviewer = AgentMode::Reviewer.instructions().unwrap();
+        assert!(reviewer.contains("reviewer") || reviewer.contains("read"));
     }
 }
