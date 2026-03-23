@@ -1565,10 +1565,12 @@ data: {\"type\":\"message_stop\"}\n\
     }
 
     #[test]
-    fn parse_sse_event_malformed_json_returns_error() {
+    fn parse_sse_event_malformed_json_returns_none() {
+        // Malformed JSON is treated as an unparseable event and skipped
+        // (forward compatibility — don't crash on unknown SSE event formats).
         let result = parse_sse_event("{not valid json}");
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::Stream(_)));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 
     #[test]
