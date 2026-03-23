@@ -248,7 +248,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::ManaTool;
-    use crate::tools::{FileCache, Tool, ToolContext, ToolUpdate};
+    use crate::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
     use crate::ui::NullInterface;
 
     /// Outcome of a mana tool call in test context.
@@ -280,6 +280,7 @@ mod tests {
             update_tx: tx,
             ui: Arc::new(NullInterface),
             file_cache: Arc::new(FileCache::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
         };
 
         let tool = ManaTool;

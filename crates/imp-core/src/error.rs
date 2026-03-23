@@ -29,6 +29,9 @@ pub enum Error {
 
     #[error("Cancelled")]
     Cancelled,
+
+    #[error("Loop detected: agent is calling the same tool repeatedly")]
+    LoopDetected,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
