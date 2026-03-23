@@ -180,6 +180,15 @@ enum SseDelta {
     InputJsonDelta { partial_json: String },
     #[serde(rename = "thinking_delta")]
     ThinkingDelta { thinking: String },
+    /// Signature delta (model output verification) — safe to ignore.
+    #[serde(rename = "signature_delta")]
+    SignatureDelta {
+        #[allow(dead_code)]
+        signature: String,
+    },
+    /// Catch-all for future delta types.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -561,6 +570,8 @@ fn process_sse_event(event: SseEvent, state: &mut StreamState) -> Vec<StreamEven
                             json_buf.push_str(&partial_json);
                         }
                     }
+                    // Signature and unknown deltas are safely ignored
+                    SseDelta::SignatureDelta { .. } | SseDelta::Unknown => {}
                 }
             }
         }
