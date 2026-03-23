@@ -73,6 +73,10 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
             description: "OAuth login (Anthropic)".into(),
         },
         SlashCommand {
+            name: "setup".into(),
+            description: "Run setup wizard".into(),
+        },
+        SlashCommand {
             name: "quit".into(),
             description: "Quit".into(),
         },
