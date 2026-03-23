@@ -180,8 +180,7 @@ impl AgentBuilder {
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
         ask::AskTool, bash::BashTool, diff::DiffTool, edit::EditTool, find::FindTool,
-        grep::GrepTool, ls::LsTool, memory::MemoryTool, read::ReadTool, scan::ScanTool,
-        session_search::SessionSearchTool, skill_manage::SkillManageTool, web::WebTool,
+        grep::GrepTool, ls::LsTool, mana::ManaTool, read::ReadTool, scan::ScanTool, web::WebTool,
         write::WriteTool,
     };
 
@@ -192,10 +191,8 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     tools.register(Arc::new(FindTool));
     tools.register(Arc::new(GrepTool));
     tools.register(Arc::new(LsTool));
-    tools.register(Arc::new(MemoryTool));
+    tools.register(Arc::new(ManaTool));
     tools.register(Arc::new(ReadTool));
-    tools.register(Arc::new(SessionSearchTool));
-    tools.register(Arc::new(SkillManageTool));
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ScanTool));
     tools.register(Arc::new(WebTool));
