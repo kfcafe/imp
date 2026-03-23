@@ -87,8 +87,7 @@ pub struct App {
     pub scroll_offset: usize,
     pub auto_scroll: bool,
     pub tools_expanded: bool,
-    pub thinking_visible: bool,
-    pub peek: bool,
+
     pub ctrl_c_count: u8,
     pub needs_redraw: bool,
     pub last_esc: Option<Instant>,
@@ -134,8 +133,7 @@ impl App {
             scroll_offset: 0,
             auto_scroll: true,
             tools_expanded: false,
-            thinking_visible: true,
-            peek: false,
+
             ctrl_c_count: 0,
             needs_redraw: true,
             last_esc: None,
@@ -322,8 +320,6 @@ impl App {
         // Messages
         let chat = ChatView::new(&self.messages, &self.theme, &self.highlighter)
             .scroll(self.scroll_offset)
-            .thinking_visible(self.thinking_visible)
-            .peek(self.peek)
             .tick(self.tick);
         frame.render_widget(chat, chunks[0]);
 
@@ -429,7 +425,7 @@ impl App {
             output_tokens: total_output,
             cost: self.accumulated_cost.total,
             context_percent,
-            peek: self.peek,
+            peek: self.tools_expanded,
             extension_items: self.status_items.clone(),
         }
     }
@@ -514,35 +510,11 @@ impl App {
             Some(Action::CycleThinking) => {
                 self.cycle_thinking_level();
             }
-            Some(Action::ToggleToolExpand) => {
+            Some(Action::Peek) => {
                 self.tools_expanded = !self.tools_expanded;
                 for msg in &mut self.messages {
                     for tc in &mut msg.tool_calls {
                         tc.expanded = self.tools_expanded;
-                    }
-                }
-            }
-            Some(Action::ToggleThinking) => {
-                self.thinking_visible = !self.thinking_visible;
-            }
-            Some(Action::Peek) => {
-                self.peek = !self.peek;
-                if self.peek {
-                    // Peek on: expand everything
-                    self.tools_expanded = true;
-                    self.thinking_visible = true;
-                    for msg in &mut self.messages {
-                        for tc in &mut msg.tool_calls {
-                            tc.expanded = true;
-                        }
-                    }
-                } else {
-                    // Peek off: collapse everything
-                    self.tools_expanded = false;
-                    for msg in &mut self.messages {
-                        for tc in &mut msg.tool_calls {
-                            tc.expanded = false;
-                        }
                     }
                 }
             }
