@@ -842,6 +842,26 @@ impl App {
             "settings" => {
                 self.open_settings();
             }
+            "resume" | "session" => {
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::System,
+                    content: "Session management not yet implemented in TUI. Use `imp -c` to continue or `imp -r` to resume from CLI.".into(),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+            }
+            "fork" | "name" | "export" | "reload" => {
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::System,
+                    content: format!("/{cmd} not yet implemented."),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+            }
             "login" => {
                 let provider = cmd.split_whitespace().nth(1).unwrap_or("anthropic");
                 self.start_login(provider);
