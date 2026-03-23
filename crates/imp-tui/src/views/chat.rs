@@ -157,6 +157,7 @@ pub struct ChatView<'a> {
     highlighter: &'a Highlighter,
     scroll_offset: usize,
     thinking_visible: bool,
+    peek: bool,
     tick: u64,
 }
 
@@ -172,6 +173,7 @@ impl<'a> ChatView<'a> {
             highlighter,
             scroll_offset: 0,
             thinking_visible: true,
+            peek: false,
             tick: 0,
         }
     }
@@ -188,6 +190,11 @@ impl<'a> ChatView<'a> {
 
     pub fn thinking_visible(mut self, visible: bool) -> Self {
         self.thinking_visible = visible;
+        self
+    }
+
+    pub fn peek(mut self, peek: bool) -> Self {
+        self.peek = peek;
         self
     }
 }
@@ -228,20 +235,29 @@ impl Widget for ChatView<'_> {
                     // Thinking block
                     if self.thinking_visible {
                         if let Some(ref thinking) = msg.thinking {
+                            let max_lines = if self.peek { 50 } else { 5 };
+                            let label = if msg.is_streaming {
+                                "  💭 Thinking…"
+                            } else {
+                                "  💭 Thought"
+                            };
                             all_lines.push(Line::from(Span::styled(
-                                "  💭 Thinking…",
+                                label.to_string(),
                                 self.theme.muted_style(),
                             )));
-                            for line in thinking.lines().take(5) {
+                            for line in thinking.lines().take(max_lines) {
                                 all_lines.push(Line::from(Span::styled(
                                     format!("    {line}"),
                                     self.theme.muted_style(),
                                 )));
                             }
                             let total_lines = thinking.lines().count();
-                            if total_lines > 5 {
+                            if total_lines > max_lines {
                                 all_lines.push(Line::from(Span::styled(
-                                    format!("    … ({} more lines)", total_lines - 5),
+                                    format!(
+                                        "    … ({} more lines, Tab to peek)",
+                                        total_lines - max_lines
+                                    ),
                                     self.theme.muted_style(),
                                 )));
                             }

@@ -18,6 +18,7 @@ pub struct StatusInfo {
     pub output_tokens: u32,
     pub cost: f64,
     pub context_percent: f64,
+    pub peek: bool,
     pub extension_items: HashMap<String, String>,
 }
 
@@ -69,7 +70,12 @@ impl Widget for StatusBar<'_> {
         let cost_str = format!("${:.2}", self.info.cost);
         let context_str = format!("{:.0}%", self.info.context_percent * 100.0);
 
-        let right_parts = vec![
+        let mut right_parts = Vec::new();
+        if self.info.peek {
+            right_parts.push(Span::styled("👁 PEEK", self.theme.accent_style()));
+            right_parts.push(Span::styled(" │ ", self.theme.muted_style()));
+        }
+        right_parts.extend([
             Span::styled(tokens_str, self.theme.muted_style()),
             Span::styled(" │ ", self.theme.muted_style()),
             Span::styled(cost_str, self.theme.muted_style()),
@@ -77,7 +83,7 @@ impl Widget for StatusBar<'_> {
             Span::styled(context_str, self.theme.muted_style()),
             Span::styled(" │ ", self.theme.muted_style()),
             Span::styled(self.info.model.clone(), self.theme.accent_style()),
-        ];
+        ]);
 
         // Compute widths
         let right_width: usize = right_parts.iter().map(|s| s.content.len()).sum();
