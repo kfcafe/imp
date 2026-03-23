@@ -108,12 +108,22 @@ impl AgentBuilder {
         // Load hooks from config
         agent.hooks.load_from_config(self.config.hooks.clone());
 
+        // Wire agent mode from config
+        agent.mode = self.config.mode;
+
         // Register native tools
         register_native_tools(&mut agent.tools);
 
         // Register any extra tools provided by the caller
         if let Some(extra) = self.extra_tools {
             extra(&mut agent.tools);
+        }
+
+        // Filter registered tools to those allowed by the mode.
+        // Full mode allows everything — no filtering needed.
+        if agent.mode != crate::config::AgentMode::Full {
+            let mode = agent.mode;
+            agent.tools.retain(|name| mode.allows_tool(name));
         }
 
         // Assemble system prompt
@@ -124,13 +134,14 @@ impl AgentBuilder {
             let agents_md = resources::discover_agents_md(&self.cwd, &user_config_dir);
             let skills = resources::discover_skills(&self.cwd, &user_config_dir);
 
-            system_prompt::assemble(
+            system_prompt::assemble_with_mode(
                 &agent.tools,
                 &agents_md,
                 &skills,
                 &[],
                 self.task.as_ref(),
                 self.role.as_ref(),
+                &agent.mode,
             )
             .text
         };

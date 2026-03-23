@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::config::AgentMode;
 use crate::context::estimate_tokens;
 use crate::resources::{AgentsMd, Skill};
 use crate::roles::Role;
@@ -66,10 +67,32 @@ pub fn assemble(
     task: Option<&TaskContext>,
     role: Option<&Role>,
 ) -> AssembledPrompt {
+    assemble_with_mode(
+        tools,
+        agents_md,
+        skills,
+        facts,
+        task,
+        role,
+        &AgentMode::Full,
+    )
+}
+
+/// Same as `assemble` but also filters tool descriptions and appends mode
+/// instructions based on the active `AgentMode`.
+pub fn assemble_with_mode(
+    tools: &ToolRegistry,
+    agents_md: &[AgentsMd],
+    skills: &[Skill],
+    facts: &[Fact],
+    task: Option<&TaskContext>,
+    role: Option<&Role>,
+    mode: &AgentMode,
+) -> AssembledPrompt {
     let mut parts = Vec::new();
 
     // Layer 1: Identity + tool descriptions
-    parts.push(identity_layer(tools, role));
+    parts.push(identity_layer(tools, role, mode));
 
     // Layer 2: Project context from AGENTS.md
     if !agents_md.is_empty() {
@@ -100,12 +123,12 @@ pub fn assemble(
     }
 }
 
-fn identity_layer(tools: &ToolRegistry, role: Option<&Role>) -> String {
+fn identity_layer(tools: &ToolRegistry, role: Option<&Role>, mode: &AgentMode) -> String {
     let mut s = String::from("You are imp, a coding agent.\n\nAvailable tools:\n");
 
     let defs = match role {
         Some(r) if r.readonly => tools.readonly_definitions(),
-        _ => tools.definitions(),
+        _ => tools.definitions_for_mode(mode),
     };
 
     for def in &defs {
@@ -119,6 +142,13 @@ fn identity_layer(tools: &ToolRegistry, role: Option<&Role>) -> String {
             s.push_str(instructions);
             s.push('\n');
         }
+    }
+
+    // Append mode instructions if present
+    if let Some(instructions) = mode.instructions() {
+        s.push('\n');
+        s.push_str(instructions);
+        s.push('\n');
     }
 
     s
