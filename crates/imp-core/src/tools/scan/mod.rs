@@ -36,31 +36,17 @@ impl Tool for ScanTool {
     }
 
     fn description(&self) -> &str {
-        "Extract code structure (types, functions, impls) from source files using tree-sitter. Shows visibility, signatures, fields, variants, and trait implementations."
+        "Extract code structure (types, functions, impls) via tree-sitter. Shows visibility, signatures, fields, variants."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["extract", "build", "scan"],
-                    "description": "extract: specific files. build: files + task context. scan: whole directory."
-                },
-                "files": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Files to analyze (extract/build)"
-                },
-                "directory": {
-                    "type": "string",
-                    "description": "Directory to scan (scan action)"
-                },
-                "task": {
-                    "type": "string",
-                    "description": "Task context for relevance hints"
-                }
+                "action": { "type": "string", "enum": ["extract", "build", "scan"] },
+                "files": { "type": "array", "items": { "type": "string" } },
+                "directory": { "type": "string" },
+                "task": { "type": "string", "description": "Context for relevance hints" }
             },
             "required": ["action"]
         })

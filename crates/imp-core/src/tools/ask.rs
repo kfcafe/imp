@@ -47,23 +47,19 @@ impl Tool for AskTool {
         "Ask User"
     }
     fn description(&self) -> &str {
-        "Ask the user a question. Provide options for multiple choice, omit for free text input."
+        "Ask the user a question. Provide options for multiple choice, omit for free text."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "question": { "type": "string", "description": "The question to ask" },
-                "context": { "type": "string", "description": "Background context for the question" },
-                "options": {
-                    "description": "Options for multiple choice (strings or {label, description} objects)",
-                    "type": "array",
-                    "items": {}
-                },
-                "multiSelect": { "type": "boolean", "description": "Allow selecting multiple options" },
-                "allowOther": { "type": "boolean", "description": "Add an 'Other...' option for custom text" },
-                "default": { "description": "Default selection or pre-filled text" },
-                "placeholder": { "type": "string", "description": "Placeholder text for input" }
+                "question": { "type": "string" },
+                "context": { "type": "string" },
+                "options": { "type": "array", "items": {}, "description": "Strings or {label, description}" },
+                "multiSelect": { "type": "boolean" },
+                "allowOther": { "type": "boolean" },
+                "default": {},
+                "placeholder": { "type": "string" }
             },
             "required": ["question"]
         })

@@ -18,7 +18,7 @@ impl Tool for EditTool {
         "Edit File"
     }
     fn description(&self) -> &str {
-        "Edit a file. Single: pass oldText+newText. Multiple: pass edits array of {oldText, newText} pairs applied sequentially."
+        "Edit a file. Single: oldText+newText. Multi: edits array of {oldText, newText}."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
