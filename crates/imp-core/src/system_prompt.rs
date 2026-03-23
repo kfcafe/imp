@@ -63,6 +63,8 @@ pub struct AssembleParams<'a> {
     pub mode: &'a AgentMode,
     pub memory: Option<&'a str>,
     pub user_profile: Option<&'a str>,
+    /// Whether to include learning instructions in the system prompt.
+    pub learning_enabled: bool,
 }
 
 /// Assemble the system prompt from six layers.
@@ -81,7 +83,7 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
     let mut parts = Vec::new();
 
     // Layer 1: Identity + tool descriptions
-    parts.push(identity_layer(p.tools, p.role, p.mode));
+    parts.push(identity_layer(p.tools, p.role, p.mode, p.learning_enabled));
 
     // Layer 2: Project context from AGENTS.md
     if !p.agents_md.is_empty() {
@@ -124,7 +126,12 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
     }
 }
 
-fn identity_layer(tools: &ToolRegistry, role: Option<&Role>, mode: &AgentMode) -> String {
+fn identity_layer(
+    tools: &ToolRegistry,
+    role: Option<&Role>,
+    mode: &AgentMode,
+    learning_enabled: bool,
+) -> String {
     let mut s = String::from("You are imp, a coding agent.\n\nAvailable tools:\n");
 
     let defs = match role {
@@ -149,6 +156,13 @@ fn identity_layer(tools: &ToolRegistry, role: Option<&Role>, mode: &AgentMode) -
     if let Some(instructions) = mode.instructions() {
         s.push('\n');
         s.push_str(instructions);
+        s.push('\n');
+    }
+
+    // Append learning instructions when enabled
+    if learning_enabled {
+        s.push('\n');
+        s.push_str(crate::learning::LEARNING_INSTRUCTIONS);
         s.push('\n');
     }
 
@@ -348,6 +362,7 @@ mod tests {
             mode: &AgentMode::Full,
             memory: None,
             user_profile: None,
+            learning_enabled: false,
         })
     }
 
@@ -736,6 +751,7 @@ mod tests {
             mode: &AgentMode::Full,
             memory: Some(mem),
             user_profile: None,
+            learning_enabled: false,
         });
         assert!(result.text.contains("MEMORY"));
         assert!(result.text.contains("User runs macOS"));
@@ -756,6 +772,7 @@ mod tests {
             mode: &AgentMode::Full,
             memory: None,
             user_profile: Some(user),
+            learning_enabled: false,
         });
         assert!(result.text.contains("USER PROFILE"));
         assert!(result.text.contains("Prefers concise"));
@@ -774,6 +791,7 @@ mod tests {
             mode: &AgentMode::Full,
             memory: Some(""),
             user_profile: Some(""),
+            learning_enabled: false,
         });
         assert!(!result.text.contains("MEMORY"));
         assert!(!result.text.contains("USER PROFILE"));
@@ -806,6 +824,7 @@ mod tests {
             mode: &AgentMode::Full,
             memory: Some(mem),
             user_profile: None,
+            learning_enabled: false,
         });
 
         let identity_pos = result.text.find("You are imp").unwrap();
