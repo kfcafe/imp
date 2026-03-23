@@ -3304,6 +3304,7 @@ mod mode_tests {
             mode: &mode,
             memory: None,
             user_profile: None,
+            learning_enabled: false,
         });
 
         // Orchestrator allows "read" — should appear in system prompt
@@ -3347,6 +3348,7 @@ mod mode_tests {
             mode: &AgentMode::Full,
             memory: None,
             user_profile: None,
+            learning_enabled: false,
         });
         // Full mode has no instructions
         assert!(
@@ -3369,6 +3371,7 @@ mod mode_tests {
             mode: &AgentMode::Orchestrator,
             memory: None,
             user_profile: None,
+            learning_enabled: false,
         });
         assert!(
             orch_result.text.contains("orchestrator"),
@@ -3387,6 +3390,7 @@ mod mode_tests {
             mode: &AgentMode::Worker,
             memory: None,
             user_profile: None,
+            learning_enabled: false,
         });
         assert!(
             worker_result.text.contains("worker"),
@@ -3404,6 +3408,7 @@ mod mode_tests {
             mode: &AgentMode::Reviewer,
             memory: None,
             user_profile: None,
+            learning_enabled: false,
         });
         assert!(
             reviewer_result.text.contains("reviewer") || reviewer_result.text.contains("read"),

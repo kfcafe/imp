@@ -1494,7 +1494,19 @@ async fn run_interactive(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
 
     let registry = ModelRegistry::with_builtins();
-    let session = SessionManager::in_memory();
+
+    let session = if cli.no_session {
+        SessionManager::in_memory()
+    } else if cli.cont {
+        // Continue most recent session
+        SessionManager::continue_recent(&cwd, &Config::session_dir())?
+            .unwrap_or_else(|| SessionManager::new(&cwd, &Config::session_dir()).unwrap())
+    } else if let Some(ref path) = cli.session {
+        SessionManager::open(path)?
+    } else {
+        // New persistent session
+        SessionManager::new(&cwd, &Config::session_dir())?
+    };
 
     let mut app = imp_tui::app::App::new(config, session, registry, cwd);
 

@@ -165,6 +165,7 @@ impl AgentBuilder {
                 mode: &agent.mode,
                 memory: memory_block.as_deref(),
                 user_profile: user_block.as_deref(),
+                learning_enabled: self.config.learning.enabled,
             })
             .text
         };
@@ -179,7 +180,8 @@ impl AgentBuilder {
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
         ask::AskTool, bash::BashTool, diff::DiffTool, edit::EditTool, find::FindTool,
-        grep::GrepTool, ls::LsTool, read::ReadTool, scan::ScanTool, web::WebTool, write::WriteTool,
+        grep::GrepTool, ls::LsTool, memory::MemoryTool, read::ReadTool, scan::ScanTool,
+        skill_manage::SkillManageTool, web::WebTool, write::WriteTool,
     };
 
     tools.register(Arc::new(AskTool));
@@ -189,7 +191,9 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     tools.register(Arc::new(FindTool));
     tools.register(Arc::new(GrepTool));
     tools.register(Arc::new(LsTool));
+    tools.register(Arc::new(MemoryTool));
     tools.register(Arc::new(ReadTool));
+    tools.register(Arc::new(SkillManageTool));
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ScanTool));
     tools.register(Arc::new(WebTool));
