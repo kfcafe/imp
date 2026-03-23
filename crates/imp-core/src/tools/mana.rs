@@ -268,11 +268,19 @@ mod tests {
     /// The env var is reset afterwards so tests don't bleed into each other.
     /// Tests in this module must run with `--test-threads=1` because env vars are
     /// process-global (the verify gate enforces this).
+    // Serialize env-var-mutating tests to prevent IMP_MODE race conditions.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     async fn run_with_mode(mode_name: &str, action: &str) -> ManaResult {
+        let _guard = ENV_LOCK.lock().unwrap();
         let prev = std::env::var("IMP_MODE").ok();
         std::env::set_var("IMP_MODE", mode_name);
 
         let dir = tempfile::tempdir().unwrap();
+        // Create a minimal .mana/ so the tool doesn't bail with "No .mana/ directory"
+        let mana_dir = dir.path().join(".mana");
+        std::fs::create_dir_all(&mana_dir).unwrap();
+        std::fs::write(mana_dir.join("config.yaml"), "next_id: 1\n").unwrap();
         let (tx, _rx) = mpsc::channel::<ToolUpdate>(1);
         let ctx = ToolContext {
             cwd: dir.path().to_path_buf(),
