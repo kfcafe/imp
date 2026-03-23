@@ -36,7 +36,7 @@ use crate::views::settings::{SettingsState, SettingsView};
 use crate::views::status::{StatusBar, StatusInfo};
 use crate::views::tools::DisplayToolCall;
 use crate::views::tree::{flatten_tree, TreeView, TreeViewState};
-use crate::views::welcome::{WelcomeState, WelcomeStep, WelcomeView};
+use crate::views::welcome::{needs_welcome, WelcomeState, WelcomeStep, WelcomeView};
 
 type Tui = Terminal<CrosstermBackend<io::Stdout>>;
 
@@ -160,7 +160,7 @@ impl App {
         // Check for first-run welcome flow
         let config_dir = Config::user_config_dir();
         let auth_path = config_dir.join("auth.json");
-        if crate::views::welcome::needs_welcome(&config_dir, &auth_path) {
+        if needs_welcome(&config_dir, &auth_path) {
             let all_models = self.model_registry.list().to_vec();
             self.mode = UiMode::Welcome(WelcomeState::new(&all_models));
         }
