@@ -37,6 +37,7 @@ mod tests {
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_tx: tx,
             ui: Arc::new(NullInterface),
+            file_cache: Arc::new(imp_core::tools::FileCache::new()),
         }
     }
 
