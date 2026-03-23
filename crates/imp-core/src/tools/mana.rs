@@ -28,30 +28,26 @@ impl Tool for ManaTool {
         "Mana"
     }
     fn description(&self) -> &str {
-        "Manage work units. Actions: status, list, show, create, close, update."
+        "Work units: status, list, show, create, close, update."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["status", "list", "show", "create", "close", "update"],
-                    "description": "Action to perform"
-                },
-                "id": { "type": "string", "description": "Unit ID (for show, close, update)" },
-                "title": { "type": "string", "description": "Unit title (for create)" },
-                "verify": { "type": "string", "description": "Verify command (for create)" },
-                "description": { "type": "string", "description": "Description (for create, update)" },
-                "parent": { "type": "string", "description": "Parent unit ID (for create, list)" },
-                "deps": { "type": "string", "description": "Comma-separated dependency IDs (for create)" },
-                "status": { "type": "string", "description": "Filter by status (for list) or set status (for update)" },
-                "notes": { "type": "string", "description": "Append to notes (for update — use for progress logging)" },
-                "priority": { "type": "integer", "description": "Priority 0-4 (for create, update)" },
-                "labels": { "type": "string", "description": "Comma-separated labels (for create)" },
-                "force": { "type": "boolean", "description": "Skip verify check (for close)" },
-                "reason": { "type": "string", "description": "Close reason (for close)" },
-                "all": { "type": "boolean", "description": "Include closed/archived (for list)" },
+                "action": { "type": "string", "enum": ["status", "list", "show", "create", "close", "update"] },
+                "id": { "type": "string" },
+                "title": { "type": "string" },
+                "verify": { "type": "string", "description": "Shell command, must exit 0" },
+                "description": { "type": "string" },
+                "parent": { "type": "string" },
+                "deps": { "type": "string", "description": "Comma-separated IDs" },
+                "status": { "type": "string" },
+                "notes": { "type": "string", "description": "Progress log (update)" },
+                "priority": { "type": "integer" },
+                "labels": { "type": "string" },
+                "force": { "type": "boolean" },
+                "reason": { "type": "string" },
+                "all": { "type": "boolean" },
             },
             "required": ["action"],
         })

@@ -12,6 +12,54 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 const MAX_OUTPUT_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 
+/// Check whether the rush backend should be used.
+///
+/// Returns true when the `rush-backend` feature is compiled in AND the env var
+/// `IMP_SHELL_BACKEND` is either unset or set to `"rush"`. Setting
+/// `IMP_SHELL_BACKEND=sh` forces the traditional `sh -c` path even when rush
+/// is available.
+#[cfg(feature = "rush-backend")]
+fn use_rush_backend() -> bool {
+    match std::env::var("IMP_SHELL_BACKEND") {
+        Ok(val) => val.eq_ignore_ascii_case("rush"),
+        // Feature compiled in → rush is the default.
+        Err(_) => true,
+    }
+}
+
+/// Execute a command via rush's in-process library API. Returns `None` if rush
+/// fails so the caller can fall back to `sh`.
+#[cfg(feature = "rush-backend")]
+fn run_via_rush(
+    command: &str,
+    timeout_secs: u64,
+    cwd: &std::path::Path,
+) -> Option<(String, i32, bool, bool)> {
+    let result = rush::run(
+        command,
+        &rush::RunOptions {
+            cwd: Some(cwd.to_path_buf()),
+            timeout: Some(timeout_secs),
+            max_output_bytes: Some(MAX_OUTPUT_BYTES),
+            ..Default::default()
+        },
+    );
+
+    match result {
+        Ok(r) => {
+            let mut output = r.stdout;
+            if !r.stderr.is_empty() {
+                if !output.is_empty() && !output.ends_with('\n') {
+                    output.push('\n');
+                }
+                output.push_str(&r.stderr);
+            }
+            Some((output, r.exit_code, r.timed_out, r.truncated))
+        }
+        Err(_) => None,
+    }
+}
+
 pub struct BashTool;
 
 #[async_trait]
@@ -65,6 +113,45 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
             details: json!({ "exit_code": -1, "timed_out": false, "cancelled": true, "truncated": false }),
             is_error: true,
         });
+    }
+
+    // Try the rush in-process backend when available.
+    #[cfg(feature = "rush-backend")]
+    if use_rush_backend() {
+        if let Some((output, exit_code, timed_out, truncated)) =
+            run_via_rush(command, timeout_secs, &ctx.cwd)
+        {
+            // Stream the output lines so callers see incremental progress.
+            for line in output.lines() {
+                let _ = ctx
+                    .update_tx
+                    .send(ToolUpdate {
+                        content: vec![imp_llm::ContentBlock::Text {
+                            text: line.to_string(),
+                        }],
+                        details: serde_json::Value::Null,
+                    })
+                    .await;
+            }
+
+            let mut result_text = output;
+            if timed_out {
+                result_text.push_str(&format!("\n[Command timed out after {timeout_secs}s]"));
+            }
+
+            return Ok(ToolOutput {
+                content: vec![imp_llm::ContentBlock::Text { text: result_text }],
+                details: json!({
+                    "exit_code": exit_code,
+                    "timed_out": timed_out,
+                    "cancelled": false,
+                    "truncated": truncated,
+                    "backend": "rush",
+                }),
+                is_error: exit_code != 0,
+            });
+        }
+        // rush failed — fall through to sh.
     }
 
     let mut child = {
@@ -394,5 +481,63 @@ mod tests {
             _ => panic!("expected text"),
         };
         assert!(text.contains("testfile.txt"));
+    }
+
+    // ── rush backend tests ──────────────────────────────────────────
+    //
+    // Call run_via_rush directly to avoid env-var races between
+    // parallel test threads.
+
+    #[test]
+    #[cfg(feature = "rush-backend")]
+    fn test_rush_backend_echo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (output, exit_code, timed_out, _truncated) =
+            run_via_rush("echo hello world", DEFAULT_TIMEOUT_SECS, tmp.path())
+                .expect("rush should succeed");
+
+        assert_eq!(exit_code, 0);
+        assert!(!timed_out);
+        assert!(output.contains("hello world"), "stdout missing: {output}");
+    }
+
+    #[test]
+    #[cfg(feature = "rush-backend")]
+    fn test_rush_backend_builtin() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("afile.txt"), "content").unwrap();
+
+        let (output, exit_code, _, _) =
+            run_via_rush("ls", DEFAULT_TIMEOUT_SECS, tmp.path()).expect("rush should succeed");
+
+        assert_eq!(exit_code, 0);
+        assert!(
+            output.contains("afile.txt"),
+            "ls should list file: {output}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "rush-backend")]
+    fn test_rush_backend_pipeline() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let (output, exit_code, _, _) =
+            run_via_rush("echo foo | cat", DEFAULT_TIMEOUT_SECS, tmp.path())
+                .expect("rush should succeed");
+
+        assert_eq!(exit_code, 0);
+        assert!(output.contains("foo"), "pipeline output missing: {output}");
+    }
+
+    #[test]
+    #[cfg(feature = "rush-backend")]
+    fn test_rush_backend_exit_code() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let (_, exit_code, _, _) = run_via_rush("exit 42", DEFAULT_TIMEOUT_SECS, tmp.path())
+            .expect("rush should return result even on non-zero exit");
+
+        assert_eq!(exit_code, 42);
     }
 }

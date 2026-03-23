@@ -147,10 +147,9 @@ impl Tool for GrepTool {
         let query = if literal {
             // Literal mode: single exact term, no parsing
             super::query::parse(&format!("\"{}\"", pattern), true, ignore_case)
-                .map_err(|e| crate::error::Error::Tool(e))?
+                .map_err(crate::error::Error::Tool)?
         } else {
-            super::query::parse(pattern, exact, ignore_case)
-                .map_err(|e| crate::error::Error::Tool(e))?
+            super::query::parse(pattern, exact, ignore_case).map_err(crate::error::Error::Tool)?
         };
 
         let file_filter = FileFilter {

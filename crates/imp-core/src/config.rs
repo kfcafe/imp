@@ -8,6 +8,37 @@ use crate::error::Result;
 use crate::hooks::HookDef;
 use crate::roles::RoleDef;
 
+/// Shell backend selection for the Bash tool.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ShellBackend {
+    /// Use `sh -c` (default, always available).
+    #[default]
+    Sh,
+    /// Use the rush library API (`rush::run`). Falls back to `sh` if
+    /// the `rush-backend` feature is not compiled in.
+    Rush,
+    /// Connect to a running rush daemon over Unix socket. Falls back to `sh`
+    /// if the daemon is not reachable.
+    RushDaemon,
+}
+
+/// Shell-related configuration for the Bash tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ShellConfig {
+    /// Which shell backend to use. Defaults to `"sh"`.
+    #[serde(default)]
+    pub backend: ShellBackend,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            backend: ShellBackend::Sh,
+        }
+    }
+}
+
 /// Top-level configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -34,6 +65,10 @@ pub struct Config {
     /// Context management settings.
     #[serde(default)]
     pub context: ContextConfig,
+
+    /// Shell backend settings.
+    #[serde(default)]
+    pub shell: ShellConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -115,6 +150,9 @@ impl Config {
         }
         if other.context != ContextConfig::default() {
             self.context = other.context;
+        }
+        if other.shell != ShellConfig::default() {
+            self.shell = other.shell;
         }
         self.roles.extend(other.roles);
         self.hooks.extend(other.hooks);
