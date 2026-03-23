@@ -15,7 +15,7 @@ use imp_core::builder::AgentBuilder;
 use imp_core::config::Config;
 use imp_core::session::{SessionEntry, SessionManager};
 use imp_llm::auth::AuthStore;
-use imp_llm::model::ModelRegistry;
+use imp_llm::model::{ModelMeta, ModelRegistry};
 use imp_llm::providers::create_provider;
 use imp_llm::{Cost, Message, Model, StreamEvent, ThinkingLevel, Usage};
 use ratatui::backend::CrosstermBackend;
@@ -31,6 +31,7 @@ use crate::views::command_palette::{builtin_commands, CommandPaletteState, Comma
 use crate::views::editor::{EditorState, EditorView};
 use crate::views::file_finder::{collect_project_files, FileFinderState, FileFinderView};
 use crate::views::model_selector::{ModelSelectorState, ModelSelectorView};
+use crate::views::settings::{SettingsState, SettingsView};
 use crate::views::status::{StatusBar, StatusInfo};
 use crate::views::tools::DisplayToolCall;
 use crate::views::tree::{flatten_tree, TreeView, TreeViewState};
@@ -45,6 +46,7 @@ pub enum UiMode {
     CommandPalette(CommandPaletteState),
     FileFinder(FileFinderState),
     TreeView(TreeViewState),
+    Settings(SettingsState),
 }
 
 /// A queued message (steering or follow-up).
@@ -300,6 +302,11 @@ impl App {
                 let view = TreeView::new(state, &self.theme);
                 frame.render_widget(view, tree_area);
             }
+            UiMode::Settings(state) => {
+                let overlay_area = centered_rect(60, 60, area);
+                let view = SettingsView::new(state, &self.theme);
+                frame.render_widget(view, overlay_area);
+            }
         }
 
         // Set cursor position (only in normal mode)
@@ -364,6 +371,7 @@ impl App {
                 self.handle_overlay_key(key)
             }
             UiMode::TreeView(_) => self.handle_tree_key(key),
+            UiMode::Settings(_) => self.handle_settings_key(key),
         }
 
         Ok(())
@@ -800,6 +808,9 @@ impl App {
                     timestamp: imp_llm::now(),
                 });
             }
+            "settings" => {
+                self.open_settings();
+            }
             _ => {
                 self.messages.push(DisplayMessage {
                     role: MessageRole::Error,
@@ -814,8 +825,143 @@ impl App {
         self.editor.clear();
     }
 
+    fn open_settings(&mut self) {
+        let models = self.filtered_models();
+        let state = SettingsState::new(&self.config, &self.model_name, &models);
+        self.mode = UiMode::Settings(state);
+    }
+
+    fn handle_settings_key(&mut self, key: KeyEvent) {
+        use crate::views::settings::SettingsField;
+        use crossterm::event::KeyCode;
+
+        match key.code {
+            KeyCode::Esc => {
+                // Commit any pending edit, then dismiss
+                if let UiMode::Settings(ref mut state) = self.mode {
+                    state.commit_edit();
+                }
+                self.mode = UiMode::Normal;
+            }
+            KeyCode::Up => {
+                if let UiMode::Settings(ref mut state) = self.mode {
+                    state.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let UiMode::Settings(ref mut state) = self.mode {
+                    state.move_down();
+                }
+            }
+            KeyCode::Left => {
+                if let UiMode::Settings(ref mut state) = self.mode {
+                    state.cycle_backward();
+                }
+            }
+            KeyCode::Right => {
+                if let UiMode::Settings(ref mut state) = self.mode {
+                    state.cycle_forward();
+                }
+            }
+            KeyCode::Enter => {
+                let is_save = matches!(
+                    &self.mode,
+                    UiMode::Settings(s) if s.current_field() == SettingsField::Save
+                );
+                if is_save {
+                    self.save_settings();
+                } else if let UiMode::Settings(ref mut state) = self.mode {
+                    state.start_edit();
+                }
+            }
+            KeyCode::Backspace => {
+                if let UiMode::Settings(ref mut state) = self.mode {
+                    state.pop_char();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let UiMode::Settings(ref mut state) = self.mode {
+                    if state.editing_number {
+                        state.push_char(c);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn save_settings(&mut self) {
+        // Extract state before mutating self
+        let state = match &self.mode {
+            UiMode::Settings(s) => s.clone(),
+            _ => return,
+        };
+
+        // Apply to in-session config
+        state.apply_to_config(&mut self.config);
+        self.model_name = state.model.clone();
+        self.thinking_level = state.thinking_level;
+
+        // Update context window from registry
+        if let Some(meta) = self.model_registry.find_by_alias(&self.model_name) {
+            self.context_window = meta.context_window;
+        }
+
+        // Persist to user config.toml
+        let config_path = Config::user_config_path();
+        match self.config.save(&config_path) {
+            Ok(()) => {
+                if let UiMode::Settings(ref mut s) = self.mode {
+                    s.dirty = false;
+                }
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::System,
+                    content: format!("Settings saved to {}", config_path.display()),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+            }
+            Err(e) => {
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::Error,
+                    content: format!("Failed to save settings: {e}"),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+            }
+        }
+    }
+
+    /// Return models filtered by `config.enabled_models` (if set).
+    /// Entries in the enabled list can be canonical IDs or short aliases —
+    /// each is resolved through the registry before matching.
+    fn filtered_models(&self) -> Vec<ModelMeta> {
+        let all = self.model_registry.list();
+        match &self.config.enabled_models {
+            Some(enabled) if !enabled.is_empty() => {
+                let enabled_ids: Vec<&str> = enabled
+                    .iter()
+                    .filter_map(|name| {
+                        self.model_registry
+                            .find_by_alias(name)
+                            .map(|m| m.id.as_str())
+                    })
+                    .collect();
+                all.iter()
+                    .filter(|m| enabled_ids.contains(&m.id.as_str()))
+                    .cloned()
+                    .collect()
+            }
+            _ => all.to_vec(),
+        }
+    }
+
     fn open_model_selector(&mut self) {
-        let models = self.model_registry.list().to_vec();
+        let models = self.filtered_models();
         self.mode = UiMode::ModelSelector(ModelSelectorState::new(models, self.model_name.clone()));
     }
 
@@ -832,7 +978,7 @@ impl App {
     }
 
     fn cycle_model(&mut self, forward: bool) {
-        let models = self.model_registry.list();
+        let models = self.filtered_models();
         if models.is_empty() {
             return;
         }
@@ -1029,5 +1175,336 @@ fn command_dropdown_area(editor_area: Rect, max_height: u16) -> Rect {
         y: editor_area.y.saturating_sub(height),
         width: editor_area.width.min(50),
         height,
+    }
+}
+
+#[cfg(test)]
+mod session_lifecycle {
+    use super::*;
+    use imp_core::config::Config;
+    use imp_core::session::{SessionEntry, SessionManager};
+    use imp_llm::model::ModelRegistry;
+    use imp_llm::ThinkingLevel;
+    use tempfile::TempDir;
+
+    /// Helper: build an App with defaults and an in-memory session.
+    fn make_app() -> App {
+        let config = Config::default();
+        let session = SessionManager::in_memory();
+        let registry = ModelRegistry::with_builtins();
+        App::new(config, session, registry, PathBuf::from("/tmp/test"))
+    }
+
+    /// Helper: build an App backed by a persistent session in `dir`.
+    fn make_persistent_app(tmp: &TempDir) -> App {
+        let cwd = tmp.path().join("project");
+        let session_dir = tmp.path().join("sessions");
+        let session = SessionManager::new(&cwd, &session_dir).unwrap();
+        let config = Config {
+            model: Some("sonnet".into()),
+            ..Config::default()
+        };
+        let registry = ModelRegistry::with_builtins();
+        App::new(config, session, registry, cwd)
+    }
+
+    // ── 1. App::new creates with config + session ───────────────
+
+    #[test]
+    fn tui_integration_app_new_defaults() {
+        let app = make_app();
+
+        assert!(app.running);
+        assert!(app.messages.is_empty());
+        assert_eq!(app.model_name, "sonnet");
+        assert_eq!(app.thinking_level, ThinkingLevel::Medium);
+        assert_eq!(app.context_window, 200_000);
+        assert!(!app.is_streaming);
+        assert!(app.agent_handle.is_none());
+        assert!(matches!(app.mode, UiMode::Normal));
+    }
+
+    #[test]
+    fn tui_integration_app_new_with_custom_config() {
+        let config = Config {
+            model: Some("haiku".into()),
+            thinking: Some(ThinkingLevel::High),
+            ..Config::default()
+        };
+        let session = SessionManager::in_memory();
+        let registry = ModelRegistry::with_builtins();
+        let app = App::new(config, session, registry, PathBuf::from("/tmp"));
+
+        assert_eq!(app.model_name, "haiku");
+        assert_eq!(app.thinking_level, ThinkingLevel::High);
+    }
+
+    #[test]
+    fn tui_integration_app_new_persistent_session() {
+        let tmp = TempDir::new().unwrap();
+        let app = make_persistent_app(&tmp);
+
+        // Session is backed by a file on disk
+        assert!(app.session.path().is_some());
+        assert!(app.session.path().unwrap().exists());
+    }
+
+    // ── 2. send_message persists to session ─────────────────────
+
+    #[tokio::test]
+    async fn tui_integration_send_message_persists() {
+        let tmp = TempDir::new().unwrap();
+        let mut app = make_persistent_app(&tmp);
+
+        // Type a message and send
+        app.editor.set_content("hello world");
+        app.send_message();
+
+        // User message persisted to session (even though agent spawn fails)
+        let messages = app.session.get_messages();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].is_user());
+
+        // Display should have user msg + error (agent spawn fails without auth)
+        assert!(app.messages.len() >= 2);
+        assert_eq!(app.messages[0].role, MessageRole::User);
+        assert_eq!(app.messages[0].content, "hello world");
+    }
+
+    #[test]
+    fn tui_integration_send_message_empty_ignored() {
+        let mut app = make_app();
+
+        // Empty editor — send_message should be a no-op
+        app.send_message();
+        assert!(app.messages.is_empty());
+        assert_eq!(app.session.get_messages().len(), 0);
+
+        // Whitespace-only too
+        app.editor.set_content("   ");
+        app.send_message();
+        assert!(app.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tui_integration_send_message_persists_to_disk() {
+        let tmp = TempDir::new().unwrap();
+        let mut app = make_persistent_app(&tmp);
+        let session_path = app.session.path().unwrap().to_path_buf();
+
+        app.editor.set_content("persist me");
+        app.send_message();
+
+        // Reopen the file and verify the message is there
+        let reopened = SessionManager::open(&session_path).unwrap();
+        let msgs = reopened.get_messages();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].is_user());
+    }
+
+    // ── 3. Slash commands ───────────────────────────────────────
+
+    #[test]
+    fn tui_integration_slash_new_clears_session() {
+        let mut app = make_app();
+
+        // Add some messages first
+        app.messages.push(DisplayMessage {
+            role: MessageRole::User,
+            content: "old message".into(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            is_streaming: false,
+            timestamp: 0,
+        });
+        assert_eq!(app.messages.len(), 1);
+
+        // Execute /new
+        app.execute_command("new");
+
+        assert!(app.messages.is_empty());
+        // Session replaced with in-memory
+        assert!(app.session.path().is_none());
+    }
+
+    #[test]
+    fn tui_integration_slash_compact_adds_marker() {
+        let mut app = make_app();
+
+        app.execute_command("compact");
+
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].role, MessageRole::Compaction);
+        assert!(app.messages[0].content.contains("compaction"));
+    }
+
+    #[test]
+    fn tui_integration_slash_quit_stops_app() {
+        let mut app = make_app();
+        assert!(app.running);
+
+        app.execute_command("quit");
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn tui_integration_slash_unknown_shows_error() {
+        let mut app = make_app();
+
+        app.execute_command("nonexistent");
+
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].role, MessageRole::Error);
+        assert!(app.messages[0].content.contains("nonexistent"));
+    }
+
+    #[test]
+    fn tui_integration_slash_via_send_message() {
+        let mut app = make_app();
+
+        // Type /new into editor and "send" — should route to execute_command
+        app.editor.set_content("/new");
+        app.send_message();
+
+        // /new clears messages, so display should be empty
+        assert!(app.messages.is_empty());
+        // Editor should be cleared
+        assert!(app.editor.is_empty());
+    }
+
+    // ── 4. Session reload on restart ────────────────────────────
+
+    #[test]
+    fn tui_integration_session_reload_on_restart() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let session_dir = tmp.path().join("sessions");
+
+        // First "session": create and send messages
+        let mut session = SessionManager::new(&cwd, &session_dir).unwrap();
+        let session_path = session.path().unwrap().to_path_buf();
+        session
+            .append(SessionEntry::Message {
+                id: "m1".into(),
+                parent_id: None,
+                message: imp_llm::Message::user("first message"),
+            })
+            .unwrap();
+        session
+            .append(SessionEntry::Message {
+                id: "m2".into(),
+                parent_id: None,
+                message: imp_llm::Message::user("second message"),
+            })
+            .unwrap();
+
+        // "Restart": open the session file and create a new App
+        let reloaded_session = SessionManager::open(&session_path).unwrap();
+        let config = Config::default();
+        let registry = ModelRegistry::with_builtins();
+        let mut app = App::new(config, reloaded_session, registry, cwd);
+
+        // Load persisted messages into display
+        app.load_session_messages();
+
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.messages[0].role, MessageRole::User);
+        assert_eq!(app.messages[0].content, "first message");
+        assert_eq!(app.messages[1].content, "second message");
+    }
+
+    #[test]
+    fn tui_integration_continue_recent_session() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let session_dir = tmp.path().join("sessions");
+
+        // Create a session for this cwd
+        let mut session = SessionManager::new(&cwd, &session_dir).unwrap();
+        session
+            .append(SessionEntry::Message {
+                id: "m1".into(),
+                parent_id: None,
+                message: imp_llm::Message::user("continued"),
+            })
+            .unwrap();
+        drop(session);
+
+        // Simulate --continue: find the most recent session for this cwd
+        let continued = SessionManager::continue_recent(&cwd, &session_dir)
+            .unwrap()
+            .expect("should find a session");
+        let config = Config::default();
+        let registry = ModelRegistry::with_builtins();
+        let mut app = App::new(config, continued, registry, cwd);
+        app.load_session_messages();
+
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].content, "continued");
+    }
+
+    // ── 5. Model switching ──────────────────────────────────────
+
+    #[test]
+    fn tui_integration_model_switch_via_cycle() {
+        let mut app = make_app();
+
+        // The default "sonnet" alias isn't a canonical ID, so cycle_model
+        // starts from index 0.  After cycling forward, the model changes.
+        let models = app.model_registry.list().to_vec();
+        assert!(!models.is_empty());
+
+        app.cycle_model(true);
+        let after_first = app.model_name.clone();
+        // Should now be a canonical model ID from the registry
+        assert!(
+            models.iter().any(|m| m.id == after_first),
+            "model_name should be a registered model after cycling"
+        );
+
+        app.cycle_model(true);
+        let after_second = app.model_name.clone();
+        assert_ne!(
+            after_first, after_second,
+            "cycling again should pick a different model"
+        );
+
+        // Cycling back returns to previous
+        app.cycle_model(false);
+        assert_eq!(app.model_name, after_first);
+    }
+
+    #[test]
+    fn tui_integration_model_switch_updates_context_window() {
+        let mut app = make_app();
+        let original_ctx = app.context_window;
+
+        // Cycle to a different model and check context_window updated
+        app.cycle_model(true);
+        let new_model = app.model_name.clone();
+        let new_ctx = app.context_window;
+
+        let meta = app.model_registry.find_by_alias(&new_model).unwrap();
+        assert_eq!(new_ctx, meta.context_window);
+
+        // If the new model has a different context window, verify it changed
+        if meta.context_window != original_ctx {
+            assert_ne!(new_ctx, original_ctx);
+        }
+    }
+
+    #[test]
+    fn tui_integration_thinking_level_cycle() {
+        let mut app = make_app();
+        assert_eq!(app.thinking_level, ThinkingLevel::Medium);
+
+        app.cycle_thinking_level();
+        assert_eq!(app.thinking_level, ThinkingLevel::High);
+
+        app.cycle_thinking_level();
+        assert_eq!(app.thinking_level, ThinkingLevel::XHigh);
+
+        app.cycle_thinking_level();
+        assert_eq!(app.thinking_level, ThinkingLevel::Off);
     }
 }

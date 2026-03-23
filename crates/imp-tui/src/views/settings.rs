@@ -1,0 +1,496 @@
+use imp_core::config::{Config, ContextConfig, ShellBackend, ShellConfig};
+use imp_llm::model::ModelMeta;
+use imp_llm::ThinkingLevel;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Widget};
+
+use crate::theme::Theme;
+
+/// Which field in the settings panel is focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsField {
+    Model,
+    ThinkingLevel,
+    MaxTurns,
+    ObservationMask,
+    CompactionThreshold,
+    ShellBackend,
+    Save,
+}
+
+const FIELDS: &[SettingsField] = &[
+    SettingsField::Model,
+    SettingsField::ThinkingLevel,
+    SettingsField::MaxTurns,
+    SettingsField::ObservationMask,
+    SettingsField::CompactionThreshold,
+    SettingsField::ShellBackend,
+    SettingsField::Save,
+];
+
+/// State for the settings overlay.
+#[derive(Debug, Clone)]
+pub struct SettingsState {
+    pub selected: usize,
+    pub model: String,
+    pub model_options: Vec<String>,
+    pub thinking_level: ThinkingLevel,
+    pub max_turns: u32,
+    pub observation_mask: f64,
+    pub compaction_threshold: f64,
+    pub shell_backend: ShellBackend,
+    pub editing_number: bool,
+    pub edit_buffer: String,
+    pub dirty: bool,
+}
+
+impl SettingsState {
+    pub fn new(config: &Config, model_name: &str, models: &[ModelMeta]) -> Self {
+        Self {
+            selected: 0,
+            model: model_name.to_string(),
+            model_options: models.iter().map(|m| m.id.clone()).collect(),
+            thinking_level: config.thinking.unwrap_or(ThinkingLevel::Medium),
+            max_turns: config.max_turns.unwrap_or(100),
+            observation_mask: config.context.observation_mask_threshold,
+            compaction_threshold: config.context.compaction_threshold,
+            shell_backend: config.shell.backend.clone(),
+            editing_number: false,
+            edit_buffer: String::new(),
+            dirty: false,
+        }
+    }
+
+    pub fn current_field(&self) -> SettingsField {
+        FIELDS[self.selected]
+    }
+
+    pub fn move_up(&mut self) {
+        self.commit_edit();
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        self.commit_edit();
+        if self.selected + 1 < FIELDS.len() {
+            self.selected += 1;
+        }
+    }
+
+    /// Cycle the current field's value forward.
+    pub fn cycle_forward(&mut self) {
+        self.dirty = true;
+        match self.current_field() {
+            SettingsField::Model => {
+                if let Some(idx) = self.model_options.iter().position(|m| *m == self.model) {
+                    let next = (idx + 1) % self.model_options.len();
+                    self.model = self.model_options[next].clone();
+                }
+            }
+            SettingsField::ThinkingLevel => {
+                self.thinking_level = next_thinking(self.thinking_level);
+            }
+            SettingsField::ShellBackend => {
+                self.shell_backend = next_shell(&self.shell_backend);
+            }
+            SettingsField::MaxTurns => {
+                self.max_turns = self.max_turns.saturating_add(10);
+            }
+            SettingsField::ObservationMask => {
+                self.observation_mask = (self.observation_mask + 0.05).min(1.0);
+            }
+            SettingsField::CompactionThreshold => {
+                self.compaction_threshold = (self.compaction_threshold + 0.05).min(1.0);
+            }
+            SettingsField::Save => {}
+        }
+    }
+
+    /// Cycle the current field's value backward.
+    pub fn cycle_backward(&mut self) {
+        self.dirty = true;
+        match self.current_field() {
+            SettingsField::Model => {
+                if let Some(idx) = self.model_options.iter().position(|m| *m == self.model) {
+                    let prev = if idx == 0 {
+                        self.model_options.len() - 1
+                    } else {
+                        idx - 1
+                    };
+                    self.model = self.model_options[prev].clone();
+                }
+            }
+            SettingsField::ThinkingLevel => {
+                self.thinking_level = prev_thinking(self.thinking_level);
+            }
+            SettingsField::ShellBackend => {
+                self.shell_backend = prev_shell(&self.shell_backend);
+            }
+            SettingsField::MaxTurns => {
+                self.max_turns = self.max_turns.saturating_sub(10).max(1);
+            }
+            SettingsField::ObservationMask => {
+                self.observation_mask = (self.observation_mask - 0.05).max(0.0);
+            }
+            SettingsField::CompactionThreshold => {
+                self.compaction_threshold = (self.compaction_threshold - 0.05).max(0.0);
+            }
+            SettingsField::Save => {}
+        }
+    }
+
+    /// Begin direct numeric input for the current field.
+    pub fn start_edit(&mut self) {
+        match self.current_field() {
+            SettingsField::MaxTurns => {
+                self.editing_number = true;
+                self.edit_buffer = self.max_turns.to_string();
+            }
+            SettingsField::ObservationMask => {
+                self.editing_number = true;
+                self.edit_buffer = format!("{:.2}", self.observation_mask);
+            }
+            SettingsField::CompactionThreshold => {
+                self.editing_number = true;
+                self.edit_buffer = format!("{:.2}", self.compaction_threshold);
+            }
+            _ => {
+                // For enum fields, Enter cycles forward
+                self.cycle_forward();
+            }
+        }
+    }
+
+    pub fn push_char(&mut self, c: char) {
+        if self.editing_number && (c.is_ascii_digit() || c == '.') {
+            self.edit_buffer.push(c);
+        }
+    }
+
+    pub fn pop_char(&mut self) {
+        if self.editing_number {
+            self.edit_buffer.pop();
+        }
+    }
+
+    /// Commit the edit buffer to the underlying field value.
+    pub fn commit_edit(&mut self) {
+        if !self.editing_number {
+            return;
+        }
+        self.editing_number = false;
+        self.dirty = true;
+        match self.current_field() {
+            SettingsField::MaxTurns => {
+                if let Ok(v) = self.edit_buffer.parse::<u32>() {
+                    self.max_turns = v.max(1);
+                }
+            }
+            SettingsField::ObservationMask => {
+                if let Ok(v) = self.edit_buffer.parse::<f64>() {
+                    self.observation_mask = v.clamp(0.0, 1.0);
+                }
+            }
+            SettingsField::CompactionThreshold => {
+                if let Ok(v) = self.edit_buffer.parse::<f64>() {
+                    self.compaction_threshold = v.clamp(0.0, 1.0);
+                }
+            }
+            _ => {}
+        }
+        self.edit_buffer.clear();
+    }
+
+    /// Write current settings into a Config for saving and in-session use.
+    pub fn apply_to_config(&self, config: &mut Config) {
+        config.model = Some(self.model.clone());
+        config.thinking = Some(self.thinking_level);
+        config.max_turns = Some(self.max_turns);
+        config.context = ContextConfig {
+            observation_mask_threshold: self.observation_mask,
+            compaction_threshold: self.compaction_threshold,
+            ..config.context.clone()
+        };
+        config.shell = ShellConfig {
+            backend: self.shell_backend.clone(),
+        };
+    }
+}
+
+fn next_thinking(level: ThinkingLevel) -> ThinkingLevel {
+    match level {
+        ThinkingLevel::Off => ThinkingLevel::Low,
+        ThinkingLevel::Minimal => ThinkingLevel::Low,
+        ThinkingLevel::Low => ThinkingLevel::Medium,
+        ThinkingLevel::Medium => ThinkingLevel::High,
+        ThinkingLevel::High => ThinkingLevel::XHigh,
+        ThinkingLevel::XHigh => ThinkingLevel::Off,
+    }
+}
+
+fn prev_thinking(level: ThinkingLevel) -> ThinkingLevel {
+    match level {
+        ThinkingLevel::Off => ThinkingLevel::XHigh,
+        ThinkingLevel::Minimal => ThinkingLevel::Off,
+        ThinkingLevel::Low => ThinkingLevel::Off,
+        ThinkingLevel::Medium => ThinkingLevel::Low,
+        ThinkingLevel::High => ThinkingLevel::Medium,
+        ThinkingLevel::XHigh => ThinkingLevel::High,
+    }
+}
+
+fn next_shell(backend: &ShellBackend) -> ShellBackend {
+    match backend {
+        ShellBackend::Sh => ShellBackend::Rush,
+        ShellBackend::Rush => ShellBackend::RushDaemon,
+        ShellBackend::RushDaemon => ShellBackend::Sh,
+    }
+}
+
+fn prev_shell(backend: &ShellBackend) -> ShellBackend {
+    match backend {
+        ShellBackend::Sh => ShellBackend::RushDaemon,
+        ShellBackend::Rush => ShellBackend::Sh,
+        ShellBackend::RushDaemon => ShellBackend::Rush,
+    }
+}
+
+fn thinking_label(level: ThinkingLevel) -> &'static str {
+    match level {
+        ThinkingLevel::Off => "Off",
+        ThinkingLevel::Minimal => "Minimal",
+        ThinkingLevel::Low => "Low",
+        ThinkingLevel::Medium => "Medium",
+        ThinkingLevel::High => "High",
+        ThinkingLevel::XHigh => "XHigh",
+    }
+}
+
+fn shell_label(backend: &ShellBackend) -> &'static str {
+    match backend {
+        ShellBackend::Sh => "sh",
+        ShellBackend::Rush => "rush",
+        ShellBackend::RushDaemon => "rush-daemon",
+    }
+}
+
+/// Settings overlay widget.
+pub struct SettingsView<'a> {
+    state: &'a SettingsState,
+    theme: &'a Theme,
+}
+
+impl<'a> SettingsView<'a> {
+    pub fn new(state: &'a SettingsState, theme: &'a Theme) -> Self {
+        Self { state, theme }
+    }
+}
+
+impl Widget for SettingsView<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.height < 10 || area.width < 30 {
+            return;
+        }
+
+        Clear.render(area, buf);
+
+        let title = if self.state.dirty {
+            " Settings * "
+        } else {
+            " Settings "
+        };
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(self.theme.accent_style());
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        let mut row: u16 = 0;
+
+        // Instructions
+        let header = Line::from(Span::styled(
+            "  ←/→ change value  Enter edit  Esc close",
+            self.theme.muted_style(),
+        ));
+        buf.set_line(inner.x, inner.y + row, &header, inner.width);
+        row += 2;
+
+        // Model
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            0,
+            "Model",
+            &self.state.model,
+            "← →",
+        );
+
+        // Thinking
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            1,
+            "Thinking level",
+            thinking_label(self.state.thinking_level),
+            "← →",
+        );
+
+        // Max turns
+        let max_turns_val =
+            if self.state.editing_number && self.state.current_field() == SettingsField::MaxTurns {
+                format!("{}▎", self.state.edit_buffer)
+            } else {
+                self.state.max_turns.to_string()
+            };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            2,
+            "Max turns",
+            &max_turns_val,
+            "← → / type",
+        );
+
+        // Spacer before context section
+        row += 1;
+
+        // Observation mask
+        let obs_val = if self.state.editing_number
+            && self.state.current_field() == SettingsField::ObservationMask
+        {
+            format!("{}▎", self.state.edit_buffer)
+        } else {
+            format!("{:.0}%", self.state.observation_mask * 100.0)
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            3,
+            "Observation mask",
+            &obs_val,
+            "← →",
+        );
+
+        // Compaction threshold
+        let comp_val = if self.state.editing_number
+            && self.state.current_field() == SettingsField::CompactionThreshold
+        {
+            format!("{}▎", self.state.edit_buffer)
+        } else {
+            format!("{:.0}%", self.state.compaction_threshold * 100.0)
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            4,
+            "Compaction threshold",
+            &comp_val,
+            "← →",
+        );
+
+        // Shell backend
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            5,
+            "Shell backend",
+            shell_label(&self.state.shell_backend),
+            "← →",
+        );
+
+        // Spacer before save
+        row += 1;
+
+        // Save button
+        if row < inner.height {
+            let is_save = self.state.selected == 6;
+            let save_style = if is_save {
+                Style::default()
+                    .fg(self.theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                self.theme.muted_style()
+            };
+            let marker = if is_save { "▸ " } else { "  " };
+            let dirty_hint = if self.state.dirty {
+                " (unsaved changes)"
+            } else {
+                ""
+            };
+            let line = Line::from(vec![
+                Span::styled(marker, self.theme.accent_style()),
+                Span::styled("[ Save to config.toml ]", save_style),
+                Span::styled(dirty_hint, self.theme.warning_style()),
+            ]);
+            buf.set_line(inner.x, inner.y + row, &line, inner.width);
+        }
+    }
+}
+
+/// Render one settings field row.
+#[allow(clippy::too_many_arguments)]
+fn render_field(
+    state: &SettingsState,
+    theme: &Theme,
+    buf: &mut Buffer,
+    inner: Rect,
+    row: &mut u16,
+    field_idx: usize,
+    label: &str,
+    value: &str,
+    hint: &str,
+) {
+    if *row >= inner.height {
+        return;
+    }
+    let is_selected = field_idx == state.selected;
+    let marker = if is_selected { "▸ " } else { "  " };
+
+    let label_style = if is_selected {
+        theme.selected_style()
+    } else {
+        Style::default()
+    };
+    let value_style = if is_selected {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    let label_width = 22;
+    let line = Line::from(vec![
+        Span::styled(marker, theme.accent_style()),
+        Span::styled(format!("{label:<label_width$}"), label_style),
+        Span::styled(value, value_style),
+        Span::raw("  "),
+        Span::styled(hint, theme.muted_style()),
+    ]);
+    buf.set_line(inner.x, inner.y + *row, &line, inner.width);
+    *row += 1;
+}

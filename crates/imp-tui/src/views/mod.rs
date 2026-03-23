@@ -3,6 +3,7 @@ pub mod command_palette;
 pub mod editor;
 pub mod file_finder;
 pub mod model_selector;
+pub mod settings;
 pub mod status;
 pub mod tools;
 pub mod tree;
