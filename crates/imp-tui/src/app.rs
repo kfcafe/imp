@@ -31,6 +31,7 @@ use crate::views::command_palette::{builtin_commands, CommandPaletteState, Comma
 use crate::views::editor::{EditorState, EditorView};
 use crate::views::file_finder::{collect_project_files, FileFinderState, FileFinderView};
 use crate::views::model_selector::{ModelSelectorState, ModelSelectorView};
+use crate::views::session_picker::{SessionPickerState, SessionPickerView};
 use crate::views::settings::{SettingsState, SettingsView};
 use crate::views::status::{StatusBar, StatusInfo};
 use crate::views::tools::DisplayToolCall;
@@ -47,6 +48,7 @@ pub enum UiMode {
     FileFinder(FileFinderState),
     TreeView(TreeViewState),
     Settings(SettingsState),
+    SessionPicker(SessionPickerState),
 }
 
 /// A queued message (steering or follow-up).
@@ -311,6 +313,11 @@ impl App {
                 let view = SettingsView::new(state, &self.theme);
                 frame.render_widget(view, overlay_area);
             }
+            UiMode::SessionPicker(state) => {
+                let overlay_area = centered_rect(60, 50, area);
+                let view = SessionPickerView::new(state, &self.theme);
+                frame.render_widget(view, overlay_area);
+            }
         }
 
         // Set cursor position (only in normal mode)
@@ -376,6 +383,7 @@ impl App {
             }
             UiMode::TreeView(_) => self.handle_tree_key(key),
             UiMode::Settings(_) => self.handle_settings_key(key),
+            UiMode::SessionPicker(_) => self.handle_session_picker_key(key),
         }
 
         Ok(())
@@ -843,14 +851,32 @@ impl App {
                 self.open_settings();
             }
             "resume" | "session" => {
-                self.messages.push(DisplayMessage {
-                    role: MessageRole::System,
-                    content: "Session management not yet implemented in TUI. Use `imp -c` to continue or `imp -r` to resume from CLI.".into(),
-                    thinking: None,
-                    tool_calls: Vec::new(),
-                    is_streaming: false,
-                    timestamp: imp_llm::now(),
-                });
+                let session_dir = Config::session_dir();
+                match SessionManager::list(&session_dir) {
+                    Ok(sessions) if !sessions.is_empty() => {
+                        self.mode = UiMode::SessionPicker(SessionPickerState::new(sessions));
+                    }
+                    Ok(_) => {
+                        self.messages.push(DisplayMessage {
+                            role: MessageRole::System,
+                            content: "No saved sessions found.".into(),
+                            thinking: None,
+                            tool_calls: Vec::new(),
+                            is_streaming: false,
+                            timestamp: imp_llm::now(),
+                        });
+                    }
+                    Err(e) => {
+                        self.messages.push(DisplayMessage {
+                            role: MessageRole::Error,
+                            content: format!("Failed to list sessions: {e}"),
+                            thinking: None,
+                            tool_calls: Vec::new(),
+                            is_streaming: false,
+                            timestamp: imp_llm::now(),
+                        });
+                    }
+                }
             }
             "fork" | "name" | "export" | "reload" => {
                 self.messages.push(DisplayMessage {
@@ -995,6 +1021,59 @@ impl App {
         let models = self.filtered_models();
         let state = SettingsState::new(&self.config, &self.model_name, &models);
         self.mode = UiMode::Settings(state);
+    }
+
+    fn handle_session_picker_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = UiMode::Normal;
+            }
+            KeyCode::Up => {
+                if let UiMode::SessionPicker(ref mut state) = self.mode {
+                    state.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let UiMode::SessionPicker(ref mut state) = self.mode {
+                    state.move_down();
+                }
+            }
+            KeyCode::Enter => {
+                let selected_path = if let UiMode::SessionPicker(ref state) = self.mode {
+                    state.selected_session().map(|s| s.path.clone())
+                } else {
+                    None
+                };
+                self.mode = UiMode::Normal;
+                if let Some(path) = selected_path {
+                    match SessionManager::open(&path) {
+                        Ok(session) => {
+                            self.session = session;
+                            self.load_session_messages();
+                            self.messages.push(DisplayMessage {
+                                role: MessageRole::System,
+                                content: "Session resumed.".into(),
+                                thinking: None,
+                                tool_calls: Vec::new(),
+                                is_streaming: false,
+                                timestamp: imp_llm::now(),
+                            });
+                        }
+                        Err(e) => {
+                            self.messages.push(DisplayMessage {
+                                role: MessageRole::Error,
+                                content: format!("Failed to open session: {e}"),
+                                thinking: None,
+                                tool_calls: Vec::new(),
+                                is_streaming: false,
+                                timestamp: imp_llm::now(),
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) {

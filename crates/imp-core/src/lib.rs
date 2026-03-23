@@ -5,6 +5,7 @@ pub mod config;
 pub mod context;
 pub mod error;
 pub mod hooks;
+pub mod memory;
 pub mod resources;
 pub mod retry;
 pub mod roles;
