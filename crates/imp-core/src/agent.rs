@@ -2074,10 +2074,15 @@ mod tests {
             post_compaction_response,
         ]));
 
-        let model = test_model_with_context_window(provider.clone(), 6000);
+        // Context window sized so that 5 × 2000-char tool results (~3000 tokens)
+        // push context over the compaction threshold, but after compaction the
+        // summary (~100 tokens) stays well under.
+        let model = test_model_with_context_window(provider.clone(), 5000);
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.tools.register(Arc::new(EchoTool));
         agent.context_config.compaction_threshold = 0.5;
+        // Disable observation masking so it doesn't interfere with the test.
+        agent.context_config.observation_mask_threshold = 1.0;
 
         for i in 0..5 {
             let cid = format!("pre_{i}");
