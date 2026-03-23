@@ -15,6 +15,8 @@ pub struct DisplayToolCall {
     pub output: Option<String>,
     pub is_error: bool,
     pub expanded: bool,
+    /// Rolling buffer of streaming output lines (last 5)
+    pub streaming_lines: Vec<String>,
 }
 
 impl DisplayToolCall {

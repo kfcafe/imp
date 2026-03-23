@@ -733,6 +733,7 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
             json!({ "type": "compaction_end", "summary": summary })
         }
         AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
+        AgentEvent::ToolOutputDelta { .. } => return Ok(()), // handled in TUI only
     };
 
     let line = serde_json::to_string(&value)?;
@@ -1338,6 +1339,9 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             json!({ "type": "compaction_end", "summary": summary })
         }
         AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
+        AgentEvent::ToolOutputDelta { tool_call_id, text } => {
+            json!({ "type": "tool_output_delta", "tool_call_id": tool_call_id, "text": text })
+        }
     }
 }
 

@@ -1550,6 +1550,7 @@ impl App {
                                 output: None,
                                 is_error: false,
                                 expanded: self.tools_expanded,
+                                streaming_lines: Vec::new(),
                             });
                         }
                         _ => {}
@@ -1570,6 +1571,27 @@ impl App {
                             tc.args_summary = DisplayToolCall::make_args_summary(&tool_name, &args);
                         }
                     }
+                }
+            }
+            AgentEvent::ToolOutputDelta { tool_call_id, text } => {
+                // Feed streaming output into the tool call's rolling buffer
+                for msg in self.messages.iter_mut().rev() {
+                    for tc in &mut msg.tool_calls {
+                        if tc.id == tool_call_id && tc.output.is_none() {
+                            // Append text and keep last 5 lines
+                            for line in text.lines() {
+                                tc.streaming_lines.push(line.to_string());
+                            }
+                            if tc.streaming_lines.len() > 5 {
+                                let excess = tc.streaming_lines.len() - 5;
+                                tc.streaming_lines.drain(..excess);
+                            }
+                            break;
+                        }
+                    }
+                }
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
                 }
             }
             AgentEvent::ToolExecutionEnd {
