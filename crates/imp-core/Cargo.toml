@@ -36,6 +36,13 @@ jsonschema = "0.45"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[dependencies.rush]
+path = "/Users/asher/rush"
+optional = true
+
+[features]
+rush-backend = ["rush"]
+
 [[bench]]
 name = "grep_vs_probe"
 harness = false
