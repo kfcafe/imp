@@ -151,7 +151,39 @@ impl App {
     pub fn load_session_messages(&mut self) {
         self.messages.clear();
         for msg in self.session.get_messages() {
-            self.messages.push(DisplayMessage::from_message(msg));
+            match msg {
+                // Attach tool results to their parent tool call display entry
+                imp_llm::Message::ToolResult(tr) => {
+                    let output_text = tr
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    let mut attached = false;
+                    for display_msg in self.messages.iter_mut().rev() {
+                        for tc in &mut display_msg.tool_calls {
+                            if tc.id == tr.tool_call_id {
+                                tc.output = Some(output_text.clone());
+                                tc.is_error = tr.is_error;
+                                attached = true;
+                                break;
+                            }
+                        }
+                        if attached {
+                            break;
+                        }
+                    }
+                    // Only show as standalone if no matching tool call found
+                    if !attached {
+                        self.messages.push(DisplayMessage::from_message(msg));
+                    }
+                }
+                _ => self.messages.push(DisplayMessage::from_message(msg)),
+            }
         }
     }
 
@@ -733,13 +765,22 @@ impl App {
         ) {
             messages.pop();
         }
-        // Strip tool_use blocks from assistant messages — we don't persist
-        // tool_result messages, so the API would reject unpaired tool_use.
+        // Collect tool_result IDs to know which tool_calls are paired
+        let result_ids: std::collections::HashSet<String> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::ToolResult(tr) => Some(tr.tool_call_id.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // Strip unpaired tool_call blocks (old sessions without tool_results)
         for msg in &mut messages {
             if let Message::Assistant(assistant) = msg {
-                assistant
-                    .content
-                    .retain(|block| !matches!(block, imp_llm::ContentBlock::ToolCall { .. }));
+                assistant.content.retain(|block| match block {
+                    imp_llm::ContentBlock::ToolCall { id, .. } => result_ids.contains(id),
+                    _ => true,
+                });
             }
         }
         // Remove empty assistant messages left after stripping
@@ -1538,25 +1579,36 @@ impl App {
                 tool_call_id,
                 result,
             } => {
-                // Find the tool call and attach the result
+                // Build display text from result content
+                let output_text = result
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                let is_error = result.is_error;
+
+                // Attach result to the matching display tool call
                 for msg in self.messages.iter_mut().rev() {
                     for tc in &mut msg.tool_calls {
                         if tc.id == tool_call_id {
-                            let output_text = result
-                                .content
-                                .iter()
-                                .filter_map(|b| match b {
-                                    imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("");
-                            tc.output = Some(output_text);
-                            tc.is_error = result.is_error;
+                            tc.output = Some(output_text.clone());
+                            tc.is_error = is_error;
                             break;
                         }
                     }
                 }
+
+                // Persist tool result to session so resume has full conversation
+                let msg_id = uuid::Uuid::new_v4().to_string();
+                let _ = self.session.append(SessionEntry::Message {
+                    id: msg_id,
+                    parent_id: None,
+                    message: imp_llm::Message::ToolResult(result),
+                });
             }
             AgentEvent::TurnEnd { message, .. } => {
                 // Persist assistant message to session
