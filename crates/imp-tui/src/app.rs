@@ -924,6 +924,10 @@ impl App {
                 let provider = cmd.split_whitespace().nth(1).unwrap_or("anthropic");
                 self.start_login(provider);
             }
+            "welcome" | "setup" => {
+                let all_models = self.model_registry.list().to_vec();
+                self.mode = UiMode::Welcome(WelcomeState::new(&all_models));
+            }
             "copy" => {
                 // Copy last assistant message to clipboard
                 if let Some(last) = self
