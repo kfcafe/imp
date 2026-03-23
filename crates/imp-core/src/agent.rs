@@ -3255,7 +3255,7 @@ mod mode_tests {
     #[test]
     fn agent_mode_enforcement_system_prompt_filters() {
         use crate::config::AgentMode;
-        use crate::system_prompt::assemble_with_mode;
+        use crate::system_prompt::{assemble, AssembleParams};
         use crate::tools::ToolRegistry;
 
         let mut registry = ToolRegistry::new();
@@ -3294,7 +3294,17 @@ mod mode_tests {
         registry.register(Arc::new(ReadTool));
 
         let mode = AgentMode::Orchestrator;
-        let result = assemble_with_mode(&registry, &[], &[], &[], None, None, &mode);
+        let result = assemble(&AssembleParams {
+            tools: &registry,
+            agents_md: &[],
+            skills: &[],
+            facts: &[],
+            task: None,
+            role: None,
+            mode: &mode,
+            memory: None,
+            user_profile: None,
+        });
 
         // Orchestrator allows "read" — should appear in system prompt
         assert!(
@@ -3321,14 +3331,23 @@ mod mode_tests {
     #[test]
     fn agent_mode_enforcement_system_prompt_instructions() {
         use crate::config::AgentMode;
-        use crate::system_prompt::assemble_with_mode;
+        use crate::system_prompt::{assemble, AssembleParams};
         use crate::tools::ToolRegistry;
 
         let registry = ToolRegistry::new();
 
         // Full mode — no extra instructions
-        let full_result =
-            assemble_with_mode(&registry, &[], &[], &[], None, None, &AgentMode::Full);
+        let full_result = assemble(&AssembleParams {
+            tools: &registry,
+            agents_md: &[],
+            skills: &[],
+            facts: &[],
+            task: None,
+            role: None,
+            mode: &AgentMode::Full,
+            memory: None,
+            user_profile: None,
+        });
         // Full mode has no instructions
         assert!(
             !full_result.text.contains("orchestrator"),
@@ -3340,15 +3359,17 @@ mod mode_tests {
         );
 
         // Orchestrator mode — should include mode instructions
-        let orch_result = assemble_with_mode(
-            &registry,
-            &[],
-            &[],
-            &[],
-            None,
-            None,
-            &AgentMode::Orchestrator,
-        );
+        let orch_result = assemble(&AssembleParams {
+            tools: &registry,
+            agents_md: &[],
+            skills: &[],
+            facts: &[],
+            task: None,
+            role: None,
+            mode: &AgentMode::Orchestrator,
+            memory: None,
+            user_profile: None,
+        });
         assert!(
             orch_result.text.contains("orchestrator"),
             "orchestrator prompt should contain mode instructions, got: {}",
@@ -3356,16 +3377,34 @@ mod mode_tests {
         );
 
         // Worker mode — should include mode instructions
-        let worker_result =
-            assemble_with_mode(&registry, &[], &[], &[], None, None, &AgentMode::Worker);
+        let worker_result = assemble(&AssembleParams {
+            tools: &registry,
+            agents_md: &[],
+            skills: &[],
+            facts: &[],
+            task: None,
+            role: None,
+            mode: &AgentMode::Worker,
+            memory: None,
+            user_profile: None,
+        });
         assert!(
             worker_result.text.contains("worker"),
             "worker prompt should contain mode instructions"
         );
 
         // Reviewer mode — should include mode instructions
-        let reviewer_result =
-            assemble_with_mode(&registry, &[], &[], &[], None, None, &AgentMode::Reviewer);
+        let reviewer_result = assemble(&AssembleParams {
+            tools: &registry,
+            agents_md: &[],
+            skills: &[],
+            facts: &[],
+            task: None,
+            role: None,
+            mode: &AgentMode::Reviewer,
+            memory: None,
+            user_profile: None,
+        });
         assert!(
             reviewer_result.text.contains("reviewer") || reviewer_result.text.contains("read"),
             "reviewer prompt should contain mode instructions"
