@@ -88,6 +88,8 @@ pub struct Agent {
     pub retry_policy: RetryPolicy,
     /// The original prompt passed to `run()`, used to re-orient the model after compaction.
     pub original_prompt: Option<String>,
+    /// In-session file content cache, shared across tool calls.
+    pub file_cache: Arc<crate::tools::FileCache>,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_rx: mpsc::Receiver<AgentCommand>,
@@ -119,6 +121,7 @@ impl Agent {
             context_config: ContextConfig::default(),
             retry_policy: RetryPolicy::default(),
             original_prompt: None,
+            file_cache: Arc::new(crate::tools::FileCache::new()),
             event_tx,
             command_rx,
         };
@@ -504,6 +507,7 @@ impl Agent {
                     cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     update_tx,
                     ui: self.ui.clone(),
+                    file_cache: self.file_cache.clone(),
                 };
                 match tool.execute(call_id, args.clone(), ctx).await {
                     Ok(output) => output.into_tool_result(call_id, tool_name),

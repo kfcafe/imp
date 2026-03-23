@@ -282,71 +282,84 @@ fn execute_block_search(
     limit: usize,
     cwd: &Path,
 ) -> Result<ToolOutput> {
-    let mut blocks: Vec<CodeBlock> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    use rayon::prelude::*;
 
-    for entry in walk_files(search_path, file_filter) {
-        if blocks.len() >= limit {
-            break;
-        }
+    let files = walk_files(search_path, file_filter);
 
-        let content = match read_text_file(&entry) {
-            Some(c) => c,
-            None => continue,
-        };
+    // Parallel: process each file independently, then merge results
+    let file_blocks: Vec<Vec<CodeBlock>> = files
+        .par_iter()
+        .filter_map(|entry| {
+            let content = read_text_file(entry)?;
 
-        // For AND queries, check file-level match first
-        if !query.must.is_empty() && !query.matches_file(&content) {
-            continue;
-        }
+            // For AND queries, check file-level match first
+            if !query.must.is_empty() && !query.matches_file(&content) {
+                return None;
+            }
 
-        // Find matching line numbers
-        let match_lines = query.matching_lines(&content);
+            let match_lines = query.matching_lines(&content);
+            if match_lines.is_empty() {
+                return None;
+            }
 
-        if match_lines.is_empty() {
-            continue;
-        }
+            let rel_path = entry.strip_prefix(cwd).unwrap_or(entry);
 
-        let rel_path = entry.strip_prefix(cwd).unwrap_or(&entry);
-
-        // Try tree-sitter block extraction
-        if let Some(parser_blocks) = extract_blocks_at_lines(&content, &entry, &match_lines) {
-            for block in parser_blocks {
-                if blocks.len() >= limit {
-                    break;
-                }
-                let key = (rel_path.to_path_buf(), block.start_line, block.end_line);
-                if seen.insert(key) {
-                    blocks.push(CodeBlock {
+            if let Some(parser_blocks) = extract_blocks_at_lines(&content, entry, &match_lines) {
+                let blocks: Vec<CodeBlock> = parser_blocks
+                    .into_iter()
+                    .map(|block| CodeBlock {
                         file: rel_path.to_path_buf(),
                         start_line: block.start_line,
                         end_line: block.end_line,
                         kind: block.kind,
                         code: block.code,
-                    });
+                    })
+                    .collect();
+                if blocks.is_empty() {
+                    None
+                } else {
+                    Some(blocks)
                 }
-            }
-        } else {
-            // No parser for this language — fall back to context window around match
-            for &line_idx in &match_lines {
-                if blocks.len() >= limit {
-                    break;
-                }
+            } else {
                 let lines: Vec<&str> = content.lines().collect();
-                let start = line_idx.saturating_sub(5);
-                let end = (line_idx + 6).min(lines.len());
-                let code = lines[start..end].join("\n");
-                let key = (rel_path.to_path_buf(), start + 1, end);
-                if seen.insert(key) {
-                    blocks.push(CodeBlock {
-                        file: rel_path.to_path_buf(),
-                        start_line: start + 1,
-                        end_line: end,
-                        kind: None,
-                        code,
-                    });
+                let blocks: Vec<CodeBlock> = match_lines
+                    .iter()
+                    .map(|&line_idx| {
+                        let start = line_idx.saturating_sub(5);
+                        let end = (line_idx + 6).min(lines.len());
+                        CodeBlock {
+                            file: rel_path.to_path_buf(),
+                            start_line: start + 1,
+                            end_line: end,
+                            kind: None,
+                            code: lines[start..end].join("\n"),
+                        }
+                    })
+                    .collect();
+                if blocks.is_empty() {
+                    None
+                } else {
+                    Some(blocks)
                 }
             }
+        })
+        .collect();
+
+    // Merge and deduplicate
+    let mut blocks = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for file_result in file_blocks {
+        for block in file_result {
+            if blocks.len() >= limit {
+                break;
+            }
+            let key = (block.file.clone(), block.start_line, block.end_line);
+            if seen.insert(key) {
+                blocks.push(block);
+            }
+        }
+        if blocks.len() >= limit {
+            break;
         }
     }
 
@@ -786,6 +799,7 @@ mod tests {
             cancelled: Arc::new(AtomicBool::new(false)),
             update_tx: tx,
             ui: Arc::new(NullInterface),
+            file_cache: Arc::new(crate::tools::FileCache::new()),
         }
     }
 

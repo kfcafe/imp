@@ -23,6 +23,7 @@ glob = "0.3"
 regex = "1"
 ignore.workspace = true
 project-detect.workspace = true
+rayon.workspace = true
 readability-rust.workspace = true
 reqwest.workspace = true
 url.workspace = true

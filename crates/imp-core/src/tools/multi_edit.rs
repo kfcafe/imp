@@ -160,6 +160,7 @@ mod tests {
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_tx: tx,
             ui: Arc::new(crate::ui::NullInterface),
+            file_cache: Arc::new(crate::tools::FileCache::new()),
         }
     }
 
