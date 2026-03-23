@@ -37,12 +37,17 @@ jsonschema = "0.45"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[dependencies.rush]
-path = "/Users/asher/rush"
-optional = true
+# rush is an optional local-only dependency for shell backend experiments.
+# To enable: clone rush locally and uncomment with your path, then build with --features rush-backend.
+# [dependencies.rush]
+# path = "/path/to/rush"
+# optional = true
 
 [features]
-rush-backend = ["rush"]
+# When rush is available locally, uncomment the [dependencies.rush] above and enable:
+# rush-backend = ["rush"]
+# For now, declare the feature so cfg(feature = "rush-backend") compiles without warnings.
+rush-backend = []
 
 [[bench]]
 name = "grep_vs_probe"
