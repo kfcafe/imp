@@ -14,17 +14,7 @@ use imp_core::config::Config;
 
 use imp_core::session::SessionManager;
 use imp_core::system_prompt::{Attempt as TaskAttempt, TaskContext};
-use imp_core::tools::ask::AskTool;
-use imp_core::tools::bash::BashTool;
-use imp_core::tools::diff::DiffTool;
-use imp_core::tools::edit::EditTool;
-use imp_core::tools::find::FindTool;
-use imp_core::tools::grep::GrepTool;
-use imp_core::tools::ls::LsTool;
-use imp_core::tools::read::ReadTool;
-use imp_core::tools::scan::ScanTool;
-use imp_core::tools::web::WebTool;
-use imp_core::tools::write::WriteTool;
+
 use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
 use imp_llm::auth::AuthStore;
 use imp_llm::model::ModelRegistry;
@@ -697,27 +687,6 @@ fn format_attempt(attempt: &UnitAttempt) -> String {
     } else {
         format!("{number} ({outcome}): {}", details.join(", "))
     }
-}
-
-fn register_native_tools_with_ui(agent: &mut Agent, include_ui_tools: bool) {
-    if include_ui_tools {
-        agent.tools.register(Arc::new(AskTool));
-    }
-    agent.tools.register(Arc::new(BashTool));
-    agent.tools.register(Arc::new(DiffTool));
-    agent.tools.register(Arc::new(EditTool)); // handles both single and multi-edit
-    agent.tools.register(Arc::new(FindTool));
-    agent.tools.register(Arc::new(GrepTool));
-    agent.tools.register(Arc::new(LsTool));
-    agent.tools.register(Arc::new(ReadTool));
-    agent.tools.register(Arc::new(WriteTool));
-    agent.tools.register(Arc::new(ScanTool));
-    agent.tools.register(Arc::new(WebTool));
-
-    // Mana integration
-    agent
-        .tools
-        .register(Arc::new(imp_core::tools::mana::ManaTool));
 }
 
 fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>> {

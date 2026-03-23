@@ -237,6 +237,11 @@ pub struct Config {
     /// Agent mode — controls tool and mana action access.
     #[serde(default)]
     pub mode: AgentMode,
+
+    /// Enabled models for the model selector (None = show all).
+    /// Entries can be canonical IDs or aliases (e.g. "sonnet", "claude-sonnet-4-6").
+    #[serde(default)]
+    pub enabled_models: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -329,6 +334,9 @@ impl Config {
         }
         if other.mode != AgentMode::default() {
             self.mode = other.mode;
+        }
+        if other.enabled_models.is_some() {
+            self.enabled_models = other.enabled_models;
         }
         self.roles.extend(other.roles);
         self.hooks.extend(other.hooks);
