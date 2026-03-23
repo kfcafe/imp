@@ -90,10 +90,7 @@ impl Tool for SessionSearchTool {
 
         for (i, hit) in results.iter().enumerate() {
             let ts = format_timestamp(hit.created_at);
-            let first = hit
-                .first_message
-                .as_deref()
-                .unwrap_or("(no first message)");
+            let first = hit.first_message.as_deref().unwrap_or("(no first message)");
 
             output.push_str(&format!(
                 "\n[{}] Session from {} ({}, {} messages)\n    First: \"{}\"\n    {}\n",
@@ -112,10 +109,25 @@ impl Tool for SessionSearchTool {
 
 /// Default path for the session index database.
 fn index_db_path() -> std::path::PathBuf {
-    let data_dir = dirs_next::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("imp");
-    data_dir.join("session_index.db")
+    // Use XDG data dir on Linux, ~/Library on macOS, or fallback to ~/.local/share
+    let base = if cfg!(target_os = "macos") {
+        std::env::var("HOME")
+            .map(|h| {
+                std::path::PathBuf::from(h)
+                    .join("Library")
+                    .join("Application Support")
+            })
+            .unwrap_or_else(|_| std::path::PathBuf::from(".local/share"))
+    } else {
+        std::env::var("XDG_DATA_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::env::var("HOME")
+                    .map(|h| std::path::PathBuf::from(h).join(".local/share"))
+                    .unwrap_or_else(|_| std::path::PathBuf::from(".local/share"))
+            })
+    };
+    base.join("imp").join("session_index.db")
 }
 
 /// Format a unix timestamp into a human-readable date.

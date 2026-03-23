@@ -2,14 +2,17 @@
 id: '23'
 title: 'Learning loop: agent-curated memory, skill management, session search'
 slug: learning-loop-agent-curated-memory-skill-managemen
-status: open
+status: closed
 priority: 2
 created_at: '2026-03-23T19:59:21.752687Z'
-updated_at: '2026-03-23T19:59:21.752687Z'
+updated_at: '2026-03-23T21:10:01.809382Z'
 labels:
 - feature
 - learning-loop
+closed_at: '2026-03-23T21:10:01.809382Z'
+close_reason: 'Auto-closed: all children completed'
 verify: cd /Users/asher/tower && cargo check -p imp-core 2>&1 | tail -1 | grep -q "could not compile" && exit 1; cargo test -p imp-core memory_store session_index skill_manage learning 2>&1 | grep -E "(test result|FAILED)" | grep -v "0 passed" | head -1
+is_archived: true
 ---
 
 Implement the closed learning loop for imp, inspired by Hermes Agent. 
