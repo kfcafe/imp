@@ -693,6 +693,20 @@ impl App {
         ) {
             messages.pop();
         }
+        // Strip tool_use blocks from assistant messages — we don't persist
+        // tool_result messages, so the API would reject unpaired tool_use.
+        for msg in &mut messages {
+            if let Message::Assistant(assistant) = msg {
+                assistant
+                    .content
+                    .retain(|block| !matches!(block, imp_llm::ContentBlock::ToolCall { .. }));
+            }
+        }
+        // Remove empty assistant messages left after stripping
+        messages.retain(|msg| match msg {
+            Message::Assistant(a) => !a.content.is_empty(),
+            _ => true,
+        });
         agent.messages = messages;
 
         let prompt = prompt.to_string();
