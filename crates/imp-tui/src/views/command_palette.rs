@@ -1,6 +1,6 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Widget};
 
@@ -105,10 +105,26 @@ impl CommandPaletteState {
             self.commands.iter().collect()
         } else {
             let lower = self.filter.to_lowercase();
-            self.commands
+            let mut results: Vec<(usize, &SlashCommand)> = self
+                .commands
                 .iter()
-                .filter(|c| c.name.to_lowercase().contains(&lower))
-                .collect()
+                .filter_map(|c| {
+                    let name = c.name.to_lowercase();
+                    let desc = c.description.to_lowercase();
+                    // Exact prefix gets priority 0, contains gets 1, description match gets 2
+                    if name.starts_with(&lower) {
+                        Some((0, c))
+                    } else if name.contains(&lower) {
+                        Some((1, c))
+                    } else if desc.contains(&lower) {
+                        Some((2, c))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            results.sort_by_key(|(priority, _)| *priority);
+            results.into_iter().map(|(_, c)| c).collect()
         }
     }
 
@@ -155,38 +171,120 @@ impl<'a> CommandPaletteView<'a> {
 
 impl Widget for CommandPaletteView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.height < 3 || area.width < 15 {
+        if area.height < 3 || area.width < 20 {
             return;
         }
 
         Clear.render(area, buf);
+
+        let title = if self.state.filter.is_empty() {
+            " Commands ".to_string()
+        } else {
+            format!(" /{} ", self.state.filter)
+        };
+
         let block = Block::default()
+            .title(title)
             .borders(Borders::ALL)
-            .border_style(self.theme.border_style());
+            .border_style(self.theme.accent_style());
         let inner = block.inner(area);
         block.render(area, buf);
 
         let filtered = self.state.filtered();
+        let total = filtered.len();
 
-        for (i, cmd) in filtered.iter().enumerate() {
-            if i >= inner.height as usize {
+        if total == 0 {
+            let line = Line::from(Span::styled(
+                "  No matching commands",
+                self.theme.muted_style(),
+            ));
+            buf.set_line(inner.x, inner.y, &line, inner.width);
+            return;
+        }
+
+        // Find the longest command name for alignment
+        let max_name_len = filtered.iter().map(|c| c.name.len()).max().unwrap_or(0);
+
+        // Scroll to keep selected visible
+        let visible = inner.height as usize;
+        let scroll_offset = if self.state.selected >= visible {
+            self.state.selected - visible + 1
+        } else {
+            0
+        };
+
+        for (i, cmd) in filtered.iter().skip(scroll_offset).enumerate() {
+            if i >= visible {
                 break;
             }
 
-            let is_selected = i == self.state.selected;
-            let style = if is_selected {
+            let abs_idx = scroll_offset + i;
+            let is_selected = abs_idx == self.state.selected;
+
+            // Selection indicator
+            let indicator = if is_selected { " ▸ " } else { "   " };
+
+            // Build the command name with / prefix, padded for alignment
+            let name_text = format!("/{:<width$}", cmd.name, width = max_name_len);
+
+            // Build the line with full-row highlight when selected
+            let row_style = if is_selected {
                 self.theme.selected_style()
             } else {
                 Style::default()
             };
 
+            let name_style = if is_selected {
+                self.theme.selected_style().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().add_modifier(Modifier::BOLD)
+            };
+
+            let desc_style = if is_selected {
+                self.theme.selected_style()
+            } else {
+                self.theme.muted_style()
+            };
+
             let line = Line::from(vec![
-                Span::styled(format!("  /{}", cmd.name), style),
-                Span::raw("  "),
-                Span::styled(cmd.description.clone(), self.theme.muted_style()),
+                Span::styled(indicator, row_style),
+                Span::styled(name_text, name_style),
+                Span::styled("  ", row_style),
+                Span::styled(&cmd.description, desc_style),
             ]);
 
+            // Fill the entire row with the background color first
+            if is_selected {
+                let fill = " ".repeat(inner.width as usize);
+                buf.set_line(
+                    inner.x,
+                    inner.y + i as u16,
+                    &Line::from(Span::styled(fill, row_style)),
+                    inner.width,
+                );
+            }
+
             buf.set_line(inner.x, inner.y + i as u16, &line, inner.width);
+        }
+
+        // Scroll indicators
+        if scroll_offset > 0 {
+            let hint = Line::from(Span::styled("  ↑ more", self.theme.muted_style()));
+            buf.set_line(inner.x + inner.width.saturating_sub(10), inner.y, &hint, 10);
+        }
+        if scroll_offset + visible < total {
+            let y = inner.y + inner.height.saturating_sub(1);
+            let hint = Line::from(Span::styled("  ↓ more", self.theme.muted_style()));
+            buf.set_line(inner.x + inner.width.saturating_sub(10), y, &hint, 10);
+        }
+
+        // Footer hint
+        if inner.height > 1 && total > 0 {
+            let hint_y = area.y + area.height - 1;
+            let hint_text = " ↑↓/Tab  Enter  Esc ";
+            let hint_x = area.x + area.width.saturating_sub(hint_text.len() as u16 + 1);
+            let hint_line = Line::from(Span::styled(hint_text, self.theme.muted_style()));
+            buf.set_line(hint_x, hint_y, &hint_line, hint_text.len() as u16);
         }
     }
 }

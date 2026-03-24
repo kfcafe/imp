@@ -2461,7 +2461,7 @@ fn command_dropdown_area(editor_area: Rect, max_height: u16) -> Rect {
     Rect {
         x: editor_area.x,
         y: editor_area.y.saturating_sub(height),
-        width: editor_area.width.min(50),
+        width: editor_area.width.min(60),
         height,
     }
 }
