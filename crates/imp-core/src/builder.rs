@@ -131,6 +131,7 @@ impl AgentBuilder {
             prompt
         } else {
             let user_config_dir = Config::user_config_dir();
+            resources::seed_builtin_skills(&user_config_dir);
             let agents_md = resources::discover_agents_md(&self.cwd, &user_config_dir);
             let skills = resources::discover_skills(&self.cwd, &user_config_dir);
 
