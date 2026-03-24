@@ -151,12 +151,13 @@ impl Default for ModelRegistry {
 fn builtin_models() -> Vec<ModelMeta> {
     vec![
         // -- Anthropic --
+        // Latest: Sonnet 4.6 (released 2026-02)
         ModelMeta {
             id: "claude-sonnet-4-6".into(),
             provider: "anthropic".into(),
             name: "Claude Sonnet 4.6".into(),
             context_window: 200_000,
-            max_output_tokens: 128_000,
+            max_output_tokens: 64_000,
             pricing: ModelPricing {
                 input_per_mtok: 3.0,
                 output_per_mtok: 15.0,
@@ -169,12 +170,32 @@ fn builtin_models() -> Vec<ModelMeta> {
                 tool_use: true,
             },
         },
+        // Sonnet 4.5 (released 2025-09)
+        ModelMeta {
+            id: "claude-sonnet-4-5-20250929".into(),
+            provider: "anthropic".into(),
+            name: "Claude Sonnet 4.5".into(),
+            context_window: 200_000,
+            max_output_tokens: 64_000,
+            pricing: ModelPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cache_read_per_mtok: 0.3,
+                cache_write_per_mtok: 3.75,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        // Sonnet 4.0 (released 2025-05)
         ModelMeta {
             id: "claude-sonnet-4-20250514".into(),
             provider: "anthropic".into(),
             name: "Claude Sonnet 4".into(),
             context_window: 200_000,
-            max_output_tokens: 16_384,
+            max_output_tokens: 64_000,
             pricing: ModelPricing {
                 input_per_mtok: 3.0,
                 output_per_mtok: 15.0,
@@ -187,6 +208,26 @@ fn builtin_models() -> Vec<ModelMeta> {
                 tool_use: true,
             },
         },
+        // Latest: Haiku 4.5 (released 2025-10)
+        ModelMeta {
+            id: "claude-haiku-4-5-20251001".into(),
+            provider: "anthropic".into(),
+            name: "Claude Haiku 4.5".into(),
+            context_window: 200_000,
+            max_output_tokens: 64_000,
+            pricing: ModelPricing {
+                input_per_mtok: 1.0,
+                output_per_mtok: 5.0,
+                cache_read_per_mtok: 0.1,
+                cache_write_per_mtok: 1.25,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        // Legacy: Haiku 3.5 (kept for compatibility)
         ModelMeta {
             id: "claude-haiku-3-5-20241022".into(),
             provider: "anthropic".into(),
@@ -205,6 +246,45 @@ fn builtin_models() -> Vec<ModelMeta> {
                 tool_use: true,
             },
         },
+        // Latest: Opus 4.6 (released 2026-02)
+        ModelMeta {
+            id: "claude-opus-4-6".into(),
+            provider: "anthropic".into(),
+            name: "Claude Opus 4.6".into(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+            pricing: ModelPricing {
+                input_per_mtok: 5.0,
+                output_per_mtok: 25.0,
+                cache_read_per_mtok: 0.5,
+                cache_write_per_mtok: 6.25,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        // Opus 4.5 (released 2025-11)
+        ModelMeta {
+            id: "claude-opus-4-5-20251101".into(),
+            provider: "anthropic".into(),
+            name: "Claude Opus 4.5".into(),
+            context_window: 200_000,
+            max_output_tokens: 64_000,
+            pricing: ModelPricing {
+                input_per_mtok: 5.0,
+                output_per_mtok: 25.0,
+                cache_read_per_mtok: 0.5,
+                cache_write_per_mtok: 6.25,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        // Opus 4.0 (released 2025-05, deprecated 2026-05)
         ModelMeta {
             id: "claude-opus-4-20250514".into(),
             provider: "anthropic".into(),
@@ -288,7 +368,7 @@ fn builtin_models() -> Vec<ModelMeta> {
             pricing: ModelPricing {
                 input_per_mtok: 1.25,
                 output_per_mtok: 10.0,
-                cache_read_per_mtok: 0.315,
+                cache_read_per_mtok: 0.125,
                 cache_write_per_mtok: 1.25,
             },
             capabilities: Capabilities {
@@ -304,10 +384,10 @@ fn builtin_models() -> Vec<ModelMeta> {
             context_window: 1_048_576,
             max_output_tokens: 65_536,
             pricing: ModelPricing {
-                input_per_mtok: 0.15,
-                output_per_mtok: 3.5,
-                cache_read_per_mtok: 0.0375,
-                cache_write_per_mtok: 0.15,
+                input_per_mtok: 0.30,
+                output_per_mtok: 2.50,
+                cache_read_per_mtok: 0.03,
+                cache_write_per_mtok: 0.30,
             },
             capabilities: Capabilities {
                 reasoning: true,
@@ -320,15 +400,23 @@ fn builtin_models() -> Vec<ModelMeta> {
 
 fn builtin_aliases() -> Vec<(String, String)> {
     vec![
-        // Anthropic
+        // Anthropic — sonnet
         ("sonnet".into(), "claude-sonnet-4-6".into()),
         ("claude-sonnet".into(), "claude-sonnet-4-6".into()),
-        ("sonnet-4".into(), "claude-sonnet-4-20250514".into()),
         ("sonnet-4.6".into(), "claude-sonnet-4-6".into()),
-        ("haiku".into(), "claude-haiku-3-5-20241022".into()),
-        ("claude-haiku".into(), "claude-haiku-3-5-20241022".into()),
-        ("opus".into(), "claude-opus-4-20250514".into()),
-        ("claude-opus".into(), "claude-opus-4-20250514".into()),
+        ("sonnet-4.5".into(), "claude-sonnet-4-5-20250929".into()),
+        ("sonnet-4".into(), "claude-sonnet-4-20250514".into()),
+        // Anthropic — haiku
+        ("haiku".into(), "claude-haiku-4-5-20251001".into()),
+        ("claude-haiku".into(), "claude-haiku-4-5-20251001".into()),
+        ("haiku-4.5".into(), "claude-haiku-4-5-20251001".into()),
+        ("haiku-3.5".into(), "claude-haiku-3-5-20241022".into()),
+        // Anthropic — opus
+        ("opus".into(), "claude-opus-4-6".into()),
+        ("claude-opus".into(), "claude-opus-4-6".into()),
+        ("opus-4.6".into(), "claude-opus-4-6".into()),
+        ("opus-4.5".into(), "claude-opus-4-5-20251101".into()),
+        ("opus-4".into(), "claude-opus-4-20250514".into()),
         // OpenAI
         ("gpt4o".into(), "gpt-4o".into()),
         ("4o".into(), "gpt-4o".into()),
@@ -358,6 +446,15 @@ mod tests {
         let model = reg
             .find_by_alias("haiku")
             .expect("haiku alias should resolve");
+        assert_eq!(model.id, "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn find_by_alias_resolves_haiku_legacy() {
+        let reg = ModelRegistry::with_builtins();
+        let model = reg
+            .find_by_alias("haiku-3.5")
+            .expect("haiku-3.5 alias should resolve");
         assert_eq!(model.id, "claude-haiku-3-5-20241022");
     }
 
@@ -367,7 +464,7 @@ mod tests {
         let model = reg
             .find_by_alias("opus")
             .expect("opus alias should resolve");
-        assert_eq!(model.id, "claude-opus-4-20250514");
+        assert_eq!(model.id, "claude-opus-4-6");
     }
 
     #[test]
@@ -407,7 +504,7 @@ mod tests {
     fn list_by_provider_filters_correctly() {
         let reg = ModelRegistry::with_builtins();
         let anthropic = reg.list_by_provider("anthropic");
-        assert_eq!(anthropic.len(), 4);
+        assert_eq!(anthropic.len(), 8);
         assert!(anthropic.iter().all(|m| m.provider == "anthropic"));
 
         let openai = reg.list_by_provider("openai");
