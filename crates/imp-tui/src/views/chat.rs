@@ -208,26 +208,33 @@ impl Widget for ChatView<'_> {
         for msg in self.messages {
             match msg.role {
                 MessageRole::User => {
-                    all_lines.push(Line::from(Span::styled(
-                        "You:",
+                    // Compact user messages: prefix on same line as first content line
+                    let prefix = Span::styled(
+                        "❯ ",
                         Style::default()
                             .fg(self.theme.user_prefix)
                             .add_modifier(Modifier::BOLD),
-                    )));
-                    for content_line in msg.content.lines() {
-                        all_lines.push(Line::from(Span::raw(format!("  {content_line}"))));
-                    }
-                    if msg.content.is_empty() {
-                        all_lines.push(Line::raw(""));
+                    );
+                    let mut lines_iter = msg.content.lines();
+                    if let Some(first) = lines_iter.next() {
+                        all_lines.push(Line::from(vec![
+                            prefix,
+                            Span::styled(
+                                first.to_string(),
+                                Style::default().fg(self.theme.user_prefix),
+                            ),
+                        ]));
+                        for content_line in lines_iter {
+                            all_lines.push(Line::from(Span::styled(
+                                format!("  {content_line}"),
+                                Style::default().fg(self.theme.user_prefix),
+                            )));
+                        }
+                    } else {
+                        all_lines.push(Line::from(prefix));
                     }
                 }
                 MessageRole::Assistant => {
-                    all_lines.push(Line::from(Span::styled(
-                        "Assistant:",
-                        Style::default()
-                            .fg(self.theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    )));
 
                     // Thinking: rolling 5-line tail (live stream of latest thought)
                     if let Some(ref thinking) = msg.thinking {
