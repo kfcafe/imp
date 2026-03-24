@@ -3356,6 +3356,7 @@ mod mode_tests {
             mode: &mode,
             memory: None,
             user_profile: None,
+            cwd: None,
             learning_enabled: false,
         });
 
@@ -3400,6 +3401,7 @@ mod mode_tests {
             mode: &AgentMode::Full,
             memory: None,
             user_profile: None,
+            cwd: None,
             learning_enabled: false,
         });
         // Full mode has no instructions
@@ -3423,6 +3425,7 @@ mod mode_tests {
             mode: &AgentMode::Orchestrator,
             memory: None,
             user_profile: None,
+            cwd: None,
             learning_enabled: false,
         });
         assert!(
@@ -3442,6 +3445,7 @@ mod mode_tests {
             mode: &AgentMode::Worker,
             memory: None,
             user_profile: None,
+            cwd: None,
             learning_enabled: false,
         });
         assert!(
@@ -3460,6 +3464,7 @@ mod mode_tests {
             mode: &AgentMode::Reviewer,
             memory: None,
             user_profile: None,
+            cwd: None,
             learning_enabled: false,
         });
         assert!(
