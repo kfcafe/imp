@@ -118,9 +118,15 @@ pub fn resolve_normal(key: KeyEvent) -> Option<Action> {
 
 /// Resolve a key event to an action in overlay mode (model selector, command palette, file finder).
 pub fn resolve_overlay(key: KeyEvent) -> Option<Action> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
     match key.code {
         KeyCode::Up => Some(Action::OverlayUp),
         KeyCode::Down => Some(Action::OverlayDown),
+        KeyCode::Tab => Some(Action::OverlayDown),
+        KeyCode::BackTab => Some(Action::OverlayUp),
+        KeyCode::Char('n') if ctrl => Some(Action::OverlayDown),
+        KeyCode::Char('p') if ctrl => Some(Action::OverlayUp),
         KeyCode::Enter => Some(Action::OverlaySelect),
         KeyCode::Esc => Some(Action::OverlayDismiss),
         KeyCode::Backspace => Some(Action::OverlayBackspace),
