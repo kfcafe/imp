@@ -63,15 +63,26 @@ fn run_via_rush(
 /// Detect which shell to use for command execution.
 /// Prefers rush if available on PATH, falls back to sh.
 fn detect_shell() -> String {
+    // IMP_SHELL overrides everything (also used by tests to force sh)
+    if let Ok(shell) = std::env::var("IMP_SHELL") {
+        return shell;
+    }
+    // Prefer rush — dogfood it as the default shell backend.
+    // Cached after first PATH lookup.
     use std::sync::OnceLock;
-    static SHELL: OnceLock<String> = OnceLock::new();
-    SHELL
-        .get_or_init(|| {
-            // IMP_SHELL overrides (e.g. rush, bash, zsh).
-            // Defaults to sh — rush blocked on exit code propagation (rush#8).
-            std::env::var("IMP_SHELL").unwrap_or_else(|_| "sh".to_string())
-        })
-        .clone()
+    static RUSH_PATH: OnceLock<Option<String>> = OnceLock::new();
+    if let Some(path) = RUSH_PATH.get_or_init(|| {
+        std::process::Command::new("which")
+            .arg("rush")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|p| !p.is_empty())
+    }) {
+        return path.clone();
+    }
+    "sh".to_string()
 }
 
 pub struct BashTool;
@@ -338,7 +349,13 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
+    // Tests use sh for deterministic behavior (rush has exit code bugs: rush#8)
+    fn ensure_sh() {
+        std::env::set_var("IMP_SHELL", "sh");
+    }
+
     fn test_ctx(dir: &std::path::Path) -> (ToolContext, tokio::sync::mpsc::Receiver<ToolUpdate>) {
+        ensure_sh();
         let (tx, rx) = tokio::sync::mpsc::channel(1024);
         let ctx = ToolContext {
             cwd: dir.to_path_buf(),
