@@ -292,9 +292,46 @@ async fn main() {
         return;
     }
 
+    // Expand @file args into file content context
+    let file_context = expand_file_args(&cli.args);
+
+    // Read from stdin if piped
+    let stdin_content = {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf).ok();
+            if buf.is_empty() {
+                None
+            } else {
+                Some(buf)
+            }
+        } else {
+            None
+        }
+    };
+
     // Print mode
     if let Some(ref prompt) = cli.print {
-        if let Err(e) = run_print_mode(&cli, prompt).await {
+        let full_prompt = build_full_prompt(prompt, &file_context, &stdin_content);
+        if let Err(e) = run_print_mode(&cli, &full_prompt).await {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // If stdin was piped without -p, run in print mode with stdin as prompt
+    if let Some(ref stdin) = stdin_content {
+        let remaining: Vec<&str> = cli.args.iter().map(|s| s.as_str()).collect();
+        let instruction = if remaining.is_empty() {
+            String::new()
+        } else {
+            remaining.join(" ")
+        };
+        let full_prompt = build_full_prompt(&instruction, &file_context, &Some(stdin.clone()));
+        if let Err(e) = run_print_mode(&cli, &full_prompt).await {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
@@ -1728,6 +1765,55 @@ async fn run_interactive(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     app.run().await
 }
 
+/// Expand @file arguments into file content blocks.
+/// Returns a string with each file's content wrapped in XML-like tags.
+fn expand_file_args(args: &[String]) -> String {
+    let mut parts = Vec::new();
+    for arg in args {
+        if let Some(path_str) = arg.strip_prefix('@') {
+            let path = std::path::Path::new(path_str);
+            // Expand ~ in @~/path
+            let resolved = if let Some(rest) = path_str.strip_prefix("~/") {
+                if let Ok(home) = std::env::var("HOME") {
+                    std::path::PathBuf::from(home).join(rest)
+                } else {
+                    path.to_path_buf()
+                }
+            } else {
+                path.to_path_buf()
+            };
+            match std::fs::read_to_string(&resolved) {
+                Ok(content) => {
+                    parts.push(format!(
+                        "<file path=\"{}\">\n{}\n</file>",
+                        resolved.display(),
+                        content.trim_end()
+                    ));
+                }
+                Err(e) => {
+                    eprintln!("Warning: cannot read {}: {e}", resolved.display());
+                }
+            }
+        }
+    }
+    parts.join("\n\n")
+}
+
+/// Build the full prompt from user text, @file context, and stdin.
+fn build_full_prompt(prompt: &str, file_context: &str, stdin: &Option<String>) -> String {
+    let mut parts = Vec::new();
+    if !file_context.is_empty() {
+        parts.push(file_context.to_string());
+    }
+    if let Some(ref content) = stdin {
+        parts.push(format!("<stdin>\n{}\n</stdin>", content.trim_end()));
+    }
+    if !prompt.is_empty() {
+        parts.push(prompt.to_string());
+    }
+    parts.join("\n\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2131,7 +2217,7 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
         };
         sources
             .into_iter()
-            .filter(|s| target.map_or(true, |t| s.agent == t))
+            .filter(|s| target.is_none_or(|t| s.agent == t))
             .collect()
     } else {
         sources

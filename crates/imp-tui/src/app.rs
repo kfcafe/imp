@@ -333,7 +333,8 @@ impl App {
         // Messages
         let chat = ChatView::new(&self.messages, &self.theme, &self.highlighter)
             .scroll(self.scroll_offset)
-            .tick(self.tick);
+            .tick(self.tick)
+            .tool_focus(self.tool_focus);
         frame.render_widget(chat, chunks[0]);
 
         // Editor
@@ -527,11 +528,46 @@ impl App {
                 self.cycle_thinking_level();
             }
             Some(Action::Peek) => {
+                // Legacy alias — behaves the same as ToolToggle with no focus
                 self.tools_expanded = !self.tools_expanded;
                 for msg in &mut self.messages {
                     for tc in &mut msg.tool_calls {
                         tc.expanded = self.tools_expanded;
                     }
+                }
+            }
+            Some(Action::ToolToggle) => {
+                if let Some(idx) = self.tool_focus {
+                    // Toggle just the focused tool call
+                    if let Some(tc) = self.get_tool_call_mut(idx) {
+                        tc.expanded = !tc.expanded;
+                    }
+                } else {
+                    // No focus: toggle all (global expand/collapse)
+                    self.tools_expanded = !self.tools_expanded;
+                    for msg in &mut self.messages {
+                        for tc in &mut msg.tool_calls {
+                            tc.expanded = self.tools_expanded;
+                        }
+                    }
+                }
+            }
+            Some(Action::ToolFocusNext) => {
+                let total = self.total_tool_calls();
+                if total > 0 {
+                    self.tool_focus = Some(match self.tool_focus {
+                        None => 0,
+                        Some(idx) => (idx + 1).min(total - 1),
+                    });
+                }
+            }
+            Some(Action::ToolFocusPrev) => {
+                let total = self.total_tool_calls();
+                if total > 0 {
+                    self.tool_focus = Some(match self.tool_focus {
+                        None => total.saturating_sub(1),
+                        Some(idx) => idx.saturating_sub(1),
+                    });
                 }
             }
             Some(Action::InsertChar('@')) => {
@@ -809,8 +845,8 @@ impl App {
         ) {
             messages.pop();
         }
-        // Collect tool_result IDs to know which tool_calls are paired
-        let result_ids: std::collections::HashSet<String> = messages
+        // Collect tool_result IDs to know which tool_calls are paired (used by sanitize below)
+        let _result_ids: std::collections::HashSet<String> = messages
             .iter()
             .filter_map(|m| match m {
                 Message::ToolResult(tr) => Some(tr.tool_call_id.clone()),
@@ -887,6 +923,7 @@ impl App {
         self.is_streaming = true;
         self.auto_scroll = true;
         self.scroll_offset = 0;
+        self.tool_focus = None;
         self.editor.push_history();
         self.editor.clear();
 
@@ -983,15 +1020,42 @@ impl App {
                     }
                 }
             }
-            "fork" | "name" | "export" | "reload" => {
-                self.messages.push(DisplayMessage {
-                    role: MessageRole::System,
-                    content: format!("/{cmd} not yet implemented."),
-                    thinking: None,
-                    tool_calls: Vec::new(),
-                    is_streaming: false,
-                    timestamp: imp_llm::now(),
-                });
+            "name" => {
+                let new_name = cmd.strip_prefix("name").unwrap_or("").trim();
+                if new_name.is_empty() {
+                    self.push_system_msg("Usage: /name <session name>");
+                } else {
+                    self.session.set_name(new_name);
+                    self.push_system_msg(&format!("Session renamed to: {new_name}"));
+                }
+            }
+            "export" => {
+                let dest = cmd.strip_prefix("export").unwrap_or("").trim();
+                let path = if dest.is_empty() {
+                    let name = self.session.name().unwrap_or("conversation");
+                    std::path::PathBuf::from(format!("{name}.md"))
+                } else {
+                    std::path::PathBuf::from(dest)
+                };
+                match self.export_conversation(&path) {
+                    Ok(_) => self.push_system_msg(&format!("Exported to {}", path.display())),
+                    Err(e) => self.push_system_msg(&format!("Export failed: {e}")),
+                }
+            }
+            "reload" => {
+                match imp_core::config::Config::resolve(
+                    &imp_core::config::Config::user_config_dir(),
+                    Some(&self.cwd),
+                ) {
+                    Ok(new_config) => {
+                        self.config = new_config;
+                        self.push_system_msg("Config reloaded.");
+                    }
+                    Err(e) => self.push_system_msg(&format!("Reload failed: {e}")),
+                }
+            }
+            "fork" => {
+                self.push_system_msg("/fork not yet implemented.");
             }
             "login" => {
                 let provider = cmd.split_whitespace().nth(1).unwrap_or("anthropic");
@@ -1529,6 +1593,45 @@ impl App {
         };
     }
 
+    // ── Helpers ──────────────────────────────────────────────────
+
+    fn push_system_msg(&mut self, content: &str) {
+        self.messages.push(DisplayMessage {
+            role: MessageRole::System,
+            content: content.to_string(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            is_streaming: false,
+            timestamp: imp_llm::now(),
+        });
+    }
+
+    fn export_conversation(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path)?;
+        for msg in &self.messages {
+            let role = match msg.role {
+                MessageRole::User => "**You:**",
+                MessageRole::Assistant => "**Assistant:**",
+                MessageRole::System | MessageRole::Compaction => "*System:*",
+                MessageRole::Error => "**Error:**",
+            };
+            writeln!(f, "{role}\n{}\n", msg.content)?;
+            for tc in &msg.tool_calls {
+                writeln!(f, "> `{}`: {}", tc.name, tc.args_summary)?;
+                if let Some(ref output) = tc.output {
+                    let preview = if output.len() > 200 {
+                        &output[..200]
+                    } else {
+                        output
+                    };
+                    writeln!(f, "> {preview}\n")?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     // ── Agent event handling ────────────────────────────────────
 
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
@@ -1536,6 +1639,7 @@ impl App {
             AgentEvent::AgentStart { model, .. } => {
                 self.model_name = model;
                 self.is_streaming = true;
+                self.tool_focus = None;
                 self.turn_tracker.reset();
             }
             AgentEvent::AgentEnd { usage, cost } => {
@@ -1659,6 +1763,10 @@ impl App {
                         if tc.id == tool_call_id {
                             tc.output = Some(output_text.clone());
                             tc.is_error = is_error;
+                            // Auto-expand failed tool calls so the error is immediately visible
+                            if is_error {
+                                tc.expanded = true;
+                            }
                             break;
                         }
                     }

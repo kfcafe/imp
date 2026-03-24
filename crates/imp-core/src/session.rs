@@ -90,6 +90,7 @@ pub struct SessionManager {
     entries: Vec<SessionEntry>,
     path: Option<PathBuf>,
     leaf_id: Option<String>,
+    session_name: Option<String>,
 }
 
 impl SessionManager {
@@ -118,6 +119,7 @@ impl SessionManager {
             entries: vec![header],
             path: Some(path),
             leaf_id: None,
+            session_name: None,
         })
     }
 
@@ -152,6 +154,7 @@ impl SessionManager {
             entries,
             path: Some(path.to_path_buf()),
             leaf_id: last_id,
+            session_name: None,
         })
     }
 
@@ -161,6 +164,7 @@ impl SessionManager {
             entries: Vec::new(),
             path: None,
             leaf_id: None,
+            session_name: None,
         }
     }
 
@@ -204,6 +208,16 @@ impl SessionManager {
             Some((_, path)) => Ok(Some(Self::open(&path)?)),
             None => Ok(None),
         }
+    }
+
+    /// Get the session name.
+    pub fn name(&self) -> Option<&str> {
+        self.session_name.as_deref()
+    }
+
+    /// Set the session name.
+    pub fn set_name(&mut self, name: &str) {
+        self.session_name = Some(name.to_string());
     }
 
     /// Append an entry. Sets parent_id to current leaf_id, updates leaf_id,
@@ -428,6 +442,7 @@ impl SessionManager {
             entries: forked_entries,
             path: Some(new_path.to_path_buf()),
             leaf_id,
+            session_name: None,
         })
     }
 
