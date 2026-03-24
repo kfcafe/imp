@@ -41,6 +41,7 @@ mod tests {
             file_tracker: Arc::new(std::sync::Mutex::new(
                 imp_core::tools::FileTracker::default(),
             )),
+            mode: imp_core::config::AgentMode::Full,
         }
     }
 
