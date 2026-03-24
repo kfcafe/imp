@@ -180,23 +180,22 @@ impl AgentBuilder {
 /// This is the canonical list — update here when adding or removing tools.
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
-        ask::AskTool, bash::BashTool, diff::DiffTool, edit::EditTool, find::FindTool,
-        grep::GrepTool, ls::LsTool, mana::ManaTool, read::ReadTool, scan::ScanTool, web::WebTool,
-        write::WriteTool, write_lua::WriteLuaTool, write_skill::WriteSkillTool,
+        ask::AskTool, bash::BashTool, diff::DiffTool, edit::EditTool, extend::ExtendTool,
+        find::FindTool, grep::GrepTool, ls::LsTool, mana::ManaTool, read::ReadTool, scan::ScanTool,
+        web::WebTool, write::WriteTool,
     };
 
     tools.register(Arc::new(AskTool));
     tools.register(Arc::new(BashTool));
     tools.register(Arc::new(DiffTool));
     tools.register(Arc::new(EditTool));
+    tools.register(Arc::new(ExtendTool));
     tools.register(Arc::new(FindTool));
     tools.register(Arc::new(GrepTool));
     tools.register(Arc::new(LsTool));
     tools.register(Arc::new(ManaTool));
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
-    tools.register(Arc::new(WriteLuaTool));
-    tools.register(Arc::new(WriteSkillTool));
     tools.register(Arc::new(ScanTool));
     tools.register(Arc::new(WebTool));
 }

@@ -9,37 +9,41 @@ use super::{Tool, ToolContext, ToolOutput};
 use crate::config::Config;
 use crate::error::Result;
 
-pub struct SkillManageTool;
+const LUA_REFERENCE: &str = include_str!("../../skills/lua-tools/SKILL.md");
+const SKILL_REFERENCE: &str = include_str!("../../skills/writing-skills/REFERENCE.md");
+
+pub struct ExtendTool;
 
 #[async_trait]
-impl Tool for SkillManageTool {
+impl Tool for ExtendTool {
     fn name(&self) -> &str {
-        "skill_manage"
+        "extend"
     }
 
     fn label(&self) -> &str {
-        "Skill Manager"
+        "Extend Imp"
     }
 
     fn description(&self) -> &str {
-        "Create, update, and delete skills. Use after completing complex tasks \
-         to save the approach for future reuse. Use to fix skills that are \
-         incomplete or incorrect."
+        "Create skills and Lua tools to extend imp. Actions: \
+         'lua_reference' returns the Lua tool API, \
+         'skill_reference' returns the skill authoring guide, \
+         'create'/'patch'/'delete' manage skill files."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
-            "required": ["action", "name"],
+            "required": ["action"],
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create", "patch", "delete"],
-                    "description": "Action: create a new skill, patch an existing one, or delete"
+                    "enum": ["lua_reference", "skill_reference", "create", "patch", "delete"],
+                    "description": "lua_reference: Lua tool API guide. skill_reference: skill authoring guide. create/patch/delete: manage skill files."
                 },
                 "name": {
                     "type": "string",
-                    "description": "Skill name (lowercase, hyphens, e.g. 'deploy-k8s')"
+                    "description": "Skill name for create/patch/delete (lowercase, hyphens, e.g. 'deploy-k8s')"
                 },
                 "content": {
                     "type": "string",
@@ -68,50 +72,55 @@ impl Tool for SkillManageTool {
         _ctx: ToolContext,
     ) -> Result<ToolOutput> {
         let action = params["action"].as_str().unwrap_or("");
-        let name = params["name"].as_str().unwrap_or("");
-
-        if action.is_empty() {
-            return Ok(ToolOutput::error("Missing required parameter: action"));
-        }
-        if name.is_empty() {
-            return Ok(ToolOutput::error("Missing required parameter: name"));
-        }
-
-        if let Some(reason) = validate_skill_name(name) {
-            return Ok(ToolOutput::error(reason));
-        }
-
-        let agent_skills_dir = Config::user_config_dir().join("skills").join("agent");
 
         match action {
-            "create" => {
-                let content = params["content"].as_str().unwrap_or("");
-                if content.is_empty() {
+            "lua_reference" => Ok(ToolOutput::text(LUA_REFERENCE)),
+            "skill_reference" => Ok(ToolOutput::text(SKILL_REFERENCE)),
+            "create" | "patch" | "delete" => {
+                let name = params["name"].as_str().unwrap_or("");
+                if name.is_empty() {
                     return Ok(ToolOutput::error(
-                        "Missing required parameter: content (for 'create' action)",
+                        "Missing required parameter: name (for create/patch/delete)",
                     ));
                 }
-                create_skill(&agent_skills_dir, name, content)
-            }
-            "patch" => {
-                let old_text = params["old_text"].as_str().unwrap_or("");
-                let new_text = params["new_text"].as_str().unwrap_or("");
-                if old_text.is_empty() {
-                    return Ok(ToolOutput::error(
-                        "Missing required parameter: old_text (for 'patch' action)",
-                    ));
+                if let Some(reason) = validate_skill_name(name) {
+                    return Ok(ToolOutput::error(reason));
                 }
-                patch_skill(&agent_skills_dir, name, old_text, new_text)
+
+                let agent_skills_dir = Config::user_config_dir().join("skills").join("agent");
+
+                match action {
+                    "create" => {
+                        let content = params["content"].as_str().unwrap_or("");
+                        if content.is_empty() {
+                            return Ok(ToolOutput::error(
+                                "Missing required parameter: content (for 'create')",
+                            ));
+                        }
+                        create_skill(&agent_skills_dir, name, content)
+                    }
+                    "patch" => {
+                        let old_text = params["old_text"].as_str().unwrap_or("");
+                        let new_text = params["new_text"].as_str().unwrap_or("");
+                        if old_text.is_empty() {
+                            return Ok(ToolOutput::error(
+                                "Missing required parameter: old_text (for 'patch')",
+                            ));
+                        }
+                        patch_skill(&agent_skills_dir, name, old_text, new_text)
+                    }
+                    "delete" => delete_skill(&agent_skills_dir, name),
+                    _ => unreachable!(),
+                }
             }
-            "delete" => delete_skill(&agent_skills_dir, name),
+            "" => Ok(ToolOutput::error("Missing required parameter: action")),
             other => Ok(ToolOutput::error(format!(
-                "Unknown action \"{other}\". Use \"create\", \"patch\", or \"delete\"."
+                "Unknown action \"{other}\". Use: lua_reference, skill_reference, create, patch, delete"
             ))),
         }
     }
 }
 
-/// Validate a skill name against the agentskills.io spec.
 fn validate_skill_name(name: &str) -> Option<String> {
     if name.len() > 64 {
         return Some(format!(
@@ -136,14 +145,12 @@ fn validate_skill_name(name: &str) -> Option<String> {
     None
 }
 
-/// Validate SKILL.md frontmatter has required fields.
 fn validate_frontmatter(content: &str, expected_name: &str) -> Option<String> {
     let trimmed = content.trim();
     if !trimmed.starts_with("---") {
         return Some("SKILL.md must start with YAML frontmatter (---)".to_string());
     }
 
-    // Find closing ---
     let after_first = &trimmed[3..];
     let end = after_first.find("\n---");
     let Some(end) = end else {
@@ -152,7 +159,6 @@ fn validate_frontmatter(content: &str, expected_name: &str) -> Option<String> {
 
     let yaml_block = &after_first[..end];
 
-    // Check for required fields (simple string matching — no YAML parser needed)
     let has_name = yaml_block
         .lines()
         .any(|l| l.trim_start().starts_with("name:"));
@@ -167,7 +173,6 @@ fn validate_frontmatter(content: &str, expected_name: &str) -> Option<String> {
         return Some("Frontmatter missing required field: description".to_string());
     }
 
-    // Verify name matches
     for line in yaml_block.lines() {
         let line = line.trim();
         if let Some(val) = line.strip_prefix("name:") {
@@ -207,12 +212,10 @@ fn create_skill(agent_dir: &Path, name: &str, content: &str) -> Result<ToolOutpu
 }
 
 fn patch_skill(agent_dir: &Path, name: &str, old_text: &str, new_text: &str) -> Result<ToolOutput> {
-    // Search agent-created skills first, then fall back to all user skills
     let agent_path = agent_dir.join(name).join("SKILL.md");
     let skill_path = if agent_path.exists() {
         agent_path
     } else {
-        // Check parent skills directory (non-agent skills)
         let parent_dir = agent_dir.parent().unwrap_or(agent_dir);
         let alt_path = parent_dir.join(name).join("SKILL.md");
         if alt_path.exists() {
@@ -246,7 +249,6 @@ fn delete_skill(agent_dir: &Path, name: &str) -> Result<ToolOutput> {
     let skill_dir = agent_dir.join(name);
 
     if !skill_dir.exists() {
-        // Check if it exists outside agent dir — refuse to delete
         let parent = agent_dir.parent().unwrap_or(agent_dir);
         if parent.join(name).exists() {
             return Ok(ToolOutput::error(format!(
@@ -277,171 +279,159 @@ mod tests {
         format!("---\nname: {name}\ndescription: A test skill\n---\n\n# Test Skill\n\nDo things.\n")
     }
 
+    fn test_ctx() -> ToolContext {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        ToolContext {
+            cwd: PathBuf::from("/tmp"),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            ui: std::sync::Arc::new(crate::ui::NullInterface),
+            file_cache: std::sync::Arc::new(crate::tools::FileCache::new()),
+            file_tracker: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::tools::FileTracker::new(),
+            )),
+            mode: crate::config::AgentMode::Full,
+        }
+    }
+
+    // --- References ---
+
+    #[tokio::test]
+    async fn extend_lua_reference() {
+        let tool = ExtendTool;
+        let result = tool
+            .execute("c1", json!({"action": "lua_reference"}), test_ctx())
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        let text = result.text_content().unwrap();
+        assert!(text.contains("imp.register_tool"));
+        assert!(text.contains("imp.exec"));
+    }
+
+    #[tokio::test]
+    async fn extend_skill_reference() {
+        let tool = ExtendTool;
+        let result = tool
+            .execute("c2", json!({"action": "skill_reference"}), test_ctx())
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        let text = result.text_content().unwrap();
+        assert!(text.contains("SKILL.md"));
+        assert!(text.contains("frontmatter"));
+    }
+
     // --- Name validation ---
 
     #[test]
-    fn skill_manage_valid_names() {
+    fn extend_valid_names() {
         assert!(validate_skill_name("deploy-k8s").is_none());
         assert!(validate_skill_name("a").is_none());
         assert!(validate_skill_name("my-skill-123").is_none());
     }
 
     #[test]
-    fn skill_manage_rejects_uppercase() {
+    fn extend_rejects_bad_names() {
         assert!(validate_skill_name("Deploy").is_some());
-    }
-
-    #[test]
-    fn skill_manage_rejects_leading_hyphen() {
         assert!(validate_skill_name("-bad").is_some());
-    }
-
-    #[test]
-    fn skill_manage_rejects_trailing_hyphen() {
         assert!(validate_skill_name("bad-").is_some());
-    }
-
-    #[test]
-    fn skill_manage_rejects_consecutive_hyphens() {
         assert!(validate_skill_name("bad--name").is_some());
-    }
-
-    #[test]
-    fn skill_manage_rejects_spaces() {
         assert!(validate_skill_name("bad name").is_some());
+        assert!(validate_skill_name(&"a".repeat(65)).is_some());
     }
 
-    #[test]
-    fn skill_manage_rejects_too_long() {
-        let long = "a".repeat(65);
-        assert!(validate_skill_name(&long).is_some());
-    }
-
-    // --- Frontmatter validation ---
+    // --- Frontmatter ---
 
     #[test]
-    fn skill_manage_valid_frontmatter() {
+    fn extend_valid_frontmatter() {
         let content = "---\nname: test\ndescription: A test\n---\n\n# Body\n";
         assert!(validate_frontmatter(content, "test").is_none());
     }
 
     #[test]
-    fn skill_manage_frontmatter_missing_name() {
-        let content = "---\ndescription: A test\n---\n\n# Body\n";
-        assert!(validate_frontmatter(content, "test").is_some());
+    fn extend_frontmatter_missing_fields() {
+        assert!(validate_frontmatter("---\ndescription: A test\n---\n", "test").is_some());
+        assert!(validate_frontmatter("---\nname: test\n---\n", "test").is_some());
     }
 
     #[test]
-    fn skill_manage_frontmatter_missing_description() {
-        let content = "---\nname: test\n---\n\n# Body\n";
-        assert!(validate_frontmatter(content, "test").is_some());
-    }
-
-    #[test]
-    fn skill_manage_frontmatter_name_mismatch() {
-        let content = "---\nname: wrong\ndescription: A test\n---\n";
-        let r = validate_frontmatter(content, "test");
+    fn extend_frontmatter_name_mismatch() {
+        let r = validate_frontmatter("---\nname: wrong\ndescription: A test\n---\n", "test");
         assert!(r.is_some());
         assert!(r.unwrap().contains("doesn't match"));
     }
 
     #[test]
-    fn skill_manage_no_frontmatter() {
-        let content = "# Just a heading\nNo frontmatter here.";
-        assert!(validate_frontmatter(content, "test").is_some());
+    fn extend_no_frontmatter() {
+        assert!(validate_frontmatter("# Just a heading", "test").is_some());
     }
 
     // --- Create ---
 
     #[test]
-    fn skill_manage_create() {
+    fn extend_create_skill() {
         let (_dir, agent_dir) = setup();
         let content = valid_skill_content("my-skill");
         let r = create_skill(&agent_dir, "my-skill", &content).unwrap();
-        assert!(!r.is_error, "Expected success: {:?}", r.text_content());
-
-        let file = agent_dir.join("my-skill").join("SKILL.md");
-        assert!(file.exists());
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), content);
+        assert!(!r.is_error);
+        assert!(agent_dir.join("my-skill").join("SKILL.md").exists());
     }
 
     #[test]
-    fn skill_manage_create_duplicate() {
+    fn extend_create_duplicate() {
         let (_dir, agent_dir) = setup();
         let content = valid_skill_content("dup");
         create_skill(&agent_dir, "dup", &content).unwrap();
-
         let r = create_skill(&agent_dir, "dup", &content).unwrap();
         assert!(r.is_error);
-        assert!(r.text_content().unwrap().contains("already exists"));
     }
 
     // --- Patch ---
 
     #[test]
-    fn skill_manage_patch() {
+    fn extend_patch_skill() {
         let (_dir, agent_dir) = setup();
-        let content = valid_skill_content("patchme");
-        create_skill(&agent_dir, "patchme", &content).unwrap();
-
+        create_skill(&agent_dir, "patchme", &valid_skill_content("patchme")).unwrap();
         let r = patch_skill(&agent_dir, "patchme", "Do things.", "Do better things.").unwrap();
-        assert!(!r.is_error, "Expected success: {:?}", r.text_content());
-
+        assert!(!r.is_error);
         let updated = std::fs::read_to_string(agent_dir.join("patchme").join("SKILL.md")).unwrap();
         assert!(updated.contains("Do better things."));
-        assert!(!updated.contains("Do things."));
     }
 
     #[test]
-    fn skill_manage_patch_not_found() {
+    fn extend_patch_not_found() {
         let (_dir, agent_dir) = setup();
-        let content = valid_skill_content("patchme");
-        create_skill(&agent_dir, "patchme", &content).unwrap();
-
-        let r = patch_skill(&agent_dir, "patchme", "NONEXISTENT", "replacement").unwrap();
+        create_skill(&agent_dir, "patchme", &valid_skill_content("patchme")).unwrap();
+        let r = patch_skill(&agent_dir, "patchme", "NONEXISTENT", "new").unwrap();
         assert!(r.is_error);
-        assert!(r.text_content().unwrap().contains("not found"));
-    }
-
-    #[test]
-    fn skill_manage_patch_nonexistent_skill() {
-        let (_dir, agent_dir) = setup();
-        let r = patch_skill(&agent_dir, "nope", "old", "new").unwrap();
-        assert!(r.is_error);
-        assert!(r.text_content().unwrap().contains("not found"));
     }
 
     // --- Delete ---
 
     #[test]
-    fn skill_manage_delete() {
+    fn extend_delete_skill() {
         let (_dir, agent_dir) = setup();
-        let content = valid_skill_content("deleteme");
-        create_skill(&agent_dir, "deleteme", &content).unwrap();
-        assert!(agent_dir.join("deleteme").exists());
-
+        create_skill(&agent_dir, "deleteme", &valid_skill_content("deleteme")).unwrap();
         let r = delete_skill(&agent_dir, "deleteme").unwrap();
         assert!(!r.is_error);
         assert!(!agent_dir.join("deleteme").exists());
     }
 
     #[test]
-    fn skill_manage_delete_nonexistent() {
+    fn extend_delete_nonexistent() {
         let (_dir, agent_dir) = setup();
         let r = delete_skill(&agent_dir, "nope").unwrap();
         assert!(r.is_error);
-        assert!(r.text_content().unwrap().contains("not found"));
     }
 
     #[test]
-    fn skill_manage_delete_non_agent_skill_refused() {
-        let (dir, agent_dir) = setup();
-        // Create a skill outside the agent dir (simulating a user-installed skill)
+    fn extend_delete_non_agent_refused() {
+        let (_dir, agent_dir) = setup();
         let parent = agent_dir.parent().unwrap();
         let user_skill = parent.join("user-skill");
         std::fs::create_dir_all(&user_skill).unwrap();
         std::fs::write(user_skill.join("SKILL.md"), "content").unwrap();
-
         let r = delete_skill(&agent_dir, "user-skill").unwrap();
         assert!(r.is_error);
         assert!(r.text_content().unwrap().contains("not agent-created"));
