@@ -447,7 +447,7 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
         auth_store.set_runtime_key(&provider_name, key.clone());
     }
 
-    let api_key = auth_store.resolve(&provider_name)?;
+    let api_key = auth_store.resolve_with_refresh(&provider_name).await?;
     let model = Model {
         meta,
         provider: Arc::from(provider),
@@ -1140,7 +1140,9 @@ fn create_rpc_agent(
         auth_store.set_runtime_key(&provider_name, key.clone());
     }
 
-    let api_key = auth_store.resolve(&provider_name)?;
+    let api_key = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(auth_store.resolve_with_refresh(&provider_name))
+    })?;
     let model = Model {
         meta,
         provider: Arc::from(provider),
@@ -1435,7 +1437,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         auth_store.set_runtime_key(&provider_name, key.clone());
     }
 
-    let api_key = auth_store.resolve(&provider_name)?;
+    let api_key = auth_store.resolve_with_refresh(&provider_name).await?;
 
     let model = Model {
         meta,

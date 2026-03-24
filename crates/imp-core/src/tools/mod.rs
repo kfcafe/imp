@@ -30,6 +30,25 @@ use crate::config::AgentMode;
 use crate::error::Result;
 use crate::ui::UserInterface;
 
+/// Resolve a user-provided path: expands `~` to home dir, resolves relative paths against cwd.
+pub fn resolve_path(cwd: &Path, raw: &str) -> PathBuf {
+    if raw == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    let p = Path::new(raw);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    }
+}
+
 /// A tool that can be invoked by the agent.
 #[async_trait]
 pub trait Tool: Send + Sync {

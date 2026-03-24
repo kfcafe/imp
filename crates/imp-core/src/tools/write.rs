@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -46,11 +44,7 @@ impl Tool for WriteTool {
             return Ok(ToolOutput::error("Missing required parameter: path"));
         }
 
-        let path = if Path::new(raw_path).is_absolute() {
-            std::path::PathBuf::from(raw_path)
-        } else {
-            ctx.cwd.join(raw_path)
-        };
+        let path = super::resolve_path(&ctx.cwd, raw_path);
 
         let existed = path.exists();
 

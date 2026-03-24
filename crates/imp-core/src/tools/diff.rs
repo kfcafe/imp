@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use async_trait::async_trait;
 use serde_json::json;
 use similar::TextDiff;
@@ -100,7 +98,7 @@ impl Tool for DiffShowTool {
         };
         let context_lines = params["contextLines"].as_u64().unwrap_or(3) as usize;
 
-        let path = resolve_path(&ctx.cwd, raw_path);
+        let path = super::resolve_path(&ctx.cwd, raw_path);
 
         if !path.exists() {
             return Ok(ToolOutput::error(format!(
@@ -166,7 +164,7 @@ impl Tool for DiffApplyTool {
         };
         let dry_run = params["dryRun"].as_bool().unwrap_or(false);
 
-        let path = resolve_path(&ctx.cwd, raw_path);
+        let path = super::resolve_path(&ctx.cwd, raw_path);
 
         if !path.exists() {
             return Ok(ToolOutput::error(format!(
@@ -492,15 +490,6 @@ fn build_replacement(hunk_lines: &[DiffLine]) -> Vec<String> {
             DiffLine::Remove(_) => None,
         })
         .collect()
-}
-
-fn resolve_path(cwd: &Path, raw: &str) -> std::path::PathBuf {
-    let p = Path::new(raw);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        cwd.join(p)
-    }
 }
 
 #[cfg(test)]
