@@ -332,6 +332,11 @@ impl ToolRegistry {
         self.tools.get(name)
     }
 
+    /// Get a cloned map of all tools (for passing to extension runtimes).
+    pub fn tools_map(&self) -> HashMap<String, Arc<dyn Tool>> {
+        self.tools.clone()
+    }
+
     /// Get all tool definitions (for LLM context).
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let mut defs: Vec<_> = self

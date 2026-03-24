@@ -528,9 +528,14 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
         a.system_prompt = cli.system_prompt.clone().unwrap_or_default();
         (a, h)
     } else {
+        let lua_cwd = cwd.clone();
         let mut builder =
             imp_core::builder::AgentBuilder::new(agent_config, cwd.clone(), model, api_key)
-                .task(task_context.clone());
+                .task(task_context.clone())
+                .lua_tool_loader(move |tools| {
+                    let user_config_dir = Config::user_config_dir();
+                    imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
+                });
         if let Some(ref prompt) = cli.system_prompt {
             builder = builder.system_prompt(prompt.clone());
         }
@@ -1235,8 +1240,13 @@ fn create_rpc_agent(
     }
 
     let rpc_ui_clone = rpc_ui.clone() as Arc<dyn UserInterface>;
+    let lua_cwd = cwd.to_path_buf();
     let mut builder =
-        imp_core::builder::AgentBuilder::new(agent_config, cwd.to_path_buf(), model, api_key);
+        imp_core::builder::AgentBuilder::new(agent_config, cwd.to_path_buf(), model, api_key)
+            .lua_tool_loader(move |tools| {
+                let user_config_dir = Config::user_config_dir();
+                imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
+            });
     if let Some(ref prompt) = cli.system_prompt {
         builder = builder.system_prompt(prompt.clone());
     }
@@ -1611,8 +1621,13 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         }
     } else {
         // Full agent loop with tools
+        let lua_cwd = std::env::current_dir().unwrap_or_default();
+        let user_config_dir = Config::user_config_dir();
         let (mut agent, mut handle) =
             imp_core::builder::AgentBuilder::new(config, cwd, model, api_key)
+                .lua_tool_loader(move |tools| {
+                    imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
+                })
                 .build()
                 .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
