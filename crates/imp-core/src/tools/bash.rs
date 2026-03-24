@@ -67,20 +67,9 @@ fn detect_shell() -> String {
     static SHELL: OnceLock<String> = OnceLock::new();
     SHELL
         .get_or_init(|| {
-            // Check IMP_SHELL env var first
-            if let Ok(shell) = std::env::var("IMP_SHELL") {
-                return shell;
-            }
-            // Check if rush is on PATH
-            if let Ok(output) = std::process::Command::new("which").arg("rush").output() {
-                if output.status.success() {
-                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !path.is_empty() {
-                        return path;
-                    }
-                }
-            }
-            "sh".to_string()
+            // IMP_SHELL overrides (e.g. rush, bash, zsh).
+            // Defaults to sh — rush blocked on exit code propagation (rush#8).
+            std::env::var("IMP_SHELL").unwrap_or_else(|_| "sh".to_string())
         })
         .clone()
 }
