@@ -50,7 +50,10 @@ impl Tool for FindTool {
         };
 
         let raw_path = params["path"].as_str().unwrap_or(".");
-        let limit = params["limit"].as_u64().unwrap_or(DEFAULT_LIMIT as u64) as usize;
+        let limit = params["limit"]
+            .as_u64()
+            .unwrap_or(DEFAULT_LIMIT as u64)
+            .max(1) as usize;
 
         let search_dir = super::resolve_path(&ctx.cwd, raw_path);
 
@@ -88,14 +91,24 @@ impl Tool for FindTool {
 }
 
 async fn has_fd() -> bool {
-    tokio::process::Command::new("fd")
+    use std::sync::OnceLock;
+    static FD_AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+    if let Some(&cached) = FD_AVAILABLE.get() {
+        return cached;
+    }
+
+    let available = tokio::process::Command::new("fd")
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
         .await
         .map(|s| s.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+
+    FD_AVAILABLE.get_or_init(|| available);
+    available
 }
 
 async fn find_fd(

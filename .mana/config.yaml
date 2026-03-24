@@ -1,5 +1,5 @@
 project: imp
-next_id: 24
+next_id: 25
 auto_close_parent: true
 run: 'pi -p "Read the unit with: cat .mana/{id}-*.md && then implement everything described. Working dir: /Users/asher/tower/imp. Workspace root: /Users/asher/tower. Run verify. If pass: mana close {id}"'
 max_loops: 10

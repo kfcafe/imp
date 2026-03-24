@@ -41,7 +41,10 @@ impl Tool for LsTool {
         ctx: ToolContext,
     ) -> Result<ToolOutput> {
         let raw_path = params["path"].as_str().unwrap_or(".");
-        let limit = params["limit"].as_u64().unwrap_or(DEFAULT_LIMIT as u64) as usize;
+        let limit = params["limit"]
+            .as_u64()
+            .unwrap_or(DEFAULT_LIMIT as u64)
+            .max(1) as usize;
 
         let dir = super::resolve_path(&ctx.cwd, raw_path);
 
