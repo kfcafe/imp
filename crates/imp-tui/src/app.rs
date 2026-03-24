@@ -1814,7 +1814,7 @@ mod session_lifecycle {
 
     // ── 2. send_message persists to session ─────────────────────
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tui_integration_send_message_persists() {
         let tmp = TempDir::new().unwrap();
         let mut app = make_persistent_app(&tmp);
@@ -1849,7 +1849,7 @@ mod session_lifecycle {
         assert!(app.messages.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tui_integration_send_message_persists_to_disk() {
         let tmp = TempDir::new().unwrap();
         let mut app = make_persistent_app(&tmp);
