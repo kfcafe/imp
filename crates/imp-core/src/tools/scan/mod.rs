@@ -80,7 +80,7 @@ impl Tool for ScanTool {
                 let mut resolved = Vec::with_capacity(files.len());
                 for file in files {
                     match file.as_str() {
-                        Some(f) => resolved.push(ctx.cwd.join(f)),
+                        Some(f) => resolved.push(crate::tools::resolve_path(&ctx.cwd, f)),
                         None => return Ok(ToolOutput::error("'files' must contain strings")),
                     }
                 }
@@ -89,7 +89,7 @@ impl Tool for ScanTool {
             "scan" => {
                 let dir = params["directory"]
                     .as_str()
-                    .map(|d| ctx.cwd.join(d))
+                    .map(|d| crate::tools::resolve_path(&ctx.cwd, d))
                     .unwrap_or_else(|| ctx.cwd.clone());
                 collect_source_files(&dir)?
             }
