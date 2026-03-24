@@ -1,7 +1,7 @@
 use imp_llm::ThinkingLevel;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::layout::{Alignment, Rect};
+use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
@@ -272,6 +272,7 @@ pub struct EditorView<'a> {
     state: &'a EditorState,
     theme: &'a Theme,
     thinking_level: ThinkingLevel,
+    model_name: &'a str,
     is_streaming: bool,
     has_queued: bool,
 }
@@ -282,9 +283,16 @@ impl<'a> EditorView<'a> {
             state,
             theme,
             thinking_level,
+            model_name: "",
             is_streaming: false,
             has_queued: false,
         }
+    }
+
+    /// Set the model name shown in the editor border.
+    pub fn model(mut self, name: &'a str) -> Self {
+        self.model_name = name;
+        self
     }
 
     pub fn streaming(mut self, streaming: bool) -> Self {
@@ -306,18 +314,38 @@ impl Widget for EditorView<'_> {
 
         let border_color = self.theme.thinking_border_color(self.thinking_level);
 
-        let title = if self.is_streaming {
+        let top_title = if self.is_streaming {
             if self.has_queued {
-                " streaming [queued] "
+                " streaming [queued] ".to_string()
             } else {
-                " streaming… "
+                " streaming… ".to_string()
             }
         } else {
-            ""
+            String::new()
+        };
+
+        // Build bottom-right model + thinking indicator
+        let thinking_label = match self.thinking_level {
+            ThinkingLevel::Off => "",
+            ThinkingLevel::Minimal => "min",
+            ThinkingLevel::Low => "low",
+            ThinkingLevel::Medium => "med",
+            ThinkingLevel::High => "high",
+            ThinkingLevel::XHigh => "xhigh",
+        };
+        let bottom_title = if !self.model_name.is_empty() {
+            if thinking_label.is_empty() {
+                format!(" {} ", self.model_name)
+            } else {
+                format!(" {} • {} ", self.model_name, thinking_label)
+            }
+        } else {
+            String::new()
         };
 
         let block = Block::default()
-            .title(title)
+            .title(top_title)
+            .title_bottom(Line::from(bottom_title).alignment(Alignment::Right))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color));
 
@@ -335,6 +363,17 @@ impl Widget for EditorView<'_> {
 
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
         paragraph.render(inner, buf);
+
+        // Placeholder text when empty and not streaming
+        if self.state.content.is_empty() && !self.is_streaming {
+            let placeholder = "Ask anything… ⇧↵ newline  @file  /commands";
+            buf.set_string(
+                inner.x,
+                inner.y,
+                placeholder,
+                Style::default().fg(Color::DarkGray),
+            );
+        }
     }
 }
 

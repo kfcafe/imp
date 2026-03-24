@@ -4,4 +4,5 @@ pub mod keybindings;
 pub mod markdown;
 pub mod theme;
 pub mod tui_interface;
+pub mod turn_tracker;
 pub mod views;
