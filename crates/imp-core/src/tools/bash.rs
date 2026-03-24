@@ -289,6 +289,7 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
         "timed_out": timed_out,
         "cancelled": false,
         "truncated": truncated,
+        "command": command,
     });
 
     Ok(ToolOutput {

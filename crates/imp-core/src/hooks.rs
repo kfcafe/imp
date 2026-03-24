@@ -290,9 +290,49 @@ fn interpolate_command(command: &str, event: &HookEvent<'_>) -> String {
         HookEvent::AfterFileWrite { file } => {
             result = result.replace("{file}", &file.to_string_lossy());
         }
-        HookEvent::BeforeToolCall { tool_name, .. }
-        | HookEvent::AfterToolCall { tool_name, .. } => {
+        HookEvent::BeforeToolCall { tool_name, .. } => {
             result = result.replace("{tool_name}", tool_name);
+        }
+        HookEvent::AfterToolCall {
+            tool_name,
+            result: tool_result,
+        } => {
+            result = result.replace("{tool_name}", tool_name);
+            result = result.replace(
+                "{is_error}",
+                if tool_result.is_error {
+                    "true"
+                } else {
+                    "false"
+                },
+            );
+            // Extract exit_code from details if present (bash tool sets this)
+            let exit_code = tool_result
+                .details
+                .get("exit_code")
+                .and_then(|v| v.as_i64())
+                .map(|c| c.to_string())
+                .unwrap_or_default();
+            result = result.replace("{exit_code}", &exit_code);
+            // First line of output for summary
+            let output_first = tool_result
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .next()
+                .and_then(|t| t.lines().next())
+                .unwrap_or("");
+            result = result.replace("{output_first_line}", output_first);
+            // Extract command from details (bash tool stores it)
+            let command = tool_result
+                .details
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            result = result.replace("{command}", command);
         }
         HookEvent::OnContextThreshold { ratio } => {
             result = result.replace("{ratio}", &ratio.to_string());

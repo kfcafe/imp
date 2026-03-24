@@ -262,6 +262,9 @@ impl Agent {
             timestamp: imp_llm::now(),
         })
         .await;
+        self.hooks
+            .fire(&HookEvent::OnAgentStart { prompt: &prompt })
+            .await;
 
         self.original_prompt = Some(prompt.clone());
         self.messages.push(Message::user(&prompt));
@@ -606,6 +609,25 @@ impl Agent {
     }
 
     async fn emit(&self, event: AgentEvent) {
+        // Fire corresponding hooks for lifecycle events
+        match &event {
+            AgentEvent::AgentEnd { .. } => {
+                self.hooks
+                    .fire(&HookEvent::OnAgentEnd {
+                        messages: &self.messages,
+                    })
+                    .await;
+            }
+            AgentEvent::TurnEnd { index, message } => {
+                self.hooks
+                    .fire(&HookEvent::OnTurnEnd {
+                        index: *index,
+                        message,
+                    })
+                    .await;
+            }
+            _ => {}
+        }
         let _ = self.event_tx.send(event).await;
     }
 
