@@ -17,7 +17,7 @@ use imp_core::system_prompt::{Attempt as TaskAttempt, TaskContext};
 
 use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
 use imp_llm::auth::AuthStore;
-use imp_llm::model::ModelRegistry;
+use imp_llm::model::{ModelRegistry, ProviderRegistry};
 use imp_llm::oauth::anthropic::AnthropicOAuth;
 use imp_llm::provider::{Context, RequestOptions, ThinkingLevel};
 use imp_llm::providers::create_provider;
@@ -108,9 +108,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// OAuth login flow
+    /// Log in to an LLM provider. Uses OAuth for Anthropic; prompts for an API key for all others.
     Login {
-        /// Provider to log in to (default: anthropic)
+        /// Provider to log in to (e.g. anthropic, openai, deepseek, groq). Defaults to anthropic.
         provider: Option<String>,
     },
     /// Edit configuration
@@ -385,49 +385,72 @@ fn run_list_models() {
 }
 
 async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    match provider_name {
-        "anthropic" => {
-            let oauth = AnthropicOAuth::new();
-            let auth_path = Config::user_config_dir().join("auth.json");
-            let mut auth_store =
-                AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+    let auth_path = Config::user_config_dir().join("auth.json");
+    let mut auth_store =
+        AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
 
-            eprintln!("Opening browser for Anthropic login...");
-            eprintln!("If the browser doesn't open, visit the URL printed below.");
+    if provider_name == "anthropic" {
+        let oauth = AnthropicOAuth::new();
 
-            let credential = oauth
-                .login(
-                    |url| {
-                        eprintln!("\n{url}\n");
-                        let _ = open_url(url);
-                    },
-                    || async {
-                        eprintln!("Paste the authorization code or redirect URL:");
-                        let mut input = String::new();
-                        std::io::stdin().read_line(&mut input).ok()?;
-                        let trimmed = input.trim().to_string();
-                        if trimmed.is_empty() {
-                            None
-                        } else {
-                            Some(trimmed)
-                        }
-                    },
-                )
-                .await?;
+        eprintln!("Opening browser for Anthropic login...");
+        eprintln!("If the browser doesn't open, visit the URL printed below.");
 
-            auth_store.store(
-                "anthropic",
-                imp_llm::auth::StoredCredential::OAuth(credential),
-            )?;
-            eprintln!("Logged in to Anthropic successfully.");
-            Ok(())
+        let credential = oauth
+            .login(
+                |url| {
+                    eprintln!("\n{url}\n");
+                    let _ = open_url(url);
+                },
+                || async {
+                    eprintln!("Paste the authorization code or redirect URL:");
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input).ok()?;
+                    let trimmed = input.trim().to_string();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    }
+                },
+            )
+            .await?;
+
+        auth_store.store(
+            "anthropic",
+            imp_llm::auth::StoredCredential::OAuth(credential),
+        )?;
+        eprintln!("Logged in to Anthropic successfully.");
+    } else {
+        // For all other providers: prompt for an API key.
+        let registry = ProviderRegistry::with_builtins();
+        let provider_meta = registry.find(provider_name);
+        let display_name = provider_meta.map(|p| p.name).unwrap_or(provider_name);
+        let docs_hint = provider_meta.map(|p| p.docs_url).unwrap_or("");
+
+        eprintln!("Enter API key for {display_name}:");
+        if !docs_hint.is_empty() {
+            eprintln!("  Get a key at: {docs_hint}");
         }
-        other => {
-            eprintln!("Login for '{other}' is not yet supported. Set the API key via environment variable instead.");
-            eprintln!("  ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY");
+        eprint!("> ");
+        io::stdout().flush().ok();
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let key = input.trim().to_string();
+
+        if key.is_empty() {
+            eprintln!("No key entered. Aborting.");
             std::process::exit(1);
         }
+
+        auth_store.store(
+            provider_name,
+            imp_llm::auth::StoredCredential::ApiKey { key },
+        )?;
+        eprintln!("API key saved for {display_name}.");
     }
+
+    Ok(())
 }
 
 fn open_url(url: &str) -> std::io::Result<()> {

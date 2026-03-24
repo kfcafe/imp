@@ -77,26 +77,36 @@ You can also define shell tools via TOML config, or register tools from Lua exte
 
 ## Providers
 
-imp works with multiple LLM providers through a shared streaming interface:
+imp works with 11 LLM providers out of the box. Native integrations for Anthropic, OpenAI, and Google, plus any provider that speaks the OpenAI Chat Completions protocol.
 
-| Provider | Models |
-|----------|--------|
-| Anthropic | Claude Sonnet 4.6, Haiku 4.5, Opus 4.6 |
-| OpenAI | GPT-4o, o3, o4-mini |
-| Google | Gemini 2.5 Pro, Flash |
-| xAI | Grok 3 |
-| Groq | Llama 3.3 70B |
-| AWS Bedrock | Claude via Bedrock |
+| Provider | Models | Auth |
+|----------|--------|------|
+| Anthropic | Claude Sonnet 4.6, Haiku 4.5, Opus 4.6 | `ANTHROPIC_API_KEY` or OAuth |
+| OpenAI | GPT-4o, o3, o4-mini | `OPENAI_API_KEY` |
+| Google | Gemini 2.5 Pro, Flash | `GOOGLE_API_KEY` |
+| DeepSeek | DeepSeek V3, R1 | `DEEPSEEK_API_KEY` |
+| Groq | Llama 3.3 70B | `GROQ_API_KEY` |
+| Cerebras | Llama 3.3 70B | `CEREBRAS_API_KEY` |
+| xAI | Grok 3, Grok 3 Mini | `XAI_API_KEY` |
+| Mistral | Mistral Large, Codestral | `MISTRAL_API_KEY` |
+| Together | Llama 3.3 70B Turbo, Qwen 2.5 72B | `TOGETHER_API_KEY` |
+| OpenRouter | Any model via OpenRouter | `OPENROUTER_API_KEY` |
+| Fireworks | Llama 3.3 70B | `FIREWORKS_API_KEY` |
 
-Prompt caching is automatic on Anthropic (system prompt, tools, recent turns).
+Set an env var and it's auto-detected — no login step needed. Prompt caching is automatic on Anthropic (system prompt, tools, recent turns).
 
 ```bash
-# Login
+# Login (stores key locally)
 imp login              # Anthropic OAuth
-imp login openai       # API key prompt
+imp login deepseek     # Prompts for API key
+imp login cerebras     # Any provider works
+
+# Or just set the env var
+export DEEPSEEK_API_KEY=sk-...
 
 # Switch models
-imp -m haiku           # CLI flag
+imp -m deepseek        # CLI flag
+imp -m grok            # Aliases work
 # or Ctrl+L in the TUI
 ```
 

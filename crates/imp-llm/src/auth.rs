@@ -79,23 +79,28 @@ impl AuthStore {
             }
         }
 
-        // 3. Environment variable
-        let env_var = match provider {
-            "anthropic" => "ANTHROPIC_API_KEY",
-            "openai" => "OPENAI_API_KEY",
-            "google" => "GOOGLE_API_KEY",
-            other => {
-                return Err(crate::error::Error::Auth(format!(
-                    "Unknown provider: {other}"
-                )))
+        // 3. Environment variable — look up from provider registry
+        let registry = crate::model::ProviderRegistry::with_builtins();
+        if let Some(meta) = registry.find(provider) {
+            for env_var in meta.env_vars {
+                if let Ok(key) = std::env::var(env_var) {
+                    return Ok(key);
+                }
             }
-        };
-        if let Ok(key) = std::env::var(env_var) {
+            let env_list = meta.env_vars.join(" or ");
+            return Err(crate::error::Error::Auth(format!(
+                "No API key found for {provider}. Set {env_list} or run `imp login {provider}`."
+            )));
+        }
+
+        // 4. Unknown provider — try convention: <PROVIDER>_API_KEY
+        let env_var = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
+        if let Ok(key) = std::env::var(&env_var) {
             return Ok(key);
         }
 
         Err(crate::error::Error::Auth(format!(
-            "No API key found for {provider}. Set {env_var} or run `imp auth login {provider}`."
+            "No API key found for {provider}. Set {env_var} or run `imp login {provider}`."
         )))
     }
 

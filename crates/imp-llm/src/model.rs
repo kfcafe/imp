@@ -5,6 +5,168 @@ use serde::{Deserialize, Serialize};
 
 use crate::provider::Provider;
 
+/// How a provider's API should be called.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiStyle {
+    /// Native Anthropic Messages API.
+    Anthropic,
+    /// Native OpenAI Responses API.
+    OpenAi,
+    /// Native Google Gemini API.
+    Google,
+    /// OpenAI-compatible Chat Completions API (DeepSeek, Groq, etc.).
+    OpenAiCompat,
+}
+
+/// Metadata about an LLM provider.
+#[derive(Debug, Clone)]
+pub struct ProviderMeta {
+    /// Provider identifier (e.g. "anthropic", "deepseek").
+    pub id: &'static str,
+    /// Human-readable name (e.g. "Anthropic", "DeepSeek").
+    pub name: &'static str,
+    /// Environment variable names for API key resolution, in priority order.
+    pub env_vars: &'static [&'static str],
+    /// Base URL for API requests. None for native providers that hardcode their URL.
+    pub api_base_url: Option<&'static str>,
+    /// URL where users can get an API key (shown in welcome flow).
+    pub docs_url: &'static str,
+    /// Which API protocol this provider uses.
+    pub api_style: ApiStyle,
+}
+
+/// Registry of known LLM providers.
+#[derive(Debug, Clone)]
+pub struct ProviderRegistry {
+    providers: Vec<ProviderMeta>,
+}
+
+impl ProviderRegistry {
+    /// Empty registry with no providers.
+    pub fn new() -> Self {
+        Self {
+            providers: Vec::new(),
+        }
+    }
+
+    /// Registry pre-populated with all built-in providers.
+    pub fn with_builtins() -> Self {
+        Self {
+            providers: builtin_providers(),
+        }
+    }
+
+    /// Find a provider by its id (e.g. "anthropic", "deepseek").
+    pub fn find(&self, id: &str) -> Option<&ProviderMeta> {
+        self.providers.iter().find(|p| p.id == id)
+    }
+
+    /// All registered providers.
+    pub fn list(&self) -> &[ProviderMeta] {
+        &self.providers
+    }
+}
+
+impl Default for ProviderRegistry {
+    fn default() -> Self {
+        Self::with_builtins()
+    }
+}
+
+/// Built-in provider catalogue covering all supported LLM providers.
+pub fn builtin_providers() -> Vec<ProviderMeta> {
+    vec![
+        ProviderMeta {
+            id: "anthropic",
+            name: "Anthropic",
+            env_vars: &["ANTHROPIC_API_KEY"],
+            api_base_url: None,
+            docs_url: "console.anthropic.com/settings/keys",
+            api_style: ApiStyle::Anthropic,
+        },
+        ProviderMeta {
+            id: "openai",
+            name: "OpenAI",
+            env_vars: &["OPENAI_API_KEY"],
+            api_base_url: None,
+            docs_url: "platform.openai.com/api-keys",
+            api_style: ApiStyle::OpenAi,
+        },
+        ProviderMeta {
+            id: "google",
+            name: "Google",
+            env_vars: &["GOOGLE_API_KEY"],
+            api_base_url: None,
+            docs_url: "aistudio.google.dev/apikey",
+            api_style: ApiStyle::Google,
+        },
+        ProviderMeta {
+            id: "deepseek",
+            name: "DeepSeek",
+            env_vars: &["DEEPSEEK_API_KEY"],
+            api_base_url: Some("https://api.deepseek.com"),
+            docs_url: "platform.deepseek.com/api_keys",
+            api_style: ApiStyle::OpenAiCompat,
+        },
+        ProviderMeta {
+            id: "groq",
+            name: "Groq",
+            env_vars: &["GROQ_API_KEY"],
+            api_base_url: Some("https://api.groq.com/openai"),
+            docs_url: "console.groq.com/keys",
+            api_style: ApiStyle::OpenAiCompat,
+        },
+        ProviderMeta {
+            id: "together",
+            name: "Together",
+            env_vars: &["TOGETHER_API_KEY"],
+            api_base_url: Some("https://api.together.xyz"),
+            docs_url: "api.together.ai/settings/api-keys",
+            api_style: ApiStyle::OpenAiCompat,
+        },
+        ProviderMeta {
+            id: "mistral",
+            name: "Mistral",
+            env_vars: &["MISTRAL_API_KEY"],
+            api_base_url: Some("https://api.mistral.ai"),
+            docs_url: "console.mistral.ai/api-keys",
+            api_style: ApiStyle::OpenAiCompat,
+        },
+        ProviderMeta {
+            id: "xai",
+            name: "xAI",
+            env_vars: &["XAI_API_KEY"],
+            api_base_url: Some("https://api.x.ai"),
+            docs_url: "console.x.ai",
+            api_style: ApiStyle::OpenAiCompat,
+        },
+        ProviderMeta {
+            id: "openrouter",
+            name: "OpenRouter",
+            env_vars: &["OPENROUTER_API_KEY"],
+            api_base_url: Some("https://openrouter.ai/api"),
+            docs_url: "openrouter.ai/settings/keys",
+            api_style: ApiStyle::OpenAiCompat,
+        },
+        ProviderMeta {
+            id: "fireworks",
+            name: "Fireworks",
+            env_vars: &["FIREWORKS_API_KEY"],
+            api_base_url: Some("https://api.fireworks.ai/inference"),
+            docs_url: "fireworks.ai/account/api-keys",
+            api_style: ApiStyle::OpenAiCompat,
+        },
+        ProviderMeta {
+            id: "cerebras",
+            name: "Cerebras",
+            env_vars: &["CEREBRAS_API_KEY"],
+            api_base_url: Some("https://api.cerebras.ai"),
+            docs_url: "cloud.cerebras.ai",
+            api_style: ApiStyle::OpenAiCompat,
+        },
+    ]
+}
+
 /// Static metadata describing a model's capabilities and pricing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelMeta {
@@ -395,6 +557,230 @@ fn builtin_models() -> Vec<ModelMeta> {
                 tool_use: true,
             },
         },
+        // -- DeepSeek --
+        ModelMeta {
+            id: "deepseek-chat".into(),
+            provider: "deepseek".into(),
+            name: "DeepSeek V3".into(),
+            context_window: 64_000,
+            max_output_tokens: 8_192,
+            pricing: ModelPricing {
+                input_per_mtok: 0.27,
+                output_per_mtok: 1.10,
+                cache_read_per_mtok: 0.07,
+                cache_write_per_mtok: 0.27,
+            },
+            capabilities: Capabilities {
+                reasoning: false,
+                images: false,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "deepseek-reasoner".into(),
+            provider: "deepseek".into(),
+            name: "DeepSeek R1".into(),
+            context_window: 64_000,
+            max_output_tokens: 8_192,
+            pricing: ModelPricing {
+                input_per_mtok: 0.55,
+                output_per_mtok: 2.19,
+                cache_read_per_mtok: 0.14,
+                cache_write_per_mtok: 0.55,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
+                tool_use: false,
+            },
+        },
+        // -- Groq --
+        ModelMeta {
+            id: "llama-3.3-70b-versatile".into(),
+            provider: "groq".into(),
+            name: "Llama 3.3 70B".into(),
+            context_window: 128_000,
+            max_output_tokens: 32_768,
+            pricing: ModelPricing {
+                input_per_mtok: 0.59,
+                output_per_mtok: 0.79,
+                cache_read_per_mtok: 0.0,
+                cache_write_per_mtok: 0.0,
+            },
+            capabilities: Capabilities {
+                reasoning: false,
+                images: false,
+                tool_use: true,
+            },
+        },
+        // -- Together --
+        ModelMeta {
+            id: "meta-llama/Llama-3.3-70B-Instruct-Turbo".into(),
+            provider: "together".into(),
+            name: "Llama 3.3 70B Turbo".into(),
+            context_window: 128_000,
+            max_output_tokens: 4_096,
+            pricing: ModelPricing {
+                input_per_mtok: 0.88,
+                output_per_mtok: 0.88,
+                cache_read_per_mtok: 0.0,
+                cache_write_per_mtok: 0.0,
+            },
+            capabilities: Capabilities {
+                reasoning: false,
+                images: false,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "Qwen/Qwen2.5-72B-Instruct-Turbo".into(),
+            provider: "together".into(),
+            name: "Qwen 2.5 72B Turbo".into(),
+            context_window: 128_000,
+            max_output_tokens: 4_096,
+            pricing: ModelPricing {
+                input_per_mtok: 1.20,
+                output_per_mtok: 1.20,
+                cache_read_per_mtok: 0.0,
+                cache_write_per_mtok: 0.0,
+            },
+            capabilities: Capabilities {
+                reasoning: false,
+                images: false,
+                tool_use: true,
+            },
+        },
+        // -- Mistral --
+        ModelMeta {
+            id: "mistral-large-latest".into(),
+            provider: "mistral".into(),
+            name: "Mistral Large".into(),
+            context_window: 128_000,
+            max_output_tokens: 8_192,
+            pricing: ModelPricing {
+                input_per_mtok: 2.0,
+                output_per_mtok: 6.0,
+                cache_read_per_mtok: 0.0,
+                cache_write_per_mtok: 0.0,
+            },
+            capabilities: Capabilities {
+                reasoning: false,
+                images: true,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "codestral-latest".into(),
+            provider: "mistral".into(),
+            name: "Codestral".into(),
+            context_window: 256_000,
+            max_output_tokens: 8_192,
+            pricing: ModelPricing {
+                input_per_mtok: 0.30,
+                output_per_mtok: 0.90,
+                cache_read_per_mtok: 0.0,
+                cache_write_per_mtok: 0.0,
+            },
+            capabilities: Capabilities {
+                reasoning: false,
+                images: false,
+                tool_use: true,
+            },
+        },
+        // -- xAI --
+        ModelMeta {
+            id: "grok-3".into(),
+            provider: "xai".into(),
+            name: "Grok 3".into(),
+            context_window: 131_072,
+            max_output_tokens: 131_072,
+            pricing: ModelPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cache_read_per_mtok: 0.0,
+                cache_write_per_mtok: 0.0,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "grok-3-mini".into(),
+            provider: "xai".into(),
+            name: "Grok 3 Mini".into(),
+            context_window: 131_072,
+            max_output_tokens: 131_072,
+            pricing: ModelPricing {
+                input_per_mtok: 0.30,
+                output_per_mtok: 0.50,
+                cache_read_per_mtok: 0.0,
+                cache_write_per_mtok: 0.0,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
+                tool_use: true,
+            },
+        },
+        // -- OpenRouter --
+        ModelMeta {
+            id: "anthropic/claude-sonnet-4".into(),
+            provider: "openrouter".into(),
+            name: "Claude Sonnet 4 (via OpenRouter)".into(),
+            context_window: 200_000,
+            max_output_tokens: 64_000,
+            pricing: ModelPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cache_read_per_mtok: 0.3,
+                cache_write_per_mtok: 3.75,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        // -- Fireworks --
+        ModelMeta {
+            id: "accounts/fireworks/models/llama-v3p3-70b-instruct".into(),
+            provider: "fireworks".into(),
+            name: "Llama 3.3 70B (Fireworks)".into(),
+            context_window: 128_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing {
+                input_per_mtok: 0.90,
+                output_per_mtok: 0.90,
+                cache_read_per_mtok: 0.0,
+                cache_write_per_mtok: 0.0,
+            },
+            capabilities: Capabilities {
+                reasoning: false,
+                images: false,
+                tool_use: true,
+            },
+        },
+        // -- Cerebras --
+        ModelMeta {
+            id: "llama-3.3-70b".into(),
+            provider: "cerebras".into(),
+            name: "Llama 3.3 70B (Cerebras)".into(),
+            context_window: 128_000,
+            max_output_tokens: 8_192,
+            pricing: ModelPricing {
+                input_per_mtok: 0.60,
+                output_per_mtok: 0.60,
+                cache_read_per_mtok: 0.0,
+                cache_write_per_mtok: 0.0,
+            },
+            capabilities: Capabilities {
+                reasoning: false,
+                images: false,
+                tool_use: true,
+            },
+        },
     ]
 }
 
@@ -423,6 +809,20 @@ fn builtin_aliases() -> Vec<(String, String)> {
         // Google
         ("gemini-pro".into(), "gemini-2.5-pro".into()),
         ("gemini-flash".into(), "gemini-2.5-flash".into()),
+        // DeepSeek
+        ("deepseek".into(), "deepseek-chat".into()),
+        ("deepseek-v3".into(), "deepseek-chat".into()),
+        ("deepseek-r1".into(), "deepseek-reasoner".into()),
+        // Groq
+        ("llama-groq".into(), "llama-3.3-70b-versatile".into()),
+        // Mistral
+        ("mistral".into(), "mistral-large-latest".into()),
+        ("codestral".into(), "codestral-latest".into()),
+        // xAI
+        ("grok".into(), "grok-3".into()),
+        ("grok-mini".into(), "grok-3-mini".into()),
+        // Cerebras
+        ("cerebras".into(), "llama-3.3-70b".into()),
     ]
 }
 

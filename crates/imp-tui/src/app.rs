@@ -1879,7 +1879,7 @@ impl App {
                     .map(|m| m.id.clone())
                     .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
                 let thinking = state.thinking_level;
-                let provider_id = state.selected_provider_id();
+                let provider_id = state.selected_provider_id().to_string();
                 let resolved_key = state.resolved_key.clone();
                 (model_id, thinking, provider_id, resolved_key)
             }
@@ -1915,7 +1915,7 @@ impl App {
             let mut auth_store =
                 AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
             if let Err(e) = auth_store.store(
-                provider_id.provider_id(),
+                &provider_id,
                 imp_llm::auth::StoredCredential::ApiKey { key },
             ) {
                 self.messages.push(DisplayMessage {

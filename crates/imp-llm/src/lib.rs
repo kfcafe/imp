@@ -18,7 +18,10 @@ pub use error::{Error, Result};
 pub use message::{
     AssistantMessage, ContentBlock, Message, StopReason, ToolResultMessage, UserMessage,
 };
-pub use model::{Capabilities, Model, ModelMeta, ModelPricing, ModelRegistry};
+pub use model::{
+    ApiStyle, Capabilities, Model, ModelMeta, ModelPricing, ModelRegistry, ProviderMeta,
+    ProviderRegistry,
+};
 pub use provider::{
     CacheOptions, Context, Provider, RequestOptions, ThinkingLevel, ToolDefinition,
 };
