@@ -133,6 +133,7 @@ impl App {
     ) -> Self {
         let model_name = config.model.clone().unwrap_or_else(|| "sonnet".into());
         let thinking_level = config.thinking.unwrap_or(ThinkingLevel::Medium);
+        let theme = Theme::named(config.theme.as_deref().unwrap_or("default"));
 
         Self {
             running: true,
@@ -166,7 +167,7 @@ impl App {
             current_context_tokens: 0,
             status_items: HashMap::new(),
             turn_tracker: TurnTracker::new(),
-            theme: Theme::default(),
+            theme,
             highlighter: Highlighter::new(),
             model_registry,
         }

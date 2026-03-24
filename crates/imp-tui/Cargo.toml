@@ -7,6 +7,7 @@ description = "Terminal UI (ratatui)"
 
 [dependencies]
 imp-core.workspace = true
+serde.workspace = true
 imp-llm.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

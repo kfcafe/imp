@@ -243,6 +243,9 @@ pub struct Config {
     #[serde(default)]
     pub enabled_models: Option<Vec<String>>,
 
+    /// Theme name ("default", "light", or custom).
+    pub theme: Option<String>,
+
     /// Learning loop settings (memory, skill nudges).
     #[serde(default)]
     pub learning: LearningConfig,

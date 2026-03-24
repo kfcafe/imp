@@ -235,7 +235,6 @@ impl Widget for ChatView<'_> {
                     }
                 }
                 MessageRole::Assistant => {
-
                     // Thinking: rolling 5-line tail (live stream of latest thought)
                     if let Some(ref thinking) = msg.thinking {
                         if !thinking.is_empty() {
