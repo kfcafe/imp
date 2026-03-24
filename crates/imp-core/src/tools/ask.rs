@@ -126,20 +126,20 @@ impl Tool for AskTool {
                         if allow_other && idx == options.len() - 1 {
                             match ctx.ui.input("Enter your answer:", placeholder).await {
                                 Some(text) => Ok(ToolOutput::text(text)),
-                                None => Ok(ToolOutput::error("User cancelled input")),
+                                None => Ok(ToolOutput::text("User skipped")),
                             }
                         } else {
                             Ok(ToolOutput::text(&options[idx].label))
                         }
                     }
-                    None => Ok(ToolOutput::error("User cancelled selection")),
+                    None => Ok(ToolOutput::text("User skipped")),
                 }
             }
             _ => {
                 // Free text input
                 match ctx.ui.input(&title, placeholder).await {
                     Some(text) => Ok(ToolOutput::text(text)),
-                    None => Ok(ToolOutput::error("User cancelled input")),
+                    None => Ok(ToolOutput::text("User skipped")),
                 }
             }
         }
