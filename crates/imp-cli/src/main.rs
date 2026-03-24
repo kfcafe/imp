@@ -566,7 +566,25 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
             .map(str::trim)
             .filter(|verify| !verify.is_empty())
         {
-            return run_verify_command(verify, &unit.workspace_root).await;
+            let passed = run_verify_command(verify, &unit.workspace_root).await?;
+            if passed {
+                // Auto-close the unit on verify pass
+                if let Some(ref id) = unit.id {
+                    let close_result = std::process::Command::new("mana")
+                        .args(["close", id])
+                        .current_dir(&unit.workspace_root)
+                        .output();
+                    match close_result {
+                        Ok(output) if output.status.success() => {
+                            eprintln!("[imp] Unit {id} closed (verify passed)");
+                        }
+                        _ => {
+                            eprintln!("[imp] Verify passed but failed to close unit {id}");
+                        }
+                    }
+                }
+            }
+            return Ok(passed);
         }
     }
 
