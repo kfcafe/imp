@@ -196,6 +196,27 @@ local resp = imp.http.post("https://api.example.com/deploy", {
 local token = imp.env("DEPLOY_TOKEN")  -- returns string or nil
 ```
 
+## Streaming Progress
+
+`imp.update()` sends live progress to the TUI sidebar while your tool runs. Use it for long-running operations so the user sees what's happening.
+
+```lua
+execute = function(call_id, params, ctx)
+    imp.update("Building Docker image...")
+    local build = imp.tool("bash", { command = "docker build -t myapp ." })
+    
+    imp.update("Pushing to registry...")
+    local push = imp.tool("bash", { command = "docker push myapp:latest" })
+    
+    imp.update("Deploying to cluster...")
+    local deploy = imp.tool("bash", { command = "kubectl apply -f deploy.yaml" })
+    
+    return { content = "Deployed successfully" }
+end
+```
+
+Each `imp.update()` call appears in the sidebar's streaming output and the chat's rolling tool output window.
+
 ## Hooks
 
 React to agent lifecycle events:

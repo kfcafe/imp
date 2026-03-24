@@ -5,10 +5,12 @@ use async_trait::async_trait;
 use imp_core::tools::lua::{parameter_schema_from_lua, tool_output_from_lua_result};
 use imp_core::tools::{Tool, ToolContext, ToolOutput, ToolRegistry};
 use imp_core::Error as CoreError;
-use mlua::{Function, Lua, Table, Value};
+use mlua::{Function, Lua, MultiValue, Table, Value};
 use serde_json::json;
 
-use crate::sandbox::{LuaCommandHandle, LuaError, LuaHookHandle, LuaRuntime, LuaToolHandle};
+use crate::sandbox::{
+    LuaCallContext, LuaCommandHandle, LuaError, LuaHookHandle, LuaRuntime, LuaToolHandle,
+};
 
 /// A `Tool` implementation backed by a Lua function registered with
 /// `imp.register_tool()`.
@@ -57,32 +59,50 @@ impl Tool for LuaTool {
             "cwd": ctx.cwd.display().to_string(),
             "cancelled": ctx.is_cancelled(),
         });
+        let call_ctx = LuaCallContext {
+            cwd: ctx.cwd,
+            cancelled: ctx.cancelled,
+            update_tx: ctx.update_tx,
+            ui: ctx.ui,
+            file_cache: ctx.file_cache,
+            file_tracker: ctx.file_tracker,
+            mode: ctx.mode,
+        };
 
         tokio::task::spawn_blocking(move || {
             let runtime_guard = runtime
                 .lock()
                 .map_err(|_| CoreError::Tool("Lua runtime lock poisoned".into()))?;
-            let tools = runtime_guard.tools();
-            let handles = tools
-                .lock()
-                .map_err(|_| CoreError::Tool("Lua tool registry lock poisoned".into()))?;
-            let handle = handles.get(handle_index).ok_or_else(|| {
-                CoreError::Tool(format!("Lua tool handle {handle_index} not found"))
-            })?;
 
-            let execute_fn: Function = runtime_guard
-                .lua()
-                .registry_value(&handle.execute_key)
-                .map_err(lua_tool_error)?;
-            let lua_params =
-                json_to_lua_value(runtime_guard.lua(), &params).map_err(lua_tool_error)?;
-            let lua_ctx =
-                json_to_lua_value(runtime_guard.lua(), &ctx_json).map_err(lua_tool_error)?;
-            let result: Value = execute_fn
-                .call((call_id.as_str(), lua_params, lua_ctx))
-                .map_err(lua_tool_error)?;
+            // Make the ToolContext available to imp.tool() during this execution.
+            runtime_guard.set_call_context(call_ctx);
 
-            tool_output_from_lua_result(lua_value_to_json(result))
+            let result = (|| {
+                let tools = runtime_guard.tools();
+                let handles = tools
+                    .lock()
+                    .map_err(|_| CoreError::Tool("Lua tool registry lock poisoned".into()))?;
+                let handle = handles.get(handle_index).ok_or_else(|| {
+                    CoreError::Tool(format!("Lua tool handle {handle_index} not found"))
+                })?;
+
+                let execute_fn: Function = runtime_guard
+                    .lua()
+                    .registry_value(&handle.execute_key)
+                    .map_err(lua_tool_error)?;
+                let lua_params =
+                    json_to_lua_value(runtime_guard.lua(), &params).map_err(lua_tool_error)?;
+                let lua_ctx =
+                    json_to_lua_value(runtime_guard.lua(), &ctx_json).map_err(lua_tool_error)?;
+                let result: Value = execute_fn
+                    .call((call_id.as_str(), lua_params, lua_ctx))
+                    .map_err(lua_tool_error)?;
+
+                tool_output_from_lua_result(lua_value_to_json(result))
+            })();
+
+            runtime_guard.clear_call_context();
+            result
         })
         .await
         .map_err(|error| CoreError::Tool(format!("Lua tool task failed: {error}")))?
@@ -124,6 +144,18 @@ fn lua_tool_error(error: mlua::Error) -> CoreError {
     CoreError::Tool(format!("Lua tool error: {error}"))
 }
 
+/// Extract header key-value pairs from an optional Lua table.
+fn extract_header_pairs(headers: Option<Table>) -> mlua::Result<Vec<(String, String)>> {
+    let mut pairs = Vec::new();
+    if let Some(tbl) = headers {
+        for pair in tbl.pairs::<String, String>() {
+            let (k, v) = pair?;
+            pairs.push((k, v));
+        }
+    }
+    Ok(pairs)
+}
+
 /// Set up the `imp` global table with host API functions.
 ///
 /// Exposes to Lua:
@@ -132,6 +164,10 @@ fn lua_tool_error(error: mlua::Error) -> CoreError {
 /// - imp.exec(command, args, opts)    — run a shell command
 /// - imp.register_command(name, def)  — register a slash command
 /// - imp.events.on() / imp.events.emit() — inter-extension event bus
+/// - imp.tool(name, params)           — call a native imp tool
+/// - imp.env(name)                    — read an env var (scoped by allowed list)
+/// - imp.http.get(url, headers?)      — HTTP GET
+/// - imp.http.post(url, body, headers?) — HTTP POST
 pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
     let lua = runtime.lua();
 
@@ -283,6 +319,159 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
     events.set("emit", events_emit)?;
 
     imp.set("events", events)?;
+
+    // ── imp.tool(name, params) — call a native imp tool ──────────
+    let native_tools = runtime.native_tools();
+    let tool_call_ctx = runtime.call_context();
+    let imp_tool_fn = lua.create_function(
+        move |lua_inner, (name, params): (String, Value)| -> mlua::Result<MultiValue> {
+            // Look up the tool.
+            let tool = {
+                let tools_guard = native_tools
+                    .lock()
+                    .map_err(|_| mlua::Error::external("native tools lock poisoned"))?;
+                tools_guard
+                    .get(&name)
+                    .cloned()
+                    .ok_or_else(|| mlua::Error::external(format!("tool '{name}' not found")))?
+            };
+
+            // Build a ToolContext from the stored call context.
+            let ctx = {
+                let ctx_guard = tool_call_ctx
+                    .lock()
+                    .map_err(|_| mlua::Error::external("call context lock poisoned"))?;
+                ctx_guard
+                    .as_ref()
+                    .ok_or_else(|| {
+                        mlua::Error::external("imp.tool() called outside of tool execution context")
+                    })?
+                    .to_tool_context()
+            };
+
+            let params_json = lua_value_to_json(params);
+
+            // Execute the tool — async via block_on (safe from spawn_blocking).
+            let handle = tokio::runtime::Handle::try_current()
+                .map_err(|_| mlua::Error::external("imp.tool() requires a tokio runtime"))?;
+
+            let output = handle
+                .block_on(tool.execute("lua-call", params_json, ctx))
+                .map_err(|e| mlua::Error::external(format!("tool error: {e}")))?;
+
+            // Convert ToolOutput → Lua multi-return: (result, err).
+            let mut mv = MultiValue::new();
+            if output.is_error {
+                let err_text = output
+                    .text_content()
+                    .unwrap_or("tool execution failed")
+                    .to_string();
+                mv.push_back(Value::Nil);
+                mv.push_back(Value::String(lua_inner.create_string(&err_text)?));
+            } else if let Some(text) = output.text_content() {
+                mv.push_back(Value::String(lua_inner.create_string(text)?));
+            } else {
+                mv.push_back(Value::Nil);
+            }
+            Ok(mv)
+        },
+    )?;
+    imp.set("tool", imp_tool_fn)?;
+
+    // ── imp.update(text) — stream progress to the TUI ─────────────
+    let update_call_ctx = runtime.call_context();
+    let imp_update_fn = lua.create_function(move |_lua, text: String| {
+        let ctx_guard = update_call_ctx
+            .lock()
+            .map_err(|_| mlua::Error::external("call context lock poisoned"))?;
+        if let Some(ref ctx) = *ctx_guard {
+            let _ = ctx.update_tx.try_send(imp_core::tools::ToolUpdate {
+                content: vec![imp_core::imp_llm::ContentBlock::Text { text }],
+                details: serde_json::Value::Null,
+            });
+        }
+        Ok(())
+    })?;
+    imp.set("update", imp_update_fn)?;
+
+    // ── imp.env(name) — read a scoped env var ────────────────────
+    let allowed_env = runtime.allowed_env();
+    let env_fn = lua.create_function(move |lua_inner, name: String| {
+        let allowed = allowed_env
+            .lock()
+            .map_err(|_| mlua::Error::external("allowed_env lock poisoned"))?;
+        // If the allow-list is non-empty, reject unlisted vars.
+        if !allowed.is_empty() && !allowed.contains(&name) {
+            return Ok(Value::Nil);
+        }
+        match std::env::var(&name) {
+            Ok(val) => Ok(Value::String(lua_inner.create_string(&val)?)),
+            Err(_) => Ok(Value::Nil),
+        }
+    })?;
+    imp.set("env", env_fn)?;
+
+    // ── imp.http — HTTP GET / POST via reqwest ───────────────────
+    let http = lua.create_table()?;
+
+    let http_get_fn =
+        lua.create_function(|lua_inner, (url, headers): (String, Option<Table>)| {
+            let header_pairs = extract_header_pairs(headers)?;
+
+            let handle = tokio::runtime::Handle::try_current()
+                .map_err(|_| mlua::Error::external("imp.http requires a tokio runtime"))?;
+
+            let (status, body) = handle
+                .block_on(async {
+                    let client = reqwest::Client::new();
+                    let mut builder = client.get(&url);
+                    for (k, v) in &header_pairs {
+                        builder = builder.header(k.as_str(), v.as_str());
+                    }
+                    let resp = builder.send().await.map_err(|e| e.to_string())?;
+                    let status = resp.status().as_u16();
+                    let body = resp.text().await.map_err(|e| e.to_string())?;
+                    Ok::<_, String>((status, body))
+                })
+                .map_err(mlua::Error::external)?;
+
+            let result = lua_inner.create_table()?;
+            result.set("status", status)?;
+            result.set("body", body)?;
+            Ok(result)
+        })?;
+    http.set("get", http_get_fn)?;
+
+    let http_post_fn = lua.create_function(
+        |lua_inner, (url, body, headers): (String, String, Option<Table>)| {
+            let header_pairs = extract_header_pairs(headers)?;
+
+            let handle = tokio::runtime::Handle::try_current()
+                .map_err(|_| mlua::Error::external("imp.http requires a tokio runtime"))?;
+
+            let (status, resp_body) = handle
+                .block_on(async {
+                    let client = reqwest::Client::new();
+                    let mut builder = client.post(&url).body(body);
+                    for (k, v) in &header_pairs {
+                        builder = builder.header(k.as_str(), v.as_str());
+                    }
+                    let resp = builder.send().await.map_err(|e| e.to_string())?;
+                    let status = resp.status().as_u16();
+                    let resp_body = resp.text().await.map_err(|e| e.to_string())?;
+                    Ok::<_, String>((status, resp_body))
+                })
+                .map_err(mlua::Error::external)?;
+
+            let result = lua_inner.create_table()?;
+            result.set("status", status)?;
+            result.set("body", resp_body)?;
+            Ok(result)
+        },
+    )?;
+    http.set("post", http_post_fn)?;
+
+    imp.set("http", http)?;
 
     // ── Set the global ───────────────────────────────────────────
     lua.globals().set("imp", imp)?;
