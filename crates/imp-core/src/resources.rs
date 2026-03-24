@@ -65,37 +65,6 @@ pub fn discover_agents_md(cwd: &Path, user_config_dir: &Path) -> Vec<AgentsMd> {
     results
 }
 
-/// Built-in skills embedded in the binary.
-/// Each entry is (name, SKILL.md content).
-const BUILTIN_SKILLS: &[(&str, &str)] =
-    &[("lua-tools", include_str!("../skills/lua-tools/SKILL.md"))];
-
-/// Ensure built-in skills exist in the user config directory.
-/// Writes them only if absent — never overwrites user modifications.
-pub fn seed_builtin_skills(user_config_dir: &Path) {
-    let skills_dir = user_config_dir.join("skills");
-
-    for (name, content) in BUILTIN_SKILLS {
-        let skill_dir = skills_dir.join(name);
-        let skill_file = skill_dir.join("SKILL.md");
-
-        if skill_file.exists() {
-            continue;
-        }
-
-        if let Err(e) = std::fs::create_dir_all(&skill_dir) {
-            eprintln!(
-                "[imp] failed to create skill dir {}: {e}",
-                skill_dir.display()
-            );
-            continue;
-        }
-        if let Err(e) = std::fs::write(&skill_file, content) {
-            eprintln!("[imp] failed to write builtin skill {name}: {e}");
-        }
-    }
-}
-
 /// Discover skills from user and project directories.
 pub fn discover_skills(cwd: &Path, user_config_dir: &Path) -> Vec<Skill> {
     let mut skills = Vec::new();

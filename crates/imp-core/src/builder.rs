@@ -131,7 +131,6 @@ impl AgentBuilder {
             prompt
         } else {
             let user_config_dir = Config::user_config_dir();
-            resources::seed_builtin_skills(&user_config_dir);
             let agents_md = resources::discover_agents_md(&self.cwd, &user_config_dir);
             let skills = resources::discover_skills(&self.cwd, &user_config_dir);
 
@@ -183,7 +182,7 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
         ask::AskTool, bash::BashTool, diff::DiffTool, edit::EditTool, find::FindTool,
         grep::GrepTool, ls::LsTool, mana::ManaTool, read::ReadTool, scan::ScanTool, web::WebTool,
-        write::WriteTool,
+        write::WriteTool, write_lua::WriteLuaTool,
     };
 
     tools.register(Arc::new(AskTool));
@@ -196,6 +195,7 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     tools.register(Arc::new(ManaTool));
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
+    tools.register(Arc::new(WriteLuaTool));
     tools.register(Arc::new(ScanTool));
     tools.register(Arc::new(WebTool));
 }
