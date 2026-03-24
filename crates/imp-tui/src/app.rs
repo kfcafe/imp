@@ -26,6 +26,7 @@ use ratatui::{Frame, Terminal};
 use crate::highlight::Highlighter;
 use crate::keybindings::{self, Action};
 use crate::theme::Theme;
+use crate::turn_tracker::TurnTracker;
 use crate::views::chat::{ChatView, DisplayMessage, MessageRole};
 use crate::views::command_palette::{builtin_commands, CommandPaletteState, CommandPaletteView};
 use crate::views::editor::{EditorState, EditorView};
@@ -87,18 +88,26 @@ pub struct App {
     pub scroll_offset: usize,
     pub auto_scroll: bool,
     pub tools_expanded: bool,
+    /// Index into the flattened tool call list — `None` means no tool focused.
+    pub tool_focus: Option<usize>,
 
     pub ctrl_c_count: u8,
     pub needs_redraw: bool,
     pub last_esc: Option<Instant>,
     pub tick: u64,
+    pub max_turns_override: Option<u32>,
 
     // Accumulated stats
     pub accumulated_usage: Usage,
     pub accumulated_cost: Cost,
+    /// Last turn's input tokens — best proxy for actual current context size.
+    pub current_context_tokens: u32,
 
     // Extension state
     pub status_items: HashMap<String, String>,
+
+    // Turn activity tracking
+    pub turn_tracker: TurnTracker,
 
     // Display helpers
     pub theme: Theme,
@@ -133,14 +142,18 @@ impl App {
             scroll_offset: 0,
             auto_scroll: true,
             tools_expanded: false,
+            tool_focus: None,
 
             ctrl_c_count: 0,
             needs_redraw: true,
             last_esc: None,
             tick: 0,
+            max_turns_override: None,
             accumulated_usage: Usage::default(),
             accumulated_cost: Cost::default(),
+            current_context_tokens: 0,
             status_items: HashMap::new(),
+            turn_tracker: TurnTracker::new(),
             theme: Theme::default(),
             highlighter: Highlighter::new(),
             model_registry,
@@ -325,6 +338,7 @@ impl App {
 
         // Editor
         let editor = EditorView::new(&self.editor, &self.theme, self.thinking_level)
+            .model(&self.model_name)
             .streaming(self.is_streaming)
             .queued(!self.message_queue.is_empty());
         frame.render_widget(editor, chunks[1]);
@@ -409,9 +423,11 @@ impl App {
 
         let total_input = self.accumulated_usage.input_tokens;
         let total_output = self.accumulated_usage.output_tokens;
-        let context_used = (total_input + total_output) as f64;
+        // Use last turn's input_tokens as the actual context size rather than
+        // accumulating across turns, which grows without bound and misrepresents
+        // compacted conversations.
         let context_percent = if self.context_window > 0 {
-            context_used / self.context_window as f64
+            self.current_context_tokens as f64 / self.context_window as f64
         } else {
             0.0
         };
@@ -694,6 +710,28 @@ impl App {
         }
     }
 
+    // ── Tool focus helpers ───────────────────────────────────────
+
+    /// Total number of tool calls across all display messages.
+    fn total_tool_calls(&self) -> usize {
+        self.messages.iter().map(|m| m.tool_calls.len()).sum()
+    }
+
+    /// Mutable access to a tool call by its flat index across all messages.
+    fn get_tool_call_mut(
+        &mut self,
+        flat_idx: usize,
+    ) -> Option<&mut crate::views::tools::DisplayToolCall> {
+        let mut remaining = flat_idx;
+        for msg in &mut self.messages {
+            if remaining < msg.tool_calls.len() {
+                return Some(&mut msg.tool_calls[remaining]);
+            }
+            remaining -= msg.tool_calls.len();
+        }
+        None
+    }
+
     fn handle_cancel(&mut self) {
         if !self.editor.is_empty() {
             // First Ctrl+C: clear editor
@@ -755,6 +793,11 @@ impl App {
         // Remove ask tool — TUI doesn't wire UserInterface to the agent yet
         agent.tools.retain(|name| name != "ask");
 
+        // Apply max_turns override from CLI
+        if let Some(max_turns) = self.max_turns_override {
+            agent.max_turns = max_turns;
+        }
+
         let mut messages: Vec<Message> = self.session.get_messages().into_iter().cloned().collect();
         if matches!(
             messages.last(),
@@ -775,20 +818,8 @@ impl App {
             })
             .collect();
 
-        // Strip unpaired tool_call blocks (old sessions without tool_results)
-        for msg in &mut messages {
-            if let Message::Assistant(assistant) = msg {
-                assistant.content.retain(|block| match block {
-                    imp_llm::ContentBlock::ToolCall { id, .. } => result_ids.contains(id),
-                    _ => true,
-                });
-            }
-        }
-        // Remove empty assistant messages left after stripping
-        messages.retain(|msg| match msg {
-            Message::Assistant(a) => !a.content.is_empty(),
-            _ => true,
-        });
+        // Sanitize: strip unpaired tool_calls and orphaned tool_results
+        imp_core::session::sanitize_messages(&mut messages);
         agent.messages = messages;
 
         let prompt = prompt.to_string();
@@ -1505,8 +1536,12 @@ impl App {
             AgentEvent::AgentStart { model, .. } => {
                 self.model_name = model;
                 self.is_streaming = true;
+                self.turn_tracker.reset();
             }
             AgentEvent::AgentEnd { usage, cost } => {
+                // Track actual context size: input_tokens on each API call reflects
+                // the full conversation sent to the model, including any compaction.
+                self.current_context_tokens = usage.input_tokens;
                 self.accumulated_usage.add(&usage);
                 self.accumulated_cost.total += cost.total;
                 self.accumulated_cost.input += cost.input;
@@ -1566,8 +1601,12 @@ impl App {
                 }
             }
             AgentEvent::ToolExecutionStart {
-                tool_name, args, ..
+                tool_call_id,
+                tool_name,
+                args,
             } => {
+                self.turn_tracker
+                    .record_tool_start(&tool_call_id, &tool_name, &args);
                 // Find the matching tool call and update it
                 if let Some(last) = self.messages.last_mut() {
                     if let Some(tc) = last.tool_calls.last_mut() {
@@ -1602,6 +1641,8 @@ impl App {
                 tool_call_id,
                 result,
             } => {
+                let is_error = result.is_error;
+                self.turn_tracker.record_tool_end(&tool_call_id, is_error);
                 // Build display text from result content
                 let output_text = result
                     .content
@@ -1612,8 +1653,6 @@ impl App {
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                let is_error = result.is_error;
-
                 // Attach result to the matching display tool call
                 for msg in self.messages.iter_mut().rev() {
                     for tc in &mut msg.tool_calls {
@@ -1643,6 +1682,8 @@ impl App {
                 });
             }
             AgentEvent::CompactionEnd { summary } => {
+                // Context shrunk — reset so % shows 0 until the next turn updates it.
+                self.current_context_tokens = 0;
                 self.messages.push(DisplayMessage {
                     role: MessageRole::Compaction,
                     content: summary,

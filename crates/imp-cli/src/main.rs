@@ -86,6 +86,10 @@ struct Cli {
     #[arg(long, default_value = "interactive")]
     mode: String,
 
+    /// Maximum turns before stopping (default: 50)
+    #[arg(long)]
+    max_turns: Option<u32>,
+
     /// Verbose startup logging
     #[arg(long)]
     verbose: bool,
@@ -115,6 +119,18 @@ enum Commands {
     Run {
         /// Unit ID to run
         unit_id: String,
+    },
+    /// Import skills and config from other agents (pi, Claude Code, Codex)
+    Import {
+        /// Only detect — don't copy anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Import from a specific agent: pi, claude, codex
+        #[arg(long)]
+        from: Option<String>,
+        /// Skip the confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 }
 
@@ -263,6 +279,10 @@ async fn main() {
                     std::process::exit(1);
                 }
             },
+            Commands::Import { dry_run, from, yes } => {
+                run_import(*dry_run, from.as_deref(), *yes);
+                return;
+            }
         }
     }
 
@@ -479,6 +499,11 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
         }
         builder.build().map_err(io::Error::other)?
     };
+
+    // CLI --max-turns overrides config
+    if let Some(max_turns) = cli.max_turns {
+        agent.max_turns = max_turns;
+    }
 
     let prompt = unit.task_prompt();
     let agent_task = tokio::spawn(async move { agent.run(prompt).await });
@@ -1539,31 +1564,17 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         // Remove ask tool in headless mode
         agent.tools.retain(|name| name != "ask");
 
+        // CLI --max-turns override
+        if let Some(max_turns) = cli.max_turns {
+            agent.max_turns = max_turns;
+        }
+
         // Load session history into the agent (same pattern as TUI's spawn_agent_for_prompt)
         if !history.is_empty() {
             let mut messages = history;
-            // Collect tool_result IDs to know which tool_calls are paired
-            let result_ids: std::collections::HashSet<String> = messages
-                .iter()
-                .filter_map(|m| match m {
-                    Message::ToolResult(tr) => Some(tr.tool_call_id.clone()),
-                    _ => None,
-                })
-                .collect();
-            // Strip unpaired tool_call blocks (old sessions without tool_results)
-            for msg in &mut messages {
-                if let Message::Assistant(assistant) = msg {
-                    assistant.content.retain(|block| match block {
-                        imp_llm::ContentBlock::ToolCall { id, .. } => result_ids.contains(id),
-                        _ => true,
-                    });
-                }
-            }
-            // Remove empty assistant messages left after stripping
-            messages.retain(|msg| match msg {
-                Message::Assistant(a) => !a.content.is_empty(),
-                _ => true,
-            });
+            // Sanitize: strip unpaired tool_calls and orphaned tool_results
+            imp_core::session::sanitize_messages(&mut messages);
+
             agent.messages = messages;
         }
 
@@ -1709,6 +1720,9 @@ async fn run_interactive(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(ref thinking) = cli.thinking {
         app.thinking_level = parse_thinking_level(thinking);
+    }
+    if cli.max_turns.is_some() {
+        app.max_turns_override = cli.max_turns;
     }
 
     app.run().await

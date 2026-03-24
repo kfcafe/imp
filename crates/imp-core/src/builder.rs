@@ -165,6 +165,7 @@ impl AgentBuilder {
                 mode: &agent.mode,
                 memory: memory_block.as_deref(),
                 user_profile: user_block.as_deref(),
+                cwd: Some(&self.cwd),
                 learning_enabled: self.config.learning.enabled,
             })
             .text

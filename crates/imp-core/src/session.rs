@@ -518,6 +518,58 @@ impl SessionManager {
     }
 }
 
+/// Sanitize a message history for API submission.
+///
+/// Strips unpaired tool_call blocks (assistant tool_use without matching tool_result)
+/// and orphaned tool_result messages (tool_result without matching tool_use).
+/// This handles both old sessions (before tool_result persistence) and corrupted
+/// sessions where tool calls were partially recorded.
+pub fn sanitize_messages(messages: &mut Vec<Message>) {
+    use std::collections::HashSet;
+
+    // Collect tool_result IDs to find which tool_calls have results
+    let result_ids: HashSet<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult(tr) => Some(tr.tool_call_id.clone()),
+            _ => None,
+        })
+        .collect();
+
+    // Strip unpaired tool_call blocks from assistant messages
+    for msg in messages.iter_mut() {
+        if let Message::Assistant(assistant) = msg {
+            assistant.content.retain(|block| match block {
+                imp_llm::ContentBlock::ToolCall { id, .. } => result_ids.contains(id),
+                _ => true,
+            });
+        }
+    }
+
+    // Remove empty assistant messages left after stripping
+    messages.retain(|msg| match msg {
+        Message::Assistant(a) => !a.content.is_empty(),
+        _ => true,
+    });
+
+    // Strip orphaned tool_results whose tool_call no longer exists
+    let remaining_call_ids: HashSet<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::Assistant(a) => Some(a.content.iter().filter_map(|b| match b {
+                imp_llm::ContentBlock::ToolCall { id, .. } => Some(id.clone()),
+                _ => None,
+            })),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    messages.retain(|msg| match msg {
+        Message::ToolResult(tr) => remaining_call_ids.contains(&tr.tool_call_id),
+        _ => true,
+    });
+}
+
 /// Extract the first text content from a message.
 fn extract_text(message: &Message) -> Option<String> {
     let blocks = match message {
