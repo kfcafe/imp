@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -34,12 +35,21 @@ use crate::views::file_finder::{collect_project_files, FileFinderState, FileFind
 use crate::views::model_selector::{ModelSelectorState, ModelSelectorView};
 use crate::views::session_picker::{SessionPickerState, SessionPickerView};
 use crate::views::settings::{SettingsState, SettingsView};
-use crate::views::status::{StatusBar, StatusInfo};
+use crate::views::sidebar::{Sidebar, SidebarView};
+use crate::views::status::StatusInfo;
 use crate::views::tools::DisplayToolCall;
+use crate::views::top_bar::TopBar;
 use crate::views::tree::{flatten_tree, TreeView, TreeViewState};
 use crate::views::welcome::{needs_welcome, WelcomeState, WelcomeStep, WelcomeView};
 
 type Tui = Terminal<CrosstermBackend<io::Stdout>>;
+
+/// Which pane currently has focus (for mouse-wheel routing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pane {
+    Chat,
+    Sidebar,
+}
 
 /// UI mode — determines what overlay is displayed.
 #[derive(Debug)]
@@ -115,6 +125,16 @@ pub struct App {
     // Extension state
     pub status_items: HashMap<String, String>,
 
+    // Sidebar
+    pub sidebar: Sidebar,
+
+    // Mouse click map: Y coordinate → tool_call_id (rebuilt each render)
+    pub click_map: Vec<(u16, String)>,
+    /// Which pane has focus for scroll routing.
+    pub active_pane: Pane,
+    /// Sidebar area cached from last render (for click detection).
+    pub sidebar_rect: Option<Rect>,
+
     // Turn activity tracking
     pub turn_tracker: TurnTracker,
 
@@ -166,6 +186,10 @@ impl App {
             accumulated_cost: Cost::default(),
             current_context_tokens: 0,
             status_items: HashMap::new(),
+            sidebar: Sidebar::default(),
+            click_map: Vec::new(),
+            active_pane: Pane::Chat,
+            sidebar_rect: None,
             turn_tracker: TurnTracker::new(),
             theme,
             highlighter: Highlighter::new(),
@@ -263,22 +287,7 @@ impl App {
                         self.handle_key(key)?;
                     }
                     Event::Mouse(mouse) => {
-                        use crossterm::event::MouseEventKind;
-                        match mouse.kind {
-                            MouseEventKind::ScrollUp => {
-                                self.scroll_offset += 3;
-                                self.auto_scroll = false;
-                                self.needs_redraw = true;
-                            }
-                            MouseEventKind::ScrollDown => {
-                                self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                                if self.scroll_offset == 0 {
-                                    self.auto_scroll = true;
-                                }
-                                self.needs_redraw = true;
-                            }
-                            _ => {}
-                        }
+                        self.handle_mouse(mouse);
                     }
                     Event::Resize(_, _) => {
                         self.needs_redraw = true;
@@ -418,7 +427,7 @@ impl App {
 
     // ── Rendering ───────────────────────────────────────────────
 
-    fn render(&self, frame: &mut Frame) {
+    fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
         // Editor height: at least 3 lines, up to 1/3 of screen
@@ -430,16 +439,16 @@ impl App {
 
         let constraints = if ask_height > 0 {
             vec![
+                Constraint::Length(1),             // top bar
                 Constraint::Min(3),                // messages area
                 Constraint::Length(ask_height),    // ask overlay
                 Constraint::Length(editor_height), // editor (dimmed while ask active)
-                Constraint::Length(1),             // status bar
             ]
         } else {
             vec![
+                Constraint::Length(1),             // top bar
                 Constraint::Min(3),                // messages area
                 Constraint::Length(editor_height), // editor
-                Constraint::Length(1),             // status bar
             ]
         };
 
@@ -448,10 +457,31 @@ impl App {
             .constraints(constraints)
             .split(area);
 
-        let (chat_area, ask_area, editor_area, status_area) = if ask_height > 0 {
-            (chunks[0], Some(chunks[1]), chunks[2], chunks[3])
+        let (top_bar_area, chat_area, ask_area, editor_area) = if ask_height > 0 {
+            (chunks[0], chunks[1], Some(chunks[2]), chunks[3])
         } else {
-            (chunks[0], None, chunks[1], chunks[2])
+            (chunks[0], chunks[1], None, chunks[2])
+        };
+
+        // Split chat area for sidebar when open
+        let (chat_area, sidebar_area) = if self.sidebar.open && chat_area.width >= 60 {
+            let min_sidebar = 30u16;
+            let sidebar_w = (chat_area.width * 40 / 100)
+                .max(min_sidebar)
+                .min(chat_area.width.saturating_sub(30));
+            let chat_w = chat_area.width.saturating_sub(sidebar_w);
+            let chat_rect = Rect {
+                width: chat_w,
+                ..chat_area
+            };
+            let sidebar_rect = Rect {
+                x: chat_area.x + chat_w,
+                width: sidebar_w,
+                ..chat_area
+            };
+            (chat_rect, Some(sidebar_rect))
+        } else {
+            (chat_area, None)
         };
 
         // Messages
@@ -460,6 +490,31 @@ impl App {
             .tick(self.tick)
             .tool_focus(self.tool_focus);
         frame.render_widget(chat, chat_area);
+
+        // Build click_map: Y coordinate → tool_call_id for mouse click handling.
+        // We mirror the ChatView line-building logic to know which rendered rows
+        // correspond to tool call headers.
+        self.click_map = build_click_map(
+            &self.messages,
+            &self.theme,
+            &self.highlighter,
+            chat_area,
+            self.scroll_offset,
+        );
+
+        // Cache sidebar rect for mouse hit-testing
+        self.sidebar_rect = sidebar_area;
+
+        // Sidebar
+        if let Some(sidebar_area) = sidebar_area {
+            let tool_call = self
+                .sidebar
+                .tool_id
+                .as_ref()
+                .and_then(|id| self.find_tool_call(id));
+            let view = SidebarView::new(tool_call, &self.theme, self.tick, self.sidebar.scroll);
+            frame.render_widget(view, sidebar_area);
+        }
 
         // Ask overlay (between chat and editor)
         if let (Some(ask_area), Some(ref state)) = (ask_area, &self.ask_state) {
@@ -474,10 +529,10 @@ impl App {
             .queued(!self.message_queue.is_empty());
         frame.render_widget(editor, editor_area);
 
-        // Status bar
+        // Top bar (header line)
         let status_info = self.build_status_info();
-        let status = StatusBar::new(&status_info, &self.theme);
-        frame.render_widget(status, status_area);
+        let top_bar = TopBar::new(&status_info, &self.theme);
+        frame.render_widget(top_bar, top_bar_area);
 
         // Render overlays
         match &self.mode {
@@ -487,7 +542,7 @@ impl App {
                     let filter = &self.editor.content()[1..];
                     let mut state = CommandPaletteState::new(builtin_commands());
                     state.filter = filter.to_string();
-                    let palette_area = command_dropdown_area(chunks[1], 10);
+                    let palette_area = command_dropdown_area(editor_area, 10);
                     let view = CommandPaletteView::new(&state, &self.theme);
                     frame.render_widget(view, palette_area);
                 }
@@ -498,12 +553,12 @@ impl App {
                 frame.render_widget(view, overlay_area);
             }
             UiMode::CommandPalette(state) => {
-                let palette_area = command_dropdown_area(chunks[1], 12);
+                let palette_area = command_dropdown_area(editor_area, 12);
                 let view = CommandPaletteView::new(state, &self.theme);
                 frame.render_widget(view, palette_area);
             }
             UiMode::FileFinder(state) => {
-                let finder_area = command_dropdown_area(chunks[1], 12);
+                let finder_area = command_dropdown_area(editor_area, 12);
                 let view = FileFinderView::new(state, &self.theme);
                 frame.render_widget(view, finder_area);
             }
@@ -531,7 +586,7 @@ impl App {
 
         // Set cursor position (only in normal mode)
         if matches!(self.mode, UiMode::Normal) {
-            let (cx, cy) = self.editor.cursor_screen_position(chunks[1]);
+            let (cx, cy) = self.editor.cursor_screen_position(editor_area);
             frame.set_cursor_position((cx, cy));
         }
     }
@@ -572,6 +627,7 @@ impl App {
             output_tokens: total_output,
             cost: self.accumulated_cost.total,
             context_percent,
+            context_window: self.context_window,
             peek: self.tools_expanded,
             extension_items: self.status_items.clone(),
         }
@@ -662,6 +718,9 @@ impl App {
             }
             Some(Action::CycleThinking) => {
                 self.cycle_thinking_level();
+            }
+            Some(Action::SidebarToggle) => {
+                self.sidebar.open = !self.sidebar.open;
             }
             Some(Action::Peek) => {
                 // Legacy alias — behaves the same as ToolToggle with no focus
@@ -884,6 +943,18 @@ impl App {
 
     // ── Tool focus helpers ───────────────────────────────────────
 
+    /// Find a tool call by ID across all display messages.
+    fn find_tool_call(&self, id: &str) -> Option<&DisplayToolCall> {
+        for msg in self.messages.iter().rev() {
+            for tc in &msg.tool_calls {
+                if tc.id == id {
+                    return Some(tc);
+                }
+            }
+        }
+        None
+    }
+
     /// Total number of tool calls across all display messages.
     fn total_tool_calls(&self) -> usize {
         self.messages.iter().map(|m| m.tool_calls.len()).sum()
@@ -902,6 +973,61 @@ impl App {
             remaining -= msg.tool_calls.len();
         }
         None
+    }
+
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        self.needs_redraw = true;
+        match mouse.kind {
+            MouseEventKind::ScrollUp => match self.active_pane {
+                Pane::Chat => {
+                    self.scroll_offset += 3;
+                    self.auto_scroll = false;
+                }
+                Pane::Sidebar => {
+                    self.sidebar.scroll_up(3);
+                }
+            },
+            MouseEventKind::ScrollDown => match self.active_pane {
+                Pane::Chat => {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                    if self.scroll_offset == 0 {
+                        self.auto_scroll = true;
+                    }
+                }
+                Pane::Sidebar => {
+                    self.sidebar.scroll_down(3);
+                }
+            },
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                let col = mouse.column;
+                let row = mouse.row;
+
+                // Check if click is in the sidebar area
+                if let Some(sr) = self.sidebar_rect {
+                    if col >= sr.x && col < sr.x + sr.width && row >= sr.y && row < sr.y + sr.height
+                    {
+                        self.active_pane = Pane::Sidebar;
+                        return;
+                    }
+                }
+
+                // Click is in the chat area — set focus to chat
+                self.active_pane = Pane::Chat;
+
+                // Check click_map for tool call hits
+                if let Some(tool_id) = self
+                    .click_map
+                    .iter()
+                    .find(|(y, _)| *y == row)
+                    .map(|(_, id)| id.clone())
+                {
+                    self.sidebar.follow(&tool_id);
+                    self.sidebar.open = true;
+                    self.active_pane = Pane::Sidebar;
+                }
+            }
+            _ => {}
+        }
     }
 
     fn handle_cancel(&mut self) {
@@ -1975,6 +2101,16 @@ impl App {
                         }
                     }
                 }
+                // Sidebar: auto-follow the new tool
+                self.sidebar.follow(&tool_call_id);
+                // Auto-open on first tool if terminal is wide enough
+                if !self.sidebar.first_tool_seen {
+                    self.sidebar.first_tool_seen = true;
+                    let (cols, _) = crossterm::terminal::size().unwrap_or((80, 24));
+                    if cols >= 120 {
+                        self.sidebar.open = true;
+                    }
+                }
             }
             AgentEvent::ToolOutputDelta { tool_call_id, text } => {
                 // Feed streaming output into the tool call's rolling buffer
@@ -2139,6 +2275,106 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+/// Build a click map: Vec<(screen_y, tool_call_id)> for each tool call header
+/// line that is visible in the chat area.  Mirrors the line-counting logic in
+/// `ChatView::render` so mouse clicks land on the right tool call.
+fn build_click_map(
+    messages: &[DisplayMessage],
+    theme: &Theme,
+    highlighter: &Highlighter,
+    chat_area: Rect,
+    scroll_offset: usize,
+) -> Vec<(u16, String)> {
+    // Step 1: walk messages and record (line_index, tool_call_id) for each
+    // tool call header line.  The line numbering matches ChatView's all_lines.
+    let mut tool_line_indices: Vec<(usize, String)> = Vec::new();
+    let mut line_idx: usize = 0;
+
+    for msg in messages {
+        match msg.role {
+            MessageRole::User => {
+                // Same counting as ChatView: 1 line for prefix+first line, then 1 per extra line
+                let content_lines = msg.content.lines().count().max(1);
+                line_idx += content_lines;
+            }
+            MessageRole::Assistant => {
+                // Thinking tail (up to 5 lines)
+                if let Some(ref thinking) = msg.thinking {
+                    if !thinking.is_empty() {
+                        let count = thinking.lines().count().min(5);
+                        line_idx += count;
+                    }
+                }
+                // Markdown-rendered content
+                if !msg.content.is_empty() {
+                    let rendered =
+                        crate::markdown::render_markdown(&msg.content, theme, highlighter);
+                    line_idx += rendered.len();
+                }
+                // Streaming indicator
+                if msg.is_streaming {
+                    line_idx += 1;
+                }
+            }
+            MessageRole::System => {
+                line_idx += msg.content.lines().take(3).count().max(0);
+            }
+            MessageRole::Compaction => {
+                line_idx += 1;
+            }
+            MessageRole::Error => {
+                line_idx += 1;
+            }
+        }
+
+        // Tool calls
+        for tc in &msg.tool_calls {
+            let is_running = tc.output.is_none() && !tc.is_error;
+            // Header line — this is the clickable line
+            tool_line_indices.push((line_idx, tc.id.clone()));
+            line_idx += 1;
+
+            // Running with streaming output
+            if is_running && !tc.streaming_lines.is_empty() {
+                line_idx += tc.streaming_lines.len();
+            }
+
+            // Expanded output
+            if tc.expanded && !is_running {
+                if let Some(ref output) = tc.output {
+                    line_idx += output.lines().count().min(50);
+                }
+            }
+        }
+
+        // Separator
+        line_idx += 1;
+    }
+
+    // Step 2: determine which lines are visible (same scroll logic as ChatView)
+    let total_lines = line_idx;
+    let visible_height = chat_area.height as usize;
+
+    let start = if scroll_offset == 0 {
+        total_lines.saturating_sub(visible_height)
+    } else {
+        total_lines.saturating_sub(visible_height + scroll_offset)
+    };
+
+    let end = total_lines.min(start + visible_height);
+
+    // Step 3: map visible tool-call line indices to screen Y coordinates
+    let mut result = Vec::new();
+    for (li, id) in &tool_line_indices {
+        if *li >= start && *li < end {
+            let screen_y = chat_area.y + (*li - start) as u16;
+            result.push((screen_y, id.clone()));
+        }
+    }
+
+    result
 }
 
 /// Create an area above the editor for a dropdown.
@@ -2480,5 +2716,179 @@ mod session_lifecycle {
 
         app.cycle_thinking_level();
         assert_eq!(app.thinking_level, ThinkingLevel::Off);
+    }
+
+    // ── 6. Mouse click handling ─────────────────────────────────
+
+    #[test]
+    fn click_map_defaults_empty() {
+        let app = make_app();
+        assert!(app.click_map.is_empty());
+        assert_eq!(app.active_pane, Pane::Chat);
+        assert!(app.sidebar_rect.is_none());
+    }
+
+    #[test]
+    fn mouse_click_on_tool_call_opens_sidebar() {
+        let mut app = make_app();
+
+        // Simulate a message with a tool call
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "checking...".into(),
+            thinking: None,
+            tool_calls: vec![crate::views::tools::DisplayToolCall {
+                id: "tc-42".into(),
+                name: "bash".into(),
+                args_summary: "$ ls".into(),
+                output: Some("file1\nfile2".into()),
+                is_error: false,
+                expanded: false,
+                streaming_lines: Vec::new(),
+            }],
+            is_streaming: false,
+            timestamp: 0,
+        });
+
+        // Pre-populate click_map as if render had run
+        app.click_map = vec![(5, "tc-42".into())];
+
+        // Simulate a mouse click at row 5
+        let mouse = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse(mouse);
+
+        assert!(app.sidebar.open);
+        assert_eq!(app.sidebar.tool_id.as_deref(), Some("tc-42"));
+        assert_eq!(app.active_pane, Pane::Sidebar);
+    }
+
+    #[test]
+    fn mouse_click_on_sidebar_sets_focus() {
+        let mut app = make_app();
+        app.sidebar.open = true;
+        app.sidebar_rect = Some(Rect::new(50, 1, 30, 20));
+
+        // Click inside sidebar
+        let mouse = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 60,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse(mouse);
+
+        assert_eq!(app.active_pane, Pane::Sidebar);
+    }
+
+    #[test]
+    fn mouse_click_on_chat_area_sets_chat_focus() {
+        let mut app = make_app();
+        app.active_pane = Pane::Sidebar;
+        app.sidebar_rect = Some(Rect::new(50, 1, 30, 20));
+
+        // Click outside sidebar (in chat area)
+        let mouse = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse(mouse);
+
+        assert_eq!(app.active_pane, Pane::Chat);
+    }
+
+    #[test]
+    fn mouse_scroll_routes_by_active_pane() {
+        let mut app = make_app();
+
+        // Scroll up in chat pane
+        app.active_pane = Pane::Chat;
+        let mouse = crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse(mouse);
+        assert_eq!(app.scroll_offset, 3);
+        assert!(!app.auto_scroll);
+
+        // Scroll down in sidebar pane
+        app.active_pane = Pane::Sidebar;
+        app.sidebar.scroll = 10;
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse(mouse_down);
+        assert_eq!(app.sidebar.scroll, 7);
+        // Chat scroll should be unchanged
+        assert_eq!(app.scroll_offset, 3);
+    }
+
+    #[test]
+    fn build_click_map_with_tool_calls() {
+        use crate::highlight::Highlighter;
+        use crate::theme::Theme;
+
+        let theme = Theme::default();
+        let highlighter = Highlighter::new();
+
+        let messages = vec![
+            DisplayMessage {
+                role: MessageRole::User,
+                content: "do something".into(),
+                thinking: None,
+                tool_calls: Vec::new(),
+                is_streaming: false,
+                timestamp: 0,
+            },
+            DisplayMessage {
+                role: MessageRole::Assistant,
+                content: "ok".into(),
+                thinking: None,
+                tool_calls: vec![
+                    crate::views::tools::DisplayToolCall {
+                        id: "tc-1".into(),
+                        name: "read".into(),
+                        args_summary: "file.rs".into(),
+                        output: Some("contents".into()),
+                        is_error: false,
+                        expanded: false,
+                        streaming_lines: Vec::new(),
+                    },
+                    crate::views::tools::DisplayToolCall {
+                        id: "tc-2".into(),
+                        name: "edit".into(),
+                        args_summary: "file.rs".into(),
+                        output: Some("done".into()),
+                        is_error: false,
+                        expanded: false,
+                        streaming_lines: Vec::new(),
+                    },
+                ],
+                is_streaming: false,
+                timestamp: 0,
+            },
+        ];
+
+        // Large chat area so everything is visible
+        let area = Rect::new(0, 0, 80, 50);
+        let click_map = super::build_click_map(&messages, &theme, &highlighter, area, 0);
+
+        // Should have 2 entries (one per tool call)
+        assert_eq!(click_map.len(), 2);
+        assert_eq!(click_map[0].1, "tc-1");
+        assert_eq!(click_map[1].1, "tc-2");
+        // tc-2 should be on the row after tc-1
+        assert_eq!(click_map[1].0, click_map[0].0 + 1);
     }
 }
