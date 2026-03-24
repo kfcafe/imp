@@ -27,6 +27,13 @@ pub struct AgentBuilder {
     /// Additional tool registrar called after native tools are registered.
     #[allow(clippy::type_complexity)]
     extra_tools: Option<Box<dyn FnOnce(&mut ToolRegistry) + Send>>,
+    /// Lua extension tool loader — called after native and extra tools.
+    ///
+    /// The imp-lua crate provides the actual implementation; the binary
+    /// crate wires it in to avoid a cyclic dependency between imp-core
+    /// and imp-lua.
+    #[allow(clippy::type_complexity)]
+    lua_tool_loader: Option<Box<dyn FnOnce(&mut ToolRegistry) + Send>>,
 }
 
 impl AgentBuilder {
@@ -41,6 +48,7 @@ impl AgentBuilder {
             task: None,
             system_prompt_override: None,
             extra_tools: None,
+            lua_tool_loader: None,
         }
     }
 
@@ -69,6 +77,23 @@ impl AgentBuilder {
         F: FnOnce(&mut ToolRegistry) + Send + 'static,
     {
         self.extra_tools = Some(Box::new(f));
+        self
+    }
+
+    /// Register a Lua extension tool loader.
+    ///
+    /// The provided closure should discover `.lua` extensions, create a
+    /// `LuaRuntime`, and register the resulting tools onto the registry.
+    /// This is called after native + extra tools are registered but before
+    /// mode filtering.
+    ///
+    /// The binary crate typically calls this with a closure that invokes
+    /// `imp_lua::load_lua_extensions()`.
+    pub fn lua_tool_loader<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(&mut ToolRegistry) + Send + 'static,
+    {
+        self.lua_tool_loader = Some(Box::new(f));
         self
     }
 
@@ -117,6 +142,11 @@ impl AgentBuilder {
         // Register any extra tools provided by the caller
         if let Some(extra) = self.extra_tools {
             extra(&mut agent.tools);
+        }
+
+        // Load Lua extension tools (provided by the binary crate via lua_tool_loader)
+        if let Some(lua_loader) = self.lua_tool_loader {
+            lua_loader(&mut agent.tools);
         }
 
         // Filter registered tools to those allowed by the mode.

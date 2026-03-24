@@ -15,7 +15,7 @@ pub fn parameter_schema_from_lua(params: &Value) -> Value {
         return params.clone();
     }
 
-    let properties = match params {
+    let mut properties = match params {
         Value::Object(map) => map.clone(),
         _ => Map::new(),
     };
@@ -30,6 +30,13 @@ pub fn parameter_schema_from_lua(params: &Value) -> Value {
                 .map(|_| Value::String(name.clone()))
         })
         .collect();
+
+    // Strip the non-standard "required" field from each property definition
+    for (_name, definition) in properties.iter_mut() {
+        if let Value::Object(ref mut map) = definition {
+            map.remove("required");
+        }
+    }
 
     let mut schema = json!({
         "type": "object",

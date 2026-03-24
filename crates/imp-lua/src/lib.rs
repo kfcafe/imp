@@ -2,9 +2,58 @@ pub mod bridge;
 pub mod loader;
 pub mod sandbox;
 
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use imp_core::tools::ToolRegistry;
+
 pub use bridge::{json_to_lua_value, load_lua_tools, lua_value_to_json, setup_host_api, LuaTool};
 pub use loader::{discover_extensions, load_extensions, reload, LuaExtension};
-pub use sandbox::{LuaCommandHandle, LuaError, LuaHookHandle, LuaRuntime, LuaToolHandle};
+pub use sandbox::{
+    LuaCallContext, LuaCommandHandle, LuaError, LuaHookHandle, LuaRuntime, LuaToolHandle,
+};
+
+/// Discover and load Lua extensions from user and project directories,
+/// registering any tools they define onto the given registry.
+///
+/// Returns the shared runtime handle (for command dispatch and hot-reload).
+/// Returns `None` if no extensions were found or the runtime failed to start.
+pub fn init_lua_extensions(
+    user_config_dir: &Path,
+    project_dir: Option<&Path>,
+    tools: &mut ToolRegistry,
+) -> Option<Arc<Mutex<LuaRuntime>>> {
+    let extensions = discover_extensions(user_config_dir, project_dir);
+    if extensions.is_empty() {
+        return None;
+    }
+
+    let rt = match LuaRuntime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("[imp-lua] failed to create Lua runtime: {e}");
+            return None;
+        }
+    };
+    if let Err(e) = setup_host_api(&rt) {
+        eprintln!("[imp-lua] failed to set up host API: {e}");
+        return None;
+    }
+
+    let results = load_extensions(&rt, &extensions);
+    for (name, result) in &results {
+        if let Err(e) = result {
+            eprintln!("[imp-lua] extension '{name}' failed to load: {e}");
+        }
+    }
+
+    // Give the Lua runtime access to native tools for imp.tool() calls
+    rt.set_native_tools(tools.tools_map());
+
+    let runtime = Arc::new(Mutex::new(rt));
+    load_lua_tools(Arc::clone(&runtime), tools);
+    Some(runtime)
+}
 
 #[cfg(test)]
 mod tests {
@@ -744,5 +793,260 @@ mod tests {
 
         // Good extension's hook was registered despite the bad extension
         assert_eq!(rt.hook_count(), 1);
+    }
+
+    // ── imp.tool() — call native tools from Lua ─────────────────
+
+    use async_trait::async_trait;
+
+    struct EchoTestTool;
+
+    #[async_trait]
+    impl imp_core::tools::Tool for EchoTestTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn label(&self) -> &str {
+            "Echo"
+        }
+        fn description(&self) -> &str {
+            "Echoes text"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}})
+        }
+        fn is_readonly(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            _call_id: &str,
+            params: serde_json::Value,
+            _ctx: imp_core::tools::ToolContext,
+        ) -> imp_core::Result<imp_core::tools::ToolOutput> {
+            let text = params["text"].as_str().unwrap_or("no text");
+            Ok(imp_core::tools::ToolOutput::text(format!("echo: {text}")))
+        }
+    }
+
+    struct FailTestTool;
+
+    #[async_trait]
+    impl imp_core::tools::Tool for FailTestTool {
+        fn name(&self) -> &str {
+            "fail"
+        }
+        fn label(&self) -> &str {
+            "Fail"
+        }
+        fn description(&self) -> &str {
+            "Always fails"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn is_readonly(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            _call_id: &str,
+            _params: serde_json::Value,
+            _ctx: imp_core::tools::ToolContext,
+        ) -> imp_core::Result<imp_core::tools::ToolOutput> {
+            Ok(imp_core::tools::ToolOutput::error("intentional failure"))
+        }
+    }
+
+    fn make_call_context() -> sandbox::LuaCallContext {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        sandbox::LuaCallContext {
+            cwd: PathBuf::from("/tmp/lua-test"),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            ui: Arc::new(NullInterface),
+            file_cache: Arc::new(imp_core::tools::FileCache::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(
+                imp_core::tools::FileTracker::default(),
+            )),
+            mode: imp_core::config::AgentMode::Full,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn imp_tool_calls_native_tool() {
+        let rt = make_runtime();
+
+        let mut native = std::collections::HashMap::new();
+        native.insert(
+            "echo".to_string(),
+            Arc::new(EchoTestTool) as Arc<dyn imp_core::tools::Tool>,
+        );
+        rt.set_native_tools(native);
+        rt.set_call_context(make_call_context());
+
+        let rt = Arc::new(Mutex::new(rt));
+        let rt2 = Arc::clone(&rt);
+
+        let result = tokio::task::spawn_blocking(move || {
+            let guard = rt2.lock().unwrap();
+            guard
+                .exec(
+                    r#"
+                _result, _err = imp.tool("echo", { text = "hello from lua" })
+            "#,
+                )
+                .unwrap();
+            let result: String = guard.lua().globals().get("_result").unwrap();
+            let err: mlua::Value = guard.lua().globals().get("_err").unwrap();
+            assert!(matches!(err, mlua::Value::Nil), "expected no error");
+            result
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result, "echo: hello from lua");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn imp_tool_returns_error_on_failure() {
+        let rt = make_runtime();
+
+        let mut native = std::collections::HashMap::new();
+        native.insert(
+            "fail".to_string(),
+            Arc::new(FailTestTool) as Arc<dyn imp_core::tools::Tool>,
+        );
+        rt.set_native_tools(native);
+        rt.set_call_context(make_call_context());
+
+        let rt = Arc::new(Mutex::new(rt));
+        let rt2 = Arc::clone(&rt);
+
+        tokio::task::spawn_blocking(move || {
+            let guard = rt2.lock().unwrap();
+            guard
+                .exec(
+                    r#"
+                _result, _err = imp.tool("fail", {})
+            "#,
+                )
+                .unwrap();
+            let result: mlua::Value = guard.lua().globals().get("_result").unwrap();
+            assert!(matches!(result, mlua::Value::Nil), "expected nil result");
+            let err: String = guard.lua().globals().get("_err").unwrap();
+            assert!(
+                err.contains("intentional failure"),
+                "expected failure message, got: {err}"
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn imp_tool_errors_on_unknown_tool() {
+        let rt = make_runtime();
+        rt.set_native_tools(std::collections::HashMap::new());
+        rt.set_call_context(make_call_context());
+
+        let rt = Arc::new(Mutex::new(rt));
+        let rt2 = Arc::clone(&rt);
+
+        tokio::task::spawn_blocking(move || {
+            let guard = rt2.lock().unwrap();
+            let result = guard.exec(
+                r#"
+                imp.tool("nonexistent", {})
+            "#,
+            );
+            assert!(result.is_err(), "should error on unknown tool");
+            let err = format!("{}", result.unwrap_err());
+            assert!(
+                err.contains("not found"),
+                "error should mention 'not found': {err}"
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    // ── imp.env() — scoped env var access ───────────────────────
+
+    #[test]
+    fn imp_env_reads_var_when_allowed() {
+        let rt = make_runtime();
+        std::env::set_var("IMP_LUA_TEST_VAR", "test_value");
+
+        let mut allowed = std::collections::HashSet::new();
+        allowed.insert("IMP_LUA_TEST_VAR".to_string());
+        rt.set_allowed_env(allowed);
+
+        rt.exec(
+            r#"
+            _env_val = imp.env("IMP_LUA_TEST_VAR")
+        "#,
+        )
+        .unwrap();
+
+        let val: String = rt.lua().globals().get("_env_val").unwrap();
+        assert_eq!(val, "test_value");
+    }
+
+    #[test]
+    fn imp_env_returns_nil_for_denied_var() {
+        let rt = make_runtime();
+        std::env::set_var("IMP_LUA_TEST_SECRET", "secret_value");
+
+        let mut allowed = std::collections::HashSet::new();
+        allowed.insert("SOME_OTHER_VAR".to_string());
+        rt.set_allowed_env(allowed);
+
+        rt.exec(
+            r#"
+            _env_val = imp.env("IMP_LUA_TEST_SECRET")
+            _is_nil = (_env_val == nil)
+        "#,
+        )
+        .unwrap();
+
+        let is_nil: bool = rt.lua().globals().get("_is_nil").unwrap();
+        assert!(is_nil, "denied env var should return nil");
+    }
+
+    #[test]
+    fn imp_env_allows_all_when_list_empty() {
+        let rt = make_runtime();
+        std::env::set_var("IMP_LUA_TEST_OPEN", "open_value");
+
+        // Empty allowed set = no restrictions
+        rt.set_allowed_env(std::collections::HashSet::new());
+
+        rt.exec(
+            r#"
+            _env_val = imp.env("IMP_LUA_TEST_OPEN")
+        "#,
+        )
+        .unwrap();
+
+        let val: String = rt.lua().globals().get("_env_val").unwrap();
+        assert_eq!(val, "open_value");
+    }
+
+    #[test]
+    fn imp_env_returns_nil_for_missing_var() {
+        let rt = make_runtime();
+        rt.set_allowed_env(std::collections::HashSet::new());
+
+        rt.exec(
+            r#"
+            _env_val = imp.env("DEFINITELY_NOT_SET_IMP_LUA_TEST")
+            _is_nil = (_env_val == nil)
+        "#,
+        )
+        .unwrap();
+
+        let is_nil: bool = rt.lua().globals().get("_is_nil").unwrap();
+        assert!(is_nil, "missing env var should return nil");
     }
 }

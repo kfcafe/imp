@@ -1,5 +1,10 @@
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use imp_core::config::AgentMode;
+use imp_core::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
+use imp_core::ui::UserInterface;
 use mlua::Lua;
 use thiserror::Error;
 
@@ -37,12 +42,48 @@ pub struct LuaCommandHandle {
     pub handler_key: mlua::RegistryKey,
 }
 
+/// Context passed to Lua host API functions during tool execution.
+///
+/// Mirrors `ToolContext` but is stored separately so the Lua
+/// `imp.tool()` callback can construct a fresh `ToolContext` for
+/// each native tool call.
+pub struct LuaCallContext {
+    pub cwd: PathBuf,
+    pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    pub update_tx: tokio::sync::mpsc::Sender<ToolUpdate>,
+    pub ui: Arc<dyn UserInterface>,
+    pub file_cache: Arc<FileCache>,
+    pub file_tracker: Arc<std::sync::Mutex<FileTracker>>,
+    pub mode: AgentMode,
+}
+
+impl LuaCallContext {
+    /// Build a `ToolContext` from the stored fields.
+    pub fn to_tool_context(&self) -> ToolContext {
+        ToolContext {
+            cwd: self.cwd.clone(),
+            cancelled: Arc::clone(&self.cancelled),
+            update_tx: self.update_tx.clone(),
+            ui: Arc::clone(&self.ui),
+            file_cache: Arc::clone(&self.file_cache),
+            file_tracker: Arc::clone(&self.file_tracker),
+            mode: self.mode,
+        }
+    }
+}
+
 /// Manages the Lua state for extensions.
 pub struct LuaRuntime {
     lua: Lua,
     tools: Arc<Mutex<Vec<LuaToolHandle>>>,
     hooks: Arc<Mutex<Vec<LuaHookHandle>>>,
     commands: Arc<Mutex<Vec<LuaCommandHandle>>>,
+    /// Native imp tools available via `imp.tool()` from Lua.
+    native_tools: Arc<Mutex<HashMap<String, Arc<dyn Tool>>>>,
+    /// Active execution context for `imp.tool()` calls.
+    call_context: Arc<Mutex<Option<LuaCallContext>>>,
+    /// Env vars this extension is allowed to read via `imp.env()`.
+    allowed_env: Arc<Mutex<HashSet<String>>>,
 }
 
 impl LuaRuntime {
@@ -54,6 +95,9 @@ impl LuaRuntime {
             tools: Arc::new(Mutex::new(Vec::new())),
             hooks: Arc::new(Mutex::new(Vec::new())),
             commands: Arc::new(Mutex::new(Vec::new())),
+            native_tools: Arc::new(Mutex::new(HashMap::new())),
+            call_context: Arc::new(Mutex::new(None)),
+            allowed_env: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -75,6 +119,41 @@ impl LuaRuntime {
     /// Get a clone of the commands handle for external access.
     pub fn commands(&self) -> Arc<Mutex<Vec<LuaCommandHandle>>> {
         Arc::clone(&self.commands)
+    }
+
+    /// Get a clone of the native tools map.
+    pub fn native_tools(&self) -> Arc<Mutex<HashMap<String, Arc<dyn Tool>>>> {
+        Arc::clone(&self.native_tools)
+    }
+
+    /// Get a clone of the call context handle.
+    pub fn call_context(&self) -> Arc<Mutex<Option<LuaCallContext>>> {
+        Arc::clone(&self.call_context)
+    }
+
+    /// Get a clone of the allowed-env handle.
+    pub fn allowed_env(&self) -> Arc<Mutex<HashSet<String>>> {
+        Arc::clone(&self.allowed_env)
+    }
+
+    /// Populate the native tool registry (called once after tools are registered).
+    pub fn set_native_tools(&self, tools: HashMap<String, Arc<dyn Tool>>) {
+        *self.native_tools.lock().unwrap() = tools;
+    }
+
+    /// Set the call context before executing a Lua tool function.
+    pub fn set_call_context(&self, ctx: LuaCallContext) {
+        *self.call_context.lock().unwrap() = Some(ctx);
+    }
+
+    /// Clear the call context after execution.
+    pub fn clear_call_context(&self) {
+        *self.call_context.lock().unwrap() = None;
+    }
+
+    /// Set the allowed env vars for this extension.
+    pub fn set_allowed_env(&self, vars: HashSet<String>) {
+        *self.allowed_env.lock().unwrap() = vars;
     }
 
     /// Register a tool handle (called from bridge).
@@ -149,5 +228,53 @@ impl LuaRuntime {
             .iter()
             .map(|h| h.event.clone())
             .collect()
+    }
+
+    /// Execute a registered command by name, returning its string output.
+    ///
+    /// Returns `Ok(None)` if the command returned nil (silent success).
+    /// Returns `Ok(Some(text))` if the command returned a string or value.
+    /// Returns `Err` if the command handler or name wasn't found.
+    pub fn execute_command(&self, name: &str, args: &str) -> Result<Option<String>, LuaError> {
+        let commands = self.commands.lock().unwrap();
+        let handle = commands
+            .iter()
+            .find(|c| c.name == name)
+            .ok_or_else(|| LuaError::Extension(format!("command '{name}' not found")))?;
+
+        let handler: mlua::Function = self
+            .lua
+            .registry_value(&handle.handler_key)
+            .map_err(LuaError::Mlua)?;
+
+        let result: mlua::Value = handler.call(args.to_string()).map_err(LuaError::Mlua)?;
+
+        match result {
+            mlua::Value::Nil => Ok(None),
+            mlua::Value::String(s) => Ok(Some(
+                s.to_str()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|_| "(non-utf8)".into()),
+            )),
+            other => {
+                let json = crate::bridge::lua_value_to_json(other);
+                Ok(Some(format!("{json}")))
+            }
+        }
+    }
+
+    /// Get command names.
+    pub fn command_names(&self) -> Vec<String> {
+        self.commands
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| c.name.clone())
+            .collect()
+    }
+
+    /// Check if a command with the given name exists.
+    pub fn has_command(&self, name: &str) -> bool {
+        self.commands.lock().unwrap().iter().any(|c| c.name == name)
     }
 }

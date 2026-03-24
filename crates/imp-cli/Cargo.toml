@@ -13,6 +13,7 @@ path = "src/main.rs"
 imp-llm.workspace = true
 imp-core.workspace = true
 imp-tui.workspace = true
+imp-lua.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"

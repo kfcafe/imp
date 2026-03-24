@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use imp_lua::LuaRuntime;
 
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -125,6 +127,9 @@ pub struct App {
     // Extension state
     pub status_items: HashMap<String, String>,
 
+    /// Lua extension runtime (for command dispatch and hot-reload).
+    pub lua_runtime: Option<Arc<Mutex<LuaRuntime>>>,
+
     // Sidebar
     pub sidebar: Sidebar,
 
@@ -186,6 +191,7 @@ impl App {
             accumulated_cost: Cost::default(),
             current_context_tokens: 0,
             status_items: HashMap::new(),
+            lua_runtime: None,
             sidebar: Sidebar::default(),
             click_map: Vec::new(),
             active_pane: Pane::Chat,
@@ -239,6 +245,9 @@ impl App {
 
     /// Run the TUI event loop. Sets up terminal, runs the loop, restores terminal.
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Load Lua extensions (for slash commands and tool registration)
+        self.reload_lua_extensions();
+
         // Check for first-run welcome flow
         let config_dir = Config::user_config_dir();
         let auth_path = config_dir.join("auth.json");
@@ -1084,7 +1093,12 @@ impl App {
         let mut config = self.config.clone();
         config.thinking = Some(self.thinking_level);
 
+        let lua_cwd = self.cwd.clone();
+        let user_config_dir = imp_core::config::Config::user_config_dir();
         let (mut agent, handle) = AgentBuilder::new(config, self.cwd.clone(), model, api_key)
+            .lua_tool_loader(move |tools| {
+                imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
+            })
             .build()
             .map_err(|e: imp_core::error::Error| e.to_string())?;
 
@@ -1313,7 +1327,9 @@ impl App {
                 ) {
                     Ok(new_config) => {
                         self.config = new_config;
-                        self.push_system_msg("Config reloaded.");
+                        // Reload Lua extensions
+                        self.reload_lua_extensions();
+                        self.push_system_msg("Config and Lua extensions reloaded.");
                     }
                     Err(e) => self.push_system_msg(&format!("Reload failed: {e}")),
                 }
@@ -1403,17 +1419,70 @@ impl App {
                 }
             }
             _ => {
-                self.messages.push(DisplayMessage {
-                    role: MessageRole::Error,
-                    content: format!("Unknown command: /{cmd}"),
-                    thinking: None,
-                    tool_calls: Vec::new(),
-                    is_streaming: false,
-                    timestamp: imp_llm::now(),
-                });
+                // Try Lua extension commands before reporting unknown
+                if !self.try_lua_command(cmd) {
+                    self.messages.push(DisplayMessage {
+                        role: MessageRole::Error,
+                        content: format!("Unknown command: /{cmd}"),
+                        thinking: None,
+                        tool_calls: Vec::new(),
+                        is_streaming: false,
+                        timestamp: imp_llm::now(),
+                    });
+                }
             }
         }
         self.editor.clear();
+    }
+
+    /// Reload Lua extensions: re-scan directories, re-create runtime, and update
+    /// the stored runtime handle. Tools are not re-registered on the running
+    /// agent (only new agents will pick them up), but commands become available
+    /// immediately.
+    fn reload_lua_extensions(&mut self) {
+        let user_config_dir = Config::user_config_dir();
+        match imp_lua::reload(&user_config_dir, Some(&self.cwd)) {
+            Ok((rt, _exts)) => {
+                self.lua_runtime = Some(Arc::new(Mutex::new(rt)));
+            }
+            Err(e) => {
+                self.push_system_msg(&format!("Lua reload failed: {e}"));
+                self.lua_runtime = None;
+            }
+        }
+    }
+
+    /// Try to dispatch a slash command to a Lua extension handler.
+    /// Returns `true` if a matching Lua command was found and executed.
+    fn try_lua_command(&mut self, cmd: &str) -> bool {
+        let runtime = match &self.lua_runtime {
+            Some(rt) => Arc::clone(rt),
+            None => return false,
+        };
+
+        let guard = match runtime.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+
+        // Find a command matching the typed name (first word)
+        let cmd_name = cmd.split_whitespace().next().unwrap_or(cmd);
+        let args = cmd.strip_prefix(cmd_name).unwrap_or("").trim();
+
+        if !guard.has_command(cmd_name) {
+            return false;
+        }
+
+        // Execute via LuaRuntime's helper (keeps mlua types internal)
+        let result = guard.execute_command(cmd_name, args);
+        drop(guard);
+
+        match result {
+            Ok(Some(text)) => self.push_system_msg(&text),
+            Ok(None) => {} // Command executed silently
+            Err(e) => self.push_system_msg(&format!("Lua command error: {e}")),
+        }
+        true
     }
 
     fn start_login(&mut self, provider: &str) {
