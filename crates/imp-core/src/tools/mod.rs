@@ -686,10 +686,32 @@ pub fn suggest_similar_files(cwd: &Path, target: &str) -> Vec<String> {
 
     let mut candidates: Vec<(usize, String)> = Vec::new();
 
+    // Skip directories that are typically huge and irrelevant for suggestions
+    const SKIP_DIRS: &[&str] = &[
+        "target",
+        "node_modules",
+        ".git",
+        "vendor",
+        "dist",
+        "build",
+        "__pycache__",
+        ".mypy_cache",
+        ".tox",
+        ".venv",
+    ];
+
     let walker = walkdir::WalkDir::new(cwd)
-        .max_depth(4)
+        .max_depth(3)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|e| {
+            if e.file_type().is_dir() {
+                if let Some(name) = e.file_name().to_str() {
+                    return !SKIP_DIRS.contains(&name);
+                }
+            }
+            true
+        })
         .filter_map(|e| e.ok());
 
     for entry in walker {
