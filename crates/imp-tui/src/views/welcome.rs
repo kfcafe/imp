@@ -1,4 +1,4 @@
-use imp_llm::model::ModelMeta;
+use imp_llm::model::{ModelMeta, ProviderMeta, ProviderRegistry};
 use imp_llm::ThinkingLevel;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -7,62 +7,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Widget};
 
 use crate::theme::Theme;
-
-/// Providers the welcome flow supports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WelcomeProvider {
-    Anthropic,
-    OpenAI,
-    Google,
-}
-
-impl WelcomeProvider {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Anthropic => "Anthropic",
-            Self::OpenAI => "OpenAI",
-            Self::Google => "Google",
-        }
-    }
-
-    pub fn env_var(&self) -> &'static str {
-        match self {
-            Self::Anthropic => "ANTHROPIC_API_KEY",
-            Self::OpenAI => "OPENAI_API_KEY",
-            Self::Google => "GOOGLE_API_KEY",
-        }
-    }
-
-    pub fn provider_id(&self) -> &'static str {
-        match self {
-            Self::Anthropic => "anthropic",
-            Self::OpenAI => "openai",
-            Self::Google => "google",
-        }
-    }
-
-    pub fn key_url(&self) -> &'static str {
-        match self {
-            Self::Anthropic => "console.anthropic.com/settings/keys",
-            Self::OpenAI => "platform.openai.com/api-keys",
-            Self::Google => "aistudio.google.dev/apikey",
-        }
-    }
-
-    pub fn default_model_alias(&self) -> &'static str {
-        match self {
-            Self::Anthropic => "sonnet",
-            Self::OpenAI => "gpt4o",
-            Self::Google => "gemini-pro",
-        }
-    }
-}
-
-const PROVIDERS: &[WelcomeProvider] = &[
-    WelcomeProvider::Anthropic,
-    WelcomeProvider::OpenAI,
-    WelcomeProvider::Google,
-];
 
 /// Which step of the welcome flow the user is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +31,7 @@ const STEPS: &[WelcomeStep] = &[
 /// Detected state for each provider — whether an env var or stored credential exists.
 #[derive(Debug, Clone)]
 pub struct ProviderStatus {
-    pub provider: WelcomeProvider,
+    pub meta: ProviderMeta,
     pub env_detected: bool,
     pub stored: bool,
 }
@@ -125,25 +69,27 @@ pub struct WelcomeState {
 }
 
 impl WelcomeState {
-    /// Create welcome state, detecting existing auth.
+    /// Create welcome state, detecting existing auth from env vars for all registered providers.
     pub fn new(all_models: &[ModelMeta]) -> Self {
-        let providers: Vec<ProviderStatus> = PROVIDERS
+        let registry = ProviderRegistry::with_builtins();
+        let providers: Vec<ProviderStatus> = registry
+            .list()
             .iter()
-            .map(|p| {
-                let env_detected = std::env::var(p.env_var()).is_ok();
+            .map(|meta| {
+                let env_detected = meta.env_vars.iter().any(|v| std::env::var(v).is_ok());
                 ProviderStatus {
-                    provider: *p,
+                    meta: meta.clone(),
                     env_detected,
                     stored: false,
                 }
             })
             .collect();
 
-        // Pre-select the first provider with auth, or Anthropic by default.
+        // Pre-select the first provider with auth, or the first provider (Anthropic) by default.
         let provider_selected = providers.iter().position(|p| p.has_auth()).unwrap_or(0);
 
-        let selected_provider = providers[provider_selected].provider;
-        let models = filter_models_for_provider(all_models, selected_provider);
+        let selected_id = providers[provider_selected].meta.id;
+        let models = filter_models_for_provider(all_models, selected_id);
 
         Self {
             step: 0,
@@ -161,9 +107,9 @@ impl WelcomeState {
     }
 
     /// Mark a provider as having a stored credential.
-    pub fn mark_stored(&mut self, provider: WelcomeProvider) {
+    pub fn mark_stored(&mut self, provider_id: &str) {
         for p in &mut self.providers {
-            if p.provider == provider {
+            if p.meta.id == provider_id {
                 p.stored = true;
             }
         }
@@ -177,8 +123,9 @@ impl WelcomeState {
         &self.providers[self.provider_selected]
     }
 
-    pub fn selected_provider_id(&self) -> WelcomeProvider {
-        self.providers[self.provider_selected].provider
+    /// Return the selected provider's id string.
+    pub fn selected_provider_id(&self) -> &str {
+        self.providers[self.provider_selected].meta.id
     }
 
     pub fn selected_model(&self) -> Option<&ModelMeta> {
@@ -273,8 +220,8 @@ impl WelcomeState {
     }
 
     pub fn update_models(&mut self, all_models: &[ModelMeta]) {
-        let provider = self.selected_provider_id();
-        self.models = filter_models_for_provider(all_models, provider);
+        let id = self.selected_provider_id().to_string();
+        self.models = filter_models_for_provider(all_models, &id);
         self.model_selected = 0;
     }
 
@@ -287,13 +234,10 @@ impl WelcomeState {
     }
 }
 
-fn filter_models_for_provider(
-    all_models: &[ModelMeta],
-    provider: WelcomeProvider,
-) -> Vec<ModelMeta> {
+fn filter_models_for_provider(all_models: &[ModelMeta], provider_id: &str) -> Vec<ModelMeta> {
     all_models
         .iter()
-        .filter(|m| m.provider == provider.provider_id())
+        .filter(|m| m.provider == provider_id)
         .cloned()
         .collect()
 }
@@ -308,10 +252,12 @@ pub fn needs_welcome(config_dir: &std::path::Path, auth_path: &std::path::Path) 
         return false;
     }
 
-    // Check if any provider has auth via env var or stored credential.
-    let has_env = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY"]
+    // Check if any registered provider has auth via env var.
+    let registry = ProviderRegistry::with_builtins();
+    let has_env = registry
+        .list()
         .iter()
-        .any(|var| std::env::var(var).is_ok());
+        .any(|meta| meta.env_vars.iter().any(|v| std::env::var(v).is_ok()));
 
     let has_stored = auth_path.exists()
         && std::fs::read_to_string(auth_path)
@@ -445,7 +391,15 @@ impl WelcomeView<'_> {
             let marker = if is_selected { "▸ " } else { "  " };
 
             let auth_hint = if status.env_detected {
-                format!("  ({} detected ✓)", status.provider.env_var())
+                // Show the first env var that is set, or the primary one
+                let detected_var = status
+                    .meta
+                    .env_vars
+                    .iter()
+                    .find(|v| std::env::var(v).is_ok())
+                    .copied()
+                    .unwrap_or(status.meta.env_vars.first().copied().unwrap_or(""));
+                format!("  ({} detected ✓)", detected_var)
             } else if status.stored {
                 "  (saved ✓)".to_string()
             } else {
@@ -462,7 +416,7 @@ impl WelcomeView<'_> {
 
             let line = Line::from(vec![
                 Span::styled(format!("  {marker}"), self.theme.accent_style()),
-                Span::styled(status.provider.label(), label_style),
+                Span::styled(status.meta.name, label_style),
                 Span::styled(auth_hint, self.theme.success_style()),
             ]);
             buf.set_line(x, area.y + row, &line, area.width);
@@ -504,11 +458,11 @@ impl WelcomeView<'_> {
             buf.set_line(x, area.y + row, &key_line, area.width);
             row += 1;
 
-            // Key URL hint
+            // Key URL hint — use the provider's docs_url
             let url_line = Line::from(vec![
                 Span::styled("  Get a key: ", self.theme.muted_style()),
                 Span::styled(
-                    selected.provider.key_url(),
+                    selected.meta.docs_url,
                     Style::default().fg(self.theme.accent),
                 ),
             ]);
@@ -670,8 +624,8 @@ impl WelcomeView<'_> {
         buf.set_line(x, area.y + row, &header, area.width);
         row += 2;
 
-        // Summary
-        let provider = self.state.selected_provider_id();
+        // Summary — use the provider's human-readable name from ProviderMeta
+        let provider_name = self.state.providers[self.state.provider_selected].meta.name;
         let model_name = self
             .state
             .selected_model()
@@ -687,7 +641,7 @@ impl WelcomeView<'_> {
         };
 
         let summary_lines = [
-            format!("  Provider:  {}", provider.label()),
+            format!("  Provider:  {provider_name}"),
             format!("  Model:     {model_name}"),
             format!("  Thinking:  {thinking_label}"),
         ];
