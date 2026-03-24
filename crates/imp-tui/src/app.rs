@@ -545,17 +545,7 @@ impl App {
 
         // Render overlays
         match &self.mode {
-            UiMode::Normal => {
-                // Check if slash command mode should show
-                if self.editor.content().starts_with('/') && !self.is_streaming {
-                    let filter = &self.editor.content()[1..];
-                    let mut state = CommandPaletteState::new(builtin_commands());
-                    state.filter = filter.to_string();
-                    let palette_area = command_dropdown_area(editor_area, 10);
-                    let view = CommandPaletteView::new(&state, &self.theme);
-                    frame.render_widget(view, palette_area);
-                }
-            }
+            UiMode::Normal => {}
             UiMode::ModelSelector(state) => {
                 let overlay_area = centered_rect(60, 70, area);
                 let view = ModelSelectorView::new(state, &self.theme);
@@ -778,9 +768,9 @@ impl App {
                 self.editor.insert_char('@');
                 self.open_file_finder();
             }
-            Some(Action::InsertChar('/')) if self.editor.is_empty() => {
+            Some(Action::InsertChar('/')) if self.editor.is_empty() && !self.is_streaming => {
                 self.editor.insert_char('/');
-                // Slash command mode shows inline via render
+                self.mode = UiMode::CommandPalette(CommandPaletteState::new(builtin_commands()));
             }
             Some(Action::InsertChar(c)) => {
                 self.editor.insert_char(c);
@@ -852,6 +842,10 @@ impl App {
 
         match action {
             Some(Action::OverlayDismiss) => {
+                // If dismissing command palette, clear the editor's slash prefix
+                if matches!(self.mode, UiMode::CommandPalette(_)) {
+                    self.editor.clear();
+                }
                 self.mode = UiMode::Normal;
             }
             Some(Action::OverlayUp) => match &mut self.mode {
@@ -868,13 +862,23 @@ impl App {
             },
             Some(Action::OverlayFilter(c)) => match &mut self.mode {
                 UiMode::ModelSelector(s) => s.push_filter(c),
-                UiMode::CommandPalette(s) => s.push_filter(c),
+                UiMode::CommandPalette(s) => {
+                    s.push_filter(c);
+                    self.editor.insert_char(c);
+                }
                 UiMode::FileFinder(s) => s.push_filter(c),
                 _ => {}
             },
             Some(Action::OverlayBackspace) => match &mut self.mode {
                 UiMode::ModelSelector(s) => s.pop_filter(),
-                UiMode::CommandPalette(s) => s.pop_filter(),
+                UiMode::CommandPalette(s) => {
+                    s.pop_filter();
+                    self.editor.delete_back();
+                    // If editor is empty (backspaced past /), dismiss
+                    if self.editor.is_empty() {
+                        self.mode = UiMode::Normal;
+                    }
+                }
                 UiMode::FileFinder(s) => s.pop_filter(),
                 _ => {}
             },
@@ -897,6 +901,7 @@ impl App {
             }
             UiMode::CommandPalette(state) => {
                 if let Some(cmd) = state.selected_command() {
+                    self.editor.clear();
                     self.execute_command(&cmd.name.clone());
                 }
             }
