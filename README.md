@@ -213,9 +213,22 @@ The agent reads the unit's title, description, and verify command, works through
 
 ## Install
 
-**Homebrew** (macOS arm64):
+**Homebrew** (macOS + Linux):
 ```bash
 brew tap kfcafe/tap && brew install imp
+```
+
+**Direct download** (Linux):
+```bash
+# x86_64
+curl -LO https://github.com/kfcafe/imp/releases/latest/download/imp-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+tar xzf imp-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+sudo mv imp-0.1.0-x86_64-unknown-linux-gnu/imp /usr/local/bin/
+
+# aarch64
+curl -LO https://github.com/kfcafe/imp/releases/latest/download/imp-0.1.0-aarch64-unknown-linux-gnu.tar.gz
+tar xzf imp-0.1.0-aarch64-unknown-linux-gnu.tar.gz
+sudo mv imp-0.1.0-aarch64-unknown-linux-gnu/imp /usr/local/bin/
 ```
 
 **From source:**
