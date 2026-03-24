@@ -496,6 +496,7 @@ fn build_replacement(hunk_lines: &[DiffLine]) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::tools::ToolContext;
+    use std::path::Path;
     use std::sync::Arc;
 
     fn test_ctx(dir: &Path) -> ToolContext {
