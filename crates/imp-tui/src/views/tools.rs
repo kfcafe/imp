@@ -100,6 +100,25 @@ impl DisplayToolCall {
         Line::from(spans)
     }
 
+    /// Build compact inline spans for multi-tool-per-line rendering: "✓ name args"
+    pub fn compact_spans(&self, theme: &Theme) -> Vec<Span<'static>> {
+        let icon_style = theme.success_style();
+        let args_short = short_args(&self.args_summary);
+        let mut spans = vec![
+            Span::styled("✓ ", icon_style),
+            Span::styled(
+                self.name.clone(),
+                Style::default()
+                    .fg(theme.tool_name)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if !args_short.is_empty() {
+            spans.push(Span::styled(format!(" {args_short}"), theme.muted_style()));
+        }
+        spans
+    }
+
     /// Build a compact args summary from tool name and arguments.
     pub fn make_args_summary(name: &str, args: &serde_json::Value) -> String {
         match name {
@@ -201,4 +220,218 @@ pub fn tool_call_height(tc: &DisplayToolCall) -> u16 {
         }
     }
     h
+}
+
+/// Check whether a tool call can be rendered in compact (inline) mode.
+/// Compactable = completed successfully, not expanded, not an error.
+pub fn is_compactable(tc: &DisplayToolCall) -> bool {
+    tc.output.is_some() && !tc.is_error && !tc.expanded
+}
+
+/// Calculate the rendered height of a slice of tool calls using compact grouping.
+/// Consecutive compactable calls share lines; others get their own full-height row.
+pub fn tool_calls_compact_height(tcs: &[DisplayToolCall], width: u16) -> u16 {
+    let mut h: u16 = 0;
+    let mut i = 0;
+    while i < tcs.len() {
+        let tc = &tcs[i];
+        if is_compactable(tc) {
+            let group_start = i;
+            while i < tcs.len() && is_compactable(&tcs[i]) {
+                i += 1;
+            }
+            h += compact_group_line_count(&tcs[group_start..i], width);
+        } else {
+            h += tool_call_height(tc);
+            i += 1;
+        }
+    }
+    h
+}
+
+/// Calculate how many lines a group of compact tool calls takes.
+/// Each call renders as "✓ name args" and we pack as many as fit per line.
+fn compact_group_line_count(tcs: &[DisplayToolCall], width: u16) -> u16 {
+    if tcs.is_empty() {
+        return 0;
+    }
+    let usable = (width as usize).saturating_sub(4); // rail = 4 chars
+    if usable == 0 {
+        return tcs.len() as u16;
+    }
+    let mut lines: u16 = 1;
+    let mut col: usize = 0;
+    for tc in tcs {
+        let span_len = compact_span_width(tc);
+        if col > 0 && col + 2 + span_len > usable {
+            lines += 1;
+            col = span_len;
+        } else if col > 0 {
+            col += 2 + span_len; // 2 for "  " separator
+        } else {
+            col = span_len;
+        }
+    }
+    lines
+}
+
+/// Width of a compact tool call span: "✓ name args" character count.
+fn compact_span_width(tc: &DisplayToolCall) -> usize {
+    let args_short = short_args(&tc.args_summary);
+    let w = 2 + tc.name.len(); // "✓ name"
+    if args_short.is_empty() {
+        w
+    } else {
+        w + 1 + args_short.len()
+    }
+}
+
+/// Shorten args_summary for compact display (just the filename or first word).
+fn short_args(args: &str) -> String {
+    if args.is_empty() {
+        return String::new();
+    }
+    // For paths, show just the filename
+    if args.contains('/') {
+        if let Some(name) = args.rsplit('/').next() {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+    // For "$ command" bash summaries, take first 20 chars
+    if let Some(cmd) = args.strip_prefix("$ ") {
+        let short = if cmd.len() > 20 {
+            format!("$ {}…", &cmd[..17])
+        } else {
+            format!("$ {cmd}")
+        };
+        return short;
+    }
+    // For quoted grep patterns, keep as-is if short
+    if args.len() <= 24 {
+        return args.to_string();
+    }
+    format!("{}…", &args[..21])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tc(name: &str, args: &str, output: Option<&str>, is_error: bool) -> DisplayToolCall {
+        DisplayToolCall {
+            id: "test".into(),
+            name: name.into(),
+            args_summary: args.into(),
+            output: output.map(String::from),
+            is_error,
+            expanded: false,
+            streaming_lines: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn compactable_completed_success() {
+        let tc = make_tc("read", "file.rs", Some("contents"), false);
+        assert!(is_compactable(&tc));
+    }
+
+    #[test]
+    fn not_compactable_running() {
+        let tc = make_tc("read", "file.rs", None, false);
+        assert!(!is_compactable(&tc));
+    }
+
+    #[test]
+    fn not_compactable_error() {
+        let tc = make_tc("read", "file.rs", Some("err"), true);
+        assert!(!is_compactable(&tc));
+    }
+
+    #[test]
+    fn not_compactable_expanded() {
+        let mut tc = make_tc("read", "file.rs", Some("data"), false);
+        tc.expanded = true;
+        assert!(!is_compactable(&tc));
+    }
+
+    #[test]
+    fn short_args_path() {
+        assert_eq!(short_args("src/views/tools.rs"), "tools.rs");
+    }
+
+    #[test]
+    fn short_args_bash() {
+        // "cargo test -p imp-tui" is 21 chars, > 20, so truncated to 17 + "…"
+        assert_eq!(
+            short_args("$ cargo test -p imp-tui"),
+            "$ cargo test -p imp…"
+        );
+    }
+
+    #[test]
+    fn short_args_bash_short() {
+        assert_eq!(short_args("$ ls -la"), "$ ls -la");
+    }
+
+    #[test]
+    fn short_args_empty() {
+        assert_eq!(short_args(""), "");
+    }
+
+    #[test]
+    fn short_args_short_text() {
+        assert_eq!(short_args("pattern"), "pattern");
+    }
+
+    #[test]
+    fn compact_group_fits_one_line() {
+        let tcs = vec![
+            make_tc("read", "file.rs", Some("ok"), false),
+            make_tc("grep", "pat", Some("ok"), false),
+        ];
+        assert_eq!(compact_group_line_count(&tcs, 80), 1);
+    }
+
+    #[test]
+    fn compact_group_wraps() {
+        let tcs: Vec<_> = (0..10)
+            .map(|i| {
+                make_tc(
+                    "read",
+                    &format!("long/path/to/file_{i}.rs"),
+                    Some("ok"),
+                    false,
+                )
+            })
+            .collect();
+        let lines = compact_group_line_count(&tcs, 80);
+        assert!(lines > 1);
+        assert!(lines < 10);
+    }
+
+    #[test]
+    fn compact_height_mixed() {
+        let tcs = vec![
+            make_tc("read", "a.rs", Some("ok"), false),
+            make_tc("read", "b.rs", Some("ok"), false),
+            make_tc("bash", "$ cmd", None, false), // running
+            make_tc("read", "c.rs", Some("ok"), false),
+        ];
+        let h = tool_calls_compact_height(&tcs, 80);
+        // First 2 compact (1 line) + 1 running (1 line) + 1 compact (1 line) = 3
+        assert_eq!(h, 3);
+    }
+
+    #[test]
+    fn compact_height_all_compactable() {
+        let tcs = vec![
+            make_tc("read", "a.rs", Some("ok"), false),
+            make_tc("grep", "pat", Some("ok"), false),
+            make_tc("edit", "b.rs", Some("ok"), false),
+        ];
+        let h = tool_calls_compact_height(&tcs, 80);
+        assert_eq!(h, 1);
+    }
 }

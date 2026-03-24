@@ -2,15 +2,34 @@
 id: '24'
 title: TUI UX overhaul — information density, summaries, interactivity, polish
 slug: tui-ux-overhaul-information-density-summaries-inte
-status: open
+status: closed
 priority: 1
 created_at: '2026-03-24T03:16:12.302973Z'
-updated_at: '2026-03-24T03:16:12.302973Z'
+updated_at: '2026-03-24T06:41:13.964326Z'
+notes: |2
+
+  ## Attempt 1 — 2026-03-24T06:27:03Z
+  Exit code: 1
+
+  ```
+
+  ```
 labels:
 - tui
 - ux
+closed_at: '2026-03-24T06:41:13.964326Z'
+close_reason: 'Auto-closed: all children completed'
 verify: 'cd /Users/asher/tower && cargo test -p imp-tui 2>&1 | tail -1 | grep -q ''test result: ok'''
 fail_first: true
+attempts: 1
+is_archived: true
+history:
+- attempt: 1
+  started_at: '2026-03-24T06:26:57.243582Z'
+  finished_at: '2026-03-24T06:27:03.530750Z'
+  duration_secs: 6.287
+  result: fail
+  exit_code: 1
 ---
 
 Comprehensive UX improvement for imp's TUI (imp-tui crate).

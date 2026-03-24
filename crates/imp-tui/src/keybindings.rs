@@ -35,6 +35,7 @@ pub enum Action {
     CycleModelBackward,
     CycleThinking,
     Peek,
+    SidebarToggle,
     SessionTree,
     Reload,
     Quit,
@@ -75,7 +76,7 @@ pub fn resolve_normal(key: KeyEvent) -> Option<Action> {
         // Model / thinking
         KeyCode::Char('l') if ctrl => Some(Action::SelectModel),
         KeyCode::Char('p') if ctrl && shift => Some(Action::CycleModelBackward),
-        KeyCode::Char('p') if ctrl => Some(Action::CycleModelForward),
+        KeyCode::Char('p') if ctrl => Some(Action::SidebarToggle),
         KeyCode::BackTab => Some(Action::CycleThinking),
 
         // Toggle tool/thinking

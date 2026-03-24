@@ -5,8 +5,24 @@ slug: imp-efficiency-smarter-tool-output-truncation
 status: open
 priority: 2
 created_at: '2026-03-23T00:00:21.665478Z'
-updated_at: '2026-03-23T00:00:21.665478Z'
+updated_at: '2026-03-24T06:26:56.730682Z'
+notes: |2
+
+  ## Attempt 1 — 2026-03-24T06:26:56Z
+  Exit code: 1
+
+  ```
+
+  ```
 verify: cd /Users/asher/tower && grep -q 'DEFAULT_LIMIT.*50\|of.*matches\|of.*results' imp/crates/imp-core/src/tools/grep.rs
+attempts: 1
+history:
+- attempt: 1
+  started_at: '2026-03-24T06:26:56.676229Z'
+  finished_at: '2026-03-24T06:26:56.730668Z'
+  duration_secs: 0.054
+  result: fail
+  exit_code: 1
 ---
 
 ## Problem

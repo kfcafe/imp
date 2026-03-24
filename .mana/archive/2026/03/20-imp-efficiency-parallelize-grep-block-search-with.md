@@ -2,11 +2,20 @@
 id: '20'
 title: 'imp efficiency: parallelize grep block search with rayon'
 slug: imp-efficiency-parallelize-grep-block-search-with
-status: open
+status: closed
 priority: 2
 created_at: '2026-03-23T00:00:08.283281Z'
-updated_at: '2026-03-23T00:00:08.283281Z'
+updated_at: '2026-03-24T06:26:56.662686Z'
+closed_at: '2026-03-24T06:26:56.662686Z'
 verify: 'cd /Users/asher/tower && cargo test -p imp-core "tools::grep" -- --test-threads=1 2>&1 | grep -q ''test result: ok'''
+is_archived: true
+history:
+- attempt: 1
+  started_at: '2026-03-24T06:26:56.050429Z'
+  finished_at: '2026-03-24T06:26:56.639666Z'
+  duration_secs: 0.589
+  result: pass
+  exit_code: 0
 ---
 
 ## Problem

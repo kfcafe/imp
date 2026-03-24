@@ -18,6 +18,7 @@ pub struct StatusInfo {
     pub output_tokens: u32,
     pub cost: f64,
     pub context_percent: f64,
+    pub context_window: u32,
     pub peek: bool,
     pub extension_items: HashMap<String, String>,
 }

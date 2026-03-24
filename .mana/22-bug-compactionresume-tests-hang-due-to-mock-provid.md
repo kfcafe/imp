@@ -5,12 +5,28 @@ slug: bug-compactionresume-tests-hang-due-to-mock-provid
 status: open
 priority: 2
 created_at: '2026-03-23T18:43:29.660196Z'
-updated_at: '2026-03-23T18:43:29.660196Z'
+updated_at: '2026-03-24T06:26:57.184881Z'
+notes: |2
+
+  ## Attempt 1 — 2026-03-24T06:26:57Z
+  Exit code: 1
+
+  ```
+
+  ```
 labels:
 - bug
 - imp-core
 verify: cd /Users/asher/tower && timeout 30 cargo test -p imp-core compaction_resume 2>&1 | grep "test result:" | grep -v "0 passed"
 fail_first: true
+attempts: 1
+history:
+- attempt: 1
+  started_at: '2026-03-24T06:26:56.760343Z'
+  finished_at: '2026-03-24T06:26:57.184868Z'
+  duration_secs: 0.424
+  result: fail
+  exit_code: 1
 ---
 
 The three compaction_resume agent tests in imp-core/src/agent.rs hang indefinitely. The tests verify that after context compaction fires mid-task, a resume message containing the original prompt is injected.

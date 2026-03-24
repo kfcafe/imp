@@ -2,11 +2,20 @@
 id: '17'
 title: 'imp efficiency: enable prompt caching'
 slug: imp-efficiency-enable-prompt-caching
-status: open
+status: closed
 priority: 0
 created_at: '2026-03-22T23:58:41.214809Z'
-updated_at: '2026-03-22T23:58:41.214809Z'
+updated_at: '2026-03-24T06:26:55.802124Z'
+closed_at: '2026-03-24T06:26:55.802124Z'
 verify: 'cd /Users/asher/tower && grep -q ''cache_system_prompt: true'' imp/crates/imp-core/src/agent.rs && grep -q ''cache_tools: true'' imp/crates/imp-core/src/agent.rs'
+is_archived: true
+history:
+- attempt: 1
+  started_at: '2026-03-24T06:26:55.713693Z'
+  finished_at: '2026-03-24T06:26:55.774661Z'
+  duration_secs: 0.06
+  result: pass
+  exit_code: 0
 ---
 
 ## Problem
