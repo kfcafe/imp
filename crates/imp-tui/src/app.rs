@@ -729,11 +729,34 @@ impl App {
             .ok_or_else(|| format!("Unknown provider: {provider_name}"))?;
 
         let auth_path = Config::user_config_dir().join("auth.json");
-        let auth_store =
+        let mut auth_store =
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+
+        // Auto-refresh expired OAuth tokens before spawning agent
+        if let Some(imp_llm::auth::StoredCredential::OAuth(oauth)) =
+            auth_store.stored.get(&provider_name)
+        {
+            if oauth.is_expired() {
+                let refresh_token = oauth.refresh_token.clone();
+                let oauth_client = imp_llm::oauth::anthropic::AnthropicOAuth::new();
+                match tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(oauth_client.refresh_token(&refresh_token))
+                }) {
+                    Ok(new_cred) => {
+                        let _ = auth_store.store(
+                            &provider_name,
+                            imp_llm::auth::StoredCredential::OAuth(new_cred),
+                        );
+                    }
+                    Err(e) => return Err(format!("Token refresh failed: {e}. Use /login")),
+                }
+            }
+        }
+
         let api_key = auth_store
             .resolve(&provider_name)
-            .map_err(|error| error.to_string())?;
+            .map_err(|e: imp_llm::Error| e.to_string())?;
 
         let model = Model {
             meta,
@@ -1649,9 +1672,18 @@ impl App {
                 });
             }
             AgentEvent::Error { error } => {
+                // Stop streaming — errors can be terminal (no AgentEnd follows)
+                self.is_streaming = false;
+                if let Some(last) = self.messages.last_mut() {
+                    last.is_streaming = false;
+                }
+
+                // Parse the error for a cleaner display
+                let display_error = parse_api_error(&error);
+
                 self.messages.push(DisplayMessage {
                     role: MessageRole::Error,
-                    content: error,
+                    content: display_error,
                     thinking: None,
                     tool_calls: Vec::new(),
                     is_streaming: false,
@@ -1661,6 +1693,37 @@ impl App {
             _ => {}
         }
     }
+}
+
+// ── Error parsing ───────────────────────────────────────────────
+
+/// Extract a human-readable message from API error strings.
+/// Input: "Provider error: HTTP 401 Unauthorized: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired...\"}}"
+/// Output: "OAuth token has expired. Please obtain a new token or refresh your existing token. (use /login)"
+fn parse_api_error(raw: &str) -> String {
+    // Try to extract JSON from the error string
+    if let Some(json_start) = raw.find('{') {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw[json_start..]) {
+            // Anthropic error format: {"type":"error","error":{"type":"...","message":"..."}}
+            if let Some(msg) = parsed
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+            {
+                let hint = if msg.contains("expired") || msg.contains("token") {
+                    " (use /login to refresh)"
+                } else {
+                    ""
+                };
+                return format!("{msg}{hint}");
+            }
+            // Simple {"message":"..."} format
+            if let Some(msg) = parsed.get("message").and_then(|m| m.as_str()) {
+                return msg.to_string();
+            }
+        }
+    }
+    raw.to_string()
 }
 
 // ── Layout helpers ──────────────────────────────────────────────

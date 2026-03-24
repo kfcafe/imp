@@ -31,7 +31,7 @@ pub enum StoredCredential {
 /// Manages API keys and OAuth credentials.
 pub struct AuthStore {
     runtime_keys: HashMap<String, String>,
-    stored: HashMap<String, StoredCredential>,
+    pub stored: HashMap<String, StoredCredential>,
     path: PathBuf,
 }
 
