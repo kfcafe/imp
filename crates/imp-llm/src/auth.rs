@@ -105,6 +105,29 @@ impl AuthStore {
         self.save()
     }
 
+    /// Resolve API key, auto-refreshing expired OAuth tokens.
+    /// Persists the refreshed credential to disk on success.
+    pub async fn resolve_with_refresh(&mut self, provider: &str) -> Result<ApiKey> {
+        // Check for expired OAuth and refresh
+        if let Some(StoredCredential::OAuth(oauth)) = self.stored.get(provider) {
+            if oauth.is_expired() {
+                let refresh_token = oauth.refresh_token.clone();
+                let oauth_client = crate::oauth::anthropic::AnthropicOAuth::new();
+                match oauth_client.refresh_token(&refresh_token).await {
+                    Ok(new_cred) => {
+                        self.store(provider, StoredCredential::OAuth(new_cred))?;
+                    }
+                    Err(e) => {
+                        return Err(crate::error::Error::Auth(format!(
+                            "Token refresh failed: {e}. Run `imp login` to re-authenticate."
+                        )));
+                    }
+                }
+            }
+        }
+        self.resolve(provider)
+    }
+
     /// Check if the stored OAuth credential for a provider is expired.
     pub fn is_oauth_expired(&self, provider: &str) -> bool {
         matches!(

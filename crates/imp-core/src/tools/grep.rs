@@ -121,7 +121,7 @@ impl Tool for GrepTool {
 
         let search_path = params["path"]
             .as_str()
-            .map(|p| ctx.cwd.join(p))
+            .map(|p| super::resolve_path(&ctx.cwd, p))
             .unwrap_or_else(|| ctx.cwd.clone());
 
         let glob_filter = params["glob"].as_str();
@@ -382,11 +382,7 @@ async fn execute_extract(targets: &[serde_json::Value], ctx: &ToolContext) -> Re
         };
 
         if let Some((file, locator)) = parse_extract_target(target_str) {
-            let path = if Path::new(&file).is_absolute() {
-                PathBuf::from(&file)
-            } else {
-                ctx.cwd.join(&file)
-            };
+            let path = super::resolve_path(&ctx.cwd, &file);
 
             let content = match read_text_file(&path) {
                 Some(c) => c,

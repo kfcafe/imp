@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -60,11 +58,7 @@ impl Tool for EditTool {
             return Ok(ToolOutput::error("Missing required parameter: oldText"));
         }
 
-        let path = if Path::new(raw_path).is_absolute() {
-            std::path::PathBuf::from(raw_path)
-        } else {
-            ctx.cwd.join(raw_path)
-        };
+        let path = super::resolve_path(&ctx.cwd, raw_path);
 
         if !path.exists() {
             let suggestions = suggest_similar_files(&ctx.cwd, raw_path);

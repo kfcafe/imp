@@ -732,31 +732,12 @@ impl App {
         let mut auth_store =
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
 
-        // Auto-refresh expired OAuth tokens before spawning agent
-        if let Some(imp_llm::auth::StoredCredential::OAuth(oauth)) =
-            auth_store.stored.get(&provider_name)
-        {
-            if oauth.is_expired() {
-                let refresh_token = oauth.refresh_token.clone();
-                let oauth_client = imp_llm::oauth::anthropic::AnthropicOAuth::new();
-                match tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(oauth_client.refresh_token(&refresh_token))
-                }) {
-                    Ok(new_cred) => {
-                        let _ = auth_store.store(
-                            &provider_name,
-                            imp_llm::auth::StoredCredential::OAuth(new_cred),
-                        );
-                    }
-                    Err(e) => return Err(format!("Token refresh failed: {e}. Use /login")),
-                }
-            }
-        }
-
-        let api_key = auth_store
-            .resolve(&provider_name)
-            .map_err(|e: imp_llm::Error| e.to_string())?;
+        // Resolve API key with auto-refresh for expired OAuth tokens
+        let api_key = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(auth_store.resolve_with_refresh(&provider_name))
+        })
+        .map_err(|e: imp_llm::Error| e.to_string())?;
 
         let model = Model {
             meta,

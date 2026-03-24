@@ -54,7 +54,7 @@ impl Tool for ReadTool {
             return Ok(ToolOutput::error("Missing required parameter: path"));
         }
 
-        let path = resolve_path(&ctx.cwd, raw_path);
+        let path = super::resolve_path(&ctx.cwd, raw_path);
 
         if !path.exists() {
             let suggestions = suggest_similar_files(&ctx.cwd, raw_path);
@@ -124,15 +124,6 @@ impl Tool for ReadTool {
             }),
             is_error: false,
         })
-    }
-}
-
-fn resolve_path(cwd: &Path, raw: &str) -> std::path::PathBuf {
-    let p = Path::new(raw);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        cwd.join(p)
     }
 }
 

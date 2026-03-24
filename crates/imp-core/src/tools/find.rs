@@ -52,11 +52,7 @@ impl Tool for FindTool {
         let raw_path = params["path"].as_str().unwrap_or(".");
         let limit = params["limit"].as_u64().unwrap_or(DEFAULT_LIMIT as u64) as usize;
 
-        let search_dir = if Path::new(raw_path).is_absolute() {
-            raw_path.into()
-        } else {
-            ctx.cwd.join(raw_path)
-        };
+        let search_dir = super::resolve_path(&ctx.cwd, raw_path);
 
         if !search_dir.exists() {
             return Ok(ToolOutput::error(format!(
