@@ -1449,14 +1449,41 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         config.thinking = Some(parse_thinking_level(thinking));
     }
 
+    // Session handling — same logic as interactive mode
+    let session_dir = Config::session_dir();
+    let mut session = if cli.no_session {
+        SessionManager::in_memory()
+    } else if cli.cont {
+        SessionManager::continue_recent(&cwd, &session_dir)?
+            .unwrap_or_else(|| SessionManager::new(&cwd, &session_dir).unwrap())
+    } else if let Some(ref path) = cli.session {
+        SessionManager::open(path)?
+    } else {
+        SessionManager::new(&cwd, &session_dir)?
+    };
+
+    // Load previous messages from the session branch
+    let history: Vec<Message> = session.get_messages().iter().cloned().cloned().collect();
+
+    // Persist the new user prompt to the session
+    let user_msg_id = uuid::Uuid::new_v4().to_string();
+    let _ = session.append(imp_core::session::SessionEntry::Message {
+        id: user_msg_id,
+        parent_id: None,
+        message: Message::user(prompt),
+    });
+
     // Use agent loop if tools are available (not --no-tools)
     if cli.no_tools {
         // Simple streaming — no tools, no agent loop
         let thinking = config.thinking.unwrap_or(ThinkingLevel::Off);
         let system_prompt = cli.system_prompt.clone().unwrap_or_default();
-        let context = Context {
-            messages: vec![Message::user(prompt)],
-        };
+
+        // Build context with session history + new prompt
+        let mut messages: Vec<Message> = history;
+        messages.push(Message::user(prompt));
+        let context = Context { messages };
+
         let options = RequestOptions {
             thinking_level: thinking,
             max_tokens: Some(model.meta.max_output_tokens),
@@ -1464,10 +1491,14 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
             ..Default::default()
         };
 
+        let mut response_text = String::new();
         let mut stream = model.provider.stream(&model, context, options, &api_key);
         while let Some(event_result) = stream.next().await {
             match event_result {
-                Ok(StreamEvent::TextDelta { text }) => print!("{text}"),
+                Ok(StreamEvent::TextDelta { text }) => {
+                    print!("{text}");
+                    response_text.push_str(&text);
+                }
                 Ok(StreamEvent::ThinkingDelta { text }) => eprint!("{text}"),
                 Ok(StreamEvent::Error { error }) => {
                     eprintln!("Error: {error}");
@@ -1481,6 +1512,23 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                 }
             }
         }
+
+        // Persist the assistant response to the session
+        if !response_text.is_empty() {
+            let assistant_msg_id = uuid::Uuid::new_v4().to_string();
+            let _ = session.append(imp_core::session::SessionEntry::Message {
+                id: assistant_msg_id,
+                parent_id: None,
+                message: Message::Assistant(imp_llm::AssistantMessage {
+                    content: vec![imp_llm::ContentBlock::Text {
+                        text: response_text,
+                    }],
+                    usage: None,
+                    stop_reason: imp_llm::StopReason::EndTurn,
+                    timestamp: imp_llm::now(),
+                }),
+            });
+        }
     } else {
         // Full agent loop with tools
         let (mut agent, mut handle) =
@@ -1491,7 +1539,37 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         // Remove ask tool in headless mode
         agent.tools.retain(|name| name != "ask");
 
+        // Load session history into the agent (same pattern as TUI's spawn_agent_for_prompt)
+        if !history.is_empty() {
+            let mut messages = history;
+            // Collect tool_result IDs to know which tool_calls are paired
+            let result_ids: std::collections::HashSet<String> = messages
+                .iter()
+                .filter_map(|m| match m {
+                    Message::ToolResult(tr) => Some(tr.tool_call_id.clone()),
+                    _ => None,
+                })
+                .collect();
+            // Strip unpaired tool_call blocks (old sessions without tool_results)
+            for msg in &mut messages {
+                if let Message::Assistant(assistant) = msg {
+                    assistant.content.retain(|block| match block {
+                        imp_llm::ContentBlock::ToolCall { id, .. } => result_ids.contains(id),
+                        _ => true,
+                    });
+                }
+            }
+            // Remove empty assistant messages left after stripping
+            messages.retain(|msg| match msg {
+                Message::Assistant(a) => !a.content.is_empty(),
+                _ => true,
+            });
+            agent.messages = messages;
+        }
+
         let prompt_owned = prompt.to_string();
+        let session_mu = Arc::new(Mutex::new(session));
+        let session_for_events = Arc::clone(&session_mu);
         tokio::spawn(async move {
             if let Err(e) = agent.run(prompt_owned).await {
                 eprintln!("[imp] agent error: {e}");
@@ -1540,7 +1618,10 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                         eprintln!("[tool: {tool_name} {summary}]");
                     }
                 }
-                AgentEvent::ToolExecutionEnd { result, .. } => {
+                AgentEvent::ToolExecutionEnd {
+                    tool_call_id: _,
+                    result,
+                } => {
                     if result.is_error {
                         let text: String = result
                             .content
@@ -1562,6 +1643,24 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                             );
                         }
                     }
+                    // Persist tool result to session
+                    let msg_id = uuid::Uuid::new_v4().to_string();
+                    let mut s = session_for_events.lock().await;
+                    let _ = s.append(imp_core::session::SessionEntry::Message {
+                        id: msg_id,
+                        parent_id: None,
+                        message: Message::ToolResult(result),
+                    });
+                }
+                AgentEvent::TurnEnd { message, .. } => {
+                    // Persist assistant message to session
+                    let msg_id = uuid::Uuid::new_v4().to_string();
+                    let mut s = session_for_events.lock().await;
+                    let _ = s.append(imp_core::session::SessionEntry::Message {
+                        id: msg_id,
+                        parent_id: None,
+                        message: Message::Assistant(message),
+                    });
                 }
                 AgentEvent::Error { error } => {
                     eprintln!("Error: {error}");
@@ -1576,6 +1675,8 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                 _ => {}
             }
         }
+
+        // session_mu is dropped here — no further use needed
     }
 
     Ok(())
