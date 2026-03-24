@@ -285,7 +285,8 @@ mod tests {
             ui: Arc::new(NullInterface),
             file_cache: Arc::new(FileCache::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
-            mode: crate::config::AgentMode::Full,
+            mode: crate::config::AgentMode::from_name(mode_name)
+                .unwrap_or(crate::config::AgentMode::Full),
         };
 
         let tool = ManaTool;
