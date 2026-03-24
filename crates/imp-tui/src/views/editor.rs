@@ -333,12 +333,8 @@ impl Widget for EditorView<'_> {
             ThinkingLevel::High => "high",
             ThinkingLevel::XHigh => "xhigh",
         };
-        let bottom_title = if !self.model_name.is_empty() {
-            if thinking_label.is_empty() {
-                format!(" {} ", self.model_name)
-            } else {
-                format!(" {} • {} ", self.model_name, thinking_label)
-            }
+        let bottom_title = if !thinking_label.is_empty() {
+            format!(" {thinking_label} ")
         } else {
             String::new()
         };
