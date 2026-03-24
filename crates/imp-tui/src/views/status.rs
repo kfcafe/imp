@@ -69,6 +69,14 @@ impl Widget for StatusBar<'_> {
         );
         let cost_str = format!("${:.2}", self.info.cost);
         let context_str = format!("{:.0}%", self.info.context_percent * 100.0);
+        // Color the context% to give an at-a-glance warning before compaction fires.
+        let context_style = if self.info.context_percent > 0.75 {
+            self.theme.error_style()
+        } else if self.info.context_percent > 0.50 {
+            self.theme.warning_style()
+        } else {
+            self.theme.muted_style()
+        };
 
         let mut right_parts = Vec::new();
         if self.info.peek {
@@ -80,7 +88,7 @@ impl Widget for StatusBar<'_> {
             Span::styled(" │ ", self.theme.muted_style()),
             Span::styled(cost_str, self.theme.muted_style()),
             Span::styled(" │ ", self.theme.muted_style()),
-            Span::styled(context_str, self.theme.muted_style()),
+            Span::styled(context_str, context_style),
             Span::styled(" │ ", self.theme.muted_style()),
             Span::styled(self.info.model.clone(), self.theme.accent_style()),
         ]);

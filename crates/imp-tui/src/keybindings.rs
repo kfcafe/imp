@@ -48,6 +48,11 @@ pub enum Action {
     OverlayDismiss,
     OverlayFilter(char),
     OverlayBackspace,
+    // Tool call navigation
+    ToolFocusNext,
+    ToolFocusPrev,
+    /// Toggle the focused tool call's expansion (or all if no focus).
+    ToolToggle,
 }
 
 /// Resolve a key event to an action in normal mode.
@@ -74,13 +79,15 @@ pub fn resolve_normal(key: KeyEvent) -> Option<Action> {
         KeyCode::BackTab => Some(Action::CycleThinking),
 
         // Toggle tool/thinking
-        KeyCode::Tab => Some(Action::Peek),
+        KeyCode::Tab => Some(Action::ToolToggle),
 
         // Cursor movement
         KeyCode::Left if ctrl => Some(Action::WordLeft),
         KeyCode::Right if ctrl => Some(Action::WordRight),
         KeyCode::Left => Some(Action::CursorLeft),
         KeyCode::Right => Some(Action::CursorRight),
+        KeyCode::Up if ctrl => Some(Action::ToolFocusPrev),
+        KeyCode::Down if ctrl => Some(Action::ToolFocusNext),
         KeyCode::Up => Some(Action::CursorUp),
         KeyCode::Down => Some(Action::CursorDown),
         KeyCode::Home => Some(Action::CursorHome),

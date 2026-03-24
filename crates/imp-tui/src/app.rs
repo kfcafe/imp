@@ -62,6 +62,12 @@ pub enum QueuedMessage {
 }
 
 /// The TUI application state.
+/// Holds the oneshot sender to reply to an ask tool request.
+pub enum AskReply {
+    Select(tokio::sync::oneshot::Sender<Option<usize>>),
+    Input(tokio::sync::oneshot::Sender<Option<String>>),
+}
+
 pub struct App {
     // Core
     pub running: bool,
@@ -97,6 +103,8 @@ pub struct App {
     pub tick: u64,
     pub max_turns_override: Option<u32>,
     pub ui_rx: Option<tokio::sync::mpsc::Receiver<crate::tui_interface::UiRequest>>,
+    pub ask_state: Option<crate::views::ask_bar::AskState>,
+    pub ask_reply: Option<AskReply>,
 
     // Accumulated stats
     pub accumulated_usage: Usage,
@@ -151,6 +159,8 @@ impl App {
             tick: 0,
             max_turns_override: None,
             ui_rx: None,
+            ask_state: None,
+            ask_reply: None,
             accumulated_usage: Usage::default(),
             accumulated_cost: Cost::default(),
             current_context_tokens: 0,
@@ -276,8 +286,9 @@ impl App {
                 }
             }
 
-            // Drain agent events (non-blocking)
+            // Drain agent events and UI requests (non-blocking)
             self.drain_agent_events();
+            self.drain_ui_requests();
 
             // Tick + periodic redraw for streaming/spinner
             self.tick = self.tick.wrapping_add(1);
@@ -310,6 +321,97 @@ impl App {
         for event in events {
             self.handle_agent_event(event);
             self.needs_redraw = true;
+        }
+    }
+
+    fn drain_ui_requests(&mut self) {
+        use crate::tui_interface::UiRequest;
+        use crate::views::ask_bar::{AskOption, AskState};
+
+        let requests: Vec<UiRequest> = self
+            .ui_rx
+            .as_mut()
+            .map(|rx| {
+                let mut reqs = Vec::new();
+                while let Ok(req) = rx.try_recv() {
+                    reqs.push(req);
+                }
+                reqs
+            })
+            .unwrap_or_default();
+
+        for req in requests {
+            match req {
+                UiRequest::Select {
+                    title,
+                    options,
+                    reply,
+                } => {
+                    let ask_options: Vec<AskOption> = options
+                        .into_iter()
+                        .map(|o| AskOption {
+                            label: o.label,
+                            description: o.description,
+                            checked: false,
+                        })
+                        .collect();
+                    self.ask_state = Some(AskState::new(title, String::new(), ask_options, false));
+                    self.ask_reply = Some(AskReply::Select(reply));
+                    self.needs_redraw = true;
+                }
+                UiRequest::Input {
+                    title,
+                    placeholder: _,
+                    reply,
+                } => {
+                    self.ask_state = Some(AskState::new(title, String::new(), vec![], false));
+                    self.ask_reply = Some(AskReply::Input(reply));
+                    self.needs_redraw = true;
+                }
+                UiRequest::Confirm {
+                    title,
+                    message,
+                    reply,
+                } => {
+                    // Render as a select with Yes/No
+                    let options = vec![
+                        AskOption {
+                            label: "Yes".into(),
+                            description: None,
+                            checked: false,
+                        },
+                        AskOption {
+                            label: "No".into(),
+                            description: None,
+                            checked: false,
+                        },
+                    ];
+                    self.ask_state = Some(AskState::new(title, message, options, false));
+                    // Wrap: convert selected index to bool
+                    let (bool_tx, bool_rx) = tokio::sync::oneshot::channel();
+                    self.ask_reply = Some(AskReply::Select(bool_tx));
+                    // Spawn a task to convert index → bool
+                    let confirm_reply = reply;
+                    tokio::spawn(async move {
+                        let result = bool_rx.await.ok().flatten();
+                        let _ = confirm_reply.send(result.map(|idx| idx == 0)); // 0 = Yes
+                    });
+                    self.needs_redraw = true;
+                }
+                UiRequest::Notify { message, level: _ } => {
+                    self.push_system_msg(&message);
+                    self.needs_redraw = true;
+                }
+                UiRequest::SetStatus { key, text } => {
+                    if let Some(t) = text {
+                        self.status_items.insert(key, t);
+                    } else {
+                        self.status_items.remove(&key);
+                    }
+                    self.needs_redraw = true;
+                }
+                _ => {} // SetWidget, Custom — not yet handled
+            }
         }
     }
 
@@ -457,6 +559,12 @@ impl App {
         // Reset ctrl+c counter on non-ctrl+c keypress
         if !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
             self.ctrl_c_count = 0;
+        }
+
+        // Ask overlay intercepts all keys when active
+        if self.ask_state.is_some() {
+            self.handle_ask_key(key);
+            return Ok(());
         }
 
         // Route based on current UI mode
@@ -1251,6 +1359,88 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn handle_ask_key(&mut self, key: KeyEvent) {
+
+        let Some(ref mut state) = self.ask_state else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Up => state.cursor_up(),
+            KeyCode::Down => state.cursor_down(),
+            KeyCode::Tab => state.tab_to_edit(),
+            KeyCode::Char(' ') if !state.input_active => state.toggle_current(),
+            KeyCode::Char(c) if !state.input_active && c.is_ascii_digit() => {
+                let n = c.to_digit(10).unwrap_or(0) as usize;
+                if state.quick_select(n) {
+                    // Quick-select + auto-confirm
+                    self.finish_ask();
+                }
+            }
+            KeyCode::Char(c) => state.type_char(c),
+            KeyCode::Backspace => state.backspace(),
+            KeyCode::Enter => {
+                self.finish_ask();
+            }
+            KeyCode::Esc => {
+                self.cancel_ask();
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_ask(&mut self) {
+        use crate::views::ask_bar::AskResult;
+
+        let state = self.ask_state.take();
+        let reply = self.ask_reply.take();
+
+        let Some(state) = state else { return };
+        let result = state.confirm();
+
+        // Show Q&A in chat
+        self.push_system_msg(&format!("❯ {}", state.question));
+
+        match (&result, reply) {
+            (AskResult::Text(text), Some(AskReply::Input(tx))) => {
+                self.push_system_msg(&format!("  {text}"));
+                let _ = tx.send(Some(text.clone()));
+            }
+            (AskResult::Selected(indices), Some(AskReply::Select(tx))) => {
+                let labels: Vec<String> = indices
+                    .iter()
+                    .filter_map(|&i| state.options.get(i).map(|o| o.label.clone()))
+                    .collect();
+                self.push_system_msg(&format!("  {}", labels.join(", ")));
+                // Send first selected index for single select
+                let _ = tx.send(indices.first().copied());
+            }
+            (AskResult::Text(text), Some(AskReply::Select(tx))) => {
+                // User typed custom text but we have a Select reply — send as index None
+                // Actually, we can't send text through a Select channel.
+                // Send None (cancelled) and let the agent handle it.
+                self.push_system_msg(&format!("  {text} (custom — options ignored)"));
+                let _ = tx.send(None);
+            }
+            _ => {}
+        }
+    }
+
+    fn cancel_ask(&mut self) {
+        self.ask_state = None;
+        if let Some(reply) = self.ask_reply.take() {
+            match reply {
+                AskReply::Select(tx) => {
+                    let _ = tx.send(None);
+                }
+                AskReply::Input(tx) => {
+                    let _ = tx.send(None);
+                }
+            }
+        }
+        self.push_system_msg("(skipped)");
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) {

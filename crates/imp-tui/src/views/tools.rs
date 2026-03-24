@@ -27,6 +27,16 @@ impl DisplayToolCall {
 
     /// Header with animated spinner for running tools.
     pub fn header_line_animated(&self, theme: &Theme, tick: u64) -> Line<'static> {
+        self.header_line_animated_focused(theme, tick, false)
+    }
+
+    /// Header with animated spinner and optional focus indicator.
+    pub fn header_line_animated_focused(
+        &self,
+        theme: &Theme,
+        tick: u64,
+        focused: bool,
+    ) -> Line<'static> {
         let is_running = self.output.is_none() && !self.is_error;
         let icon = if self.is_error {
             "✗".to_string()
@@ -44,7 +54,20 @@ impl DisplayToolCall {
             theme.success_style()
         };
 
+        // Focus indicator prepended before the status icon
+        let focus_span = if focused {
+            Span::styled(
+                "▸",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw(" ")
+        };
+
         let mut spans = vec![
+            focus_span,
             Span::styled(format!(" {icon} "), icon_style),
             Span::styled(
                 self.name.clone(),
@@ -56,27 +79,21 @@ impl DisplayToolCall {
 
         if !self.args_summary.is_empty() {
             spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                self.args_summary.clone(),
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::styled(self.args_summary.clone(), theme.muted_style()));
         }
 
-        // Result summary when collapsed
+        // Result summary when collapsed — just line count (icon already shows status)
         if !self.expanded {
             if let Some(ref output) = self.output {
-                let line_count = output.lines().count();
-                let status = if self.is_error {
-                    " ✗ Error".to_string()
+                if self.is_error {
+                    spans.push(Span::styled(" error", theme.error_style()));
                 } else {
-                    format!(" ✓ {line_count} lines")
-                };
-                let status_style = if self.is_error {
-                    theme.error_style()
-                } else {
-                    theme.success_style()
-                };
-                spans.push(Span::styled(status, status_style));
+                    let line_count = output.lines().count();
+                    spans.push(Span::styled(
+                        format!("  {line_count} lines"),
+                        theme.muted_style(),
+                    ));
+                }
             }
         }
 

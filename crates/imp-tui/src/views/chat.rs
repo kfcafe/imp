@@ -158,6 +158,8 @@ pub struct ChatView<'a> {
     highlighter: &'a Highlighter,
     scroll_offset: usize,
     tick: u64,
+    /// Flat index of the focused tool call across all messages, if any.
+    tool_focus: Option<usize>,
 }
 
 impl<'a> ChatView<'a> {
@@ -172,6 +174,7 @@ impl<'a> ChatView<'a> {
             highlighter,
             scroll_offset: 0,
             tick: 0,
+            tool_focus: None,
         }
     }
 
@@ -184,6 +187,11 @@ impl<'a> ChatView<'a> {
         self.tick = tick;
         self
     }
+
+    pub fn tool_focus(mut self, focus: Option<usize>) -> Self {
+        self.tool_focus = focus;
+        self
+    }
 }
 
 impl Widget for ChatView<'_> {
@@ -194,6 +202,8 @@ impl Widget for ChatView<'_> {
 
         // Build all lines from all messages
         let mut all_lines: Vec<Line<'_>> = Vec::new();
+        // Running counter of tool calls seen so far — used to map flat_idx → focused
+        let mut tool_call_counter: usize = 0;
 
         for msg in self.messages {
             match msg.role {
@@ -301,28 +311,33 @@ impl Widget for ChatView<'_> {
                 }
             }
 
-            // Tool calls
+            // Tool calls — rendered with a │ left rail for visual grouping
             for tc in &msg.tool_calls {
                 let is_running = tc.output.is_none() && !tc.is_error;
+                let focused = self.tool_focus == Some(tool_call_counter);
+                tool_call_counter += 1;
+
+                let rail = Span::styled("  │", self.theme.muted_style());
+
+                // Build header with rail prepended; use focused variant for ▸ indicator
+                let mut header = tc.header_line_animated_focused(self.theme, self.tick, focused);
+                header.spans.insert(0, rail.clone());
 
                 if is_running && !tc.streaming_lines.is_empty() {
-                    // Running: show header + rolling 5-line output tail
-                    all_lines.push(tc.header_line_animated(self.theme, self.tick));
+                    // Running: show header + rolling streaming output tail
+                    all_lines.push(header);
                     for line in &tc.streaming_lines {
-                        all_lines.push(Line::from(Span::styled(
-                            format!("    {line}"),
-                            self.theme.muted_style(),
-                        )));
+                        all_lines.push(Line::from(vec![
+                            rail.clone(),
+                            Span::styled(format!("    {line}"), self.theme.muted_style()),
+                        ]));
                     }
-                } else if is_running {
-                    // Running but no output yet: just the spinner header
-                    all_lines.push(tc.header_line_animated(self.theme, self.tick));
                 } else {
-                    // Done: one-line header with ✓/✗
-                    all_lines.push(tc.header_line_animated(self.theme, self.tick));
+                    // Running (no output yet) or done: just the header line
+                    all_lines.push(header);
                 }
 
-                // Expanded output (Tab peek)
+                // Expanded output (Tab peek or auto-expanded errors) — also railed
                 if tc.expanded && !is_running {
                     if let Some(ref output) = tc.output {
                         let output_style = if tc.is_error {
@@ -331,10 +346,10 @@ impl Widget for ChatView<'_> {
                             Style::default().fg(Color::DarkGray)
                         };
                         for output_line in output.lines().take(50) {
-                            all_lines.push(Line::from(Span::styled(
-                                format!("    {output_line}"),
-                                output_style,
-                            )));
+                            all_lines.push(Line::from(vec![
+                                rail.clone(),
+                                Span::styled(format!("    {output_line}"), output_style),
+                            ]));
                         }
                     }
                 }
