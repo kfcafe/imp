@@ -96,6 +96,7 @@ pub struct App {
     pub last_esc: Option<Instant>,
     pub tick: u64,
     pub max_turns_override: Option<u32>,
+    pub ui_rx: Option<tokio::sync::mpsc::Receiver<crate::tui_interface::UiRequest>>,
 
     // Accumulated stats
     pub accumulated_usage: Usage,
@@ -149,6 +150,7 @@ impl App {
             last_esc: None,
             tick: 0,
             max_turns_override: None,
+            ui_rx: None,
             accumulated_usage: Usage::default(),
             accumulated_cost: Cost::default(),
             current_context_tokens: 0,
@@ -826,8 +828,10 @@ impl App {
             .build()
             .map_err(|e: imp_core::error::Error| e.to_string())?;
 
-        // Remove ask tool — TUI doesn't wire UserInterface to the agent yet
-        agent.tools.retain(|name| name != "ask");
+        // Wire TuiInterface so the ask tool works
+        let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(16);
+        agent.ui = crate::tui_interface::TuiInterface::new(ui_tx);
+        self.ui_rx = Some(ui_rx);
 
         // Apply max_turns override from CLI
         if let Some(max_turns) = self.max_turns_override {
