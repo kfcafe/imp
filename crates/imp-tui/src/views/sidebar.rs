@@ -279,12 +279,14 @@ fn format_output(tool_name: &str, output: &str) -> Vec<String> {
 /// Truncate a line to fit within `max_width` characters.
 fn truncate_line(s: &str, max_width: usize) -> String {
     if s.len() <= max_width {
-        s.to_string()
-    } else if max_width > 1 {
-        format!("{}…", &s[..max_width - 1])
-    } else {
-        "…".to_string()
+        return s.to_string();
     }
+    if max_width <= 1 {
+        return "…".to_string();
+    }
+    // Walk chars to find a safe truncation point
+    let truncated: String = s.chars().take(max_width - 1).collect();
+    format!("{truncated}…")
 }
 
 #[cfg(test)]
@@ -500,5 +502,14 @@ mod tests {
     #[test]
     fn truncate_line_width_one() {
         assert_eq!(truncate_line("hello", 1), "…");
+    }
+
+    #[test]
+    fn truncate_line_multibyte_utf8() {
+        // 日本語 = 3 chars, 9 bytes. Truncating at byte 5 would split a char.
+        let result = truncate_line("日本語テスト", 4);
+        assert!(result.ends_with('…'));
+        // Should not panic
+        assert!(!result.is_empty());
     }
 }
