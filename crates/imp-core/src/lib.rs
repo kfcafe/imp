@@ -5,6 +5,7 @@ pub mod config;
 pub mod context;
 pub mod error;
 pub mod hooks;
+pub mod import;
 pub mod learning;
 pub mod memory;
 pub mod resources;

@@ -134,7 +134,7 @@ pub fn discover_prompts(cwd: &Path, user_config_dir: &Path) -> Result<Vec<Prompt
 }
 
 /// Extract the first paragraph as a description from a markdown file.
-fn extract_description(content: &str) -> String {
+pub fn extract_description(content: &str) -> String {
     content
         .lines()
         .skip_while(|l| l.starts_with('#') || l.trim().is_empty())
