@@ -583,6 +583,65 @@ pub fn sanitize_messages(messages: &mut Vec<Message>) {
         Message::ToolResult(tr) => remaining_call_ids.contains(&tr.tool_call_id),
         _ => true,
     });
+
+    // Reorder: ensure each tool_result follows the assistant message that
+    // contains its tool_call. Session persistence can write tool_results
+    // before the assistant message (ToolExecutionEnd fires before TurnEnd).
+    reorder_tool_results(messages);
+}
+
+/// Move tool_result messages so they immediately follow the assistant
+/// message containing the matching tool_call.
+fn reorder_tool_results(messages: &mut Vec<Message>) {
+    use std::collections::HashMap;
+
+    // Build map: tool_call_id → index of the assistant message that has it
+    let mut call_to_assistant: HashMap<String, usize> = HashMap::new();
+    for (i, msg) in messages.iter().enumerate() {
+        if let Message::Assistant(a) = msg {
+            for block in &a.content {
+                if let imp_llm::ContentBlock::ToolCall { id, .. } = block {
+                    call_to_assistant.insert(id.clone(), i);
+                }
+            }
+        }
+    }
+
+    // Separate tool_results that are out of order
+    let mut deferred: Vec<(usize, Message)> = Vec::new(); // (target_after_idx, msg)
+    let mut i = 0;
+    while i < messages.len() {
+        if let Message::ToolResult(tr) = &messages[i] {
+            if let Some(&assistant_idx) = call_to_assistant.get(&tr.tool_call_id) {
+                if i < assistant_idx {
+                    // tool_result appears before its assistant — pull it out
+                    let msg = messages.remove(i);
+                    deferred.push((assistant_idx, msg));
+                    // Adjust assistant indices after removal
+                    for v in call_to_assistant.values_mut() {
+                        if *v > i {
+                            *v -= 1;
+                        }
+                    }
+                    for d in &mut deferred {
+                        if d.0 > i {
+                            d.0 -= 1;
+                        }
+                    }
+                    continue; // don't increment i
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Re-insert deferred tool_results after their assistant messages
+    // Sort by target index descending so insertions don't shift earlier targets
+    deferred.sort_by(|a, b| b.0.cmp(&a.0));
+    for (target_idx, msg) in deferred {
+        let insert_at = (target_idx + 1).min(messages.len());
+        messages.insert(insert_at, msg);
+    }
 }
 
 /// Extract the first text content from a message.
