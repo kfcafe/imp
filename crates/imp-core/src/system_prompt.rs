@@ -63,6 +63,7 @@ pub struct AssembleParams<'a> {
     pub mode: &'a AgentMode,
     pub memory: Option<&'a str>,
     pub user_profile: Option<&'a str>,
+    pub cwd: Option<&'a std::path::Path>,
     /// Whether to include learning instructions in the system prompt.
     pub learning_enabled: bool,
 }
@@ -84,6 +85,9 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
 
     // Layer 1: Identity + tool descriptions
     parts.push(identity_layer(p.tools, p.role, p.mode, p.learning_enabled));
+
+    // Layer 1.5: Environment context
+    parts.push(environment_layer(p.cwd));
 
     // Layer 2: Project context from AGENTS.md
     if !p.agents_md.is_empty() {
@@ -167,6 +171,44 @@ fn identity_layer(
     }
 
     s
+}
+
+fn environment_layer(cwd: Option<&std::path::Path>) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let cwd_str = cwd.map(|p| p.display().to_string()).unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    });
+    let os = std::env::consts::OS;
+    let today = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let days = secs / 86400;
+        // Simple date calculation
+        let (y, m, d) = days_to_ymd(days);
+        format!("{y}-{m:02}-{d:02}")
+    };
+    format!("Environment: cwd={cwd_str}, os={os}, home={home}, date={today}")
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    // Civil days algorithm (Howard Hinnant)
+    days += 719_468;
+    let era = days / 146_097;
+    let doe = days - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 fn agents_md_layer(agents: &[AgentsMd]) -> String {
@@ -362,6 +404,7 @@ mod tests {
             mode: &AgentMode::Full,
             memory: None,
             user_profile: None,
+            cwd: None,
             learning_enabled: false,
         })
     }
@@ -751,6 +794,7 @@ mod tests {
             mode: &AgentMode::Full,
             memory: Some(mem),
             user_profile: None,
+            cwd: None,
             learning_enabled: false,
         });
         assert!(result.text.contains("MEMORY"));
@@ -772,6 +816,7 @@ mod tests {
             mode: &AgentMode::Full,
             memory: None,
             user_profile: Some(user),
+            cwd: None,
             learning_enabled: false,
         });
         assert!(result.text.contains("USER PROFILE"));
@@ -791,6 +836,7 @@ mod tests {
             mode: &AgentMode::Full,
             memory: Some(""),
             user_profile: Some(""),
+            cwd: None,
             learning_enabled: false,
         });
         assert!(!result.text.contains("MEMORY"));
@@ -824,6 +870,7 @@ mod tests {
             mode: &AgentMode::Full,
             memory: Some(mem),
             user_profile: None,
+            cwd: None,
             learning_enabled: false,
         });
 
