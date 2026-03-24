@@ -22,23 +22,23 @@ pub struct Theme {
 }
 
 impl Default for Theme {
-    /// Deep blue-black with warm bronze, Aegean teal, and Mediterranean earth tones.
+    /// Dungeon stone — charcoal, muted bronze, forge ember, moss.
     fn default() -> Self {
         Self {
-            bg: Color::Rgb(0x15, 0x18, 0x20),           // deep blue-black
-            fg: Color::Rgb(0xe8, 0xe0, 0xd4),           // warm parchment
-            accent: Color::Rgb(0x4a, 0x9a, 0x8c),       // Aegean teal
-            error: Color::Rgb(0xc4, 0x7a, 0x5a),        // terracotta
-            warning: Color::Rgb(0xe5, 0xa8, 0x4b),      // bright gold
-            success: Color::Rgb(0x8a, 0x9a, 0x6b),      // sage green
-            muted: Color::Rgb(0x6b, 0x65, 0x60),        // warm gray
-            border: Color::Rgb(0x2d, 0x3a, 0x4a),       // slate blue
-            user_prefix: Color::Rgb(0xd4, 0xa5, 0x74),  // warm bronze
-            tool_name: Color::Rgb(0x8a, 0x6a, 0x8a),    // dusty purple
-            code_bg: Color::Rgb(0x25, 0x2a, 0x35),      // darker blue-black
-            header_fg: Color::Rgb(0xe8, 0xe0, 0xd4),    // parchment
-            selection_bg: Color::Rgb(0x2d, 0x3a, 0x4a), // slate blue
-            selection_fg: Color::Rgb(0xe8, 0xe0, 0xd4), // parchment
+            bg: Color::Rgb(0x14, 0x12, 0x10),           // charcoal stone
+            fg: Color::Rgb(0xb8, 0xa8, 0x98),           // weathered limestone
+            accent: Color::Rgb(0xc0, 0xa1, 0x70),       // muted bronze
+            error: Color::Rgb(0xce, 0x5b, 0x47),        // forge ember
+            warning: Color::Rgb(0xcb, 0x97, 0x73),      // muted coral-orange
+            success: Color::Rgb(0x8a, 0x9a, 0x6b),      // dungeon moss
+            muted: Color::Rgb(0x83, 0x7e, 0x78),        // worn stone
+            border: Color::Rgb(0x2a, 0x26, 0x22),       // mortar
+            user_prefix: Color::Rgb(0xc0, 0xa1, 0x70),  // bronze
+            tool_name: Color::Rgb(0xb9, 0x9c, 0x72),    // darker bronze
+            code_bg: Color::Rgb(0x1a, 0x18, 0x16),      // dark alcove
+            header_fg: Color::Rgb(0xb8, 0xa8, 0x98),    // limestone
+            selection_bg: Color::Rgb(0x2a, 0x26, 0x22), // torchlit stone
+            selection_fg: Color::Rgb(0xb8, 0xa8, 0x98), // limestone
         }
     }
 }
@@ -52,23 +52,23 @@ impl Theme {
         }
     }
 
-    /// Light theme for bright terminals.
+    /// Light theme — sandstone in daylight.
     pub fn light() -> Self {
         Self {
-            bg: Color::Rgb(0xfa, 0xf8, 0xf5),
-            fg: Color::Rgb(0x2a, 0x2a, 0x2a),
-            accent: Color::Rgb(0x2a, 0x7a, 0x6c),
-            error: Color::Rgb(0xb0, 0x40, 0x30),
-            warning: Color::Rgb(0xb0, 0x80, 0x20),
-            success: Color::Rgb(0x50, 0x70, 0x40),
-            muted: Color::Rgb(0x99, 0x95, 0x90),
-            border: Color::Rgb(0xd0, 0xcc, 0xc4),
-            user_prefix: Color::Rgb(0x90, 0x70, 0x40),
-            tool_name: Color::Rgb(0x70, 0x50, 0x70),
-            code_bg: Color::Rgb(0xf0, 0xec, 0xe6),
-            header_fg: Color::Rgb(0x2a, 0x2a, 0x2a),
-            selection_bg: Color::Rgb(0xd0, 0xdc, 0xe8),
-            selection_fg: Color::Rgb(0x2a, 0x2a, 0x2a),
+            bg: Color::Rgb(0xf5, 0xf0, 0xe8),           // sunlit sandstone
+            fg: Color::Rgb(0x2a, 0x26, 0x22),           // charcoal ink
+            accent: Color::Rgb(0x8a, 0x70, 0x48),       // dark bronze
+            error: Color::Rgb(0xa0, 0x38, 0x28),        // brick red
+            warning: Color::Rgb(0x9a, 0x6a, 0x40),      // aged copper
+            success: Color::Rgb(0x50, 0x6a, 0x3a),      // deep moss
+            muted: Color::Rgb(0x8a, 0x84, 0x7e),        // grey stone
+            border: Color::Rgb(0xd0, 0xc8, 0xbc),       // pale mortar
+            user_prefix: Color::Rgb(0x8a, 0x70, 0x48),  // dark bronze
+            tool_name: Color::Rgb(0x7a, 0x68, 0x50),    // worn brass
+            code_bg: Color::Rgb(0xec, 0xe6, 0xdc),      // parchment shadow
+            header_fg: Color::Rgb(0x2a, 0x26, 0x22),    // charcoal
+            selection_bg: Color::Rgb(0xd8, 0xd0, 0xc0), // highlighted stone
+            selection_fg: Color::Rgb(0x2a, 0x26, 0x22), // charcoal
         }
     }
 
@@ -181,15 +181,15 @@ impl Theme {
         Style::default().fg(self.selection_fg).bg(self.selection_bg)
     }
 
-    /// Border color progresses through palette warmth with thinking level.
+    /// Border color progresses like a forge heating up.
     pub fn thinking_border_color(&self, level: ThinkingLevel) -> Color {
         match level {
-            ThinkingLevel::Off => self.border,
-            ThinkingLevel::Minimal => Color::Rgb(0x2d, 0x3a, 0x4a), // slate
-            ThinkingLevel::Low => Color::Rgb(0x4a, 0x9a, 0x8c),     // teal
-            ThinkingLevel::Medium => self.accent,                   // teal
-            ThinkingLevel::High => Color::Rgb(0xd4, 0xa5, 0x74),    // bronze
-            ThinkingLevel::XHigh => Color::Rgb(0xe5, 0xa8, 0x4b),   // gold
+            ThinkingLevel::Off => self.border, // cold mortar
+            ThinkingLevel::Minimal => Color::Rgb(0x83, 0x7e, 0x78), // warming stone
+            ThinkingLevel::Low => Color::Rgb(0xb9, 0x9c, 0x72), // bronze glow
+            ThinkingLevel::Medium => self.accent, // muted bronze
+            ThinkingLevel::High => Color::Rgb(0xce, 0x5b, 0x47), // forge ember
+            ThinkingLevel::XHigh => Color::Rgb(0xcb, 0x97, 0x73), // hot coral
         }
     }
 }
@@ -241,12 +241,14 @@ mod tests {
     }
 
     #[test]
-    fn default_theme_is_warm() {
+    fn default_theme_is_dungeon() {
         let t = Theme::default();
-        // Bronze user prefix
-        assert_eq!(t.user_prefix, Color::Rgb(0xd4, 0xa5, 0x74));
-        // Teal accent
-        assert_eq!(t.accent, Color::Rgb(0x4a, 0x9a, 0x8c));
+        // Muted bronze accent
+        assert_eq!(t.accent, Color::Rgb(0xc0, 0xa1, 0x70));
+        // Charcoal stone background
+        assert_eq!(t.bg, Color::Rgb(0x14, 0x12, 0x10));
+        // Forge ember error
+        assert_eq!(t.error, Color::Rgb(0xce, 0x5b, 0x47));
     }
 
     #[test]
@@ -259,19 +261,19 @@ mod tests {
         t.apply_overrides(&overrides);
         assert_eq!(t.accent, Color::Rgb(255, 0, 0));
         // Other fields unchanged
-        assert_eq!(t.user_prefix, Color::Rgb(0xd4, 0xa5, 0x74));
+        assert_eq!(t.user_prefix, Color::Rgb(0xc0, 0xa1, 0x70));
     }
 
     #[test]
     fn named_themes() {
         let default = Theme::named("default");
-        assert_eq!(default.accent, Color::Rgb(0x4a, 0x9a, 0x8c));
+        assert_eq!(default.accent, Color::Rgb(0xc0, 0xa1, 0x70));
 
         let light = Theme::named("light");
-        assert_eq!(light.bg, Color::Rgb(0xfa, 0xf8, 0xf5));
+        assert_eq!(light.bg, Color::Rgb(0xf5, 0xf0, 0xe8));
 
         // Unknown falls back to default
         let unknown = Theme::named("nonexistent");
-        assert_eq!(unknown.accent, Color::Rgb(0x4a, 0x9a, 0x8c));
+        assert_eq!(unknown.accent, Color::Rgb(0xc0, 0xa1, 0x70));
     }
 }
