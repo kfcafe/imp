@@ -18,6 +18,7 @@ pub mod skill_manage;
 pub mod web;
 pub mod write;
 pub mod write_lua;
+pub mod write_skill;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

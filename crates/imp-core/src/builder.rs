@@ -182,7 +182,7 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
         ask::AskTool, bash::BashTool, diff::DiffTool, edit::EditTool, find::FindTool,
         grep::GrepTool, ls::LsTool, mana::ManaTool, read::ReadTool, scan::ScanTool, web::WebTool,
-        write::WriteTool, write_lua::WriteLuaTool,
+        write::WriteTool, write_lua::WriteLuaTool, write_skill::WriteSkillTool,
     };
 
     tools.register(Arc::new(AskTool));
@@ -196,6 +196,7 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(WriteLuaTool));
+    tools.register(Arc::new(WriteSkillTool));
     tools.register(Arc::new(ScanTool));
     tools.register(Arc::new(WebTool));
 }
