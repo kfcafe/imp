@@ -128,6 +128,74 @@ local result = imp.exec("curl", { "-s", url })
 local result = imp.exec("git log --oneline -5", nil, { cwd = ctx.cwd })
 ```
 
+## Calling Native Tools
+
+`imp.tool()` calls any of imp's built-in tools (read, write, edit, bash, grep, scan, etc.) from Lua. This is the most powerful API — your extension gets the full capability of every native tool without reimplementing anything.
+
+```lua
+-- Read a file (uses imp's read tool with truncation, path resolution, etc.)
+local content = imp.tool("read", { path = "src/main.rs" })
+
+-- Run a shell command (uses imp's bash tool with timeouts, streaming, etc.)
+local output = imp.tool("bash", { command = "cargo test" })
+
+-- Search for patterns (uses imp's grep tool with tree-sitter blocks)
+local matches = imp.tool("grep", { pattern = "fn main", path = "src/" })
+
+-- Edit a file (uses imp's edit tool with exact match, diff output)
+local diff = imp.tool("edit", {
+    path = "config.toml",
+    old_text = 'port = 3000',
+    new_text = 'port = 8080',
+})
+
+-- Create a mana unit
+imp.tool("mana", { action = "create", title = "Fix the bug", verify = "cargo test" })
+```
+
+`imp.tool()` returns the text content of the tool result as a string. If the tool errors, it returns `nil, error_message`.
+
+```lua
+local result, err = imp.tool("read", { path = "nonexistent.txt" })
+if not result then
+    return { content = "Failed: " .. err, is_error = true }
+end
+```
+
+## HTTP Requests
+
+`imp.http` makes HTTP requests for API integrations.
+
+```lua
+-- GET
+local resp = imp.http.get("https://api.example.com/status")
+-- resp.status  (number, e.g. 200)
+-- resp.body    (string)
+
+-- GET with headers
+local resp = imp.http.get("https://api.example.com/data", {
+    ["Authorization"] = "Bearer " .. imp.env("API_KEY"),
+    ["Accept"] = "application/json",
+})
+
+-- POST with JSON body
+local resp = imp.http.post("https://api.example.com/deploy", {
+    body = '{"env": "production"}',
+    headers = { ["Content-Type"] = "application/json" },
+})
+```
+
+## Environment Variables
+
+`imp.env()` reads environment variables. In sandboxed mode, only variables declared in the extension's `env` table are accessible.
+
+```lua
+-- Declare required env vars at the top of your extension:
+-- imp.env_allow = { "DEPLOY_TOKEN", "SLACK_WEBHOOK" }
+
+local token = imp.env("DEPLOY_TOKEN")  -- returns string or nil
+```
+
 ## Hooks
 
 React to agent lifecycle events:
