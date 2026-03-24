@@ -1702,7 +1702,11 @@ impl App {
                 }
             }
         }
-        self.push_system_msg("(skipped)");
+        // Stop the agent — user wants control back
+        if let Some(ref handle) = self.agent_handle {
+            let _ = handle.command_tx.try_send(AgentCommand::Cancel);
+        }
+        self.is_streaming = false;
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) {
