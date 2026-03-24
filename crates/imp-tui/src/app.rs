@@ -425,33 +425,58 @@ impl App {
             .max(3)
             .min(area.height / 3);
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
+        let ask_height = self.ask_state.as_ref().map(|s| s.height()).unwrap_or(0);
+
+        let constraints = if ask_height > 0 {
+            vec![
+                Constraint::Min(3),                // messages area
+                Constraint::Length(ask_height),    // ask overlay
+                Constraint::Length(editor_height), // editor (dimmed while ask active)
+                Constraint::Length(1),             // status bar
+            ]
+        } else {
+            vec![
                 Constraint::Min(3),                // messages area
                 Constraint::Length(editor_height), // editor
                 Constraint::Length(1),             // status bar
-            ])
+            ]
+        };
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
             .split(area);
+
+        let (chat_area, ask_area, editor_area, status_area) = if ask_height > 0 {
+            (chunks[0], Some(chunks[1]), chunks[2], chunks[3])
+        } else {
+            (chunks[0], None, chunks[1], chunks[2])
+        };
 
         // Messages
         let chat = ChatView::new(&self.messages, &self.theme, &self.highlighter)
             .scroll(self.scroll_offset)
             .tick(self.tick)
             .tool_focus(self.tool_focus);
-        frame.render_widget(chat, chunks[0]);
+        frame.render_widget(chat, chat_area);
+
+        // Ask overlay (between chat and editor)
+        if let (Some(ask_area), Some(ref state)) = (ask_area, &self.ask_state) {
+            use crate::views::ask_bar::AskBar;
+            frame.render_widget(AskBar::new(state), ask_area);
+        }
 
         // Editor
         let editor = EditorView::new(&self.editor, &self.theme, self.thinking_level)
             .model(&self.model_name)
             .streaming(self.is_streaming)
             .queued(!self.message_queue.is_empty());
-        frame.render_widget(editor, chunks[1]);
+        frame.render_widget(editor, editor_area);
 
         // Status bar
         let status_info = self.build_status_info();
         let status = StatusBar::new(&status_info, &self.theme);
-        frame.render_widget(status, chunks[2]);
+        frame.render_widget(status, status_area);
 
         // Render overlays
         match &self.mode {
@@ -1167,7 +1192,34 @@ impl App {
                 }
             }
             "fork" => {
-                self.push_system_msg("/fork not yet implemented.");
+                let leaf = self.session.leaf_id().unwrap_or_default().to_string();
+                let path = Config::session_dir().join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+                match self.session.fork(&leaf, &path) {
+                    Ok(forked) => {
+                        self.session = forked;
+                        self.push_system_msg("Forked. You're on a new branch.");
+                    }
+                    Err(e) => self.push_system_msg(&format!("Fork failed: {e}")),
+                }
+            }
+            "help" => {
+                self.push_system_msg(concat!(
+                    "Commands:\n",
+                    "  /new        — start fresh session\n",
+                    "  /model      — switch model\n",
+                    "  /compact    — compress context\n",
+                    "  /resume     — resume a session\n",
+                    "  /session    — browse sessions\n",
+                    "  /fork       — branch conversation\n",
+                    "  /name <n>   — rename session\n",
+                    "  /export [f] — export to markdown\n",
+                    "  /copy       — copy last response\n",
+                    "  /reload     — reload config\n",
+                    "  /settings   — edit settings\n",
+                    "  /login      — OAuth login\n",
+                    "  /help       — this message\n",
+                    "  /quit       — exit",
+                ));
             }
             "login" => {
                 let provider = cmd.split_whitespace().nth(1).unwrap_or("anthropic");
@@ -1362,7 +1414,6 @@ impl App {
     }
 
     fn handle_ask_key(&mut self, key: KeyEvent) {
-
         let Some(ref mut state) = self.ask_state else {
             return;
         };
@@ -1418,11 +1469,21 @@ impl App {
                 let _ = tx.send(indices.first().copied());
             }
             (AskResult::Text(text), Some(AskReply::Select(tx))) => {
-                // User typed custom text but we have a Select reply — send as index None
-                // Actually, we can't send text through a Select channel.
-                // Send None (cancelled) and let the agent handle it.
-                self.push_system_msg(&format!("  {text} (custom — options ignored)"));
-                let _ = tx.send(None);
+                // User typed custom text on a Select ask.
+                // Find if the text matches an option label (case-insensitive).
+                let match_idx = state
+                    .options
+                    .iter()
+                    .position(|o| o.label.eq_ignore_ascii_case(text));
+                if let Some(idx) = match_idx {
+                    self.push_system_msg(&format!("  {}", state.options[idx].label));
+                    let _ = tx.send(Some(idx));
+                } else {
+                    // No match — send None. The ask tool will get "User cancelled".
+                    // The custom text is shown in chat so the user knows what happened.
+                    self.push_system_msg(&format!("  {text}"));
+                    let _ = tx.send(None);
+                }
             }
             _ => {}
         }
@@ -1975,6 +2036,12 @@ impl App {
                 });
             }
             AgentEvent::TurnEnd { message, .. } => {
+                // Update context tracking from this turn's usage
+                if let Some(ref usage) = message.usage {
+                    self.current_context_tokens = usage.input_tokens + usage.cache_read_tokens;
+                    self.accumulated_usage.add(usage);
+                }
+
                 // Persist assistant message to session
                 let msg_id = uuid::Uuid::new_v4().to_string();
                 let _ = self.session.append(SessionEntry::Message {

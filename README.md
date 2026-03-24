@@ -77,7 +77,7 @@ Enforcement at two levels: disallowed tools are removed from the registry (never
 |---------|---------|
 | Streaming | Server-sent events parsed into typed `StreamEvent` variants |
 | Multi-provider | Anthropic (native), OpenAI (responses API), Google (Gemini), with a shared `Provider` trait |
-| Model registry | Alias resolution (sonnet → claude-sonnet-4-20250514), pricing, capabilities, context window metadata |
+| Model registry | Alias resolution (sonnet → claude-sonnet-4-6), pricing, capabilities, context window metadata |
 | Prompt caching | Anthropic `cache_control` on system prompt, tool definitions, and recent turns |
 | OAuth | Token storage, refresh flow, provider-specific auth |
 | Extended thinking | Maps thinking levels to provider-specific budget tokens |
@@ -240,8 +240,8 @@ backend = "rush"  # or "sh" (default)
 
 | Provider | Models |
 |----------|--------|
-| Anthropic | Claude Sonnet, Haiku, Opus |
-| OpenAI | GPT-4o, o3, o3-mini |
+| Anthropic | Claude Sonnet 4.6, Haiku 4.5, Opus 4.6 (and older versions) |
+| OpenAI | GPT-4o, o3, o4-mini |
 | Google | Gemini 2.5 Pro, Flash |
 | AWS Bedrock | Claude via Bedrock |
 | xAI | Grok 3, Grok 2 |
