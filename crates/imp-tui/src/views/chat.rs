@@ -160,6 +160,8 @@ pub struct ChatView<'a> {
     tick: u64,
     /// Flat index of the focused tool call across all messages, if any.
     tool_focus: Option<usize>,
+    /// When true, tool calls are shown in the sidebar — hide them from chat.
+    sidebar_open: bool,
 }
 
 impl<'a> ChatView<'a> {
@@ -175,6 +177,7 @@ impl<'a> ChatView<'a> {
             scroll_offset: 0,
             tick: 0,
             tool_focus: None,
+            sidebar_open: false,
         }
     }
 
@@ -190,6 +193,11 @@ impl<'a> ChatView<'a> {
 
     pub fn tool_focus(mut self, focus: Option<usize>) -> Self {
         self.tool_focus = focus;
+        self
+    }
+
+    pub fn sidebar_open(mut self, open: bool) -> Self {
+        self.sidebar_open = open;
         self
     }
 }
@@ -317,45 +325,92 @@ impl Widget for ChatView<'_> {
                 }
             }
 
-            // Tool calls — rendered with a │ left rail for visual grouping
-            for tc in &msg.tool_calls {
-                let is_running = tc.output.is_none() && !tc.is_error;
-                let focused = self.tool_focus == Some(tool_call_counter);
-                tool_call_counter += 1;
+            // Tool calls
+            if self.sidebar_open {
+                // Sidebar shows tool details — just show a compact activity line
+                tool_call_counter += msg.tool_calls.len();
+                if !msg.tool_calls.is_empty() {
+                    let running = msg
+                        .tool_calls
+                        .iter()
+                        .filter(|tc| tc.output.is_none() && !tc.is_error)
+                        .count();
+                    let errors = msg.tool_calls.iter().filter(|tc| tc.is_error).count();
+                    let total = msg.tool_calls.len();
 
-                let rail = Span::styled("  │", self.theme.muted_style());
-
-                // Build header with rail prepended; use focused variant for ▸ indicator
-                let mut header = tc.header_line_animated_focused(self.theme, self.tick, focused);
-                header.spans.insert(0, rail.clone());
-
-                if is_running && !tc.streaming_lines.is_empty() {
-                    // Running: show header + rolling streaming output tail
-                    all_lines.push(header);
-                    for line in &tc.streaming_lines {
-                        all_lines.push(Line::from(vec![
-                            rail.clone(),
-                            Span::styled(format!("    {line}"), self.theme.muted_style()),
-                        ]));
-                    }
-                } else {
-                    // Running (no output yet) or done: just the header line
-                    all_lines.push(header);
-                }
-
-                // Expanded output (Tab peek or auto-expanded errors) — also railed
-                if tc.expanded && !is_running {
-                    if let Some(ref output) = tc.output {
-                        let output_style = if tc.is_error {
-                            self.theme.error_style()
+                    let summary = if running > 0 {
+                        // Show what's currently running
+                        let current = msg
+                            .tool_calls
+                            .iter()
+                            .rev()
+                            .find(|tc| tc.output.is_none() && !tc.is_error);
+                        if let Some(tc) = current {
+                            const SPINNER: &[&str] =
+                                &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                            let frame = SPINNER[(self.tick / 2) as usize % SPINNER.len()];
+                            let done = total - running;
+                            format!(
+                                "  {frame} {name} {args}  ({done}/{total} done)",
+                                name = tc.name,
+                                args = tc.args_summary,
+                            )
                         } else {
-                            Style::default().fg(Color::DarkGray)
-                        };
-                        for output_line in output.lines().take(50) {
+                            format!("  ⠋ {running} running ({total} total)")
+                        }
+                    } else if errors > 0 {
+                        format!("  ✗ {total} tool calls ({errors} failed) →",)
+                    } else {
+                        format!("  ✓ {total} tool calls →")
+                    };
+
+                    let style = if running > 0 {
+                        self.theme.accent_style()
+                    } else if errors > 0 {
+                        self.theme.error_style()
+                    } else {
+                        self.theme.muted_style()
+                    };
+                    all_lines.push(Line::from(Span::styled(summary, style)));
+                }
+            } else {
+                // Full inline tool call rendering with │ rail
+                for tc in &msg.tool_calls {
+                    let is_running = tc.output.is_none() && !tc.is_error;
+                    let focused = self.tool_focus == Some(tool_call_counter);
+                    tool_call_counter += 1;
+
+                    let rail = Span::styled("  │", self.theme.muted_style());
+
+                    let mut header =
+                        tc.header_line_animated_focused(self.theme, self.tick, focused);
+                    header.spans.insert(0, rail.clone());
+
+                    if is_running && !tc.streaming_lines.is_empty() {
+                        all_lines.push(header);
+                        for line in &tc.streaming_lines {
                             all_lines.push(Line::from(vec![
                                 rail.clone(),
-                                Span::styled(format!("    {output_line}"), output_style),
+                                Span::styled(format!("    {line}"), self.theme.muted_style()),
                             ]));
+                        }
+                    } else {
+                        all_lines.push(header);
+                    }
+
+                    if tc.expanded && !is_running {
+                        if let Some(ref output) = tc.output {
+                            let output_style = if tc.is_error {
+                                self.theme.error_style()
+                            } else {
+                                Style::default().fg(Color::DarkGray)
+                            };
+                            for output_line in output.lines().take(50) {
+                                all_lines.push(Line::from(vec![
+                                    rail.clone(),
+                                    Span::styled(format!("    {output_line}"), output_style),
+                                ]));
+                            }
                         }
                     }
                 }
