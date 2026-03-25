@@ -482,7 +482,8 @@ impl App {
         // Split chat area for sidebar when open
         let (chat_area, sidebar_area) = if self.sidebar.open && chat_area.width >= 60 {
             let min_sidebar = 30u16;
-            let sidebar_w = (chat_area.width * 40 / 100)
+            let pct = self.config.ui.sidebar_width.clamp(20, 80);
+            let sidebar_w = (chat_area.width * pct / 100)
                 .max(min_sidebar)
                 .min(chat_area.width.saturating_sub(30));
             let chat_w = chat_area.width.saturating_sub(sidebar_w);
@@ -530,7 +531,7 @@ impl App {
                     .flat_map(|m| m.tool_calls.iter())
                     .collect();
                 let tc_count = all_tool_calls.len();
-                let areas = sidebar_sub_areas(sidebar_area, tc_count);
+                let areas = sidebar_sub_areas(sidebar_area, tc_count, self.config.ui.sidebar_style);
 
                 let view = SidebarView::new(
                     all_tool_calls,
@@ -539,6 +540,7 @@ impl App {
                     self.tick,
                     self.sidebar.list_scroll,
                     self.sidebar.detail_scroll,
+                    &self.config.ui,
                 );
                 frame.render_widget(view, sidebar_area);
                 areas
@@ -1031,23 +1033,36 @@ impl App {
         let col = mouse.column;
         let row = mouse.row;
 
+        let is_stream = self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Stream;
+        // In stream mode, sidebar_list_rect covers the whole sidebar and
+        // scrolls detail_scroll. In split mode, list and detail scroll independently.
+        let in_sidebar = point_in_rect(col, row, self.sidebar_list_rect)
+            || point_in_rect(col, row, self.sidebar_detail_rect);
+
         match mouse.kind {
             MouseEventKind::ScrollUp => {
-                // Position-based scroll routing
-                if point_in_rect(col, row, self.sidebar_list_rect) {
-                    self.sidebar.scroll_list_up(3);
-                } else if point_in_rect(col, row, self.sidebar_detail_rect) {
-                    self.sidebar.scroll_detail_up(3);
+                if in_sidebar {
+                    if is_stream {
+                        self.sidebar.scroll_detail_up(3);
+                    } else if point_in_rect(col, row, self.sidebar_list_rect) {
+                        self.sidebar.scroll_list_up(3);
+                    } else {
+                        self.sidebar.scroll_detail_up(3);
+                    }
                 } else {
                     self.scroll_offset += 3;
                     self.auto_scroll = false;
                 }
             }
             MouseEventKind::ScrollDown => {
-                if point_in_rect(col, row, self.sidebar_list_rect) {
-                    self.sidebar.scroll_list_down(3);
-                } else if point_in_rect(col, row, self.sidebar_detail_rect) {
-                    self.sidebar.scroll_detail_down(3);
+                if in_sidebar {
+                    if is_stream {
+                        self.sidebar.scroll_detail_down(3);
+                    } else if point_in_rect(col, row, self.sidebar_list_rect) {
+                        self.sidebar.scroll_list_down(3);
+                    } else {
+                        self.sidebar.scroll_detail_down(3);
+                    }
                 } else {
                     self.scroll_offset = self.scroll_offset.saturating_sub(3);
                     if self.scroll_offset == 0 {
@@ -1056,23 +1071,24 @@ impl App {
                 }
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                // Click in sidebar list — select a tool call
-                if let Some(lr) = self.sidebar_list_rect {
-                    if col >= lr.x && col < lr.x + lr.width && row >= lr.y && row < lr.y + lr.height
-                    {
-                        let clicked_row = (row - lr.y) as usize;
-                        let clicked_idx = self.sidebar.list_scroll + clicked_row;
-                        let total = self.total_tool_calls();
-                        if clicked_idx < total {
-                            self.focus_tool(clicked_idx);
+                if in_sidebar {
+                    if !is_stream {
+                        // Split mode: click in list selects a tool
+                        if let Some(lr) = self.sidebar_list_rect {
+                            if col >= lr.x
+                                && col < lr.x + lr.width
+                                && row >= lr.y
+                                && row < lr.y + lr.height
+                            {
+                                let clicked_row = (row - lr.y) as usize;
+                                let clicked_idx = self.sidebar.list_scroll + clicked_row;
+                                let total = self.total_tool_calls();
+                                if clicked_idx < total {
+                                    self.focus_tool(clicked_idx);
+                                }
+                            }
                         }
-                        self.active_pane = Pane::Sidebar;
-                        return;
                     }
-                }
-
-                // Click in sidebar detail — just focus that pane
-                if point_in_rect(col, row, self.sidebar_detail_rect) {
                     self.active_pane = Pane::Sidebar;
                     return;
                 }
@@ -2957,6 +2973,8 @@ mod session_lifecycle {
     #[test]
     fn mouse_scroll_routes_by_position() {
         let mut app = make_app();
+        // Use split mode so list and detail scroll independently
+        app.config.ui.sidebar_style = imp_core::config::SidebarStyle::Split;
 
         // Scroll up in chat area (no sidebar rects set)
         let mouse = crossterm::event::MouseEvent {

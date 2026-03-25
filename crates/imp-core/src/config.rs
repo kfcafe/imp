@@ -249,6 +249,79 @@ pub struct Config {
     /// Learning loop settings (memory, skill nudges).
     #[serde(default)]
     pub learning: LearningConfig,
+
+    /// UI display settings.
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+// ── UI configuration ────────────────────────────────────────────
+
+/// How the sidebar displays tool calls.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarStyle {
+    /// Chronological stream of tool calls with inline results.
+    #[default]
+    Stream,
+    /// Master-detail split: tool list (top) + selected output (bottom).
+    Split,
+}
+
+/// How much tool output to show per tool call.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolOutputDisplay {
+    /// Show all output lines (scrollable).
+    Full,
+    /// Show first N lines per tool (configurable via `tool_output_lines`).
+    #[default]
+    Compact,
+    /// Headers only — expand on click/enter.
+    Collapsed,
+}
+
+/// UI display configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UiConfig {
+    /// Sidebar layout style.
+    #[serde(default)]
+    pub sidebar_style: SidebarStyle,
+
+    /// How much tool output to show.
+    #[serde(default)]
+    pub tool_output: ToolOutputDisplay,
+
+    /// Max lines per tool in compact mode. Default: 10.
+    #[serde(default = "default_tool_output_lines")]
+    pub tool_output_lines: usize,
+
+    /// Sidebar width as percentage of screen (20-80). Default: 40.
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: u16,
+
+    /// Word-wrap long lines in tool output. Default: true.
+    #[serde(default = "default_true")]
+    pub word_wrap: bool,
+}
+
+fn default_tool_output_lines() -> usize {
+    10
+}
+fn default_sidebar_width() -> u16 {
+    40
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            sidebar_style: SidebarStyle::default(),
+            tool_output: ToolOutputDisplay::default(),
+            tool_output_lines: 10,
+            sidebar_width: 40,
+            word_wrap: true,
+        }
+    }
 }
 
 /// Learning loop configuration.
@@ -388,6 +461,9 @@ impl Config {
         }
         if other.enabled_models.is_some() {
             self.enabled_models = other.enabled_models;
+        }
+        if other.ui != UiConfig::default() {
+            self.ui = other.ui;
         }
         self.roles.extend(other.roles);
         self.hooks.extend(other.hooks);
