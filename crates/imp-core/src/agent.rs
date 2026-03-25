@@ -414,8 +414,7 @@ impl Agent {
                 }
             };
 
-            let mut text_parts: Vec<String> = Vec::new();
-            let mut thinking_parts: Vec<String> = Vec::new();
+            let mut ordered_content: Vec<ContentBlock> = Vec::new();
             let mut tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
             let mut assistant_msg: Option<AssistantMessage> = None;
 
@@ -436,16 +435,21 @@ impl Agent {
 
                         match event {
                             StreamEvent::TextDelta { text } => {
-                                text_parts.push(text);
+                                push_stream_text_block(&mut ordered_content, text);
                             }
                             StreamEvent::ThinkingDelta { text } => {
-                                thinking_parts.push(text);
+                                push_stream_thinking_block(&mut ordered_content, text);
                             }
                             StreamEvent::ToolCall {
                                 id,
                                 name,
                                 arguments,
                             } => {
+                                ordered_content.push(ContentBlock::ToolCall {
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                    arguments: arguments.clone(),
+                                });
                                 tool_calls.push((id, name, arguments));
                             }
                             StreamEvent::MessageEnd { message } => {
@@ -506,7 +510,7 @@ impl Agent {
             if cancelled {
                 // Emit TurnEnd with whatever we have so far
                 let partial = assistant_msg.unwrap_or_else(|| {
-                    build_assistant_message(&text_parts, &thinking_parts, &tool_calls, None)
+                    build_assistant_message(&ordered_content, &tool_calls, None)
                 });
                 self.messages.push(Message::Assistant(partial.clone()));
                 self.emit(AgentEvent::TurnEnd {
@@ -518,9 +522,8 @@ impl Agent {
             }
 
             // Use the MessageEnd message if provided, otherwise build from accumulated parts
-            let msg = assistant_msg.unwrap_or_else(|| {
-                build_assistant_message(&text_parts, &thinking_parts, &tool_calls, None)
-            });
+            let msg = assistant_msg
+                .unwrap_or_else(|| build_assistant_message(&ordered_content, &tool_calls, None));
 
             self.messages.push(Message::Assistant(msg.clone()));
 
@@ -837,35 +840,37 @@ fn message_matches_compaction_id(message: &Message, first_kept_id: &str) -> bool
     }
 }
 
-/// Build an AssistantMessage from accumulated stream parts.
+fn push_stream_text_block(content: &mut Vec<ContentBlock>, text: String) {
+    if text.is_empty() {
+        return;
+    }
+
+    if let Some(ContentBlock::Text { text: existing }) = content.last_mut() {
+        existing.push_str(&text);
+    } else {
+        content.push(ContentBlock::Text { text });
+    }
+}
+
+fn push_stream_thinking_block(content: &mut Vec<ContentBlock>, text: String) {
+    if text.is_empty() {
+        return;
+    }
+
+    if let Some(ContentBlock::Thinking { text: existing }) = content.last_mut() {
+        existing.push_str(&text);
+    } else {
+        content.push(ContentBlock::Thinking { text });
+    }
+}
+
+/// Build an AssistantMessage from accumulated stream parts while preserving
+/// the original block order emitted by the model.
 fn build_assistant_message(
-    text_parts: &[String],
-    thinking_parts: &[String],
+    content: &[ContentBlock],
     tool_calls: &[(String, String, serde_json::Value)],
     usage: Option<Usage>,
 ) -> AssistantMessage {
-    let mut content = Vec::new();
-
-    if !thinking_parts.is_empty() {
-        content.push(ContentBlock::Thinking {
-            text: thinking_parts.concat(),
-        });
-    }
-
-    if !text_parts.is_empty() {
-        content.push(ContentBlock::Text {
-            text: text_parts.concat(),
-        });
-    }
-
-    for (id, name, arguments) in tool_calls {
-        content.push(ContentBlock::ToolCall {
-            id: id.clone(),
-            name: name.clone(),
-            arguments: arguments.clone(),
-        });
-    }
-
     let stop_reason = if tool_calls.is_empty() {
         StopReason::EndTurn
     } else {
@@ -873,7 +878,7 @@ fn build_assistant_message(
     };
 
     AssistantMessage {
-        content,
+        content: content.to_vec(),
         usage,
         stop_reason,
         timestamp: imp_llm::now(),

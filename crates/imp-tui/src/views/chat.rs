@@ -1,3 +1,4 @@
+use imp_core::config::ChatToolDisplay;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -19,6 +20,13 @@ pub enum MessageRole {
     Error,
 }
 
+/// Ordered display blocks inside an assistant message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisplayAssistantBlock {
+    Text(String),
+    ToolCall { id: String },
+}
+
 /// A message formatted for display in the chat view.
 #[derive(Debug, Clone)]
 pub struct DisplayMessage {
@@ -26,6 +34,7 @@ pub struct DisplayMessage {
     pub content: String,
     pub thinking: Option<String>,
     pub tool_calls: Vec<DisplayToolCall>,
+    pub assistant_blocks: Vec<DisplayAssistantBlock>,
     pub is_streaming: bool,
     pub timestamp: u64,
 }
@@ -49,26 +58,38 @@ impl DisplayMessage {
                     content: text,
                     thinking: None,
                     tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
                     is_streaming: false,
                     timestamp: u.timestamp,
                 }
             }
             imp_llm::Message::Assistant(a) => {
-                let mut text = String::new();
-                let mut thinking = None;
-                let mut tool_calls = Vec::new();
+                let mut display = Self {
+                    role: MessageRole::Assistant,
+                    content: String::new(),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: a.timestamp,
+                };
                 for block in &a.content {
                     match block {
-                        imp_llm::ContentBlock::Text { text: t } => text.push_str(t),
+                        imp_llm::ContentBlock::Text { text: t } => {
+                            display.add_assistant_text_block(t);
+                        }
                         imp_llm::ContentBlock::Thinking { text: t } => {
-                            thinking = Some(t.clone());
+                            match &mut display.thinking {
+                                Some(existing) => existing.push_str(t),
+                                None => display.thinking = Some(t.clone()),
+                            }
                         }
                         imp_llm::ContentBlock::ToolCall {
                             id,
                             name,
                             arguments,
                         } => {
-                            tool_calls.push(DisplayToolCall {
+                            display.push_assistant_tool_call(DisplayToolCall {
                                 id: id.clone(),
                                 name: name.clone(),
                                 args_summary: DisplayToolCall::make_args_summary(name, arguments),
@@ -81,14 +102,7 @@ impl DisplayMessage {
                         _ => {}
                     }
                 }
-                Self {
-                    role: MessageRole::Assistant,
-                    content: text,
-                    thinking,
-                    tool_calls,
-                    is_streaming: false,
-                    timestamp: a.timestamp,
-                }
+                display
             }
             imp_llm::Message::ToolResult(t) => {
                 let text = t
@@ -109,11 +123,41 @@ impl DisplayMessage {
                     content: text,
                     thinking: None,
                     tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
                     is_streaming: false,
                     timestamp: t.timestamp,
                 }
             }
         }
+    }
+
+    pub fn add_assistant_text_block(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        self.content.push_str(text);
+        if let Some(DisplayAssistantBlock::Text(existing)) = self.assistant_blocks.last_mut() {
+            existing.push_str(text);
+        } else {
+            self.assistant_blocks
+                .push(DisplayAssistantBlock::Text(text.to_string()));
+        }
+    }
+
+    pub fn push_assistant_text_delta(&mut self, text: &str) {
+        self.add_assistant_text_block(text);
+    }
+
+    pub fn push_assistant_tool_call(&mut self, tool_call: DisplayToolCall) {
+        let id = tool_call.id.clone();
+        self.tool_calls.push(tool_call);
+        self.assistant_blocks
+            .push(DisplayAssistantBlock::ToolCall { id });
+    }
+
+    fn find_tool_call(&self, id: &str) -> Option<&DisplayToolCall> {
+        self.tool_calls.iter().find(|tc| tc.id == id)
     }
 
     /// Calculate the rendered line count for this message.
@@ -160,12 +204,10 @@ pub struct ChatView<'a> {
     tick: u64,
     /// Flat index of the focused tool call across all messages, if any.
     tool_focus: Option<usize>,
-    /// When true, tool calls are shown in the sidebar — hide them from chat.
-    sidebar_open: bool,
     /// Word-wrap long chat lines to the current viewport width.
     word_wrap: bool,
-    /// When true, tool calls are rendered only in the sidebar.
-    hide_tools_in_chat: bool,
+    /// How tool calls should appear in the chat transcript.
+    chat_tool_display: ChatToolDisplay,
     /// Number of thinking lines to show.
     thinking_lines: usize,
     /// Whether to show timestamps above messages.
@@ -185,9 +227,8 @@ impl<'a> ChatView<'a> {
             scroll_offset: 0,
             tick: 0,
             tool_focus: None,
-            sidebar_open: false,
             word_wrap: true,
-            hide_tools_in_chat: false,
+            chat_tool_display: ChatToolDisplay::Interleaved,
             thinking_lines: 5,
             show_timestamps: false,
         }
@@ -208,18 +249,13 @@ impl<'a> ChatView<'a> {
         self
     }
 
-    pub fn sidebar_open(mut self, open: bool) -> Self {
-        self.sidebar_open = open;
-        self
-    }
-
     pub fn word_wrap(mut self, enabled: bool) -> Self {
         self.word_wrap = enabled;
         self
     }
 
-    pub fn hide_tools_in_chat(mut self, hidden: bool) -> Self {
-        self.hide_tools_in_chat = hidden;
+    pub fn chat_tool_display(mut self, display: ChatToolDisplay) -> Self {
+        self.chat_tool_display = display;
         self
     }
 
@@ -247,9 +283,8 @@ impl Widget for ChatView<'_> {
             area.width as usize,
             self.tick,
             self.tool_focus,
-            self.sidebar_open,
             self.word_wrap,
-            self.hide_tools_in_chat,
+            self.chat_tool_display,
             self.thinking_lines,
             self.show_timestamps,
         );
@@ -283,9 +318,8 @@ fn build_chat_lines(
     width: usize,
     tick: u64,
     tool_focus: Option<usize>,
-    sidebar_open: bool,
     word_wrap: bool,
-    hide_tools_in_chat: bool,
+    chat_tool_display: ChatToolDisplay,
     thinking_lines: usize,
     show_timestamps: bool,
 ) -> (Vec<Line<'static>>, Vec<(usize, String)>) {
@@ -300,6 +334,7 @@ fn build_chat_lines(
                 theme.muted_style(),
             )));
         }
+
         match msg.role {
             MessageRole::User => {
                 let content_style = Style::default().fg(theme.user_prefix);
@@ -357,13 +392,64 @@ fn build_chat_lines(
                     }
                 }
 
-                if !msg.content.is_empty() {
-                    let rendered = markdown::render_markdown(&msg.content, theme, highlighter);
-                    let indent = vec![Span::raw("  ".to_string())];
-                    for line in rendered {
-                        all_lines.extend(wrap_line_with_prefix(
-                            &line, &indent, &indent, width, word_wrap,
-                        ));
+                if !msg.assistant_blocks.is_empty() {
+                    for block in &msg.assistant_blocks {
+                        match block {
+                            DisplayAssistantBlock::Text(text) => {
+                                if !text.is_empty() {
+                                    let rendered =
+                                        markdown::render_markdown(text, theme, highlighter);
+                                    let indent = vec![Span::raw("  ".to_string())];
+                                    for line in rendered {
+                                        all_lines.extend(wrap_line_with_prefix(
+                                            &line, &indent, &indent, width, word_wrap,
+                                        ));
+                                    }
+                                }
+                            }
+                            DisplayAssistantBlock::ToolCall { id } => {
+                                let focused = tool_focus == Some(tool_call_counter);
+                                tool_call_counter += 1;
+                                if let Some(tc) = msg.find_tool_call(id) {
+                                    push_tool_call_chat_lines(
+                                        &mut all_lines,
+                                        &mut tool_line_indices,
+                                        tc,
+                                        theme,
+                                        tick,
+                                        width,
+                                        word_wrap,
+                                        focused,
+                                        chat_tool_display,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if !msg.content.is_empty() {
+                        let rendered = markdown::render_markdown(&msg.content, theme, highlighter);
+                        let indent = vec![Span::raw("  ".to_string())];
+                        for line in rendered {
+                            all_lines.extend(wrap_line_with_prefix(
+                                &line, &indent, &indent, width, word_wrap,
+                            ));
+                        }
+                    }
+                    for tc in &msg.tool_calls {
+                        let focused = tool_focus == Some(tool_call_counter);
+                        tool_call_counter += 1;
+                        push_tool_call_chat_lines(
+                            &mut all_lines,
+                            &mut tool_line_indices,
+                            tc,
+                            theme,
+                            tick,
+                            width,
+                            word_wrap,
+                            focused,
+                            chat_tool_display,
+                        );
                     }
                 }
 
@@ -425,110 +511,66 @@ fn build_chat_lines(
             }
         }
 
-        if hide_tools_in_chat {
-            tool_call_counter += msg.tool_calls.len();
-        } else if sidebar_open {
-            tool_call_counter += msg.tool_calls.len();
-            if !msg.tool_calls.is_empty() {
-                let running = msg
-                    .tool_calls
-                    .iter()
-                    .filter(|tc| tc.output.is_none() && !tc.is_error)
-                    .count();
-                let errors = msg.tool_calls.iter().filter(|tc| tc.is_error).count();
-                let total = msg.tool_calls.len();
-
-                let summary = if running > 0 {
-                    let current = msg
-                        .tool_calls
-                        .iter()
-                        .rev()
-                        .find(|tc| tc.output.is_none() && !tc.is_error);
-                    if let Some(tc) = current {
-                        const SPINNER: &[&str] =
-                            &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                        let frame = SPINNER[(tick / 2) as usize % SPINNER.len()];
-                        let done = total - running;
-                        format!(
-                            "  {frame} {name} {args}  ({done}/{total} done)",
-                            name = tc.name,
-                            args = tc.args_summary,
-                        )
-                    } else {
-                        format!("  ⠋ {running} running ({total} total)")
-                    }
-                } else if errors > 0 {
-                    format!("  ✗ {total} tool calls ({errors} failed) →")
-                } else {
-                    format!("  ✓ {total} tool calls →")
-                };
-
-                let style = if running > 0 {
-                    theme.accent_style()
-                } else if errors > 0 {
-                    theme.error_style()
-                } else {
-                    theme.muted_style()
-                };
-                all_lines.extend(wrap_text_with_prefix(
-                    &summary,
-                    &[],
-                    &[],
-                    style,
-                    width,
-                    word_wrap,
-                ));
-            }
-        } else {
-            for tc in &msg.tool_calls {
-                let is_running = tc.output.is_none() && !tc.is_error;
-                let focused = tool_focus == Some(tool_call_counter);
-                tool_call_counter += 1;
-
-                let rail = vec![Span::styled("  │".to_string(), theme.muted_style())];
-                let header = tc.header_line_animated_focused(theme, tick, focused);
-                let header_lines = wrap_line_with_prefix(&header, &rail, &rail, width, word_wrap);
-                let header_start = all_lines.len();
-                for offset in 0..header_lines.len() {
-                    tool_line_indices.push((header_start + offset, tc.id.clone()));
-                }
-                all_lines.extend(header_lines);
-
-                if is_running && !tc.streaming_lines.is_empty() {
-                    for line in &tc.streaming_lines {
-                        let content =
-                            Line::from(Span::styled(format!("    {line}"), theme.muted_style()));
-                        all_lines.extend(wrap_line_with_prefix(
-                            &content, &rail, &rail, width, word_wrap,
-                        ));
-                    }
-                }
-
-                if tc.expanded && !is_running {
-                    if let Some(ref output) = tc.output {
-                        let output_style = if tc.is_error {
-                            theme.error_style()
-                        } else {
-                            Style::default().fg(Color::DarkGray)
-                        };
-                        for output_line in output.lines().take(50) {
-                            let content = Line::from(Span::styled(
-                                format!("    {output_line}"),
-                                output_style,
-                            ));
-                            all_lines.extend(wrap_line_with_prefix(
-                                &content, &rail, &rail, width, word_wrap,
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-
         all_lines.push(Line::raw(""));
     }
 
     (all_lines, tool_line_indices)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_tool_call_chat_lines(
+    all_lines: &mut Vec<Line<'static>>,
+    tool_line_indices: &mut Vec<(usize, String)>,
+    tc: &DisplayToolCall,
+    theme: &Theme,
+    tick: u64,
+    width: usize,
+    word_wrap: bool,
+    focused: bool,
+    chat_tool_display: ChatToolDisplay,
+) {
+    if chat_tool_display == ChatToolDisplay::Hidden {
+        return;
+    }
+
+    let is_running = tc.output.is_none() && !tc.is_error;
+    let rail = vec![Span::styled("  │".to_string(), theme.muted_style())];
+    let header = tc.header_line_animated_focused(theme, tick, focused);
+    let header_lines = wrap_line_with_prefix(&header, &rail, &rail, width, word_wrap);
+    let header_start = all_lines.len();
+    for offset in 0..header_lines.len() {
+        tool_line_indices.push((header_start + offset, tc.id.clone()));
+    }
+    all_lines.extend(header_lines);
+
+    if chat_tool_display == ChatToolDisplay::Summary {
+        return;
+    }
+
+    if is_running && !tc.streaming_lines.is_empty() {
+        for line in &tc.streaming_lines {
+            let content = Line::from(Span::styled(format!("    {line}"), theme.muted_style()));
+            all_lines.extend(wrap_line_with_prefix(
+                &content, &rail, &rail, width, word_wrap,
+            ));
+        }
+    }
+
+    if tc.expanded && !is_running {
+        if let Some(ref output) = tc.output {
+            let output_style = if tc.is_error {
+                theme.error_style()
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            for output_line in output.lines().take(50) {
+                let content = Line::from(Span::styled(format!("    {output_line}"), output_style));
+                all_lines.extend(wrap_line_with_prefix(
+                    &content, &rail, &rail, width, word_wrap,
+                ));
+            }
+        }
+    }
 }
 
 fn wrap_text_with_prefix(
@@ -702,9 +744,8 @@ pub fn build_click_map(
     highlighter: &Highlighter,
     chat_area: Rect,
     scroll_offset: usize,
-    sidebar_open: bool,
     word_wrap: bool,
-    hide_tools_in_chat: bool,
+    chat_tool_display: ChatToolDisplay,
     thinking_lines: usize,
     show_timestamps: bool,
 ) -> Vec<(u16, String)> {
@@ -715,9 +756,8 @@ pub fn build_click_map(
         chat_area.width as usize,
         0,
         None,
-        sidebar_open,
         word_wrap,
-        hide_tools_in_chat,
+        chat_tool_display,
         thinking_lines,
         show_timestamps,
     );
@@ -760,6 +800,13 @@ mod tests {
         }
     }
 
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
     #[test]
     fn wraps_long_user_message() {
         let theme = Theme::default();
@@ -769,6 +816,7 @@ mod tests {
             content: "this is a long line that should wrap in the chat view".into(),
             thinking: None,
             tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
             is_streaming: false,
             timestamp: 0,
         }];
@@ -780,9 +828,8 @@ mod tests {
             20,
             0,
             None,
-            false,
             true,
-            false,
+            ChatToolDisplay::Interleaved,
             5,
             false,
         );
@@ -799,6 +846,7 @@ mod tests {
             content: "done".into(),
             thinking: None,
             tool_calls: vec![make_tool("tc-1")],
+            assistant_blocks: Vec::new(),
             is_streaming: false,
             timestamp: 0,
         }];
@@ -810,13 +858,129 @@ mod tests {
             80,
             0,
             None,
-            false,
             true,
-            true,
+            ChatToolDisplay::Hidden,
             5,
             false,
         );
 
         assert!(visible_tools.is_empty());
+    }
+
+    #[test]
+    fn assistant_blocks_preserve_text_tool_text_order() {
+        let assistant = imp_llm::Message::Assistant(imp_llm::AssistantMessage {
+            content: vec![
+                imp_llm::ContentBlock::Text {
+                    text: "Before tool".into(),
+                },
+                imp_llm::ContentBlock::ToolCall {
+                    id: "tc-1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "src/main.rs"}),
+                },
+                imp_llm::ContentBlock::Text {
+                    text: "After tool".into(),
+                },
+            ],
+            usage: None,
+            stop_reason: imp_llm::StopReason::ToolUse,
+            timestamp: 0,
+        });
+
+        let display = DisplayMessage::from_message(&assistant);
+        assert_eq!(
+            display.assistant_blocks,
+            vec![
+                DisplayAssistantBlock::Text("Before tool".into()),
+                DisplayAssistantBlock::ToolCall { id: "tc-1".into() },
+                DisplayAssistantBlock::Text("After tool".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn interleaved_mode_renders_tool_between_text_blocks() {
+        let theme = Theme::default();
+        let highlighter = Highlighter::new();
+        let messages = vec![DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "Before toolAfter tool".into(),
+            thinking: None,
+            tool_calls: vec![make_tool("tc-1")],
+            assistant_blocks: vec![
+                DisplayAssistantBlock::Text("Before tool".into()),
+                DisplayAssistantBlock::ToolCall { id: "tc-1".into() },
+                DisplayAssistantBlock::Text("After tool".into()),
+            ],
+            is_streaming: false,
+            timestamp: 0,
+        }];
+
+        let (lines, _) = build_chat_lines(
+            &messages,
+            &theme,
+            &highlighter,
+            80,
+            0,
+            None,
+            true,
+            ChatToolDisplay::Interleaved,
+            5,
+            false,
+        );
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        let before_idx = rendered
+            .iter()
+            .position(|line| line.contains("Before tool"))
+            .unwrap();
+        let tool_idx = rendered
+            .iter()
+            .position(|line| line.contains("read") && line.contains("src/main.rs"))
+            .unwrap();
+        let after_idx = rendered
+            .iter()
+            .position(|line| line.contains("After tool"))
+            .unwrap();
+
+        assert!(before_idx < tool_idx && tool_idx < after_idx);
+    }
+
+    #[test]
+    fn summary_mode_hides_tool_output_but_keeps_header() {
+        let theme = Theme::default();
+        let highlighter = Highlighter::new();
+        let mut tool = make_tool("tc-1");
+        tool.expanded = true;
+        let messages = vec![DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: vec![tool],
+            assistant_blocks: vec![DisplayAssistantBlock::ToolCall { id: "tc-1".into() }],
+            is_streaming: false,
+            timestamp: 0,
+        }];
+
+        let (lines, visible_tools) = build_chat_lines(
+            &messages,
+            &theme,
+            &highlighter,
+            80,
+            0,
+            None,
+            true,
+            ChatToolDisplay::Summary,
+            5,
+            false,
+        );
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(visible_tools.len(), 1);
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("read") && line.contains("src/main.rs")));
+        assert!(!rendered.iter().any(|line| line.contains("fn main() {}")));
     }
 }

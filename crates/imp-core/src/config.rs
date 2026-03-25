@@ -281,6 +281,19 @@ pub enum ToolOutputDisplay {
     Collapsed,
 }
 
+/// How tool calls appear inside the chat transcript.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChatToolDisplay {
+    /// Show tool calls inline where they occurred, preserving chronological order.
+    #[default]
+    Interleaved,
+    /// Show a compact header in chat and leave details to the sidebar.
+    Summary,
+    /// Hide tool calls in chat entirely.
+    Hidden,
+}
+
 /// UI display configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UiConfig {
@@ -304,9 +317,13 @@ pub struct UiConfig {
     #[serde(default = "default_true")]
     pub word_wrap: bool,
 
-    /// Hide tool calls in the chat pane and show them only in the sidebar.
+    /// Legacy compatibility flag for older configs. Prefer `chat_tool_display`.
     #[serde(default)]
     pub hide_tools_in_chat: bool,
+
+    /// How tool calls should appear in the chat transcript.
+    #[serde(default)]
+    pub chat_tool_display: ChatToolDisplay,
 
     /// Auto-open the sidebar on the first tool call. Default: true.
     #[serde(default = "default_true")]
@@ -376,6 +393,7 @@ impl Default for UiConfig {
             sidebar_width: 40,
             word_wrap: true,
             hide_tools_in_chat: false,
+            chat_tool_display: ChatToolDisplay::default(),
             auto_open_sidebar: true,
             sidebar_auto_open_width: 120,
             thinking_lines: 5,
@@ -385,6 +403,16 @@ impl Default for UiConfig {
             show_timestamps: false,
             show_cost: true,
             show_context_usage: true,
+        }
+    }
+}
+
+impl UiConfig {
+    pub fn effective_chat_tool_display(&self) -> ChatToolDisplay {
+        if self.hide_tools_in_chat {
+            ChatToolDisplay::Hidden
+        } else {
+            self.chat_tool_display
         }
     }
 }

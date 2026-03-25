@@ -502,13 +502,13 @@ impl App {
         };
 
         // Messages
+        let chat_tool_display = self.config.ui.effective_chat_tool_display();
         let chat = ChatView::new(&self.messages, &self.theme, &self.highlighter)
             .scroll(self.scroll_offset)
             .tick(self.tick)
             .tool_focus(self.tool_focus)
-            .sidebar_open(self.sidebar.open)
             .word_wrap(self.config.ui.word_wrap)
-            .hide_tools_in_chat(self.config.ui.hide_tools_in_chat)
+            .chat_tool_display(chat_tool_display)
             .thinking_lines(self.config.ui.thinking_lines)
             .show_timestamps(self.config.ui.show_timestamps);
         frame.render_widget(chat, chat_area);
@@ -522,9 +522,8 @@ impl App {
             &self.highlighter,
             chat_area,
             self.scroll_offset,
-            self.sidebar.open,
             self.config.ui.word_wrap,
-            self.config.ui.hide_tools_in_chat,
+            chat_tool_display,
             self.config.ui.thinking_lines,
             self.config.ui.show_timestamps,
         );
@@ -1286,6 +1285,7 @@ impl App {
             content: text.clone(),
             thinking: None,
             tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
             is_streaming: false,
             timestamp: imp_llm::now(),
         });
@@ -1304,6 +1304,7 @@ impl App {
             content: String::new(),
             thinking: None,
             tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
             is_streaming: true,
             timestamp: imp_llm::now(),
         });
@@ -1323,6 +1324,7 @@ impl App {
                 content: error,
                 thinking: None,
                 tool_calls: Vec::new(),
+                assistant_blocks: Vec::new(),
                 is_streaming: false,
                 timestamp: imp_llm::now(),
             });
@@ -1350,6 +1352,7 @@ impl App {
                     content: "Context compaction requested".into(),
                     thinking: None,
                     tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
                     is_streaming: false,
                     timestamp: imp_llm::now(),
                 });
@@ -1373,6 +1376,7 @@ impl App {
                     .join("\n"),
                     thinking: None,
                     tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
                     is_streaming: false,
                     timestamp: imp_llm::now(),
                 });
@@ -1392,6 +1396,7 @@ impl App {
                             content: "No saved sessions found.".into(),
                             thinking: None,
                             tool_calls: Vec::new(),
+                            assistant_blocks: Vec::new(),
                             is_streaming: false,
                             timestamp: imp_llm::now(),
                         });
@@ -1402,6 +1407,7 @@ impl App {
                             content: format!("Failed to list sessions: {e}"),
                             thinking: None,
                             tool_calls: Vec::new(),
+                            assistant_blocks: Vec::new(),
                             is_streaming: false,
                             timestamp: imp_llm::now(),
                         });
@@ -1523,6 +1529,7 @@ impl App {
                         content: "Copied to clipboard.".into(),
                         thinking: None,
                         tool_calls: Vec::new(),
+                        assistant_blocks: Vec::new(),
                         is_streaming: false,
                         timestamp: imp_llm::now(),
                     });
@@ -1536,6 +1543,7 @@ impl App {
                         content: format!("Unknown command: /{cmd}"),
                         thinking: None,
                         tool_calls: Vec::new(),
+                        assistant_blocks: Vec::new(),
                         is_streaming: false,
                         timestamp: imp_llm::now(),
                     });
@@ -1602,6 +1610,7 @@ impl App {
                 content: format!("Login for '{provider}' not supported. Set API key via env var."),
                 thinking: None,
                 tool_calls: Vec::new(),
+                assistant_blocks: Vec::new(),
                 is_streaming: false,
                 timestamp: imp_llm::now(),
             });
@@ -1613,6 +1622,7 @@ impl App {
             content: "Opening browser for Anthropic login...".into(),
             thinking: None,
             tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
             is_streaming: false,
             timestamp: imp_llm::now(),
         });
@@ -1698,6 +1708,7 @@ impl App {
                                 content: "Session resumed.".into(),
                                 thinking: None,
                                 tool_calls: Vec::new(),
+                                assistant_blocks: Vec::new(),
                                 is_streaming: false,
                                 timestamp: imp_llm::now(),
                             });
@@ -1708,6 +1719,7 @@ impl App {
                                 content: format!("Failed to open session: {e}"),
                                 thinking: None,
                                 tool_calls: Vec::new(),
+                                assistant_blocks: Vec::new(),
                                 is_streaming: false,
                                 timestamp: imp_llm::now(),
                             });
@@ -2009,6 +2021,7 @@ impl App {
                 content: format!("Failed to save config: {e}"),
                 thinking: None,
                 tool_calls: Vec::new(),
+                assistant_blocks: Vec::new(),
                 is_streaming: false,
                 timestamp: imp_llm::now(),
             });
@@ -2028,6 +2041,7 @@ impl App {
                     content: format!("Failed to save API key: {e}"),
                     thinking: None,
                     tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
                     is_streaming: false,
                     timestamp: imp_llm::now(),
                 });
@@ -2070,6 +2084,7 @@ impl App {
                     content: format!("Settings saved to {}", config_path.display()),
                     thinking: None,
                     tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
                     is_streaming: false,
                     timestamp: imp_llm::now(),
                 });
@@ -2080,6 +2095,7 @@ impl App {
                     content: format!("Failed to save settings: {e}"),
                     thinking: None,
                     tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
                     is_streaming: false,
                     timestamp: imp_llm::now(),
                 });
@@ -2167,6 +2183,7 @@ impl App {
             content: content.to_string(),
             thinking: None,
             tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
             is_streaming: false,
             timestamp: imp_llm::now(),
         });
@@ -2237,7 +2254,7 @@ impl App {
                 if let Some(last) = self.messages.last_mut() {
                     match delta {
                         StreamEvent::TextDelta { text } => {
-                            last.content.push_str(&text);
+                            last.push_assistant_text_delta(&text);
                         }
                         StreamEvent::ThinkingDelta { text } => match &mut last.thinking {
                             Some(t) => t.push_str(&text),
@@ -2248,7 +2265,7 @@ impl App {
                             name,
                             arguments,
                         } => {
-                            last.tool_calls.push(DisplayToolCall {
+                            last.push_assistant_tool_call(DisplayToolCall {
                                 id,
                                 args_summary: DisplayToolCall::make_args_summary(&name, &arguments),
                                 name,
@@ -2293,7 +2310,8 @@ impl App {
                 if !self.sidebar.first_tool_seen {
                     self.sidebar.first_tool_seen = true;
                     let (cols, _) = crossterm::terminal::size().unwrap_or((80, 24));
-                    if self.config.ui.hide_tools_in_chat
+                    if self.config.ui.effective_chat_tool_display()
+                        == imp_core::config::ChatToolDisplay::Hidden
                         || (self.config.ui.auto_open_sidebar
                             && cols >= self.config.ui.sidebar_auto_open_width)
                     {
@@ -2385,6 +2403,7 @@ impl App {
                     content: summary,
                     thinking: None,
                     tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
                     is_streaming: false,
                     timestamp: imp_llm::now(),
                 });
@@ -2404,6 +2423,7 @@ impl App {
                     content: display_error,
                     thinking: None,
                     tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
                     is_streaming: false,
                     timestamp: imp_llm::now(),
                 });
@@ -2476,9 +2496,8 @@ fn build_click_map(
     highlighter: &Highlighter,
     chat_area: Rect,
     scroll_offset: usize,
-    sidebar_open: bool,
     word_wrap: bool,
-    hide_tools_in_chat: bool,
+    chat_tool_display: imp_core::config::ChatToolDisplay,
     thinking_lines: usize,
     show_timestamps: bool,
 ) -> Vec<(u16, String)> {
@@ -2488,9 +2507,8 @@ fn build_click_map(
         highlighter,
         chat_area,
         scroll_offset,
-        sidebar_open,
         word_wrap,
-        hide_tools_in_chat,
+        chat_tool_display,
         thinking_lines,
         show_timestamps,
     )
@@ -2555,7 +2573,7 @@ mod session_lifecycle {
         assert!(app.messages.is_empty());
         assert_eq!(app.model_name, "sonnet");
         assert_eq!(app.thinking_level, ThinkingLevel::Medium);
-        assert_eq!(app.context_window, 200_000);
+        assert_eq!(app.context_window, 1_000_000);
         assert!(!app.is_streaming);
         assert!(app.agent_handle.is_none());
         assert!(matches!(app.mode, UiMode::Normal));
@@ -2651,6 +2669,7 @@ mod session_lifecycle {
             content: "old message".into(),
             thinking: None,
             tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
             is_streaming: false,
             timestamp: 0,
         });
@@ -2873,6 +2892,7 @@ mod session_lifecycle {
                 expanded: false,
                 streaming_lines: Vec::new(),
             }],
+            assistant_blocks: Vec::new(),
             is_streaming: false,
             timestamp: 0,
         });
@@ -2989,6 +3009,7 @@ mod session_lifecycle {
                 content: "do something".into(),
                 thinking: None,
                 tool_calls: Vec::new(),
+                assistant_blocks: Vec::new(),
                 is_streaming: false,
                 timestamp: 0,
             },
@@ -3016,6 +3037,7 @@ mod session_lifecycle {
                         streaming_lines: Vec::new(),
                     },
                 ],
+                assistant_blocks: Vec::new(),
                 is_streaming: false,
                 timestamp: 0,
             },
@@ -3029,9 +3051,8 @@ mod session_lifecycle {
             &highlighter,
             area,
             0,
-            false,
             true,
-            false,
+            imp_core::config::ChatToolDisplay::Interleaved,
             5,
             false,
         );

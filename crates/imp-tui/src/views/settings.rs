@@ -1,5 +1,6 @@
 use imp_core::config::{
-    Config, ContextConfig, ShellBackend, ShellConfig, SidebarStyle, ToolOutputDisplay,
+    ChatToolDisplay, Config, ContextConfig, ShellBackend, ShellConfig, SidebarStyle,
+    ToolOutputDisplay,
 };
 use imp_llm::model::ModelMeta;
 use imp_llm::ThinkingLevel;
@@ -26,7 +27,7 @@ pub enum SettingsField {
     ToolOutputLines,
     SidebarWidth,
     WordWrap,
-    HideToolsInChat,
+    ChatToolDisplay,
     AutoOpenSidebar,
     SidebarAutoOpenWidth,
     ThinkingLines,
@@ -52,7 +53,7 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::ToolOutputLines,
     SettingsField::SidebarWidth,
     SettingsField::WordWrap,
-    SettingsField::HideToolsInChat,
+    SettingsField::ChatToolDisplay,
     SettingsField::AutoOpenSidebar,
     SettingsField::SidebarAutoOpenWidth,
     SettingsField::ThinkingLines,
@@ -83,7 +84,7 @@ pub struct SettingsState {
     pub tool_output_lines: usize,
     pub sidebar_width: u16,
     pub word_wrap: bool,
-    pub hide_tools_in_chat: bool,
+    pub chat_tool_display: ChatToolDisplay,
     pub auto_open_sidebar: bool,
     pub sidebar_auto_open_width: u16,
     pub thinking_lines: usize,
@@ -116,7 +117,7 @@ impl SettingsState {
             tool_output_lines: config.ui.tool_output_lines,
             sidebar_width: config.ui.sidebar_width,
             word_wrap: config.ui.word_wrap,
-            hide_tools_in_chat: config.ui.hide_tools_in_chat,
+            chat_tool_display: config.ui.effective_chat_tool_display(),
             auto_open_sidebar: config.ui.auto_open_sidebar,
             sidebar_auto_open_width: config.ui.sidebar_auto_open_width,
             thinking_lines: config.ui.thinking_lines,
@@ -207,8 +208,12 @@ impl SettingsState {
             SettingsField::WordWrap => {
                 self.word_wrap = !self.word_wrap;
             }
-            SettingsField::HideToolsInChat => {
-                self.hide_tools_in_chat = !self.hide_tools_in_chat;
+            SettingsField::ChatToolDisplay => {
+                self.chat_tool_display = match self.chat_tool_display {
+                    ChatToolDisplay::Interleaved => ChatToolDisplay::Summary,
+                    ChatToolDisplay::Summary => ChatToolDisplay::Hidden,
+                    ChatToolDisplay::Hidden => ChatToolDisplay::Interleaved,
+                };
             }
             SettingsField::AutoOpenSidebar => {
                 self.auto_open_sidebar = !self.auto_open_sidebar;
@@ -306,8 +311,12 @@ impl SettingsState {
             SettingsField::WordWrap => {
                 self.word_wrap = !self.word_wrap;
             }
-            SettingsField::HideToolsInChat => {
-                self.hide_tools_in_chat = !self.hide_tools_in_chat;
+            SettingsField::ChatToolDisplay => {
+                self.chat_tool_display = match self.chat_tool_display {
+                    ChatToolDisplay::Interleaved => ChatToolDisplay::Hidden,
+                    ChatToolDisplay::Summary => ChatToolDisplay::Interleaved,
+                    ChatToolDisplay::Hidden => ChatToolDisplay::Summary,
+                };
             }
             SettingsField::AutoOpenSidebar => {
                 self.auto_open_sidebar = !self.auto_open_sidebar;
@@ -441,7 +450,8 @@ impl SettingsState {
             tool_output_lines: self.tool_output_lines,
             sidebar_width: self.sidebar_width,
             word_wrap: self.word_wrap,
-            hide_tools_in_chat: self.hide_tools_in_chat,
+            hide_tools_in_chat: self.chat_tool_display == ChatToolDisplay::Hidden,
+            chat_tool_display: self.chat_tool_display,
             auto_open_sidebar: self.auto_open_sidebar,
             sidebar_auto_open_width: self.sidebar_auto_open_width,
             thinking_lines: self.thinking_lines,
@@ -765,11 +775,11 @@ impl Widget for SettingsView<'_> {
             inner,
             &mut row,
             12,
-            "Hide tools in chat",
-            if self.state.hide_tools_in_chat {
-                "on"
-            } else {
-                "off"
+            "Chat tool display",
+            match self.state.chat_tool_display {
+                ChatToolDisplay::Interleaved => "interleaved",
+                ChatToolDisplay::Summary => "summary",
+                ChatToolDisplay::Hidden => "hidden",
             },
             "← →",
         );
@@ -925,7 +935,6 @@ impl Widget for SettingsView<'_> {
             },
             "← →",
         );
-
         // Spacer before save
         row += 1;
 
