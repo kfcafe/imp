@@ -37,7 +37,7 @@ use crate::views::file_finder::{collect_project_files, FileFinderState, FileFind
 use crate::views::model_selector::{ModelSelectorState, ModelSelectorView};
 use crate::views::session_picker::{SessionPickerState, SessionPickerView};
 use crate::views::settings::{SettingsState, SettingsView};
-use crate::views::sidebar::{Sidebar, SidebarView};
+use crate::views::sidebar::{sidebar_sub_areas, Sidebar, SidebarView};
 use crate::views::status::StatusInfo;
 use crate::views::tools::DisplayToolCall;
 use crate::views::top_bar::TopBar;
@@ -137,8 +137,10 @@ pub struct App {
     pub click_map: Vec<(u16, String)>,
     /// Which pane has focus for scroll routing.
     pub active_pane: Pane,
-    /// Sidebar area cached from last render (for click detection).
-    pub sidebar_rect: Option<Rect>,
+    /// Sidebar list area cached from last render (for click/scroll detection).
+    pub sidebar_list_rect: Option<Rect>,
+    /// Sidebar detail area cached from last render (for click/scroll detection).
+    pub sidebar_detail_rect: Option<Rect>,
 
     // Turn activity tracking
     pub turn_tracker: TurnTracker,
@@ -159,6 +161,10 @@ impl App {
         let model_name = config.model.clone().unwrap_or_else(|| "sonnet".into());
         let thinking_level = config.thinking.unwrap_or(ThinkingLevel::Medium);
         let theme = Theme::named(config.theme.as_deref().unwrap_or("default"));
+        let context_window = model_registry
+            .find_by_alias(&model_name)
+            .map(|m| m.context_window)
+            .unwrap_or(200_000);
 
         Self {
             running: true,
@@ -172,7 +178,7 @@ impl App {
             config,
             model_name,
             thinking_level,
-            context_window: 200_000,
+            context_window,
             mode: UiMode::Normal,
             scroll_offset: 0,
             auto_scroll: true,
@@ -195,7 +201,8 @@ impl App {
             sidebar: Sidebar::default(),
             click_map: Vec::new(),
             active_pane: Pane::Chat,
-            sidebar_rect: None,
+            sidebar_list_rect: None,
+            sidebar_detail_rect: None,
             turn_tracker: TurnTracker::new(),
             theme,
             highlighter: Highlighter::new(),
@@ -511,18 +518,35 @@ impl App {
             self.scroll_offset,
         );
 
-        // Cache sidebar rect for mouse hit-testing
-        self.sidebar_rect = sidebar_area;
-
         // Sidebar
         if let Some(sidebar_area) = sidebar_area {
-            let tool_call = self
-                .sidebar
-                .tool_id
-                .as_ref()
-                .and_then(|id| self.find_tool_call(id));
-            let view = SidebarView::new(tool_call, &self.theme, self.tick, self.sidebar.scroll);
-            frame.render_widget(view, sidebar_area);
+            // Collect all tool calls, render, then cache hit-test rects
+            let sub = {
+                let all_tool_calls: Vec<&DisplayToolCall> = self
+                    .messages
+                    .iter()
+                    .flat_map(|m| m.tool_calls.iter())
+                    .collect();
+                let tc_count = all_tool_calls.len();
+                let areas = sidebar_sub_areas(sidebar_area, tc_count);
+
+                let view = SidebarView::new(
+                    all_tool_calls,
+                    self.tool_focus,
+                    &self.theme,
+                    self.tick,
+                    self.sidebar.list_scroll,
+                    self.sidebar.detail_scroll,
+                );
+                frame.render_widget(view, sidebar_area);
+                areas
+            };
+            self.sidebar_list_rect = Some(sub.0);
+            self.sidebar_detail_rect = Some(sub.1);
+            self.sidebar.list_height = sub.0.height;
+        } else {
+            self.sidebar_list_rect = None;
+            self.sidebar_detail_rect = None;
         }
 
         // Ask overlay (between chat and editor)
@@ -749,19 +773,21 @@ impl App {
             Some(Action::ToolFocusNext) => {
                 let total = self.total_tool_calls();
                 if total > 0 {
-                    self.tool_focus = Some(match self.tool_focus {
+                    let idx = match self.tool_focus {
                         None => 0,
-                        Some(idx) => (idx + 1).min(total - 1),
-                    });
+                        Some(i) => (i + 1).min(total - 1),
+                    };
+                    self.focus_tool(idx);
                 }
             }
             Some(Action::ToolFocusPrev) => {
                 let total = self.total_tool_calls();
                 if total > 0 {
-                    self.tool_focus = Some(match self.tool_focus {
+                    let idx = match self.tool_focus {
                         None => total.saturating_sub(1),
-                        Some(idx) => idx.saturating_sub(1),
-                    });
+                        Some(i) => i.saturating_sub(1),
+                    };
+                    self.focus_tool(idx);
                 }
             }
             Some(Action::InsertChar('@')) => {
@@ -957,16 +983,25 @@ impl App {
 
     // ── Tool focus helpers ───────────────────────────────────────
 
-    /// Find a tool call by ID across all display messages.
-    fn find_tool_call(&self, id: &str) -> Option<&DisplayToolCall> {
-        for msg in self.messages.iter().rev() {
+    /// Find a tool call's flat index by ID across all display messages.
+    fn find_tool_call_index(&self, id: &str) -> Option<usize> {
+        let mut index = 0;
+        for msg in &self.messages {
             for tc in &msg.tool_calls {
                 if tc.id == id {
-                    return Some(tc);
+                    return Some(index);
                 }
+                index += 1;
             }
         }
         None
+    }
+
+    /// Focus a tool call by flat index: update tool_focus and sync sidebar.
+    fn focus_tool(&mut self, index: usize) {
+        self.tool_focus = Some(index);
+        self.sidebar.reset_detail_scroll();
+        self.sidebar.ensure_selected_visible(index);
     }
 
     /// Total number of tool calls across all display messages.
@@ -991,51 +1026,68 @@ impl App {
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         self.needs_redraw = true;
+        let col = mouse.column;
+        let row = mouse.row;
+
         match mouse.kind {
-            MouseEventKind::ScrollUp => match self.active_pane {
-                Pane::Chat => {
+            MouseEventKind::ScrollUp => {
+                // Position-based scroll routing
+                if point_in_rect(col, row, self.sidebar_list_rect) {
+                    self.sidebar.scroll_list_up(3);
+                } else if point_in_rect(col, row, self.sidebar_detail_rect) {
+                    self.sidebar.scroll_detail_up(3);
+                } else {
                     self.scroll_offset += 3;
                     self.auto_scroll = false;
                 }
-                Pane::Sidebar => {
-                    self.sidebar.scroll_up(3);
-                }
-            },
-            MouseEventKind::ScrollDown => match self.active_pane {
-                Pane::Chat => {
+            }
+            MouseEventKind::ScrollDown => {
+                if point_in_rect(col, row, self.sidebar_list_rect) {
+                    self.sidebar.scroll_list_down(3);
+                } else if point_in_rect(col, row, self.sidebar_detail_rect) {
+                    self.sidebar.scroll_detail_down(3);
+                } else {
                     self.scroll_offset = self.scroll_offset.saturating_sub(3);
                     if self.scroll_offset == 0 {
                         self.auto_scroll = true;
                     }
                 }
-                Pane::Sidebar => {
-                    self.sidebar.scroll_down(3);
-                }
-            },
+            }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                let col = mouse.column;
-                let row = mouse.row;
-
-                // Check if click is in the sidebar area
-                if let Some(sr) = self.sidebar_rect {
-                    if col >= sr.x && col < sr.x + sr.width && row >= sr.y && row < sr.y + sr.height
+                // Click in sidebar list — select a tool call
+                if let Some(lr) = self.sidebar_list_rect {
+                    if col >= lr.x && col < lr.x + lr.width && row >= lr.y && row < lr.y + lr.height
                     {
+                        let clicked_row = (row - lr.y) as usize;
+                        let clicked_idx = self.sidebar.list_scroll + clicked_row;
+                        let total = self.total_tool_calls();
+                        if clicked_idx < total {
+                            self.focus_tool(clicked_idx);
+                        }
                         self.active_pane = Pane::Sidebar;
                         return;
                     }
                 }
 
-                // Click is in the chat area — set focus to chat
+                // Click in sidebar detail — just focus that pane
+                if point_in_rect(col, row, self.sidebar_detail_rect) {
+                    self.active_pane = Pane::Sidebar;
+                    return;
+                }
+
+                // Click is in the chat area
                 self.active_pane = Pane::Chat;
 
-                // Check click_map for tool call hits
+                // Check click_map for tool call hits in chat
                 if let Some(tool_id) = self
                     .click_map
                     .iter()
                     .find(|(y, _)| *y == row)
                     .map(|(_, id)| id.clone())
                 {
-                    self.sidebar.follow(&tool_id);
+                    if let Some(idx) = self.find_tool_call_index(&tool_id) {
+                        self.focus_tool(idx);
+                    }
                     self.sidebar.open = true;
                     self.active_pane = Pane::Sidebar;
                 }
@@ -2179,8 +2231,10 @@ impl App {
                         }
                     }
                 }
-                // Sidebar: auto-follow the new tool
-                self.sidebar.follow(&tool_call_id);
+                // Sidebar: auto-follow the new tool call
+                if let Some(idx) = self.find_tool_call_index(&tool_call_id) {
+                    self.focus_tool(idx);
+                }
                 // Auto-open on first tool if terminal is wide enough
                 if !self.sidebar.first_tool_seen {
                     self.sidebar.first_tool_seen = true;
@@ -2455,6 +2509,14 @@ fn build_click_map(
     result
 }
 
+/// Check if a point is inside an optional rect.
+fn point_in_rect(col: u16, row: u16, rect: Option<Rect>) -> bool {
+    match rect {
+        Some(r) => col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height,
+        None => false,
+    }
+}
+
 /// Create an area above the editor for a dropdown.
 fn command_dropdown_area(editor_area: Rect, max_height: u16) -> Rect {
     let height = max_height.min(editor_area.y);
@@ -2506,7 +2568,7 @@ mod session_lifecycle {
         assert!(app.messages.is_empty());
         assert_eq!(app.model_name, "sonnet");
         assert_eq!(app.thinking_level, ThinkingLevel::Medium);
-        assert_eq!(app.context_window, 200_000);
+        assert_eq!(app.context_window, 1_000_000);
         assert!(!app.is_streaming);
         assert!(app.agent_handle.is_none());
         assert!(matches!(app.mode, UiMode::Normal));
@@ -2803,7 +2865,7 @@ mod session_lifecycle {
         let app = make_app();
         assert!(app.click_map.is_empty());
         assert_eq!(app.active_pane, Pane::Chat);
-        assert!(app.sidebar_rect.is_none());
+        assert!(app.sidebar_list_rect.is_none());
     }
 
     #[test]
@@ -2841,7 +2903,7 @@ mod session_lifecycle {
         app.handle_mouse(mouse);
 
         assert!(app.sidebar.open);
-        assert_eq!(app.sidebar.tool_id.as_deref(), Some("tc-42"));
+        assert_eq!(app.tool_focus, Some(0)); // first (only) tool call
         assert_eq!(app.active_pane, Pane::Sidebar);
     }
 
@@ -2849,13 +2911,13 @@ mod session_lifecycle {
     fn mouse_click_on_sidebar_sets_focus() {
         let mut app = make_app();
         app.sidebar.open = true;
-        app.sidebar_rect = Some(Rect::new(50, 1, 30, 20));
+        app.sidebar_detail_rect = Some(Rect::new(50, 10, 30, 10));
 
-        // Click inside sidebar
+        // Click inside sidebar detail
         let mouse = crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
             column: 60,
-            row: 10,
+            row: 15,
             modifiers: KeyModifiers::empty(),
         };
         app.handle_mouse(mouse);
@@ -2867,7 +2929,8 @@ mod session_lifecycle {
     fn mouse_click_on_chat_area_sets_chat_focus() {
         let mut app = make_app();
         app.active_pane = Pane::Sidebar;
-        app.sidebar_rect = Some(Rect::new(50, 1, 30, 20));
+        app.sidebar_list_rect = Some(Rect::new(50, 1, 30, 5));
+        app.sidebar_detail_rect = Some(Rect::new(50, 7, 30, 13));
 
         // Click outside sidebar (in chat area)
         let mouse = crossterm::event::MouseEvent {
@@ -2882,34 +2945,45 @@ mod session_lifecycle {
     }
 
     #[test]
-    fn mouse_scroll_routes_by_active_pane() {
+    fn mouse_scroll_routes_by_position() {
         let mut app = make_app();
 
-        // Scroll up in chat pane
-        app.active_pane = Pane::Chat;
+        // Scroll up in chat area (no sidebar rects set)
         let mouse = crossterm::event::MouseEvent {
             kind: MouseEventKind::ScrollUp,
-            column: 0,
-            row: 0,
+            column: 5,
+            row: 5,
             modifiers: KeyModifiers::empty(),
         };
         app.handle_mouse(mouse);
         assert_eq!(app.scroll_offset, 3);
         assert!(!app.auto_scroll);
 
-        // Scroll down in sidebar pane
-        app.active_pane = Pane::Sidebar;
-        app.sidebar.scroll = 10;
-        let mouse_down = crossterm::event::MouseEvent {
+        // Set up sidebar rects and scroll in detail area
+        app.sidebar_detail_rect = Some(Rect::new(50, 5, 30, 15));
+        app.sidebar.detail_scroll = 0;
+        let mouse_detail = crossterm::event::MouseEvent {
             kind: MouseEventKind::ScrollDown,
-            column: 0,
-            row: 0,
+            column: 60,
+            row: 10,
             modifiers: KeyModifiers::empty(),
         };
-        app.handle_mouse(mouse_down);
-        assert_eq!(app.sidebar.scroll, 7);
+        app.handle_mouse(mouse_detail);
+        assert_eq!(app.sidebar.detail_scroll, 3);
         // Chat scroll should be unchanged
         assert_eq!(app.scroll_offset, 3);
+
+        // Scroll in list area
+        app.sidebar_list_rect = Some(Rect::new(50, 0, 30, 5));
+        app.sidebar.list_scroll = 0;
+        let mouse_list = crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 60,
+            row: 2,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse(mouse_list);
+        assert_eq!(app.sidebar.list_scroll, 3);
     }
 
     #[test]
