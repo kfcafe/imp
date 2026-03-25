@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::{ApiKey, AuthStore};
 use crate::error::{Error, Result};
 use crate::message::{AssistantMessage, ContentBlock, Message, StopReason};
-use crate::model::{Capabilities, Model, ModelMeta, ModelPricing};
+use crate::model::{Model, ModelMeta};
 use crate::provider::{Context, Provider, RequestOptions, ThinkingLevel, ToolDefinition};
 use crate::stream::StreamEvent;
 use crate::usage::Usage;
@@ -633,62 +633,7 @@ impl Provider for OpenAiProvider {
 // ---------------------------------------------------------------------------
 
 fn builtin_models() -> Vec<ModelMeta> {
-    vec![
-        ModelMeta {
-            id: "gpt-4o".into(),
-            provider: "openai".into(),
-            name: "GPT-4o".into(),
-            context_window: 128_000,
-            max_output_tokens: 16_384,
-            pricing: ModelPricing {
-                input_per_mtok: 2.5,
-                output_per_mtok: 10.0,
-                cache_read_per_mtok: 1.25,
-                cache_write_per_mtok: 2.5,
-            },
-            capabilities: Capabilities {
-                reasoning: false,
-                images: true,
-                tool_use: true,
-            },
-        },
-        ModelMeta {
-            id: "o3".into(),
-            provider: "openai".into(),
-            name: "o3".into(),
-            context_window: 200_000,
-            max_output_tokens: 100_000,
-            pricing: ModelPricing {
-                input_per_mtok: 2.0,
-                output_per_mtok: 8.0,
-                cache_read_per_mtok: 0.5,
-                cache_write_per_mtok: 2.0,
-            },
-            capabilities: Capabilities {
-                reasoning: true,
-                images: true,
-                tool_use: true,
-            },
-        },
-        ModelMeta {
-            id: "o4-mini".into(),
-            provider: "openai".into(),
-            name: "o4-mini".into(),
-            context_window: 200_000,
-            max_output_tokens: 100_000,
-            pricing: ModelPricing {
-                input_per_mtok: 1.1,
-                output_per_mtok: 4.4,
-                cache_read_per_mtok: 0.275,
-                cache_write_per_mtok: 1.1,
-            },
-            capabilities: Capabilities {
-                reasoning: true,
-                images: true,
-                tool_use: true,
-            },
-        },
-    ]
+    crate::model::builtin_openai_models()
 }
 
 // ---------------------------------------------------------------------------
@@ -699,6 +644,7 @@ fn builtin_models() -> Vec<ModelMeta> {
 mod tests {
     use super::*;
     use crate::message::{ToolResultMessage, UserMessage};
+    use crate::model::{Capabilities, ModelPricing};
 
     // -- Message serialization tests --
 

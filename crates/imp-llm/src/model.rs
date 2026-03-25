@@ -298,6 +298,26 @@ impl ModelRegistry {
             .filter(|m| m.provider == provider)
             .collect()
     }
+
+    /// Resolve a built-in model, or synthesize metadata for a custom model id.
+    pub fn resolve_meta(&self, model_name: &str, provider_hint: Option<&str>) -> Option<ModelMeta> {
+        let canonical_name = self
+            .aliases
+            .get(model_name)
+            .map(String::as_str)
+            .unwrap_or(model_name);
+
+        if let Some(meta) = self.find(canonical_name) {
+            return Some(meta.clone());
+        }
+
+        let provider_name = guess_provider_for_custom_model(canonical_name).or_else(|| {
+            provider_hint
+                .filter(|provider| ProviderRegistry::with_builtins().find(provider).is_some())
+        })?;
+
+        Some(synthesize_custom_model_meta(canonical_name, provider_name))
+    }
 }
 
 impl Default for ModelRegistry {
@@ -311,7 +331,7 @@ impl Default for ModelRegistry {
 // ---------------------------------------------------------------------------
 
 fn builtin_models() -> Vec<ModelMeta> {
-    vec![
+    let mut models = vec![
         // -- Anthropic --
         // Latest: Sonnet 4.6 (released 2026-02)
         ModelMeta {
@@ -458,61 +478,6 @@ fn builtin_models() -> Vec<ModelMeta> {
                 output_per_mtok: 75.0,
                 cache_read_per_mtok: 1.5,
                 cache_write_per_mtok: 18.75,
-            },
-            capabilities: Capabilities {
-                reasoning: true,
-                images: true,
-                tool_use: true,
-            },
-        },
-        // -- OpenAI --
-        ModelMeta {
-            id: "gpt-4o".into(),
-            provider: "openai".into(),
-            name: "GPT-4o".into(),
-            context_window: 128_000,
-            max_output_tokens: 16_384,
-            pricing: ModelPricing {
-                input_per_mtok: 2.5,
-                output_per_mtok: 10.0,
-                cache_read_per_mtok: 1.25,
-                cache_write_per_mtok: 2.5,
-            },
-            capabilities: Capabilities {
-                reasoning: false,
-                images: true,
-                tool_use: true,
-            },
-        },
-        ModelMeta {
-            id: "o3".into(),
-            provider: "openai".into(),
-            name: "o3".into(),
-            context_window: 200_000,
-            max_output_tokens: 100_000,
-            pricing: ModelPricing {
-                input_per_mtok: 2.0,
-                output_per_mtok: 8.0,
-                cache_read_per_mtok: 0.5,
-                cache_write_per_mtok: 2.0,
-            },
-            capabilities: Capabilities {
-                reasoning: true,
-                images: true,
-                tool_use: true,
-            },
-        },
-        ModelMeta {
-            id: "o4-mini".into(),
-            provider: "openai".into(),
-            name: "o4-mini".into(),
-            context_window: 200_000,
-            max_output_tokens: 100_000,
-            pricing: ModelPricing {
-                input_per_mtok: 1.1,
-                output_per_mtok: 4.4,
-                cache_read_per_mtok: 0.275,
-                cache_write_per_mtok: 1.1,
             },
             capabilities: Capabilities {
                 reasoning: true,
@@ -781,7 +746,328 @@ fn builtin_models() -> Vec<ModelMeta> {
                 tool_use: true,
             },
         },
+    ];
+
+    let openai_insert_at = models
+        .iter()
+        .take_while(|model| model.provider == "anthropic")
+        .count();
+    models.splice(openai_insert_at..openai_insert_at, builtin_openai_models());
+    models
+}
+
+pub fn builtin_openai_models() -> Vec<ModelMeta> {
+    vec![
+        ModelMeta {
+            id: "gpt-5.4".into(),
+            provider: "openai".into(),
+            name: "GPT-5.4".into(),
+            context_window: 1_050_000,
+            max_output_tokens: 128_000,
+            pricing: ModelPricing {
+                input_per_mtok: 2.5,
+                output_per_mtok: 15.0,
+                cache_read_per_mtok: 0.25,
+                cache_write_per_mtok: 2.5,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "gpt-5.4-mini".into(),
+            provider: "openai".into(),
+            name: "GPT-5.4 mini".into(),
+            context_window: 400_000,
+            max_output_tokens: 128_000,
+            pricing: ModelPricing {
+                input_per_mtok: 0.75,
+                output_per_mtok: 4.5,
+                cache_read_per_mtok: 0.075,
+                cache_write_per_mtok: 0.75,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "gpt-5.4-nano".into(),
+            provider: "openai".into(),
+            name: "GPT-5.4 nano".into(),
+            context_window: 400_000,
+            max_output_tokens: 128_000,
+            pricing: ModelPricing {
+                input_per_mtok: 0.20,
+                output_per_mtok: 1.25,
+                cache_read_per_mtok: 0.02,
+                cache_write_per_mtok: 0.20,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "gpt-5.3-chat-latest".into(),
+            provider: "openai".into(),
+            name: "GPT-5.3 ChatGPT".into(),
+            context_window: 128_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing {
+                input_per_mtok: 1.75,
+                output_per_mtok: 14.0,
+                cache_read_per_mtok: 0.175,
+                cache_write_per_mtok: 1.75,
+            },
+            capabilities: Capabilities {
+                reasoning: false,
+                images: true,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "gpt-5.3-codex".into(),
+            provider: "openai".into(),
+            name: "GPT-5.3 Codex".into(),
+            context_window: 400_000,
+            max_output_tokens: 128_000,
+            pricing: ModelPricing {
+                input_per_mtok: 1.75,
+                output_per_mtok: 14.0,
+                cache_read_per_mtok: 0.175,
+                cache_write_per_mtok: 1.75,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "gpt-5.3-codex-spark".into(),
+            provider: "openai".into(),
+            name: "GPT-5.3 Codex Spark".into(),
+            context_window: 128_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
+                tool_use: true,
+            },
+        },
     ]
+}
+
+fn guess_provider_for_custom_model(model_name: &str) -> Option<&'static str> {
+    let lower = model_name.to_lowercase();
+
+    if lower.starts_with("gpt-")
+        || lower.starts_with("chatgpt")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+        || lower.contains("codex")
+    {
+        return Some("openai");
+    }
+
+    if lower.starts_with("claude") {
+        return Some("anthropic");
+    }
+
+    if lower.starts_with("gemini") {
+        return Some("google");
+    }
+
+    None
+}
+
+fn synthesize_custom_model_meta(model_id: &str, provider: &str) -> ModelMeta {
+    match provider {
+        "openai" => synthesize_openai_model_meta(model_id),
+        "anthropic" => ModelMeta {
+            id: model_id.into(),
+            provider: provider.into(),
+            name: model_id.into(),
+            context_window: 200_000,
+            max_output_tokens: 64_000,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        "google" => ModelMeta {
+            id: model_id.into(),
+            provider: provider.into(),
+            name: model_id.into(),
+            context_window: 1_048_576,
+            max_output_tokens: 65_536,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        _ => ModelMeta {
+            id: model_id.into(),
+            provider: provider.into(),
+            name: model_id.into(),
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: false,
+                images: false,
+                tool_use: true,
+            },
+        },
+    }
+}
+
+fn synthesize_openai_model_meta(model_id: &str) -> ModelMeta {
+    match model_id {
+        "gpt-4o" => ModelMeta {
+            id: model_id.into(),
+            provider: "openai".into(),
+            name: "GPT-4o (legacy custom)".into(),
+            context_window: 128_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing {
+                input_per_mtok: 2.5,
+                output_per_mtok: 10.0,
+                cache_read_per_mtok: 1.25,
+                cache_write_per_mtok: 2.5,
+            },
+            capabilities: Capabilities {
+                reasoning: false,
+                images: true,
+                tool_use: true,
+            },
+        },
+        "o3" => ModelMeta {
+            id: model_id.into(),
+            provider: "openai".into(),
+            name: "o3 (legacy custom)".into(),
+            context_window: 200_000,
+            max_output_tokens: 100_000,
+            pricing: ModelPricing {
+                input_per_mtok: 2.0,
+                output_per_mtok: 8.0,
+                cache_read_per_mtok: 0.5,
+                cache_write_per_mtok: 2.0,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        "o4-mini" => ModelMeta {
+            id: model_id.into(),
+            provider: "openai".into(),
+            name: "o4-mini (legacy custom)".into(),
+            context_window: 200_000,
+            max_output_tokens: 100_000,
+            pricing: ModelPricing {
+                input_per_mtok: 1.1,
+                output_per_mtok: 4.4,
+                cache_read_per_mtok: 0.275,
+                cache_write_per_mtok: 1.1,
+            },
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        "gpt-5.3-codex-spark" => ModelMeta {
+            id: model_id.into(),
+            provider: "openai".into(),
+            name: "GPT-5.3 Codex Spark (preview)".into(),
+            context_window: 128_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
+                tool_use: true,
+            },
+        },
+        _ if model_id.starts_with("gpt-5.3-codex") || model_id.contains("codex") => ModelMeta {
+            id: model_id.into(),
+            provider: "openai".into(),
+            name: model_id.into(),
+            context_window: 400_000,
+            max_output_tokens: 128_000,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
+                tool_use: true,
+            },
+        },
+        _ if model_id.contains("chat-latest") => ModelMeta {
+            id: model_id.into(),
+            provider: "openai".into(),
+            name: model_id.into(),
+            context_window: 128_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: false,
+                images: true,
+                tool_use: true,
+            },
+        },
+        _ if model_id.starts_with("gpt-5") => ModelMeta {
+            id: model_id.into(),
+            provider: "openai".into(),
+            name: model_id.into(),
+            context_window: 400_000,
+            max_output_tokens: 128_000,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        _ if model_id.starts_with('o') => ModelMeta {
+            id: model_id.into(),
+            provider: "openai".into(),
+            name: model_id.into(),
+            context_window: 200_000,
+            max_output_tokens: 100_000,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        _ => ModelMeta {
+            id: model_id.into(),
+            provider: "openai".into(),
+            name: model_id.into(),
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: false,
+                images: true,
+                tool_use: true,
+            },
+        },
+    }
 }
 
 fn builtin_aliases() -> Vec<(String, String)> {
@@ -804,8 +1090,21 @@ fn builtin_aliases() -> Vec<(String, String)> {
         ("opus-4.5".into(), "claude-opus-4-5-20251101".into()),
         ("opus-4".into(), "claude-opus-4-20250514".into()),
         // OpenAI
-        ("gpt4o".into(), "gpt-4o".into()),
-        ("4o".into(), "gpt-4o".into()),
+        ("gpt5".into(), "gpt-5.4".into()),
+        ("gpt5.4".into(), "gpt-5.4".into()),
+        ("gpt-5".into(), "gpt-5.4".into()),
+        ("gpt-5.4".into(), "gpt-5.4".into()),
+        ("gpt5mini".into(), "gpt-5.4-mini".into()),
+        ("gpt-5-mini".into(), "gpt-5.4-mini".into()),
+        ("gpt5nano".into(), "gpt-5.4-nano".into()),
+        ("gpt-5-nano".into(), "gpt-5.4-nano".into()),
+        ("chatgpt".into(), "gpt-5.3-chat-latest".into()),
+        ("chatgpt-latest".into(), "gpt-5.3-chat-latest".into()),
+        ("gpt5chat".into(), "gpt-5.3-chat-latest".into()),
+        ("codex".into(), "gpt-5.3-codex".into()),
+        ("gpt5codex".into(), "gpt-5.3-codex".into()),
+        ("spark".into(), "gpt-5.3-codex-spark".into()),
+        ("codex-spark".into(), "gpt-5.3-codex-spark".into()),
         // Google
         ("gemini-pro".into(), "gemini-2.5-pro".into()),
         ("gemini-flash".into(), "gemini-2.5-flash".into()),
@@ -868,12 +1167,50 @@ mod tests {
     }
 
     #[test]
-    fn find_by_alias_resolves_gpt4o() {
+    fn find_by_alias_resolves_gpt5() {
         let reg = ModelRegistry::with_builtins();
         let model = reg
-            .find_by_alias("gpt4o")
-            .expect("gpt4o alias should resolve");
+            .find_by_alias("gpt5")
+            .expect("gpt5 alias should resolve");
+        assert_eq!(model.id, "gpt-5.4");
+    }
+
+    #[test]
+    fn find_by_alias_resolves_chatgpt() {
+        let reg = ModelRegistry::with_builtins();
+        let model = reg
+            .find_by_alias("chatgpt")
+            .expect("chatgpt alias should resolve");
+        assert_eq!(model.id, "gpt-5.3-chat-latest");
+    }
+
+    #[test]
+    fn find_by_alias_resolves_codex() {
+        let reg = ModelRegistry::with_builtins();
+        let model = reg
+            .find_by_alias("codex")
+            .expect("codex alias should resolve");
+        assert_eq!(model.id, "gpt-5.3-codex");
+    }
+
+    #[test]
+    fn resolve_meta_synthesizes_spark_preview() {
+        let reg = ModelRegistry::with_builtins();
+        let model = reg
+            .resolve_meta("spark", None)
+            .expect("spark alias should synthesize");
+        assert_eq!(model.id, "gpt-5.3-codex-spark");
+        assert_eq!(model.provider, "openai");
+    }
+
+    #[test]
+    fn resolve_meta_synthesizes_legacy_openai_model() {
+        let reg = ModelRegistry::with_builtins();
+        let model = reg
+            .resolve_meta("gpt-4o", None)
+            .expect("legacy openai model should synthesize");
         assert_eq!(model.id, "gpt-4o");
+        assert_eq!(model.provider, "openai");
     }
 
     #[test]
@@ -889,9 +1226,9 @@ mod tests {
     fn find_by_alias_falls_back_to_exact_id() {
         let reg = ModelRegistry::with_builtins();
         let model = reg
-            .find_by_alias("o3")
+            .find_by_alias("gpt-5.3-codex")
             .expect("exact id lookup should work as fallback");
-        assert_eq!(model.id, "o3");
+        assert_eq!(model.id, "gpt-5.3-codex");
     }
 
     #[test]
@@ -908,7 +1245,7 @@ mod tests {
         assert!(anthropic.iter().all(|m| m.provider == "anthropic"));
 
         let openai = reg.list_by_provider("openai");
-        assert_eq!(openai.len(), 3);
+        assert_eq!(openai.len(), 6);
 
         let google = reg.list_by_provider("google");
         assert_eq!(google.len(), 2);
