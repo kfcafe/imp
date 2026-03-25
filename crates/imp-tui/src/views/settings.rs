@@ -15,6 +15,7 @@ use crate::theme::Theme;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsField {
     Model,
+    Theme,
     ThinkingLevel,
     MaxTurns,
     ObservationMask,
@@ -25,11 +26,22 @@ pub enum SettingsField {
     ToolOutputLines,
     SidebarWidth,
     WordWrap,
+    HideToolsInChat,
+    AutoOpenSidebar,
+    SidebarAutoOpenWidth,
+    ThinkingLines,
+    StreamingLines,
+    MouseScrollLines,
+    KeyboardScrollLines,
+    ShowTimestamps,
+    ShowCost,
+    ShowContextUsage,
     Save,
 }
 
 const FIELDS: &[SettingsField] = &[
     SettingsField::Model,
+    SettingsField::Theme,
     SettingsField::ThinkingLevel,
     SettingsField::MaxTurns,
     SettingsField::ObservationMask,
@@ -40,6 +52,16 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::ToolOutputLines,
     SettingsField::SidebarWidth,
     SettingsField::WordWrap,
+    SettingsField::HideToolsInChat,
+    SettingsField::AutoOpenSidebar,
+    SettingsField::SidebarAutoOpenWidth,
+    SettingsField::ThinkingLines,
+    SettingsField::StreamingLines,
+    SettingsField::MouseScrollLines,
+    SettingsField::KeyboardScrollLines,
+    SettingsField::ShowTimestamps,
+    SettingsField::ShowCost,
+    SettingsField::ShowContextUsage,
     SettingsField::Save,
 ];
 
@@ -49,6 +71,8 @@ pub struct SettingsState {
     pub selected: usize,
     pub model: String,
     pub model_options: Vec<String>,
+    pub theme_name: String,
+    pub theme_options: Vec<String>,
     pub thinking_level: ThinkingLevel,
     pub max_turns: u32,
     pub observation_mask: f64,
@@ -59,6 +83,16 @@ pub struct SettingsState {
     pub tool_output_lines: usize,
     pub sidebar_width: u16,
     pub word_wrap: bool,
+    pub hide_tools_in_chat: bool,
+    pub auto_open_sidebar: bool,
+    pub sidebar_auto_open_width: u16,
+    pub thinking_lines: usize,
+    pub streaming_lines: usize,
+    pub mouse_scroll_lines: usize,
+    pub keyboard_scroll_lines: usize,
+    pub show_timestamps: bool,
+    pub show_cost: bool,
+    pub show_context_usage: bool,
     pub editing_number: bool,
     pub edit_buffer: String,
     pub dirty: bool,
@@ -70,6 +104,8 @@ impl SettingsState {
             selected: 0,
             model: model_name.to_string(),
             model_options: models.iter().map(|m| m.id.clone()).collect(),
+            theme_name: config.theme.clone().unwrap_or_else(|| "default".into()),
+            theme_options: vec!["default".into(), "light".into()],
             thinking_level: config.thinking.unwrap_or(ThinkingLevel::Medium),
             max_turns: config.max_turns.unwrap_or(100),
             observation_mask: config.context.observation_mask_threshold,
@@ -80,6 +116,16 @@ impl SettingsState {
             tool_output_lines: config.ui.tool_output_lines,
             sidebar_width: config.ui.sidebar_width,
             word_wrap: config.ui.word_wrap,
+            hide_tools_in_chat: config.ui.hide_tools_in_chat,
+            auto_open_sidebar: config.ui.auto_open_sidebar,
+            sidebar_auto_open_width: config.ui.sidebar_auto_open_width,
+            thinking_lines: config.ui.thinking_lines,
+            streaming_lines: config.ui.streaming_lines,
+            mouse_scroll_lines: config.ui.mouse_scroll_lines,
+            keyboard_scroll_lines: config.ui.keyboard_scroll_lines,
+            show_timestamps: config.ui.show_timestamps,
+            show_cost: config.ui.show_cost,
+            show_context_usage: config.ui.show_context_usage,
             editing_number: false,
             edit_buffer: String::new(),
             dirty: false,
@@ -112,6 +158,16 @@ impl SettingsState {
                 if let Some(idx) = self.model_options.iter().position(|m| *m == self.model) {
                     let next = (idx + 1) % self.model_options.len();
                     self.model = self.model_options[next].clone();
+                }
+            }
+            SettingsField::Theme => {
+                if let Some(idx) = self
+                    .theme_options
+                    .iter()
+                    .position(|t| *t == self.theme_name)
+                {
+                    let next = (idx + 1) % self.theme_options.len();
+                    self.theme_name = self.theme_options[next].clone();
                 }
             }
             SettingsField::ThinkingLevel => {
@@ -151,6 +207,36 @@ impl SettingsState {
             SettingsField::WordWrap => {
                 self.word_wrap = !self.word_wrap;
             }
+            SettingsField::HideToolsInChat => {
+                self.hide_tools_in_chat = !self.hide_tools_in_chat;
+            }
+            SettingsField::AutoOpenSidebar => {
+                self.auto_open_sidebar = !self.auto_open_sidebar;
+            }
+            SettingsField::SidebarAutoOpenWidth => {
+                self.sidebar_auto_open_width = (self.sidebar_auto_open_width + 10).min(240);
+            }
+            SettingsField::ThinkingLines => {
+                self.thinking_lines = self.thinking_lines.saturating_add(1).min(20);
+            }
+            SettingsField::StreamingLines => {
+                self.streaming_lines = self.streaming_lines.saturating_add(1).min(20);
+            }
+            SettingsField::MouseScrollLines => {
+                self.mouse_scroll_lines = self.mouse_scroll_lines.saturating_add(1).min(20);
+            }
+            SettingsField::KeyboardScrollLines => {
+                self.keyboard_scroll_lines = self.keyboard_scroll_lines.saturating_add(5).min(100);
+            }
+            SettingsField::ShowTimestamps => {
+                self.show_timestamps = !self.show_timestamps;
+            }
+            SettingsField::ShowCost => {
+                self.show_cost = !self.show_cost;
+            }
+            SettingsField::ShowContextUsage => {
+                self.show_context_usage = !self.show_context_usage;
+            }
             SettingsField::Save => {}
         }
     }
@@ -167,6 +253,20 @@ impl SettingsState {
                         idx - 1
                     };
                     self.model = self.model_options[prev].clone();
+                }
+            }
+            SettingsField::Theme => {
+                if let Some(idx) = self
+                    .theme_options
+                    .iter()
+                    .position(|t| *t == self.theme_name)
+                {
+                    let prev = if idx == 0 {
+                        self.theme_options.len() - 1
+                    } else {
+                        idx - 1
+                    };
+                    self.theme_name = self.theme_options[prev].clone();
                 }
             }
             SettingsField::ThinkingLevel => {
@@ -205,6 +305,37 @@ impl SettingsState {
             }
             SettingsField::WordWrap => {
                 self.word_wrap = !self.word_wrap;
+            }
+            SettingsField::HideToolsInChat => {
+                self.hide_tools_in_chat = !self.hide_tools_in_chat;
+            }
+            SettingsField::AutoOpenSidebar => {
+                self.auto_open_sidebar = !self.auto_open_sidebar;
+            }
+            SettingsField::SidebarAutoOpenWidth => {
+                self.sidebar_auto_open_width =
+                    self.sidebar_auto_open_width.saturating_sub(10).max(40);
+            }
+            SettingsField::ThinkingLines => {
+                self.thinking_lines = self.thinking_lines.saturating_sub(1).max(1);
+            }
+            SettingsField::StreamingLines => {
+                self.streaming_lines = self.streaming_lines.saturating_sub(1).max(1);
+            }
+            SettingsField::MouseScrollLines => {
+                self.mouse_scroll_lines = self.mouse_scroll_lines.saturating_sub(1).max(1);
+            }
+            SettingsField::KeyboardScrollLines => {
+                self.keyboard_scroll_lines = self.keyboard_scroll_lines.saturating_sub(5).max(5);
+            }
+            SettingsField::ShowTimestamps => {
+                self.show_timestamps = !self.show_timestamps;
+            }
+            SettingsField::ShowCost => {
+                self.show_cost = !self.show_cost;
+            }
+            SettingsField::ShowContextUsage => {
+                self.show_context_usage = !self.show_context_usage;
             }
             SettingsField::Save => {}
         }
@@ -293,6 +424,7 @@ impl SettingsState {
     /// Write current settings into a Config for saving and in-session use.
     pub fn apply_to_config(&self, config: &mut Config) {
         config.model = Some(self.model.clone());
+        config.theme = Some(self.theme_name.clone());
         config.thinking = Some(self.thinking_level);
         config.max_turns = Some(self.max_turns);
         config.context = ContextConfig {
@@ -309,6 +441,16 @@ impl SettingsState {
             tool_output_lines: self.tool_output_lines,
             sidebar_width: self.sidebar_width,
             word_wrap: self.word_wrap,
+            hide_tools_in_chat: self.hide_tools_in_chat,
+            auto_open_sidebar: self.auto_open_sidebar,
+            sidebar_auto_open_width: self.sidebar_auto_open_width,
+            thinking_lines: self.thinking_lines,
+            streaming_lines: self.streaming_lines,
+            mouse_scroll_lines: self.mouse_scroll_lines,
+            keyboard_scroll_lines: self.keyboard_scroll_lines,
+            show_timestamps: self.show_timestamps,
+            show_cost: self.show_cost,
+            show_context_usage: self.show_context_usage,
         };
     }
 }
@@ -425,7 +567,6 @@ impl Widget for SettingsView<'_> {
             "← →",
         );
 
-        // Thinking
         render_field(
             self.state,
             self.theme,
@@ -433,6 +574,19 @@ impl Widget for SettingsView<'_> {
             inner,
             &mut row,
             1,
+            "Theme",
+            &self.state.theme_name,
+            "← →",
+        );
+
+        // Thinking
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            2,
             "Thinking level",
             thinking_label(self.state.thinking_level),
             "← →",
@@ -451,7 +605,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            2,
+            3,
             "Max turns",
             &max_turns_val,
             "← → / type",
@@ -474,7 +628,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            3,
+            4,
             "Observation mask",
             &obs_val,
             "← →",
@@ -494,7 +648,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            4,
+            5,
             "Compaction threshold",
             &comp_val,
             "← →",
@@ -507,7 +661,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            5,
+            6,
             "Shell backend",
             shell_label(&self.state.shell_backend),
             "← →",
@@ -527,7 +681,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            6,
+            7,
             "Sidebar style",
             sidebar_label,
             "← →",
@@ -545,7 +699,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            7,
+            8,
             "Tool output",
             tool_output_label,
             "← →",
@@ -565,7 +719,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            8,
+            9,
             "Tool output lines",
             &tol_val,
             "← → / type",
@@ -585,7 +739,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            9,
+            10,
             "Sidebar width",
             &sw_val,
             "← → / type",
@@ -598,9 +752,177 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            10,
+            11,
             "Word wrap",
             if self.state.word_wrap { "on" } else { "off" },
+            "← →",
+        );
+
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            12,
+            "Hide tools in chat",
+            if self.state.hide_tools_in_chat {
+                "on"
+            } else {
+                "off"
+            },
+            "← →",
+        );
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            13,
+            "Auto-open sidebar",
+            if self.state.auto_open_sidebar {
+                "on"
+            } else {
+                "off"
+            },
+            "← →",
+        );
+
+        let sao_val = if self.state.editing_number
+            && self.state.current_field() == SettingsField::SidebarAutoOpenWidth
+        {
+            format!("{}▎", self.state.edit_buffer)
+        } else {
+            self.state.sidebar_auto_open_width.to_string()
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            14,
+            "Auto-open width",
+            &sao_val,
+            "← → / type",
+        );
+
+        let thinking_lines_val = if self.state.editing_number
+            && self.state.current_field() == SettingsField::ThinkingLines
+        {
+            format!("{}▎", self.state.edit_buffer)
+        } else {
+            self.state.thinking_lines.to_string()
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            15,
+            "Thinking lines",
+            &thinking_lines_val,
+            "← → / type",
+        );
+
+        let streaming_lines_val = if self.state.editing_number
+            && self.state.current_field() == SettingsField::StreamingLines
+        {
+            format!("{}▎", self.state.edit_buffer)
+        } else {
+            self.state.streaming_lines.to_string()
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            16,
+            "Streaming lines",
+            &streaming_lines_val,
+            "← → / type",
+        );
+
+        let mouse_scroll_val = if self.state.editing_number
+            && self.state.current_field() == SettingsField::MouseScrollLines
+        {
+            format!("{}▎", self.state.edit_buffer)
+        } else {
+            self.state.mouse_scroll_lines.to_string()
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            17,
+            "Mouse scroll",
+            &mouse_scroll_val,
+            "← → / type",
+        );
+
+        let keyboard_scroll_val = if self.state.editing_number
+            && self.state.current_field() == SettingsField::KeyboardScrollLines
+        {
+            format!("{}▎", self.state.edit_buffer)
+        } else {
+            self.state.keyboard_scroll_lines.to_string()
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            18,
+            "Keyboard scroll",
+            &keyboard_scroll_val,
+            "← → / type",
+        );
+
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            19,
+            "Show timestamps",
+            if self.state.show_timestamps {
+                "on"
+            } else {
+                "off"
+            },
+            "← →",
+        );
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            20,
+            "Show cost",
+            if self.state.show_cost { "on" } else { "off" },
+            "← →",
+        );
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            21,
+            "Show context",
+            if self.state.show_context_usage {
+                "on"
+            } else {
+                "off"
+            },
             "← →",
         );
 

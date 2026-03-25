@@ -33,7 +33,7 @@ impl Widget for TopBar<'_> {
 
         // Context gauge: "8.2k/200k (4%)" colored green→yellow→red
         let context_style = context_color(self.info.context_percent, self.theme);
-        let current_tokens = self.info.input_tokens;
+        let current_tokens = self.info.current_context_tokens;
         let context_window = if self.info.context_window > 0 {
             self.info.context_window
         } else {
@@ -72,14 +72,16 @@ impl Widget for TopBar<'_> {
             None
         };
 
-        // Assemble left side: model · context · cost
-        let mut left: Vec<Span> = vec![
-            model_span,
-            sep.clone(),
-            context_span,
-            sep.clone(),
-            cost_span,
-        ];
+        // Assemble left side: model · context · cost (configurable)
+        let mut left: Vec<Span> = vec![model_span];
+        if self.info.show_context_usage {
+            left.push(sep.clone());
+            left.push(context_span);
+        }
+        if self.info.show_cost {
+            left.push(sep.clone());
+            left.push(cost_span);
+        }
         if let Some(peek) = peek_span {
             left.push(sep.clone());
             left.push(peek);
@@ -116,14 +118,20 @@ impl Widget for TopBar<'_> {
             Line::from(left)
         } else {
             // Very narrow: just model + context
-            Line::from(vec![
-                Span::styled(self.info.model.clone(), self.theme.accent_style()),
-                sep,
-                Span::styled(
-                    format!("{:.0}%", self.info.context_percent * 100.0),
-                    context_style,
-                ),
-            ])
+            {
+                let mut spans = vec![Span::styled(
+                    self.info.model.clone(),
+                    self.theme.accent_style(),
+                )];
+                if self.info.show_context_usage {
+                    spans.push(sep);
+                    spans.push(Span::styled(
+                        format!("{:.0}%", self.info.context_percent * 100.0),
+                        context_style,
+                    ));
+                }
+                Line::from(spans)
+            }
         };
 
         buf.set_line(area.x, area.y, &line, area.width);
@@ -186,9 +194,12 @@ mod tests {
             model: "sonnet".into(),
             input_tokens: 8_200,
             output_tokens: 1_500,
+            current_context_tokens: 8_200,
             cost: 0.12,
             context_percent: 0.04,
             context_window: 200_000,
+            show_cost: true,
+            show_context_usage: true,
             cwd: "~/tower/imp".into(),
             session_name: "debug-oauth".into(),
             ..StatusInfo::default()
@@ -287,6 +298,43 @@ mod tests {
         assert_eq!(format_tokens(8_200), "8.2k");
         assert_eq!(format_tokens(200_000), "200.0k");
         assert_eq!(format_tokens(1_500_000), "1.5M");
+    }
+
+    #[test]
+    fn top_bar_uses_current_context_tokens_for_gauge() {
+        let info = StatusInfo {
+            model: "sonnet".into(),
+            input_tokens: 1_000_000,
+            output_tokens: 25_000,
+            current_context_tokens: 500_000,
+            cost: 1.23,
+            context_percent: 0.5,
+            context_window: 1_000_000,
+            show_cost: true,
+            show_context_usage: true,
+            cwd: "~/tower/imp".into(),
+            session_name: "ctx-test".into(),
+            ..StatusInfo::default()
+        };
+        let theme = Theme::default();
+        let bar = TopBar::new(&info, &theme);
+
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+
+        let content: String = (0..area.width)
+            .map(|x| {
+                buf.cell((x, 0))
+                    .unwrap()
+                    .symbol()
+                    .chars()
+                    .next()
+                    .unwrap_or(' ')
+            })
+            .collect();
+
+        assert!(content.contains("500.0k/1.0M (50%)"));
     }
 
     #[test]
