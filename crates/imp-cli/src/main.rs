@@ -362,6 +362,14 @@ async fn main() {
     }
 }
 
+fn format_price(price: f64) -> String {
+    if price == 0.0 {
+        "n/a".to_string()
+    } else {
+        format!("${price:.2}")
+    }
+}
+
 fn run_list_models() {
     let registry = ModelRegistry::with_builtins();
     let models = registry.list();
@@ -374,12 +382,12 @@ fn run_list_models() {
 
     for m in models {
         println!(
-            "{:<40} {:<12} {:>7}k ${:>8.2} ${:>8.2}",
+            "{:<40} {:<12} {:>7}k {:>10} {:>10}",
             m.id,
             m.provider,
             m.context_window / 1000,
-            m.pricing.input_per_mtok,
-            m.pricing.output_per_mtok,
+            format_price(m.pricing.input_per_mtok),
+            format_price(m.pricing.output_per_mtok),
         );
     }
 }
@@ -495,7 +503,7 @@ fn resolve_model_and_provider(
         .unwrap_or("sonnet");
 
     let meta = registry
-        .find_by_alias(model_hint)
+        .resolve_meta(model_hint, cli.provider.as_deref())
         .ok_or_else(|| format!("Unknown model: {model_hint}"))?;
 
     let provider_name = cli.provider.as_deref().unwrap_or(&meta.provider);
@@ -515,9 +523,8 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
         .ok_or_else(|| io::Error::other(format!("Unknown provider: {provider_name}")))?;
 
     let meta = registry
-        .find(&model_id)
-        .ok_or_else(|| io::Error::other(format!("Model not found: {model_id}")))?
-        .clone();
+        .resolve_meta(&model_id, Some(&provider_name))
+        .ok_or_else(|| io::Error::other(format!("Model not found: {model_id}")))?;
 
     let auth_path = Config::user_config_dir().join("auth.json");
     let mut auth_store =
@@ -1236,9 +1243,8 @@ fn create_rpc_agent(
         .ok_or_else(|| io::Error::other(format!("Unknown provider: {provider_name}")))?;
 
     let meta = registry
-        .find(&model_id)
-        .ok_or_else(|| io::Error::other(format!("Model not found: {model_id}")))?
-        .clone();
+        .resolve_meta(&model_id, Some(&provider_name))
+        .ok_or_else(|| io::Error::other(format!("Model not found: {model_id}")))?;
 
     let auth_path = Config::user_config_dir().join("auth.json");
     let mut auth_store =
@@ -1537,9 +1543,8 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         .ok_or_else(|| format!("Unknown provider: {provider_name}"))?;
 
     let meta = registry
-        .find(&model_id)
-        .ok_or_else(|| format!("Model not found: {model_id}"))?
-        .clone();
+        .resolve_meta(&model_id, Some(&provider_name))
+        .ok_or_else(|| format!("Model not found: {model_id}"))?;
 
     // Resolve API key
     let auth_path = Config::user_config_dir().join("auth.json");
@@ -1892,6 +1897,7 @@ mod tests {
             no_tools: false,
             system_prompt: None,
             mode: "interactive".to_string(),
+            max_turns: None,
             verbose: false,
             list_models: false,
             args: Vec::new(),
@@ -1971,6 +1977,17 @@ mod tests {
         let result = resolve_model_and_provider(&cli, &config, &registry);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown model"));
+    }
+
+    #[test]
+    fn resolve_model_allows_custom_openai_model() {
+        let mut cli = default_cli();
+        cli.model = Some("gpt-4o".to_string());
+        let config = Config::default();
+        let registry = ModelRegistry::with_builtins();
+        let (model_id, provider) = resolve_model_and_provider(&cli, &config, &registry).unwrap();
+        assert_eq!(model_id, "gpt-4o");
+        assert_eq!(provider, "openai");
     }
 
     #[test]

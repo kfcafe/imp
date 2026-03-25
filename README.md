@@ -82,7 +82,7 @@ imp works with 11 LLM providers out of the box. Native integrations for Anthropi
 | Provider | Models | Auth |
 |----------|--------|------|
 | Anthropic | Claude Sonnet 4.6, Haiku 4.5, Opus 4.6 | `ANTHROPIC_API_KEY` or OAuth |
-| OpenAI | GPT-4o, o3, o4-mini | `OPENAI_API_KEY` |
+| OpenAI | GPT-5.4, GPT-5.4 mini, GPT-5.4 nano, GPT-5.3 ChatGPT, GPT-5.3 Codex, plus custom model strings for preview/legacy models | `OPENAI_API_KEY` |
 | Google | Gemini 2.5 Pro, Flash | `GOOGLE_API_KEY` |
 | DeepSeek | DeepSeek V3, R1 | `DEEPSEEK_API_KEY` |
 | Groq | Llama 3.3 70B | `GROQ_API_KEY` |

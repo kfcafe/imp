@@ -16,6 +16,11 @@ pub struct ModelSelectorState {
     pub current_model: String,
 }
 
+pub enum ModelSelection<'a> {
+    Builtin(&'a ModelMeta),
+    Custom(String),
+}
+
 impl ModelSelectorState {
     pub fn new(models: Vec<ModelMeta>, current_model: String) -> Self {
         Self {
@@ -42,6 +47,19 @@ impl ModelSelectorState {
         }
     }
 
+    pub fn custom_model(&self) -> Option<String> {
+        let trimmed = self.filter.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    fn option_count(&self) -> usize {
+        self.filtered().len() + usize::from(self.custom_model().is_some())
+    }
+
     pub fn move_up(&mut self) {
         if self.selected > 0 {
             self.selected -= 1;
@@ -49,7 +67,7 @@ impl ModelSelectorState {
     }
 
     pub fn move_down(&mut self) {
-        let count = self.filtered().len();
+        let count = self.option_count();
         if self.selected + 1 < count {
             self.selected += 1;
         }
@@ -65,9 +83,24 @@ impl ModelSelectorState {
         self.selected = 0;
     }
 
-    pub fn selected_model(&self) -> Option<&ModelMeta> {
+    pub fn selected_choice(&self) -> Option<ModelSelection<'_>> {
         let filtered = self.filtered();
-        filtered.get(self.selected).copied()
+        let has_custom = self.custom_model();
+
+        if let Some(custom) = has_custom {
+            if self.selected == 0 {
+                return Some(ModelSelection::Custom(custom));
+            }
+            return filtered
+                .get(self.selected - 1)
+                .copied()
+                .map(ModelSelection::Builtin);
+        }
+
+        filtered
+            .get(self.selected)
+            .copied()
+            .map(ModelSelection::Builtin)
     }
 }
 
@@ -105,17 +138,35 @@ impl Widget for ModelSelectorView<'_> {
         block.render(area, buf);
 
         let filtered = self.state.filtered();
-
-        // Group by provider
-        let mut current_provider = String::new();
         let mut row: usize = 0;
+
+        if let Some(custom_model) = self.state.custom_model() {
+            let is_selected = self.state.selected == 0;
+            let is_current = custom_model == self.state.current_model;
+            let marker = if is_current { "✓ " } else { "  " };
+            let style = if is_selected {
+                self.theme.selected_style()
+            } else {
+                Style::default()
+            };
+
+            let line = Line::from(vec![
+                Span::styled(format!("  {marker}"), self.theme.accent_style()),
+                Span::styled("Use custom model: ", self.theme.muted_style()),
+                Span::styled(custom_model, style),
+            ]);
+            buf.set_line(inner.x, inner.y + row as u16, &line, inner.width);
+            row += 1;
+        }
+
+        let selection_offset = usize::from(self.state.custom_model().is_some());
+        let mut current_provider = String::new();
 
         for (i, model) in filtered.iter().enumerate() {
             if row >= inner.height as usize {
                 break;
             }
 
-            // Provider header
             if model.provider != current_provider {
                 current_provider = model.provider.clone();
                 let header_line = Line::from(Span::styled(
@@ -131,7 +182,7 @@ impl Widget for ModelSelectorView<'_> {
                 }
             }
 
-            let is_selected = i == self.state.selected;
+            let is_selected = i + selection_offset == self.state.selected;
             let is_current = model.id == self.state.current_model;
 
             let marker = if is_current { "✓ " } else { "  " };
@@ -142,10 +193,15 @@ impl Widget for ModelSelectorView<'_> {
             };
 
             let context_str = format!("{}k", model.context_window / 1000);
-            let price_str = format!(
-                "${:.2}/{:.2}",
-                model.pricing.input_per_mtok, model.pricing.output_per_mtok
-            );
+            let price_str =
+                if model.pricing.input_per_mtok == 0.0 && model.pricing.output_per_mtok == 0.0 {
+                    "n/a".to_string()
+                } else {
+                    format!(
+                        "${:.2}/{:.2}",
+                        model.pricing.input_per_mtok, model.pricing.output_per_mtok
+                    )
+                };
 
             let line = Line::from(vec![
                 Span::styled(format!("    {marker}"), self.theme.accent_style()),
@@ -160,12 +216,50 @@ impl Widget for ModelSelectorView<'_> {
             row += 1;
         }
 
-        if filtered.is_empty() {
+        if filtered.is_empty() && self.state.custom_model().is_none() {
             let line = Line::from(Span::styled(
                 "  No matching models",
                 self.theme.muted_style(),
             ));
             buf.set_line(inner.x, inner.y, &line, inner.width);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use imp_llm::model::{Capabilities, ModelPricing};
+
+    fn test_model(id: &str) -> ModelMeta {
+        ModelMeta {
+            id: id.into(),
+            provider: "openai".into(),
+            name: id.into(),
+            context_window: 128_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        }
+    }
+
+    #[test]
+    fn custom_model_is_selected_first_when_filtering() {
+        let mut state = ModelSelectorState::new(vec![test_model("gpt-5.4")], "gpt-5.4".into());
+        state.push_filter('g');
+        state.push_filter('p');
+        state.push_filter('t');
+        state.push_filter('-');
+        state.push_filter('4');
+        state.push_filter('o');
+
+        match state.selected_choice() {
+            Some(ModelSelection::Custom(model)) => assert_eq!(model, "gpt-4o"),
+            _ => panic!("expected custom model selection"),
         }
     }
 }

@@ -34,7 +34,7 @@ use crate::views::chat::{ChatView, DisplayMessage, MessageRole};
 use crate::views::command_palette::{builtin_commands, CommandPaletteState, CommandPaletteView};
 use crate::views::editor::{EditorState, EditorView};
 use crate::views::file_finder::{collect_project_files, FileFinderState, FileFinderView};
-use crate::views::model_selector::{ModelSelectorState, ModelSelectorView};
+use crate::views::model_selector::{ModelSelection, ModelSelectorState, ModelSelectorView};
 use crate::views::session_picker::{SessionPickerState, SessionPickerView};
 use crate::views::settings::{SettingsState, SettingsView};
 use crate::views::sidebar::{sidebar_sub_areas, Sidebar, SidebarView};
@@ -162,7 +162,7 @@ impl App {
         let thinking_level = config.thinking.unwrap_or(ThinkingLevel::Medium);
         let theme = Theme::named(config.theme.as_deref().unwrap_or("default"));
         let context_window = model_registry
-            .find_by_alias(&model_name)
+            .resolve_meta(&model_name, None)
             .map(|m| m.context_window)
             .unwrap_or(200_000);
 
@@ -938,9 +938,21 @@ impl App {
         let old_mode = std::mem::replace(&mut self.mode, UiMode::Normal);
         match old_mode {
             UiMode::ModelSelector(state) => {
-                if let Some(model) = state.selected_model() {
-                    self.model_name = model.id.clone();
-                    self.context_window = model.context_window;
+                if let Some(selection) = state.selected_choice() {
+                    match selection {
+                        ModelSelection::Builtin(model) => {
+                            self.model_name = model.id.clone();
+                            self.context_window = model.context_window;
+                        }
+                        ModelSelection::Custom(model_id) => {
+                            self.model_name = model_id;
+                            if let Some(meta) =
+                                self.model_registry.resolve_meta(&self.model_name, None)
+                            {
+                                self.context_window = meta.context_window;
+                            }
+                        }
+                    }
                 }
             }
             UiMode::CommandPalette(state) => {
@@ -1164,8 +1176,7 @@ impl App {
     fn spawn_agent_for_prompt(&mut self, prompt: &str) -> Result<(), String> {
         let meta = self
             .model_registry
-            .find_by_alias(&self.model_name)
-            .cloned()
+            .resolve_meta(&self.model_name, None)
             .ok_or_else(|| format!("Unknown model: {}", self.model_name))?;
 
         let provider_name = meta.provider.clone();
@@ -1986,7 +1997,7 @@ impl App {
         self.model_name = model_id;
         self.thinking_level = thinking;
 
-        if let Some(meta) = self.model_registry.find_by_alias(&self.model_name) {
+        if let Some(meta) = self.model_registry.resolve_meta(&self.model_name, None) {
             self.context_window = meta.context_window;
         }
 
@@ -2043,7 +2054,7 @@ impl App {
         self.theme = Theme::named(self.config.theme.as_deref().unwrap_or("default"));
 
         // Update context window from registry
-        if let Some(meta) = self.model_registry.find_by_alias(&self.model_name) {
+        if let Some(meta) = self.model_registry.resolve_meta(&self.model_name, None) {
             self.context_window = meta.context_window;
         }
 
