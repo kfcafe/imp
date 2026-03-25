@@ -504,7 +504,8 @@ impl App {
         let chat = ChatView::new(&self.messages, &self.theme, &self.highlighter)
             .scroll(self.scroll_offset)
             .tick(self.tick)
-            .tool_focus(self.tool_focus);
+            .tool_focus(self.tool_focus)
+            .sidebar_open(self.sidebar.open);
         frame.render_widget(chat, chat_area);
 
         // Build click_map: Y coordinate → tool_call_id for mouse click handling.
@@ -516,6 +517,7 @@ impl App {
             &self.highlighter,
             chat_area,
             self.scroll_offset,
+            self.sidebar.open,
         );
 
         // Sidebar
@@ -2418,6 +2420,7 @@ fn build_click_map(
     highlighter: &Highlighter,
     chat_area: Rect,
     scroll_offset: usize,
+    sidebar_open: bool,
 ) -> Vec<(u16, String)> {
     // Step 1: walk messages and record (line_index, tool_call_id) for each
     // tool call header line.  The line numbering matches ChatView's all_lines.
@@ -2462,21 +2465,28 @@ fn build_click_map(
         }
 
         // Tool calls
-        for tc in &msg.tool_calls {
-            let is_running = tc.output.is_none() && !tc.is_error;
-            // Header line — this is the clickable line
-            tool_line_indices.push((line_idx, tc.id.clone()));
-            line_idx += 1;
-
-            // Running with streaming output
-            if is_running && !tc.streaming_lines.is_empty() {
-                line_idx += tc.streaming_lines.len();
+        if sidebar_open {
+            // Sidebar mode: tool calls collapse to a single summary line
+            if !msg.tool_calls.is_empty() {
+                line_idx += 1;
             }
+        } else {
+            for tc in &msg.tool_calls {
+                let is_running = tc.output.is_none() && !tc.is_error;
+                // Header line — this is the clickable line
+                tool_line_indices.push((line_idx, tc.id.clone()));
+                line_idx += 1;
 
-            // Expanded output
-            if tc.expanded && !is_running {
-                if let Some(ref output) = tc.output {
-                    line_idx += output.lines().count().min(50);
+                // Running with streaming output
+                if is_running && !tc.streaming_lines.is_empty() {
+                    line_idx += tc.streaming_lines.len();
+                }
+
+                // Expanded output
+                if tc.expanded && !is_running {
+                    if let Some(ref output) = tc.output {
+                        line_idx += output.lines().count().min(50);
+                    }
                 }
             }
         }
@@ -3034,7 +3044,7 @@ mod session_lifecycle {
 
         // Large chat area so everything is visible
         let area = Rect::new(0, 0, 80, 50);
-        let click_map = super::build_click_map(&messages, &theme, &highlighter, area, 0);
+        let click_map = super::build_click_map(&messages, &theme, &highlighter, area, 0, false);
 
         // Should have 2 entries (one per tool call)
         assert_eq!(click_map.len(), 2);
