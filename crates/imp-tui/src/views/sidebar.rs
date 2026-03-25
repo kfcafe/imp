@@ -687,17 +687,21 @@ mod tests {
 
     #[test]
     fn sidebar_ensure_selected_visible_scrolls_down() {
-        let mut sidebar = Sidebar::default();
-        sidebar.list_height = 5;
+        let mut sidebar = Sidebar {
+            list_height: 5,
+            ..Sidebar::default()
+        };
         sidebar.ensure_selected_visible(7);
         assert!(sidebar.list_scroll + 5 > 7);
     }
 
     #[test]
     fn sidebar_ensure_selected_visible_scrolls_up() {
-        let mut sidebar = Sidebar::default();
-        sidebar.list_height = 5;
-        sidebar.list_scroll = 10;
+        let mut sidebar = Sidebar {
+            list_height: 5,
+            list_scroll: 10,
+            ..Sidebar::default()
+        };
         sidebar.ensure_selected_visible(3);
         assert_eq!(sidebar.list_scroll, 3);
     }

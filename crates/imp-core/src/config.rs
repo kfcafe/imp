@@ -303,6 +303,46 @@ pub struct UiConfig {
     /// Word-wrap long lines in tool output. Default: true.
     #[serde(default = "default_true")]
     pub word_wrap: bool,
+
+    /// Hide tool calls in the chat pane and show them only in the sidebar.
+    #[serde(default)]
+    pub hide_tools_in_chat: bool,
+
+    /// Auto-open the sidebar on the first tool call. Default: true.
+    #[serde(default = "default_true")]
+    pub auto_open_sidebar: bool,
+
+    /// Minimum terminal width to auto-open sidebar. Default: 120.
+    #[serde(default = "default_sidebar_auto_open_width")]
+    pub sidebar_auto_open_width: u16,
+
+    /// Number of thinking lines to show in the rolling tail. Default: 5.
+    #[serde(default = "default_thinking_lines")]
+    pub thinking_lines: usize,
+
+    /// Number of streaming tool output lines to retain. Default: 5.
+    #[serde(default = "default_streaming_lines")]
+    pub streaming_lines: usize,
+
+    /// Mouse wheel scroll speed in lines. Default: 3.
+    #[serde(default = "default_mouse_scroll_lines")]
+    pub mouse_scroll_lines: usize,
+
+    /// Keyboard/page scroll speed in lines. Default: 20.
+    #[serde(default = "default_keyboard_scroll_lines")]
+    pub keyboard_scroll_lines: usize,
+
+    /// Show timestamps in chat. Default: false.
+    #[serde(default)]
+    pub show_timestamps: bool,
+
+    /// Show cost in the top bar. Default: true.
+    #[serde(default = "default_true")]
+    pub show_cost: bool,
+
+    /// Show context usage in the top bar. Default: true.
+    #[serde(default = "default_true")]
+    pub show_context_usage: bool,
 }
 
 fn default_tool_output_lines() -> usize {
@@ -310,6 +350,21 @@ fn default_tool_output_lines() -> usize {
 }
 fn default_sidebar_width() -> u16 {
     40
+}
+fn default_sidebar_auto_open_width() -> u16 {
+    120
+}
+fn default_thinking_lines() -> usize {
+    5
+}
+fn default_streaming_lines() -> usize {
+    5
+}
+fn default_mouse_scroll_lines() -> usize {
+    3
+}
+fn default_keyboard_scroll_lines() -> usize {
+    20
 }
 
 impl Default for UiConfig {
@@ -320,6 +375,16 @@ impl Default for UiConfig {
             tool_output_lines: 10,
             sidebar_width: 40,
             word_wrap: true,
+            hide_tools_in_chat: false,
+            auto_open_sidebar: true,
+            sidebar_auto_open_width: 120,
+            thinking_lines: 5,
+            streaming_lines: 5,
+            mouse_scroll_lines: 3,
+            keyboard_scroll_lines: 20,
+            show_timestamps: false,
+            show_cost: true,
+            show_context_usage: true,
         }
     }
 }

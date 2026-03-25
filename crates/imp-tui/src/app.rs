@@ -506,7 +506,11 @@ impl App {
             .scroll(self.scroll_offset)
             .tick(self.tick)
             .tool_focus(self.tool_focus)
-            .sidebar_open(self.sidebar.open);
+            .sidebar_open(self.sidebar.open)
+            .word_wrap(self.config.ui.word_wrap)
+            .hide_tools_in_chat(self.config.ui.hide_tools_in_chat)
+            .thinking_lines(self.config.ui.thinking_lines)
+            .show_timestamps(self.config.ui.show_timestamps);
         frame.render_widget(chat, chat_area);
 
         // Build click_map: Y coordinate → tool_call_id for mouse click handling.
@@ -519,6 +523,10 @@ impl App {
             chat_area,
             self.scroll_offset,
             self.sidebar.open,
+            self.config.ui.word_wrap,
+            self.config.ui.hide_tools_in_chat,
+            self.config.ui.thinking_lines,
+            self.config.ui.show_timestamps,
         );
 
         // Sidebar
@@ -595,7 +603,7 @@ impl App {
                 frame.render_widget(view, tree_area);
             }
             UiMode::Settings(state) => {
-                let overlay_area = centered_rect(60, 60, area);
+                let overlay_area = centered_rect(80, 90, area);
                 let view = SettingsView::new(state, &self.theme);
                 frame.render_widget(view, overlay_area);
             }
@@ -636,6 +644,7 @@ impl App {
 
         let total_input = self.accumulated_usage.input_tokens;
         let total_output = self.accumulated_usage.output_tokens;
+        let current_context_tokens = self.current_context_tokens;
         // Use last turn's input_tokens as the actual context size rather than
         // accumulating across turns, which grows without bound and misrepresents
         // compacted conversations.
@@ -652,9 +661,12 @@ impl App {
             thinking: format!("{:?}", self.thinking_level),
             input_tokens: total_input,
             output_tokens: total_output,
+            current_context_tokens,
             cost: self.accumulated_cost.total,
             context_percent,
             context_window: self.context_window,
+            show_cost: self.config.ui.show_cost,
+            show_context_usage: self.config.ui.show_context_usage,
             peek: self.tools_expanded,
             extension_items: self.status_items.clone(),
         }
@@ -849,11 +861,13 @@ impl App {
                 self.editor.delete_to_end();
             }
             Some(Action::ScrollUp) | Some(Action::PageUp) => {
-                self.scroll_offset += 20;
+                self.scroll_offset += self.config.ui.keyboard_scroll_lines;
                 self.auto_scroll = false;
             }
             Some(Action::ScrollDown) | Some(Action::PageDown) => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(20);
+                self.scroll_offset = self
+                    .scroll_offset
+                    .saturating_sub(self.config.ui.keyboard_scroll_lines);
                 if self.scroll_offset == 0 {
                     self.auto_scroll = true;
                 }
@@ -1004,8 +1018,10 @@ impl App {
     /// Focus a tool call by flat index: update tool_focus and sync sidebar.
     fn focus_tool(&mut self, index: usize) {
         self.tool_focus = Some(index);
-        self.sidebar.reset_detail_scroll();
-        self.sidebar.ensure_selected_visible(index);
+        if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Split {
+            self.sidebar.reset_detail_scroll();
+            self.sidebar.ensure_selected_visible(index);
+        }
     }
 
     /// Total number of tool calls across all display messages.
@@ -1043,28 +1059,36 @@ impl App {
             MouseEventKind::ScrollUp => {
                 if in_sidebar {
                     if is_stream {
-                        self.sidebar.scroll_detail_up(3);
+                        self.sidebar
+                            .scroll_detail_up(self.config.ui.mouse_scroll_lines);
                     } else if point_in_rect(col, row, self.sidebar_list_rect) {
-                        self.sidebar.scroll_list_up(3);
+                        self.sidebar
+                            .scroll_list_up(self.config.ui.mouse_scroll_lines);
                     } else {
-                        self.sidebar.scroll_detail_up(3);
+                        self.sidebar
+                            .scroll_detail_up(self.config.ui.mouse_scroll_lines);
                     }
                 } else {
-                    self.scroll_offset += 3;
+                    self.scroll_offset += self.config.ui.mouse_scroll_lines;
                     self.auto_scroll = false;
                 }
             }
             MouseEventKind::ScrollDown => {
                 if in_sidebar {
                     if is_stream {
-                        self.sidebar.scroll_detail_down(3);
+                        self.sidebar
+                            .scroll_detail_down(self.config.ui.mouse_scroll_lines);
                     } else if point_in_rect(col, row, self.sidebar_list_rect) {
-                        self.sidebar.scroll_list_down(3);
+                        self.sidebar
+                            .scroll_list_down(self.config.ui.mouse_scroll_lines);
                     } else {
-                        self.sidebar.scroll_detail_down(3);
+                        self.sidebar
+                            .scroll_detail_down(self.config.ui.mouse_scroll_lines);
                     }
                 } else {
-                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                    self.scroll_offset = self
+                        .scroll_offset
+                        .saturating_sub(self.config.ui.mouse_scroll_lines);
                     if self.scroll_offset == 0 {
                         self.auto_scroll = true;
                     }
@@ -2016,6 +2040,7 @@ impl App {
         state.apply_to_config(&mut self.config);
         self.model_name = state.model.clone();
         self.thinking_level = state.thinking_level;
+        self.theme = Theme::named(self.config.theme.as_deref().unwrap_or("default"));
 
         // Update context window from registry
         if let Some(meta) = self.model_registry.find_by_alias(&self.model_name) {
@@ -2172,11 +2197,7 @@ impl App {
                 self.tool_focus = None;
                 self.turn_tracker.reset();
             }
-            AgentEvent::AgentEnd { usage, cost } => {
-                // Track actual context size: input_tokens on each API call reflects
-                // the full conversation sent to the model, including any compaction.
-                self.current_context_tokens = usage.input_tokens;
-                self.accumulated_usage.add(&usage);
+            AgentEvent::AgentEnd { cost, .. } => {
                 self.accumulated_cost.total += cost.total;
                 self.accumulated_cost.input += cost.input;
                 self.accumulated_cost.output += cost.output;
@@ -2252,12 +2273,19 @@ impl App {
                 // Sidebar: auto-follow the new tool call
                 if let Some(idx) = self.find_tool_call_index(&tool_call_id) {
                     self.focus_tool(idx);
+                    if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Stream {
+                        self.sidebar.detail_scroll = usize::MAX;
+                    }
                 }
-                // Auto-open on first tool if terminal is wide enough
+                // Auto-open on first tool if terminal is wide enough, or whenever
+                // chat tool calls are hidden and the sidebar is their only surface.
                 if !self.sidebar.first_tool_seen {
                     self.sidebar.first_tool_seen = true;
                     let (cols, _) = crossterm::terminal::size().unwrap_or((80, 24));
-                    if cols >= 120 {
+                    if self.config.ui.hide_tools_in_chat
+                        || (self.config.ui.auto_open_sidebar
+                            && cols >= self.config.ui.sidebar_auto_open_width)
+                    {
                         self.sidebar.open = true;
                     }
                 }
@@ -2267,12 +2295,13 @@ impl App {
                 for msg in self.messages.iter_mut().rev() {
                     for tc in &mut msg.tool_calls {
                         if tc.id == tool_call_id && tc.output.is_none() {
-                            // Append text and keep last 5 lines
+                            // Append text and keep configured rolling tail
                             for line in text.lines() {
                                 tc.streaming_lines.push(line.to_string());
                             }
-                            if tc.streaming_lines.len() > 5 {
-                                let excess = tc.streaming_lines.len() - 5;
+                            if tc.streaming_lines.len() > self.config.ui.streaming_lines {
+                                let excess =
+                                    tc.streaming_lines.len() - self.config.ui.streaming_lines;
                                 tc.streaming_lines.drain(..excess);
                             }
                             break;
@@ -2428,8 +2457,8 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 }
 
 /// Build a click map: Vec<(screen_y, tool_call_id)> for each tool call header
-/// line that is visible in the chat area.  Mirrors the line-counting logic in
-/// `ChatView::render` so mouse clicks land on the right tool call.
+/// line that is visible in the chat area.
+#[allow(clippy::too_many_arguments)]
 fn build_click_map(
     messages: &[DisplayMessage],
     theme: &Theme,
@@ -2437,102 +2466,23 @@ fn build_click_map(
     chat_area: Rect,
     scroll_offset: usize,
     sidebar_open: bool,
+    word_wrap: bool,
+    hide_tools_in_chat: bool,
+    thinking_lines: usize,
+    show_timestamps: bool,
 ) -> Vec<(u16, String)> {
-    // Step 1: walk messages and record (line_index, tool_call_id) for each
-    // tool call header line.  The line numbering matches ChatView's all_lines.
-    let mut tool_line_indices: Vec<(usize, String)> = Vec::new();
-    let mut line_idx: usize = 0;
-
-    for msg in messages {
-        match msg.role {
-            MessageRole::User => {
-                // Same counting as ChatView: 1 line for prefix+first line, then 1 per extra line
-                let content_lines = msg.content.lines().count().max(1);
-                line_idx += content_lines;
-            }
-            MessageRole::Assistant => {
-                // Thinking tail (up to 5 lines)
-                if let Some(ref thinking) = msg.thinking {
-                    if !thinking.is_empty() {
-                        let count = thinking.lines().count().min(5);
-                        line_idx += count;
-                    }
-                }
-                // Markdown-rendered content
-                if !msg.content.is_empty() {
-                    let rendered =
-                        crate::markdown::render_markdown(&msg.content, theme, highlighter);
-                    line_idx += rendered.len();
-                }
-                // Streaming indicator
-                if msg.is_streaming {
-                    line_idx += 1;
-                }
-            }
-            MessageRole::System => {
-                line_idx += msg.content.lines().take(3).count().max(0);
-            }
-            MessageRole::Compaction => {
-                line_idx += 1;
-            }
-            MessageRole::Error => {
-                line_idx += 1;
-            }
-        }
-
-        // Tool calls
-        if sidebar_open {
-            // Sidebar mode: tool calls collapse to a single summary line
-            if !msg.tool_calls.is_empty() {
-                line_idx += 1;
-            }
-        } else {
-            for tc in &msg.tool_calls {
-                let is_running = tc.output.is_none() && !tc.is_error;
-                // Header line — this is the clickable line
-                tool_line_indices.push((line_idx, tc.id.clone()));
-                line_idx += 1;
-
-                // Running with streaming output
-                if is_running && !tc.streaming_lines.is_empty() {
-                    line_idx += tc.streaming_lines.len();
-                }
-
-                // Expanded output
-                if tc.expanded && !is_running {
-                    if let Some(ref output) = tc.output {
-                        line_idx += output.lines().count().min(50);
-                    }
-                }
-            }
-        }
-
-        // Separator
-        line_idx += 1;
-    }
-
-    // Step 2: determine which lines are visible (same scroll logic as ChatView)
-    let total_lines = line_idx;
-    let visible_height = chat_area.height as usize;
-
-    let start = if scroll_offset == 0 {
-        total_lines.saturating_sub(visible_height)
-    } else {
-        total_lines.saturating_sub(visible_height + scroll_offset)
-    };
-
-    let end = total_lines.min(start + visible_height);
-
-    // Step 3: map visible tool-call line indices to screen Y coordinates
-    let mut result = Vec::new();
-    for (li, id) in &tool_line_indices {
-        if *li >= start && *li < end {
-            let screen_y = chat_area.y + (*li - start) as u16;
-            result.push((screen_y, id.clone()));
-        }
-    }
-
-    result
+    crate::views::chat::build_click_map(
+        messages,
+        theme,
+        highlighter,
+        chat_area,
+        scroll_offset,
+        sidebar_open,
+        word_wrap,
+        hide_tools_in_chat,
+        thinking_lines,
+        show_timestamps,
+    )
 }
 
 /// Check if a point is inside an optional rect.
@@ -2594,7 +2544,7 @@ mod session_lifecycle {
         assert!(app.messages.is_empty());
         assert_eq!(app.model_name, "sonnet");
         assert_eq!(app.thinking_level, ThinkingLevel::Medium);
-        assert_eq!(app.context_window, 1_000_000);
+        assert_eq!(app.context_window, 200_000);
         assert!(!app.is_streaming);
         assert!(app.agent_handle.is_none());
         assert!(matches!(app.mode, UiMode::Normal));
@@ -3062,7 +3012,18 @@ mod session_lifecycle {
 
         // Large chat area so everything is visible
         let area = Rect::new(0, 0, 80, 50);
-        let click_map = super::build_click_map(&messages, &theme, &highlighter, area, 0, false);
+        let click_map = super::build_click_map(
+            &messages,
+            &theme,
+            &highlighter,
+            area,
+            0,
+            false,
+            true,
+            false,
+            5,
+            false,
+        );
 
         // Should have 2 entries (one per tool call)
         assert_eq!(click_map.len(), 2);
@@ -3070,5 +3031,48 @@ mod session_lifecycle {
         assert_eq!(click_map[1].1, "tc-2");
         // tc-2 should be on the row after tc-1
         assert_eq!(click_map[1].0, click_map[0].0 + 1);
+    }
+
+    #[test]
+    fn agent_end_does_not_double_count_usage_or_overwrite_context() {
+        let mut app = make_app();
+        let turn_usage = Usage {
+            input_tokens: 500_000,
+            output_tokens: 25_000,
+            cache_read_tokens: 10_000,
+            ..Usage::default()
+        };
+        let assistant = imp_llm::AssistantMessage {
+            content: vec![imp_llm::ContentBlock::Text {
+                text: "done".into(),
+            }],
+            usage: Some(turn_usage.clone()),
+            stop_reason: imp_llm::StopReason::EndTurn,
+            timestamp: 0,
+        };
+
+        app.handle_agent_event(AgentEvent::TurnEnd {
+            index: 0,
+            message: assistant,
+        });
+        app.handle_agent_event(AgentEvent::AgentEnd {
+            usage: Usage {
+                input_tokens: 1_000_000,
+                output_tokens: 50_000,
+                ..Usage::default()
+            },
+            cost: Cost {
+                input: 1.0,
+                output: 2.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+                total: 3.0,
+            },
+        });
+
+        assert_eq!(app.current_context_tokens, 510_000);
+        assert_eq!(app.accumulated_usage.input_tokens, 500_000);
+        assert_eq!(app.accumulated_usage.output_tokens, 25_000);
+        assert_eq!(app.accumulated_cost.total, 3.0);
     }
 }

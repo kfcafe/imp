@@ -162,6 +162,14 @@ pub struct ChatView<'a> {
     tool_focus: Option<usize>,
     /// When true, tool calls are shown in the sidebar — hide them from chat.
     sidebar_open: bool,
+    /// Word-wrap long chat lines to the current viewport width.
+    word_wrap: bool,
+    /// When true, tool calls are rendered only in the sidebar.
+    hide_tools_in_chat: bool,
+    /// Number of thinking lines to show.
+    thinking_lines: usize,
+    /// Whether to show timestamps above messages.
+    show_timestamps: bool,
 }
 
 impl<'a> ChatView<'a> {
@@ -178,6 +186,10 @@ impl<'a> ChatView<'a> {
             tick: 0,
             tool_focus: None,
             sidebar_open: false,
+            word_wrap: true,
+            hide_tools_in_chat: false,
+            thinking_lines: 5,
+            show_timestamps: false,
         }
     }
 
@@ -200,6 +212,26 @@ impl<'a> ChatView<'a> {
         self.sidebar_open = open;
         self
     }
+
+    pub fn word_wrap(mut self, enabled: bool) -> Self {
+        self.word_wrap = enabled;
+        self
+    }
+
+    pub fn hide_tools_in_chat(mut self, hidden: bool) -> Self {
+        self.hide_tools_in_chat = hidden;
+        self
+    }
+
+    pub fn thinking_lines(mut self, lines: usize) -> Self {
+        self.thinking_lines = lines.max(1);
+        self
+    }
+
+    pub fn show_timestamps(mut self, show: bool) -> Self {
+        self.show_timestamps = show;
+        self
+    }
 }
 
 impl Widget for ChatView<'_> {
@@ -208,224 +240,24 @@ impl Widget for ChatView<'_> {
             return;
         }
 
-        // Build all lines from all messages
-        let mut all_lines: Vec<Line<'_>> = Vec::new();
-        // Running counter of tool calls seen so far — used to map flat_idx → focused
-        let mut tool_call_counter: usize = 0;
+        let (all_lines, _) = build_chat_lines(
+            self.messages,
+            self.theme,
+            self.highlighter,
+            area.width as usize,
+            self.tick,
+            self.tool_focus,
+            self.sidebar_open,
+            self.word_wrap,
+            self.hide_tools_in_chat,
+            self.thinking_lines,
+            self.show_timestamps,
+        );
 
-        for msg in self.messages {
-            match msg.role {
-                MessageRole::User => {
-                    // Compact user messages: prefix on same line as first content line
-                    let prefix = Span::styled(
-                        "❯ ",
-                        Style::default()
-                            .fg(self.theme.user_prefix)
-                            .add_modifier(Modifier::BOLD),
-                    );
-                    let mut lines_iter = msg.content.lines();
-                    if let Some(first) = lines_iter.next() {
-                        all_lines.push(Line::from(vec![
-                            prefix,
-                            Span::styled(
-                                first.to_string(),
-                                Style::default().fg(self.theme.user_prefix),
-                            ),
-                        ]));
-                        for content_line in lines_iter {
-                            all_lines.push(Line::from(Span::styled(
-                                format!("  {content_line}"),
-                                Style::default().fg(self.theme.user_prefix),
-                            )));
-                        }
-                    } else {
-                        all_lines.push(Line::from(prefix));
-                    }
-                }
-                MessageRole::Assistant => {
-                    // Thinking: rolling 5-line tail (live stream of latest thought)
-                    if let Some(ref thinking) = msg.thinking {
-                        if !thinking.is_empty() {
-                            let lines: Vec<&str> = thinking.lines().collect();
-                            let total = lines.len();
-                            let tail = if total > 5 {
-                                &lines[total - 5..]
-                            } else {
-                                &lines[..]
-                            };
-                            for (i, line) in tail.iter().enumerate() {
-                                let prefix = if i == 0 && tail.len() == 5 {
-                                    "💭"
-                                } else {
-                                    "  "
-                                };
-                                all_lines.push(Line::from(Span::styled(
-                                    format!("  {prefix} {line}"),
-                                    self.theme.muted_style(),
-                                )));
-                            }
-                        }
-                    }
-
-                    // Content with markdown rendering
-                    if !msg.content.is_empty() {
-                        let rendered =
-                            markdown::render_markdown(&msg.content, self.theme, self.highlighter);
-                        for line in rendered {
-                            // Indent assistant content
-                            let mut spans = vec![Span::raw("  ")];
-                            spans.extend(line.spans);
-                            all_lines.push(Line::from(spans));
-                        }
-                    }
-
-                    // Streaming indicator with phase context
-                    if msg.is_streaming {
-                        const SPINNER: &[&str] =
-                            &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                        let frame = SPINNER[(self.tick / 2) as usize % SPINNER.len()];
-                        let has_running_tool = msg
-                            .tool_calls
-                            .iter()
-                            .any(|tc| tc.output.is_none() && !tc.is_error);
-                        let label = if has_running_tool {
-                            ""
-                        } else if msg.content.is_empty() && !msg.tool_calls.is_empty() {
-                            " thinking…"
-                        } else {
-                            ""
-                        };
-                        all_lines.push(Line::from(Span::styled(
-                            format!("  {frame}{label}"),
-                            self.theme.accent_style(),
-                        )));
-                    }
-                }
-                MessageRole::System => {
-                    // Tool results are typically not shown as top-level messages
-                    // (they are attached to tool calls). But if standalone:
-                    for line in msg.content.lines().take(3) {
-                        all_lines.push(Line::from(Span::styled(
-                            format!("  {line}"),
-                            self.theme.muted_style(),
-                        )));
-                    }
-                }
-                MessageRole::Compaction => {
-                    all_lines.push(Line::from(Span::styled(
-                        format!("  [{}]", msg.content),
-                        self.theme.muted_style(),
-                    )));
-                }
-                MessageRole::Error => {
-                    all_lines.push(Line::from(Span::styled(
-                        format!("Error: {}", msg.content),
-                        self.theme.error_style(),
-                    )));
-                }
-            }
-
-            // Tool calls
-            if self.sidebar_open {
-                // Sidebar shows tool details — just show a compact activity line
-                tool_call_counter += msg.tool_calls.len();
-                if !msg.tool_calls.is_empty() {
-                    let running = msg
-                        .tool_calls
-                        .iter()
-                        .filter(|tc| tc.output.is_none() && !tc.is_error)
-                        .count();
-                    let errors = msg.tool_calls.iter().filter(|tc| tc.is_error).count();
-                    let total = msg.tool_calls.len();
-
-                    let summary = if running > 0 {
-                        // Show what's currently running
-                        let current = msg
-                            .tool_calls
-                            .iter()
-                            .rev()
-                            .find(|tc| tc.output.is_none() && !tc.is_error);
-                        if let Some(tc) = current {
-                            const SPINNER: &[&str] =
-                                &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                            let frame = SPINNER[(self.tick / 2) as usize % SPINNER.len()];
-                            let done = total - running;
-                            format!(
-                                "  {frame} {name} {args}  ({done}/{total} done)",
-                                name = tc.name,
-                                args = tc.args_summary,
-                            )
-                        } else {
-                            format!("  ⠋ {running} running ({total} total)")
-                        }
-                    } else if errors > 0 {
-                        format!("  ✗ {total} tool calls ({errors} failed) →",)
-                    } else {
-                        format!("  ✓ {total} tool calls →")
-                    };
-
-                    let style = if running > 0 {
-                        self.theme.accent_style()
-                    } else if errors > 0 {
-                        self.theme.error_style()
-                    } else {
-                        self.theme.muted_style()
-                    };
-                    all_lines.push(Line::from(Span::styled(summary, style)));
-                }
-            } else {
-                // Full inline tool call rendering with │ rail
-                for tc in &msg.tool_calls {
-                    let is_running = tc.output.is_none() && !tc.is_error;
-                    let focused = self.tool_focus == Some(tool_call_counter);
-                    tool_call_counter += 1;
-
-                    let rail = Span::styled("  │", self.theme.muted_style());
-
-                    let mut header =
-                        tc.header_line_animated_focused(self.theme, self.tick, focused);
-                    header.spans.insert(0, rail.clone());
-
-                    if is_running && !tc.streaming_lines.is_empty() {
-                        all_lines.push(header);
-                        for line in &tc.streaming_lines {
-                            all_lines.push(Line::from(vec![
-                                rail.clone(),
-                                Span::styled(format!("    {line}"), self.theme.muted_style()),
-                            ]));
-                        }
-                    } else {
-                        all_lines.push(header);
-                    }
-
-                    if tc.expanded && !is_running {
-                        if let Some(ref output) = tc.output {
-                            let output_style = if tc.is_error {
-                                self.theme.error_style()
-                            } else {
-                                Style::default().fg(Color::DarkGray)
-                            };
-                            for output_line in output.lines().take(50) {
-                                all_lines.push(Line::from(vec![
-                                    rail.clone(),
-                                    Span::styled(format!("    {output_line}"), output_style),
-                                ]));
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Separator
-            all_lines.push(Line::raw(""));
-        }
-
-        // Apply scroll offset: skip lines from the top
         let total_lines = all_lines.len();
         let visible_height = area.height as usize;
 
         let start = if self.scroll_offset == 0 {
-            // Auto-scroll: show the last N lines
             total_lines.saturating_sub(visible_height)
         } else {
             total_lines.saturating_sub(visible_height + self.scroll_offset)
@@ -443,6 +275,405 @@ impl Widget for ChatView<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_chat_lines(
+    messages: &[DisplayMessage],
+    theme: &Theme,
+    highlighter: &Highlighter,
+    width: usize,
+    tick: u64,
+    tool_focus: Option<usize>,
+    sidebar_open: bool,
+    word_wrap: bool,
+    hide_tools_in_chat: bool,
+    thinking_lines: usize,
+    show_timestamps: bool,
+) -> (Vec<Line<'static>>, Vec<(usize, String)>) {
+    let mut all_lines: Vec<Line<'static>> = Vec::new();
+    let mut tool_line_indices: Vec<(usize, String)> = Vec::new();
+    let mut tool_call_counter: usize = 0;
+
+    for msg in messages {
+        if show_timestamps {
+            all_lines.push(Line::from(Span::styled(
+                format!("  [{}]", format_timestamp(msg.timestamp)),
+                theme.muted_style(),
+            )));
+        }
+        match msg.role {
+            MessageRole::User => {
+                let content_style = Style::default().fg(theme.user_prefix);
+                let prefix_style = Style::default()
+                    .fg(theme.user_prefix)
+                    .add_modifier(Modifier::BOLD);
+                let logical_lines: Vec<&str> = if msg.content.is_empty() {
+                    vec![""]
+                } else {
+                    msg.content.lines().collect()
+                };
+
+                for (idx, raw_line) in logical_lines.iter().enumerate() {
+                    let prefix = if idx == 0 {
+                        vec![Span::styled("❯ ".to_string(), prefix_style)]
+                    } else {
+                        vec![Span::styled("  ".to_string(), content_style)]
+                    };
+                    let continuation = vec![Span::styled("  ".to_string(), content_style)];
+                    all_lines.extend(wrap_text_with_prefix(
+                        raw_line,
+                        &prefix,
+                        &continuation,
+                        content_style,
+                        width,
+                        word_wrap,
+                    ));
+                }
+            }
+            MessageRole::Assistant => {
+                if let Some(ref thinking) = msg.thinking {
+                    if !thinking.is_empty() {
+                        let lines: Vec<&str> = thinking.lines().collect();
+                        let total = lines.len();
+                        let tail = if total > thinking_lines {
+                            &lines[total - thinking_lines..]
+                        } else {
+                            &lines[..]
+                        };
+                        for (i, line) in tail.iter().enumerate() {
+                            let prefix = if i == 0 && tail.len() == thinking_lines {
+                                "💭"
+                            } else {
+                                "  "
+                            };
+                            all_lines.extend(wrap_text_with_prefix(
+                                &format!("  {prefix} {line}"),
+                                &[],
+                                &[],
+                                theme.muted_style(),
+                                width,
+                                word_wrap,
+                            ));
+                        }
+                    }
+                }
+
+                if !msg.content.is_empty() {
+                    let rendered = markdown::render_markdown(&msg.content, theme, highlighter);
+                    let indent = vec![Span::raw("  ".to_string())];
+                    for line in rendered {
+                        all_lines.extend(wrap_line_with_prefix(
+                            &line, &indent, &indent, width, word_wrap,
+                        ));
+                    }
+                }
+
+                if msg.is_streaming {
+                    const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                    let frame = SPINNER[(tick / 2) as usize % SPINNER.len()];
+                    let has_running_tool = msg
+                        .tool_calls
+                        .iter()
+                        .any(|tc| tc.output.is_none() && !tc.is_error);
+                    let label = if has_running_tool {
+                        ""
+                    } else if msg.content.is_empty() && !msg.tool_calls.is_empty() {
+                        " thinking…"
+                    } else {
+                        ""
+                    };
+                    all_lines.extend(wrap_text_with_prefix(
+                        &format!("  {frame}{label}"),
+                        &[],
+                        &[],
+                        theme.accent_style(),
+                        width,
+                        word_wrap,
+                    ));
+                }
+            }
+            MessageRole::System => {
+                for line in msg.content.lines().take(3) {
+                    all_lines.extend(wrap_text_with_prefix(
+                        &format!("  {line}"),
+                        &[],
+                        &[],
+                        theme.muted_style(),
+                        width,
+                        word_wrap,
+                    ));
+                }
+            }
+            MessageRole::Compaction => {
+                all_lines.extend(wrap_text_with_prefix(
+                    &format!("  [{}]", msg.content),
+                    &[],
+                    &[],
+                    theme.muted_style(),
+                    width,
+                    word_wrap,
+                ));
+            }
+            MessageRole::Error => {
+                all_lines.extend(wrap_text_with_prefix(
+                    &format!("Error: {}", msg.content),
+                    &[],
+                    &[],
+                    theme.error_style(),
+                    width,
+                    word_wrap,
+                ));
+            }
+        }
+
+        if hide_tools_in_chat {
+            tool_call_counter += msg.tool_calls.len();
+        } else if sidebar_open {
+            tool_call_counter += msg.tool_calls.len();
+            if !msg.tool_calls.is_empty() {
+                let running = msg
+                    .tool_calls
+                    .iter()
+                    .filter(|tc| tc.output.is_none() && !tc.is_error)
+                    .count();
+                let errors = msg.tool_calls.iter().filter(|tc| tc.is_error).count();
+                let total = msg.tool_calls.len();
+
+                let summary = if running > 0 {
+                    let current = msg
+                        .tool_calls
+                        .iter()
+                        .rev()
+                        .find(|tc| tc.output.is_none() && !tc.is_error);
+                    if let Some(tc) = current {
+                        const SPINNER: &[&str] =
+                            &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                        let frame = SPINNER[(tick / 2) as usize % SPINNER.len()];
+                        let done = total - running;
+                        format!(
+                            "  {frame} {name} {args}  ({done}/{total} done)",
+                            name = tc.name,
+                            args = tc.args_summary,
+                        )
+                    } else {
+                        format!("  ⠋ {running} running ({total} total)")
+                    }
+                } else if errors > 0 {
+                    format!("  ✗ {total} tool calls ({errors} failed) →")
+                } else {
+                    format!("  ✓ {total} tool calls →")
+                };
+
+                let style = if running > 0 {
+                    theme.accent_style()
+                } else if errors > 0 {
+                    theme.error_style()
+                } else {
+                    theme.muted_style()
+                };
+                all_lines.extend(wrap_text_with_prefix(
+                    &summary,
+                    &[],
+                    &[],
+                    style,
+                    width,
+                    word_wrap,
+                ));
+            }
+        } else {
+            for tc in &msg.tool_calls {
+                let is_running = tc.output.is_none() && !tc.is_error;
+                let focused = tool_focus == Some(tool_call_counter);
+                tool_call_counter += 1;
+
+                let rail = vec![Span::styled("  │".to_string(), theme.muted_style())];
+                let header = tc.header_line_animated_focused(theme, tick, focused);
+                let header_lines = wrap_line_with_prefix(&header, &rail, &rail, width, word_wrap);
+                let header_start = all_lines.len();
+                for offset in 0..header_lines.len() {
+                    tool_line_indices.push((header_start + offset, tc.id.clone()));
+                }
+                all_lines.extend(header_lines);
+
+                if is_running && !tc.streaming_lines.is_empty() {
+                    for line in &tc.streaming_lines {
+                        let content =
+                            Line::from(Span::styled(format!("    {line}"), theme.muted_style()));
+                        all_lines.extend(wrap_line_with_prefix(
+                            &content, &rail, &rail, width, word_wrap,
+                        ));
+                    }
+                }
+
+                if tc.expanded && !is_running {
+                    if let Some(ref output) = tc.output {
+                        let output_style = if tc.is_error {
+                            theme.error_style()
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        };
+                        for output_line in output.lines().take(50) {
+                            let content = Line::from(Span::styled(
+                                format!("    {output_line}"),
+                                output_style,
+                            ));
+                            all_lines.extend(wrap_line_with_prefix(
+                                &content, &rail, &rail, width, word_wrap,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        all_lines.push(Line::raw(""));
+    }
+
+    (all_lines, tool_line_indices)
+}
+
+fn wrap_text_with_prefix(
+    text: &str,
+    first_prefix: &[Span<'_>],
+    continuation_prefix: &[Span<'_>],
+    style: Style,
+    width: usize,
+    enabled: bool,
+) -> Vec<Line<'static>> {
+    let content = Line::from(Span::styled(text.to_string(), style));
+    wrap_line_with_prefix(&content, first_prefix, continuation_prefix, width, enabled)
+}
+
+fn wrap_line_with_prefix(
+    line: &Line<'_>,
+    first_prefix: &[Span<'_>],
+    continuation_prefix: &[Span<'_>],
+    width: usize,
+    enabled: bool,
+) -> Vec<Line<'static>> {
+    let first_prefix_owned = clone_spans(first_prefix);
+    let continuation_prefix_owned = clone_spans(continuation_prefix);
+
+    if !enabled || width == 0 {
+        let mut spans = first_prefix_owned;
+        spans.extend(clone_spans(&line.spans));
+        return vec![Line::from(spans)];
+    }
+
+    let chars = flatten_line_chars(line);
+    if chars.is_empty() {
+        return vec![Line::from(first_prefix_owned)];
+    }
+
+    let first_width = width.saturating_sub(spans_width(first_prefix));
+    let continuation_width = width.saturating_sub(spans_width(continuation_prefix));
+    let chunks = wrap_styled_chars(&chars, first_width, continuation_width);
+
+    let mut lines = Vec::with_capacity(chunks.len());
+    for (idx, chunk) in chunks.into_iter().enumerate() {
+        let mut spans = if idx == 0 {
+            clone_spans(&first_prefix_owned)
+        } else {
+            clone_spans(&continuation_prefix_owned)
+        };
+        spans.extend(chars_to_spans(&chunk));
+        lines.push(Line::from(spans));
+    }
+
+    lines
+}
+
+fn clone_spans(spans: &[Span<'_>]) -> Vec<Span<'static>> {
+    spans
+        .iter()
+        .map(|span| Span::styled(span.content.to_string(), span.style))
+        .collect()
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum::<usize>()
+}
+
+fn flatten_line_chars(line: &Line<'_>) -> Vec<(char, Style)> {
+    let mut chars = Vec::new();
+    for span in &line.spans {
+        for ch in span.content.chars() {
+            chars.push((ch, span.style));
+        }
+    }
+    chars
+}
+
+fn wrap_styled_chars(
+    chars: &[(char, Style)],
+    first_width: usize,
+    continuation_width: usize,
+) -> Vec<Vec<(char, Style)>> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut current_width = first_width.max(1);
+
+    while start < chars.len() {
+        let remaining = chars.len() - start;
+        if remaining <= current_width {
+            chunks.push(chars[start..].to_vec());
+            break;
+        }
+
+        let end = start + current_width;
+        let break_at = (start + 1..end)
+            .rev()
+            .find(|&idx| chars[idx].0.is_whitespace());
+
+        if let Some(space_idx) = break_at {
+            chunks.push(chars[start..space_idx].to_vec());
+            start = space_idx + 1;
+            while start < chars.len() && chars[start].0.is_whitespace() {
+                start += 1;
+            }
+        } else {
+            chunks.push(chars[start..end].to_vec());
+            start = end;
+        }
+
+        current_width = continuation_width.max(1);
+    }
+
+    if chunks.is_empty() {
+        chunks.push(Vec::new());
+    }
+
+    chunks
+}
+
+fn chars_to_spans(chars: &[(char, Style)]) -> Vec<Span<'static>> {
+    if chars.is_empty() {
+        return Vec::new();
+    }
+
+    let mut spans = Vec::new();
+    let mut current_style = chars[0].1;
+    let mut current_text = String::new();
+
+    for (ch, style) in chars {
+        if *style == current_style {
+            current_text.push(*ch);
+        } else {
+            spans.push(Span::styled(current_text, current_style));
+            current_text = ch.to_string();
+            current_style = *style;
+        }
+    }
+
+    if !current_text.is_empty() {
+        spans.push(Span::styled(current_text, current_style));
+    }
+
+    spans
+}
+
 /// Calculate the total number of rendered lines across all messages.
 pub fn total_rendered_lines(
     messages: &[DisplayMessage],
@@ -453,4 +684,139 @@ pub fn total_rendered_lines(
         .iter()
         .map(|m| m.line_count(theme, highlighter))
         .sum()
+}
+
+fn format_timestamp(ts: u64) -> String {
+    let secs = ts % 86_400;
+    let h = secs / 3_600;
+    let m = (secs % 3_600) / 60;
+    format!("{h:02}:{m:02}")
+}
+
+/// Build a click map: Vec<(screen_y, tool_call_id)> for each tool call header
+/// line that is visible in the chat area.
+#[allow(clippy::too_many_arguments)]
+pub fn build_click_map(
+    messages: &[DisplayMessage],
+    theme: &Theme,
+    highlighter: &Highlighter,
+    chat_area: Rect,
+    scroll_offset: usize,
+    sidebar_open: bool,
+    word_wrap: bool,
+    hide_tools_in_chat: bool,
+    thinking_lines: usize,
+    show_timestamps: bool,
+) -> Vec<(u16, String)> {
+    let (all_lines, tool_line_indices) = build_chat_lines(
+        messages,
+        theme,
+        highlighter,
+        chat_area.width as usize,
+        0,
+        None,
+        sidebar_open,
+        word_wrap,
+        hide_tools_in_chat,
+        thinking_lines,
+        show_timestamps,
+    );
+
+    let total_lines = all_lines.len();
+    let visible_height = chat_area.height as usize;
+
+    let start = if scroll_offset == 0 {
+        total_lines.saturating_sub(visible_height)
+    } else {
+        total_lines.saturating_sub(visible_height + scroll_offset)
+    };
+
+    let end = total_lines.min(start + visible_height);
+
+    let mut result = Vec::new();
+    for (line_index, id) in &tool_line_indices {
+        if *line_index >= start && *line_index < end {
+            let screen_y = chat_area.y + (*line_index - start) as u16;
+            result.push((screen_y, id.clone()));
+        }
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tool(id: &str) -> DisplayToolCall {
+        DisplayToolCall {
+            id: id.into(),
+            name: "read".into(),
+            args_summary: "src/main.rs".into(),
+            output: Some("fn main() {}".into()),
+            is_error: false,
+            expanded: false,
+            streaming_lines: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn wraps_long_user_message() {
+        let theme = Theme::default();
+        let highlighter = Highlighter::new();
+        let messages = vec![DisplayMessage {
+            role: MessageRole::User,
+            content: "this is a long line that should wrap in the chat view".into(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            is_streaming: false,
+            timestamp: 0,
+        }];
+
+        let (lines, _) = build_chat_lines(
+            &messages,
+            &theme,
+            &highlighter,
+            20,
+            0,
+            None,
+            false,
+            true,
+            false,
+            5,
+            false,
+        );
+
+        assert!(lines.len() > 2, "expected wrapped content plus separator");
+    }
+
+    #[test]
+    fn hide_tools_in_chat_removes_tool_lines() {
+        let theme = Theme::default();
+        let highlighter = Highlighter::new();
+        let messages = vec![DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "done".into(),
+            thinking: None,
+            tool_calls: vec![make_tool("tc-1")],
+            is_streaming: false,
+            timestamp: 0,
+        }];
+
+        let (_, visible_tools) = build_chat_lines(
+            &messages,
+            &theme,
+            &highlighter,
+            80,
+            0,
+            None,
+            false,
+            true,
+            true,
+            5,
+            false,
+        );
+
+        assert!(visible_tools.is_empty());
+    }
 }
