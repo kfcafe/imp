@@ -1,4 +1,6 @@
-use imp_core::config::{Config, ContextConfig, ShellBackend, ShellConfig};
+use imp_core::config::{
+    Config, ContextConfig, ShellBackend, ShellConfig, SidebarStyle, ToolOutputDisplay,
+};
 use imp_llm::model::ModelMeta;
 use imp_llm::ThinkingLevel;
 use ratatui::buffer::Buffer;
@@ -18,6 +20,11 @@ pub enum SettingsField {
     ObservationMask,
     CompactionThreshold,
     ShellBackend,
+    SidebarStyle,
+    ToolOutput,
+    ToolOutputLines,
+    SidebarWidth,
+    WordWrap,
     Save,
 }
 
@@ -28,6 +35,11 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::ObservationMask,
     SettingsField::CompactionThreshold,
     SettingsField::ShellBackend,
+    SettingsField::SidebarStyle,
+    SettingsField::ToolOutput,
+    SettingsField::ToolOutputLines,
+    SettingsField::SidebarWidth,
+    SettingsField::WordWrap,
     SettingsField::Save,
 ];
 
@@ -42,6 +54,11 @@ pub struct SettingsState {
     pub observation_mask: f64,
     pub compaction_threshold: f64,
     pub shell_backend: ShellBackend,
+    pub sidebar_style: SidebarStyle,
+    pub tool_output: ToolOutputDisplay,
+    pub tool_output_lines: usize,
+    pub sidebar_width: u16,
+    pub word_wrap: bool,
     pub editing_number: bool,
     pub edit_buffer: String,
     pub dirty: bool,
@@ -58,6 +75,11 @@ impl SettingsState {
             observation_mask: config.context.observation_mask_threshold,
             compaction_threshold: config.context.compaction_threshold,
             shell_backend: config.shell.backend.clone(),
+            sidebar_style: config.ui.sidebar_style,
+            tool_output: config.ui.tool_output,
+            tool_output_lines: config.ui.tool_output_lines,
+            sidebar_width: config.ui.sidebar_width,
+            word_wrap: config.ui.word_wrap,
             editing_number: false,
             edit_buffer: String::new(),
             dirty: false,
@@ -107,6 +129,28 @@ impl SettingsState {
             SettingsField::CompactionThreshold => {
                 self.compaction_threshold = (self.compaction_threshold + 0.05).min(1.0);
             }
+            SettingsField::SidebarStyle => {
+                self.sidebar_style = match self.sidebar_style {
+                    SidebarStyle::Stream => SidebarStyle::Split,
+                    SidebarStyle::Split => SidebarStyle::Stream,
+                };
+            }
+            SettingsField::ToolOutput => {
+                self.tool_output = match self.tool_output {
+                    ToolOutputDisplay::Full => ToolOutputDisplay::Compact,
+                    ToolOutputDisplay::Compact => ToolOutputDisplay::Collapsed,
+                    ToolOutputDisplay::Collapsed => ToolOutputDisplay::Full,
+                };
+            }
+            SettingsField::ToolOutputLines => {
+                self.tool_output_lines = self.tool_output_lines.saturating_add(5).min(100);
+            }
+            SettingsField::SidebarWidth => {
+                self.sidebar_width = (self.sidebar_width + 5).min(80);
+            }
+            SettingsField::WordWrap => {
+                self.word_wrap = !self.word_wrap;
+            }
             SettingsField::Save => {}
         }
     }
@@ -140,6 +184,28 @@ impl SettingsState {
             SettingsField::CompactionThreshold => {
                 self.compaction_threshold = (self.compaction_threshold - 0.05).max(0.0);
             }
+            SettingsField::SidebarStyle => {
+                self.sidebar_style = match self.sidebar_style {
+                    SidebarStyle::Stream => SidebarStyle::Split,
+                    SidebarStyle::Split => SidebarStyle::Stream,
+                };
+            }
+            SettingsField::ToolOutput => {
+                self.tool_output = match self.tool_output {
+                    ToolOutputDisplay::Full => ToolOutputDisplay::Collapsed,
+                    ToolOutputDisplay::Compact => ToolOutputDisplay::Full,
+                    ToolOutputDisplay::Collapsed => ToolOutputDisplay::Compact,
+                };
+            }
+            SettingsField::ToolOutputLines => {
+                self.tool_output_lines = self.tool_output_lines.saturating_sub(5).max(5);
+            }
+            SettingsField::SidebarWidth => {
+                self.sidebar_width = self.sidebar_width.saturating_sub(5).max(20);
+            }
+            SettingsField::WordWrap => {
+                self.word_wrap = !self.word_wrap;
+            }
             SettingsField::Save => {}
         }
     }
@@ -159,8 +225,16 @@ impl SettingsState {
                 self.editing_number = true;
                 self.edit_buffer = format!("{:.2}", self.compaction_threshold);
             }
+            SettingsField::ToolOutputLines => {
+                self.editing_number = true;
+                self.edit_buffer = self.tool_output_lines.to_string();
+            }
+            SettingsField::SidebarWidth => {
+                self.editing_number = true;
+                self.edit_buffer = self.sidebar_width.to_string();
+            }
             _ => {
-                // For enum fields, Enter cycles forward
+                // For enum/bool fields, Enter cycles forward
                 self.cycle_forward();
             }
         }
@@ -201,6 +275,16 @@ impl SettingsState {
                     self.compaction_threshold = v.clamp(0.0, 1.0);
                 }
             }
+            SettingsField::ToolOutputLines => {
+                if let Ok(v) = self.edit_buffer.parse::<usize>() {
+                    self.tool_output_lines = v.clamp(1, 100);
+                }
+            }
+            SettingsField::SidebarWidth => {
+                if let Ok(v) = self.edit_buffer.parse::<u16>() {
+                    self.sidebar_width = v.clamp(20, 80);
+                }
+            }
             _ => {}
         }
         self.edit_buffer.clear();
@@ -218,6 +302,13 @@ impl SettingsState {
         };
         config.shell = ShellConfig {
             backend: self.shell_backend.clone(),
+        };
+        config.ui = imp_core::config::UiConfig {
+            sidebar_style: self.sidebar_style,
+            tool_output: self.tool_output,
+            tool_output_lines: self.tool_output_lines,
+            sidebar_width: self.sidebar_width,
+            word_wrap: self.word_wrap,
         };
     }
 }
@@ -422,12 +513,103 @@ impl Widget for SettingsView<'_> {
             "← →",
         );
 
+        // Spacer before UI section
+        row += 1;
+
+        // Sidebar style
+        let sidebar_label = match self.state.sidebar_style {
+            SidebarStyle::Stream => "stream",
+            SidebarStyle::Split => "split",
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            6,
+            "Sidebar style",
+            sidebar_label,
+            "← →",
+        );
+
+        // Tool output
+        let tool_output_label = match self.state.tool_output {
+            ToolOutputDisplay::Full => "full",
+            ToolOutputDisplay::Compact => "compact",
+            ToolOutputDisplay::Collapsed => "collapsed",
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            7,
+            "Tool output",
+            tool_output_label,
+            "← →",
+        );
+
+        // Tool output lines
+        let tol_val = if self.state.editing_number
+            && self.state.current_field() == SettingsField::ToolOutputLines
+        {
+            format!("{}▎", self.state.edit_buffer)
+        } else {
+            self.state.tool_output_lines.to_string()
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            8,
+            "Tool output lines",
+            &tol_val,
+            "← → / type",
+        );
+
+        // Sidebar width
+        let sw_val = if self.state.editing_number
+            && self.state.current_field() == SettingsField::SidebarWidth
+        {
+            format!("{}▎", self.state.edit_buffer)
+        } else {
+            format!("{}%", self.state.sidebar_width)
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            9,
+            "Sidebar width",
+            &sw_val,
+            "← → / type",
+        );
+
+        // Word wrap
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            10,
+            "Word wrap",
+            if self.state.word_wrap { "on" } else { "off" },
+            "← →",
+        );
+
         // Spacer before save
         row += 1;
 
         // Save button
         if row < inner.height {
-            let is_save = self.state.selected == 6;
+            let is_save = self.state.selected == FIELDS.len() - 1;
             let save_style = if is_save {
                 Style::default()
                     .fg(self.theme.accent)
