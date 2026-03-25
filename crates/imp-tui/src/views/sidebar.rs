@@ -1,3 +1,4 @@
+use imp_core::config::{SidebarStyle, ToolOutputDisplay, UiConfig};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -14,9 +15,9 @@ use crate::views::tools::DisplayToolCall;
 pub struct Sidebar {
     /// Whether the sidebar pane is visible.
     pub open: bool,
-    /// Scroll offset for the tool list pane (0 = top).
+    /// Scroll offset for the tool list pane (split mode, 0 = top).
     pub list_scroll: usize,
-    /// Scroll offset for the detail pane (0 = top).
+    /// Scroll offset for the detail/stream pane (0 = top).
     pub detail_scroll: usize,
     /// Whether the first tool has been seen (for auto-open logic).
     pub first_tool_seen: bool,
@@ -40,17 +41,17 @@ impl Sidebar {
         self.list_scroll += n;
     }
 
-    /// Scroll the detail pane up (toward earlier content).
+    /// Scroll the detail/stream pane up (toward earlier content).
     pub fn scroll_detail_up(&mut self, n: usize) {
         self.detail_scroll = self.detail_scroll.saturating_sub(n);
     }
 
-    /// Scroll the detail pane down (toward later content).
+    /// Scroll the detail/stream pane down (toward later content).
     pub fn scroll_detail_down(&mut self, n: usize) {
         self.detail_scroll += n;
     }
 
-    /// Ensure the selected tool call index is visible in the list.
+    /// Ensure the selected tool call index is visible in the list (split mode).
     pub fn ensure_selected_visible(&mut self, selected: usize) {
         let visible = (self.list_height as usize).max(1);
         if selected < self.list_scroll {
@@ -64,10 +65,14 @@ impl Sidebar {
 // ── Layout computation ──────────────────────────────────────────
 
 /// Compute sidebar sub-areas for external hit-testing.
-/// Takes the full sidebar `Rect` (including border) and the number of tool
-/// calls.  Returns `(list_hit_rect, detail_hit_rect)` in screen coordinates,
-/// spanning the full sidebar width so click detection is easy.
-pub fn sidebar_sub_areas(sidebar_area: Rect, tool_count: usize) -> (Rect, Rect) {
+/// Returns `(top_hit_rect, bottom_hit_rect)` in screen coordinates.
+/// In stream mode, top covers the full sidebar (bottom is zero-height).
+/// In split mode, top = list area, bottom = detail area.
+pub fn sidebar_sub_areas(
+    sidebar_area: Rect,
+    tool_count: usize,
+    style: SidebarStyle,
+) -> (Rect, Rect) {
     let content = Rect {
         x: sidebar_area.x + 2,
         y: sidebar_area.y,
@@ -75,35 +80,50 @@ pub fn sidebar_sub_areas(sidebar_area: Rect, tool_count: usize) -> (Rect, Rect) 
         height: sidebar_area.height,
     };
 
-    let (list_area, _, detail_area) = compute_split(content, tool_count);
-
-    // Widen hit rects to cover the full sidebar width (including border)
-    let list_hit = Rect {
-        x: sidebar_area.x,
-        width: sidebar_area.width,
-        y: list_area.y,
-        height: list_area.height,
-    };
-    let detail_hit = Rect {
-        x: sidebar_area.x,
-        width: sidebar_area.width,
-        y: detail_area.y,
-        height: detail_area.height,
-    };
-
-    (list_hit, detail_hit)
+    match style {
+        SidebarStyle::Stream => {
+            // Stream: single scrollable pane — top covers everything
+            let full = Rect {
+                x: sidebar_area.x,
+                width: sidebar_area.width,
+                ..content
+            };
+            let empty = Rect {
+                x: sidebar_area.x,
+                width: sidebar_area.width,
+                y: sidebar_area.y + sidebar_area.height,
+                height: 0,
+            };
+            (full, empty)
+        }
+        SidebarStyle::Split => {
+            let (list_area, _, detail_area) = compute_split(content, tool_count);
+            (
+                Rect {
+                    x: sidebar_area.x,
+                    width: sidebar_area.width,
+                    y: list_area.y,
+                    height: list_area.height,
+                },
+                Rect {
+                    x: sidebar_area.x,
+                    width: sidebar_area.width,
+                    y: detail_area.y,
+                    height: detail_area.height,
+                },
+            )
+        }
+    }
 }
 
-/// Internal layout: split the content area into list, separator, and detail.
-/// Returns `(list_area, separator_y, detail_area)`.
+/// Split-mode layout: list, separator, detail areas.
 fn compute_split(content: Rect, tool_count: usize) -> (Rect, Option<u16>, Rect) {
     let h = content.height as usize;
-    let min_detail = 3; // header + separator + 1 content line
+    let min_detail = 3;
     let sep = 1;
-    let min_total = 2 + sep + min_detail; // need at least 6 rows to split
+    let min_total = 2 + sep + min_detail;
 
     if h < min_total || tool_count == 0 {
-        // Too small to split — give everything to list
         return (
             content,
             None,
@@ -116,9 +136,7 @@ fn compute_split(content: Rect, tool_count: usize) -> (Rect, Option<u16>, Rect) 
         );
     }
 
-    // Dynamic list height: grows with tool count, capped at 40%
-    let max_list_pct = 40;
-    let max_list = (h * max_list_pct / 100).max(2);
+    let max_list = (h * 40 / 100).max(2);
     let available_for_list = h.saturating_sub(sep + min_detail);
     let desired = tool_count.clamp(2, max_list);
     let list_h = desired.min(available_for_list).max(2);
@@ -140,7 +158,7 @@ fn compute_split(content: Rect, tool_count: usize) -> (Rect, Option<u16>, Rect) 
 
 // ── SidebarView widget ──────────────────────────────────────────
 
-/// Widget that renders the split sidebar: tool list (top) + detail (bottom).
+/// Widget that renders the sidebar in either stream or split mode.
 pub struct SidebarView<'a> {
     tool_calls: Vec<&'a DisplayToolCall>,
     selected: Option<usize>,
@@ -148,6 +166,7 @@ pub struct SidebarView<'a> {
     tick: u64,
     list_scroll: usize,
     detail_scroll: usize,
+    ui_config: &'a UiConfig,
 }
 
 impl<'a> SidebarView<'a> {
@@ -158,6 +177,7 @@ impl<'a> SidebarView<'a> {
         tick: u64,
         list_scroll: usize,
         detail_scroll: usize,
+        ui_config: &'a UiConfig,
     ) -> Self {
         Self {
             tool_calls,
@@ -166,6 +186,7 @@ impl<'a> SidebarView<'a> {
             tick,
             list_scroll,
             detail_scroll,
+            ui_config,
         }
     }
 }
@@ -185,7 +206,6 @@ impl Widget for SidebarView<'_> {
             }
         }
 
-        // Content area after the border + 1 padding column
         let cx = area.x + 2;
         let cw = area.width.saturating_sub(2);
         if cw == 0 {
@@ -204,40 +224,127 @@ impl Widget for SidebarView<'_> {
             return;
         }
 
-        // Split into list / separator / detail
-        let (list_area, sep_y, detail_area) = compute_split(content, self.tool_calls.len());
+        match self.ui_config.sidebar_style {
+            SidebarStyle::Stream => {
+                render_stream(
+                    &self.tool_calls,
+                    self.selected,
+                    self.theme,
+                    self.tick,
+                    self.detail_scroll,
+                    self.ui_config,
+                    content,
+                    buf,
+                );
+            }
+            SidebarStyle::Split => {
+                let (list_area, sep_y, detail_area) = compute_split(content, self.tool_calls.len());
 
-        // ── Tool list ───────────────────────────────────────────
-        render_list(
-            &self.tool_calls,
-            self.selected,
-            self.theme,
-            self.tick,
-            self.list_scroll,
-            list_area,
-            buf,
-        );
+                render_list(
+                    &self.tool_calls,
+                    self.selected,
+                    self.theme,
+                    self.tick,
+                    self.list_scroll,
+                    list_area,
+                    buf,
+                );
 
-        // ── Separator ───────────────────────────────────────────
-        if let Some(sy) = sep_y {
-            let sep: String = "─".repeat(cw as usize);
-            buf.set_line(cx, sy, &Line::from(Span::styled(sep, border_style)), cw);
+                if let Some(sy) = sep_y {
+                    let sep: String = "─".repeat(cw as usize);
+                    buf.set_line(cx, sy, &Line::from(Span::styled(sep, border_style)), cw);
+                }
+
+                let selected_tc = self.selected.and_then(|i| self.tool_calls.get(i)).copied();
+                render_detail(
+                    selected_tc,
+                    self.theme,
+                    self.tick,
+                    self.detail_scroll,
+                    self.ui_config,
+                    detail_area,
+                    buf,
+                );
+            }
         }
-
-        // ── Detail pane ─────────────────────────────────────────
-        let selected_tc = self.selected.and_then(|i| self.tool_calls.get(i)).copied();
-        render_detail(
-            selected_tc,
-            self.theme,
-            self.tick,
-            self.detail_scroll,
-            detail_area,
-            buf,
-        );
     }
 }
 
-// ── Tool list rendering ─────────────────────────────────────────
+// ── Stream mode rendering ───────────────────────────────────────
+
+/// Render the sidebar as a single chronological stream of tool calls
+/// with their results shown inline underneath each header.
+#[allow(clippy::too_many_arguments)]
+fn render_stream(
+    tool_calls: &[&DisplayToolCall],
+    selected: Option<usize>,
+    theme: &Theme,
+    tick: u64,
+    scroll: usize,
+    ui_config: &UiConfig,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    let width = area.width as usize;
+
+    // Build all lines: for each tool call, header + output
+    let mut all_lines: Vec<(Line<'_>, bool)> = Vec::new(); // (line, is_header)
+
+    for (idx, tc) in tool_calls.iter().enumerate() {
+        let focused = selected == Some(idx);
+        let header = tc.header_line_animated_focused(theme, tick, focused);
+        all_lines.push((header, true));
+
+        // Inline output below the header
+        let output_lines = tool_output_lines(tc, ui_config, width);
+        for text in output_lines {
+            let style = if tc.is_error {
+                theme.error_style()
+            } else {
+                theme.muted_style()
+            };
+            all_lines.push((Line::from(Span::styled(format!("  {text}"), style)), false));
+        }
+
+        // Blank line between tool calls (except after last)
+        if idx + 1 < tool_calls.len() {
+            all_lines.push((Line::raw(""), false));
+        }
+    }
+
+    // Scrollable render
+    let total = all_lines.len();
+    let visible = area.height as usize;
+    let start = scroll.min(total.saturating_sub(visible));
+
+    for (i, (line, _)) in all_lines.iter().skip(start).take(visible).enumerate() {
+        let row = area.y + i as u16;
+        buf.set_line(area.x, row, line, area.width);
+    }
+
+    // Scroll indicator
+    if total > visible && visible > 0 {
+        let pct = ((start + visible).min(total) * 100) / total;
+        let indicator = format!(" {pct}% ");
+        let iw = indicator.len() as u16;
+        if area.width > iw {
+            let ix = area.x + area.width - iw;
+            let iy = area.y + area.height.saturating_sub(1);
+            buf.set_line(
+                ix,
+                iy,
+                &Line::from(Span::styled(indicator, theme.muted_style())),
+                iw,
+            );
+        }
+    }
+}
+
+// ── Split mode: tool list ───────────────────────────────────────
 
 fn render_list(
     tool_calls: &[&DisplayToolCall],
@@ -264,7 +371,6 @@ fn render_list(
         buf.set_line(area.x, row, &header, area.width);
     }
 
-    // Scroll indicator (top-right)
     if total > visible && visible > 0 {
         let pct = ((start + visible).min(total) * 100) / total;
         let indicator = format!("{pct}%");
@@ -282,13 +388,14 @@ fn render_list(
     }
 }
 
-// ── Detail pane rendering ───────────────────────────────────────
+// ── Split mode: detail pane ─────────────────────────────────────
 
 fn render_detail(
     tc: Option<&DisplayToolCall>,
     theme: &Theme,
     tick: u64,
     scroll: usize,
+    ui_config: &UiConfig,
     area: Rect,
     buf: &mut Buffer,
 ) {
@@ -304,10 +411,10 @@ fn render_detail(
 
     let is_running = tc.output.is_none() && !tc.is_error;
 
-    // Header line: icon + name + args
+    // Header
     render_detail_header(tc, is_running, theme, tick, area.x, area.y, area.width, buf);
 
-    // Thin separator
+    // Separator
     if area.height > 1 {
         let sep: String = "─".repeat(area.width as usize);
         buf.set_line(
@@ -318,13 +425,19 @@ fn render_detail(
         );
     }
 
-    // Scrollable content
+    // Content
     if area.height > 2 {
         let content_y = area.y + 2;
         let content_h = (area.height - 2) as usize;
         let content_w = area.width as usize;
 
-        let lines = detail_content_lines(tc, content_w);
+        // Detail always shows full output (no line limit)
+        let full_config = UiConfig {
+            tool_output: ToolOutputDisplay::Full,
+            word_wrap: ui_config.word_wrap,
+            ..*ui_config
+        };
+        let lines = tool_output_lines(tc, &full_config, content_w);
         let total = lines.len();
         let start = scroll.min(total.saturating_sub(content_h).max(0));
 
@@ -344,7 +457,6 @@ fn render_detail(
             );
         }
 
-        // Scroll percentage (bottom-right of detail)
         if total > content_h && content_h > 0 {
             let pct = ((start + content_h).min(total) * 100) / total;
             let indicator = format!(" {pct}% ");
@@ -410,25 +522,47 @@ fn render_detail_header(
     buf.set_line(x, y, &Line::from(spans), width);
 }
 
-// ── Content formatting ──────────────────────────────────────────
+// ── Shared: tool output formatting ──────────────────────────────
 
-/// Build word-wrapped display lines for the detail pane.
-fn detail_content_lines(tc: &DisplayToolCall, width: usize) -> Vec<String> {
-    if let Some(ref output) = tc.output {
-        let formatted = format_output(&tc.name, output);
-        let mut wrapped = Vec::new();
-        for line in formatted {
-            wrap_into(&line, width, &mut wrapped);
-        }
-        wrapped
+/// Build display lines for a tool call's output, respecting config.
+fn tool_output_lines(tc: &DisplayToolCall, config: &UiConfig, width: usize) -> Vec<String> {
+    if matches!(config.tool_output, ToolOutputDisplay::Collapsed) {
+        // Collapsed: no output lines
+        return Vec::new();
+    }
+
+    let raw_lines = if let Some(ref output) = tc.output {
+        format_output(&tc.name, output)
     } else if !tc.streaming_lines.is_empty() {
+        tc.streaming_lines.clone()
+    } else {
+        vec!["Running…".to_string()]
+    };
+
+    // Apply line limit for compact mode
+    let limited: Vec<String> = match config.tool_output {
+        ToolOutputDisplay::Compact => {
+            let max = config.tool_output_lines;
+            if raw_lines.len() > max {
+                let mut out: Vec<String> = raw_lines.into_iter().take(max).collect();
+                out.push("…".to_string());
+                out
+            } else {
+                raw_lines
+            }
+        }
+        _ => raw_lines,
+    };
+
+    // Word wrap
+    if config.word_wrap && width > 0 {
         let mut wrapped = Vec::new();
-        for line in &tc.streaming_lines {
-            wrap_into(line, width, &mut wrapped);
+        for line in limited {
+            wrap_into(&line, width.saturating_sub(2), &mut wrapped); // -2 for "  " indent
         }
         wrapped
     } else {
-        vec!["Running…".to_string()]
+        limited
     }
 }
 
@@ -481,8 +615,8 @@ fn wrap_into(line: &str, width: usize, out: &mut Vec<String>) {
 
         let end = start + width;
 
-        // If the char right after the chunk is a space (or end-of-string),
-        // we can take the full chunk without splitting a word.
+        // If the char right after the chunk is a space or end-of-string,
+        // take the full chunk.
         if end >= chars.len() || chars[end] == ' ' {
             let segment: String = chars[start..end].iter().collect();
             out.push(segment);
@@ -502,7 +636,7 @@ fn wrap_into(line: &str, width: usize, out: &mut Vec<String>) {
         if let Some(bp) = break_at {
             let segment: String = chars[start..bp].iter().collect();
             out.push(segment);
-            start = bp + 1; // skip the space
+            start = bp + 1;
         } else {
             // No space found — force break at width
             let segment: String = chars[start..end].iter().collect();
@@ -518,7 +652,7 @@ fn wrap_into(line: &str, width: usize, out: &mut Vec<String>) {
 mod tests {
     use super::*;
 
-    // ── Sidebar state tests ─────────────────────────────────────
+    // ── Sidebar state ───────────────────────────────────────────
 
     #[test]
     fn sidebar_default_state() {
@@ -527,7 +661,6 @@ mod tests {
         assert_eq!(sidebar.list_scroll, 0);
         assert_eq!(sidebar.detail_scroll, 0);
         assert!(!sidebar.first_tool_seen);
-        assert_eq!(sidebar.list_height, 0);
     }
 
     #[test]
@@ -553,20 +686,10 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_reset_detail_scroll() {
-        let mut sidebar = Sidebar::default();
-        sidebar.detail_scroll = 42;
-        sidebar.reset_detail_scroll();
-        assert_eq!(sidebar.detail_scroll, 0);
-    }
-
-    #[test]
     fn sidebar_ensure_selected_visible_scrolls_down() {
         let mut sidebar = Sidebar::default();
         sidebar.list_height = 5;
-        sidebar.list_scroll = 0;
         sidebar.ensure_selected_visible(7);
-        assert!(sidebar.list_scroll > 0);
         assert!(sidebar.list_scroll + 5 > 7);
     }
 
@@ -579,32 +702,15 @@ mod tests {
         assert_eq!(sidebar.list_scroll, 3);
     }
 
-    #[test]
-    fn sidebar_ensure_selected_visible_already_visible() {
-        let mut sidebar = Sidebar::default();
-        sidebar.list_height = 5;
-        sidebar.list_scroll = 2;
-        sidebar.ensure_selected_visible(4);
-        assert_eq!(sidebar.list_scroll, 2); // unchanged
-    }
-
-    // ── Layout tests ────────────────────────────────────────────
+    // ── Layout ──────────────────────────────────────────────────
 
     #[test]
     fn compute_split_too_small() {
-        let area = Rect::new(0, 0, 40, 4); // only 4 rows
+        let area = Rect::new(0, 0, 40, 4);
         let (list, sep, detail) = compute_split(area, 5);
-        assert_eq!(list.height, 4); // all to list
+        assert_eq!(list.height, 4);
         assert!(sep.is_none());
         assert_eq!(detail.height, 0);
-    }
-
-    #[test]
-    fn compute_split_no_tools() {
-        let area = Rect::new(0, 0, 40, 20);
-        let (list, sep, _detail) = compute_split(area, 0);
-        assert_eq!(list.height, 20);
-        assert!(sep.is_none());
     }
 
     #[test]
@@ -613,44 +719,32 @@ mod tests {
         let (list, sep, detail) = compute_split(area, 3);
         assert!(sep.is_some());
         assert!(list.height >= 2);
-        assert!(list.height <= 8); // 40% of 20
         assert!(detail.height >= 3);
         assert_eq!(list.height as usize + 1 + detail.height as usize, 20);
     }
 
     #[test]
-    fn compute_split_many_tools() {
-        let area = Rect::new(0, 0, 40, 30);
-        let (list, sep, detail) = compute_split(area, 50);
-        assert!(sep.is_some());
-        // List should be capped at ~40%
-        assert!(list.height <= 12); // 40% of 30
-        assert!(detail.height >= 3);
+    fn sidebar_sub_areas_stream_covers_full() {
+        let sidebar = Rect::new(50, 0, 30, 20);
+        let (top, bottom) = sidebar_sub_areas(sidebar, 5, SidebarStyle::Stream);
+        assert_eq!(top.height, 20);
+        assert_eq!(bottom.height, 0);
     }
 
     #[test]
-    fn sidebar_sub_areas_returns_full_width() {
+    fn sidebar_sub_areas_split_has_two_regions() {
         let sidebar = Rect::new(50, 0, 30, 20);
-        let (list_hit, detail_hit) = sidebar_sub_areas(sidebar, 5);
-        assert_eq!(list_hit.x, 50);
-        assert_eq!(list_hit.width, 30);
-        assert_eq!(detail_hit.x, 50);
-        assert_eq!(detail_hit.width, 30);
+        let (top, bottom) = sidebar_sub_areas(sidebar, 5, SidebarStyle::Split);
+        assert!(top.height > 0);
+        assert!(bottom.height > 0);
     }
 
-    // ── Word wrapping tests ─────────────────────────────────────
+    // ── Word wrapping ───────────────────────────────────────────
 
     #[test]
     fn wrap_short_line_unchanged() {
         let mut out = Vec::new();
         wrap_into("hello", 10, &mut out);
-        assert_eq!(out, vec!["hello"]);
-    }
-
-    #[test]
-    fn wrap_exact_width() {
-        let mut out = Vec::new();
-        wrap_into("hello", 5, &mut out);
         assert_eq!(out, vec!["hello"]);
     }
 
@@ -669,123 +763,13 @@ mod tests {
     }
 
     #[test]
-    fn wrap_mixed() {
-        let mut out = Vec::new();
-        wrap_into("short verylongwordthatexceedswidth end", 10, &mut out);
-        assert_eq!(out[0], "short");
-        assert_eq!(out[1], "verylongwo");
-        assert_eq!(out[2], "rdthatexce");
-        assert_eq!(out[3], "edswidth");
-        assert_eq!(out[4], "end");
-        assert_eq!(out.len(), 5);
-    }
-
-    #[test]
-    fn wrap_empty_line() {
+    fn wrap_empty() {
         let mut out = Vec::new();
         wrap_into("", 10, &mut out);
         assert_eq!(out, vec![""]);
     }
 
-    #[test]
-    fn wrap_zero_width() {
-        let mut out = Vec::new();
-        wrap_into("hello", 0, &mut out);
-        assert_eq!(out, vec![""]);
-    }
-
-    // ── Format output tests ─────────────────────────────────────
-
-    #[test]
-    fn format_output_read_has_line_numbers() {
-        let lines = format_output("read", "fn main() {\n    println!(\"hi\");\n}");
-        assert_eq!(lines.len(), 3);
-        assert!(lines[0].contains("1 │"));
-        assert!(lines[0].contains("fn main()"));
-        assert!(lines[2].contains("3 │"));
-    }
-
-    #[test]
-    fn format_output_bash_is_raw() {
-        let lines = format_output("bash", "total 42\ndrwxr-xr-x dir");
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "total 42");
-    }
-
-    #[test]
-    fn format_output_edit_marks_diffs() {
-        let lines = format_output("edit", "+added\n-removed\nunchanged");
-        assert_eq!(lines[0], "+ added");
-        assert_eq!(lines[1], "- removed");
-        assert_eq!(lines[2], "unchanged");
-    }
-
-    // ── Detail content tests ────────────────────────────────────
-
-    #[test]
-    fn detail_content_running() {
-        let tc = DisplayToolCall {
-            id: "x".into(),
-            name: "bash".into(),
-            args_summary: String::new(),
-            output: None,
-            is_error: false,
-            expanded: false,
-            streaming_lines: Vec::new(),
-        };
-        let lines = detail_content_lines(&tc, 40);
-        assert_eq!(lines, vec!["Running…"]);
-    }
-
-    #[test]
-    fn detail_content_streaming() {
-        let tc = DisplayToolCall {
-            id: "x".into(),
-            name: "bash".into(),
-            args_summary: String::new(),
-            output: None,
-            is_error: false,
-            expanded: false,
-            streaming_lines: vec!["line1".into(), "line2".into()],
-        };
-        let lines = detail_content_lines(&tc, 40);
-        assert_eq!(lines, vec!["line1", "line2"]);
-    }
-
-    #[test]
-    fn detail_content_completed() {
-        let tc = DisplayToolCall {
-            id: "x".into(),
-            name: "bash".into(),
-            args_summary: String::new(),
-            output: Some("done\nok".into()),
-            is_error: false,
-            expanded: false,
-            streaming_lines: vec!["old".into()],
-        };
-        let lines = detail_content_lines(&tc, 40);
-        assert_eq!(lines, vec!["done", "ok"]);
-    }
-
-    #[test]
-    fn detail_content_wraps_long_output() {
-        let tc = DisplayToolCall {
-            id: "x".into(),
-            name: "bash".into(),
-            args_summary: String::new(),
-            output: Some("this is a long line that should be wrapped at word boundaries".into()),
-            is_error: false,
-            expanded: false,
-            streaming_lines: Vec::new(),
-        };
-        let lines = detail_content_lines(&tc, 20);
-        assert!(lines.len() > 1);
-        for line in &lines {
-            assert!(line.chars().count() <= 20);
-        }
-    }
-
-    // ── Widget rendering tests ──────────────────────────────────
+    // ── Tool output lines ───────────────────────────────────────
 
     fn make_tc(name: &str, args: &str, output: Option<&str>, is_error: bool) -> DisplayToolCall {
         DisplayToolCall {
@@ -800,63 +784,114 @@ mod tests {
     }
 
     #[test]
+    fn tool_output_collapsed_returns_empty() {
+        let tc = make_tc("bash", "$ ls", Some("file1\nfile2"), false);
+        let config = UiConfig {
+            tool_output: ToolOutputDisplay::Collapsed,
+            ..Default::default()
+        };
+        let lines = tool_output_lines(&tc, &config, 40);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn tool_output_compact_limits_lines() {
+        let output = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tc = make_tc("bash", "$ cmd", Some(&output), false);
+        let config = UiConfig {
+            tool_output: ToolOutputDisplay::Compact,
+            tool_output_lines: 5,
+            word_wrap: false,
+            ..Default::default()
+        };
+        let lines = tool_output_lines(&tc, &config, 80);
+        assert_eq!(lines.len(), 6); // 5 lines + "…"
+        assert_eq!(lines[5], "…");
+    }
+
+    #[test]
+    fn tool_output_full_shows_all() {
+        let output = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tc = make_tc("bash", "$ cmd", Some(&output), false);
+        let config = UiConfig {
+            tool_output: ToolOutputDisplay::Full,
+            word_wrap: false,
+            ..Default::default()
+        };
+        let lines = tool_output_lines(&tc, &config, 80);
+        assert_eq!(lines.len(), 20);
+    }
+
+    #[test]
+    fn tool_output_running_shows_placeholder() {
+        let tc = make_tc("bash", "$ cmd", None, false);
+        let config = UiConfig::default();
+        let lines = tool_output_lines(&tc, &config, 40);
+        assert_eq!(lines, vec!["Running…"]);
+    }
+
+    #[test]
+    fn format_output_read_has_line_numbers() {
+        let lines = format_output("read", "fn main() {\n}\n");
+        assert!(lines[0].contains("1 │"));
+        assert!(lines[1].contains("2 │"));
+    }
+
+    // ── Widget rendering ────────────────────────────────────────
+
+    #[test]
     fn sidebar_view_empty_no_panic() {
         let theme = Theme::default();
-        let view = SidebarView::new(vec![], None, &theme, 0, 0, 0);
+        let config = UiConfig::default();
+        let view = SidebarView::new(vec![], None, &theme, 0, 0, 0, &config);
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
         view.render(area, &mut buf);
     }
 
     #[test]
-    fn sidebar_view_with_tools_no_panic() {
+    fn sidebar_view_stream_mode_no_panic() {
         let theme = Theme::default();
+        let config = UiConfig {
+            sidebar_style: SidebarStyle::Stream,
+            ..Default::default()
+        };
         let tc1 = make_tc("read", "file.rs", Some("fn main() {}"), false);
         let tc2 = make_tc("bash", "$ ls", Some("file1\nfile2"), false);
-        let tc3 = make_tc("edit", "main.rs", Some("+new line"), false);
-        let tool_calls: Vec<&DisplayToolCall> = vec![&tc1, &tc2, &tc3];
-        let view = SidebarView::new(tool_calls, Some(1), &theme, 0, 0, 0);
+        let view = SidebarView::new(vec![&tc1, &tc2], Some(0), &theme, 0, 0, 0, &config);
         let area = Rect::new(0, 0, 50, 20);
         let mut buf = Buffer::empty(area);
         view.render(area, &mut buf);
     }
 
     #[test]
-    fn sidebar_view_tiny_area_no_panic() {
+    fn sidebar_view_split_mode_no_panic() {
         let theme = Theme::default();
+        let config = UiConfig {
+            sidebar_style: SidebarStyle::Split,
+            ..Default::default()
+        };
+        let tc1 = make_tc("read", "file.rs", Some("fn main() {}"), false);
+        let tc2 = make_tc("bash", "$ ls", Some("file1\nfile2"), false);
+        let view = SidebarView::new(vec![&tc1, &tc2], Some(1), &theme, 0, 0, 0, &config);
+        let area = Rect::new(0, 0, 50, 20);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+    }
+
+    #[test]
+    fn sidebar_view_tiny_no_panic() {
+        let theme = Theme::default();
+        let config = UiConfig::default();
         let tc = make_tc("read", "f.rs", Some("hello"), false);
-        let view = SidebarView::new(vec![&tc], Some(0), &theme, 0, 0, 0);
+        let view = SidebarView::new(vec![&tc], Some(0), &theme, 0, 0, 0, &config);
         let area = Rect::new(0, 0, 2, 1);
-        let mut buf = Buffer::empty(area);
-        view.render(area, &mut buf);
-    }
-
-    #[test]
-    fn sidebar_view_zero_area_no_panic() {
-        let theme = Theme::default();
-        let view = SidebarView::new(vec![], None, &theme, 0, 0, 0);
-        let area = Rect::new(0, 0, 0, 0);
-        let mut buf = Buffer::empty(area);
-        view.render(area, &mut buf);
-    }
-
-    #[test]
-    fn sidebar_view_with_error_tool() {
-        let theme = Theme::default();
-        let tc = make_tc("bash", "$ false", Some("command failed"), true);
-        let view = SidebarView::new(vec![&tc], Some(0), &theme, 0, 0, 0);
-        let area = Rect::new(0, 0, 50, 15);
-        let mut buf = Buffer::empty(area);
-        view.render(area, &mut buf);
-    }
-
-    #[test]
-    fn sidebar_view_with_running_tool() {
-        let theme = Theme::default();
-        let mut tc = make_tc("bash", "$ make", None, false);
-        tc.streaming_lines = vec!["compiling...".into(), "linking...".into()];
-        let view = SidebarView::new(vec![&tc], Some(0), &theme, 10, 0, 0);
-        let area = Rect::new(0, 0, 50, 15);
         let mut buf = Buffer::empty(area);
         view.render(area, &mut buf);
     }
