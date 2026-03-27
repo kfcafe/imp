@@ -19,6 +19,7 @@ use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, Widg
 use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelRegistry, ProviderRegistry};
 use imp_llm::oauth::anthropic::AnthropicOAuth;
+use imp_llm::oauth::chatgpt::ChatGptOAuth;
 use imp_llm::provider::{Context, RequestOptions, ThinkingLevel};
 use imp_llm::providers::create_provider;
 use imp_llm::{Message, Model, StreamEvent};
@@ -108,7 +109,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Log in to an LLM provider. Uses OAuth for Anthropic; prompts for an API key for all others.
+    /// Log in to an LLM provider. Uses OAuth for Anthropic and OpenAI/ChatGPT; prompts for an API key for other providers.
     Login {
         /// Provider to log in to (e.g. anthropic, openai, deepseek, groq). Defaults to anthropic.
         provider: Option<String>,
@@ -392,6 +393,13 @@ fn run_list_models() {
     }
 }
 
+fn oauth_login_success_message(auth_store: &AuthStore, provider: &str) -> String {
+    auth_store
+        .oauth_display_info(provider)
+        .map(|info| info.login_message(provider))
+        .unwrap_or_else(|| format!("Logged in to {provider} successfully."))
+}
+
 async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let auth_path = Config::user_config_dir().join("auth.json");
     let mut auth_store =
@@ -427,7 +435,45 @@ async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>
             "anthropic",
             imp_llm::auth::StoredCredential::OAuth(credential),
         )?;
-        eprintln!("Logged in to Anthropic successfully.");
+        eprintln!("{}", oauth_login_success_message(&auth_store, "anthropic"));
+    } else if provider_name == "openai" || provider_name == "openai-codex" {
+        let oauth = ChatGptOAuth::new();
+
+        eprintln!("Opening browser for OpenAI / ChatGPT login...");
+        eprintln!("If the browser doesn't open, visit the URL printed below.");
+
+        let credential = oauth
+            .login(
+                |url| {
+                    eprintln!("\n{url}\n");
+                    let _ = open_url(url);
+                },
+                || async {
+                    eprintln!("Paste the authorization code or redirect URL:");
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input).ok()?;
+                    let trimmed = input.trim().to_string();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    }
+                },
+            )
+            .await?;
+
+        auth_store.store(
+            "openai",
+            imp_llm::auth::StoredCredential::OAuth(credential.clone()),
+        )?;
+        auth_store.store(
+            "openai-codex",
+            imp_llm::auth::StoredCredential::OAuth(credential),
+        )?;
+        eprintln!(
+            "{}",
+            oauth_login_success_message(&auth_store, "openai-codex")
+        );
     } else {
         // For all other providers: prompt for an API key.
         let registry = ProviderRegistry::with_builtins();
@@ -491,10 +537,40 @@ fn parse_thinking_level(s: &str) -> ThinkingLevel {
     }
 }
 
+fn model_supports_provider(registry: &ModelRegistry, provider: &str, model_id: &str) -> bool {
+    if provider == "openai-codex" {
+        return imp_llm::model::builtin_openai_codex_models()
+            .iter()
+            .any(|model| model.id == model_id);
+    }
+
+    registry
+        .list_by_provider(provider)
+        .iter()
+        .any(|model| model.id == model_id)
+}
+
+fn should_use_chatgpt_provider(
+    cli: &Cli,
+    auth_store: &AuthStore,
+    registry: &ModelRegistry,
+    model_id: &str,
+    provider_name: &str,
+) -> bool {
+    cli.provider.is_none()
+        && cli.api_key.is_none()
+        && provider_name == "openai"
+        && auth_store.resolve_api_key_only("openai").is_err()
+        && (auth_store.get_oauth("openai").is_some()
+            || auth_store.get_oauth("openai-codex").is_some())
+        && model_supports_provider(registry, "openai-codex", model_id)
+}
+
 fn resolve_model_and_provider(
     cli: &Cli,
     config: &Config,
     registry: &ModelRegistry,
+    auth_store: &AuthStore,
 ) -> Result<(String, String), String> {
     let model_hint = cli
         .model
@@ -506,9 +582,27 @@ fn resolve_model_and_provider(
         .resolve_meta(model_hint, cli.provider.as_deref())
         .ok_or_else(|| format!("Unknown model: {model_hint}"))?;
 
-    let provider_name = cli.provider.as_deref().unwrap_or(&meta.provider);
+    let mut provider_name = cli
+        .provider
+        .as_deref()
+        .unwrap_or(&meta.provider)
+        .to_string();
+    if should_use_chatgpt_provider(cli, auth_store, registry, &meta.id, &provider_name) {
+        provider_name = "openai-codex".to_string();
+    }
 
-    Ok((meta.id.clone(), provider_name.to_string()))
+    Ok((meta.id.clone(), provider_name))
+}
+
+async fn resolve_provider_api_key(
+    auth_store: &mut AuthStore,
+    provider_name: &str,
+) -> Result<imp_llm::auth::ApiKey, imp_llm::Error> {
+    match provider_name {
+        "openai" => auth_store.resolve_api_key_only(provider_name),
+        "openai-codex" => auth_store.resolve_chatgpt_oauth().await,
+        _ => auth_store.resolve_with_refresh(provider_name).await,
+    }
 }
 
 async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std::error::Error>> {
@@ -516,8 +610,12 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
     let unit = load_mana_unit(&cwd, unit_id)?;
     let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
     let registry = ModelRegistry::with_builtins();
+    let auth_path = Config::user_config_dir().join("auth.json");
+    let mut auth_store =
+        AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
     let (model_id, provider_name) =
-        resolve_model_and_provider(cli, &config, &registry).map_err(io::Error::other)?;
+        resolve_model_and_provider(cli, &config, &registry, &auth_store)
+            .map_err(io::Error::other)?;
 
     let provider = create_provider(&provider_name)
         .ok_or_else(|| io::Error::other(format!("Unknown provider: {provider_name}")))?;
@@ -526,15 +624,11 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
         .resolve_meta(&model_id, Some(&provider_name))
         .ok_or_else(|| io::Error::other(format!("Model not found: {model_id}")))?;
 
-    let auth_path = Config::user_config_dir().join("auth.json");
-    let mut auth_store =
-        AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
-
     if let Some(ref key) = cli.api_key {
         auth_store.set_runtime_key(&provider_name, key.clone());
     }
 
-    let api_key = auth_store.resolve_with_refresh(&provider_name).await?;
+    let api_key = resolve_provider_api_key(&mut auth_store, &provider_name).await?;
     let model = Model {
         meta,
         provider: Arc::from(provider),
@@ -1236,8 +1330,11 @@ fn create_rpc_agent(
     history: Vec<Message>,
     rpc_ui: Arc<RpcUi>,
 ) -> Result<(Agent, AgentHandle), Box<dyn std::error::Error>> {
+    let auth_path = Config::user_config_dir().join("auth.json");
+    let mut auth_store =
+        AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
     let (model_id, provider_name) =
-        resolve_model_and_provider(cli, config, registry).map_err(io::Error::other)?;
+        resolve_model_and_provider(cli, config, registry, &auth_store).map_err(io::Error::other)?;
 
     let provider = create_provider(&provider_name)
         .ok_or_else(|| io::Error::other(format!("Unknown provider: {provider_name}")))?;
@@ -1246,16 +1343,13 @@ fn create_rpc_agent(
         .resolve_meta(&model_id, Some(&provider_name))
         .ok_or_else(|| io::Error::other(format!("Model not found: {model_id}")))?;
 
-    let auth_path = Config::user_config_dir().join("auth.json");
-    let mut auth_store =
-        AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
-
     if let Some(ref key) = cli.api_key {
         auth_store.set_runtime_key(&provider_name, key.clone());
     }
 
     let api_key = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(auth_store.resolve_with_refresh(&provider_name))
+        tokio::runtime::Handle::current()
+            .block_on(resolve_provider_api_key(&mut auth_store, &provider_name))
     })?;
     let model = Model {
         meta,
@@ -1536,8 +1630,12 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
     let mut config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
 
     let registry = ModelRegistry::with_builtins();
-    let (model_id, provider_name) = resolve_model_and_provider(cli, &config, &registry)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let auth_path = Config::user_config_dir().join("auth.json");
+    let mut auth_store =
+        AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+    let (model_id, provider_name) =
+        resolve_model_and_provider(cli, &config, &registry, &auth_store)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     let provider = create_provider(&provider_name)
         .ok_or_else(|| format!("Unknown provider: {provider_name}"))?;
@@ -1546,16 +1644,11 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         .resolve_meta(&model_id, Some(&provider_name))
         .ok_or_else(|| format!("Model not found: {model_id}"))?;
 
-    // Resolve API key
-    let auth_path = Config::user_config_dir().join("auth.json");
-    let mut auth_store =
-        AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
-
     if let Some(ref key) = cli.api_key {
         auth_store.set_runtime_key(&provider_name, key.clone());
     }
 
-    let api_key = auth_store.resolve_with_refresh(&provider_name).await?;
+    let api_key = resolve_provider_api_key(&mut auth_store, &provider_name).await?;
 
     let model = Model {
         meta,
@@ -1878,6 +1971,7 @@ fn build_full_prompt(prompt: &str, file_context: &str, stdin: &Option<String>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use imp_llm::auth::{OAuthCredential, StoredCredential};
     use imp_llm::provider::ThinkingLevel;
     use serde_json::json;
 
@@ -1903,6 +1997,10 @@ mod tests {
             args: Vec::new(),
             command: None,
         }
+    }
+
+    fn empty_auth_store() -> AuthStore {
+        AuthStore::new(std::path::PathBuf::from("auth.json"))
     }
 
     // ── parse_thinking_level ───────────────────────────────────────
@@ -1948,7 +2046,9 @@ mod tests {
         let cli = default_cli();
         let config = Config::default();
         let registry = ModelRegistry::with_builtins();
-        let (model_id, provider) = resolve_model_and_provider(&cli, &config, &registry).unwrap();
+        let auth_store = empty_auth_store();
+        let (model_id, provider) =
+            resolve_model_and_provider(&cli, &config, &registry, &auth_store).unwrap();
         // Default is "sonnet"
         assert!(
             model_id.contains("sonnet"),
@@ -1963,7 +2063,9 @@ mod tests {
         cli.model = Some("haiku".to_string());
         let config = Config::default();
         let registry = ModelRegistry::with_builtins();
-        let (model_id, provider) = resolve_model_and_provider(&cli, &config, &registry).unwrap();
+        let auth_store = empty_auth_store();
+        let (model_id, provider) =
+            resolve_model_and_provider(&cli, &config, &registry, &auth_store).unwrap();
         assert!(model_id.contains("haiku"), "expected haiku, got {model_id}");
         assert_eq!(provider, "anthropic");
     }
@@ -1974,7 +2076,8 @@ mod tests {
         cli.model = Some("nonexistent-xyz".to_string());
         let config = Config::default();
         let registry = ModelRegistry::with_builtins();
-        let result = resolve_model_and_provider(&cli, &config, &registry);
+        let auth_store = empty_auth_store();
+        let result = resolve_model_and_provider(&cli, &config, &registry, &auth_store);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown model"));
     }
@@ -1985,7 +2088,9 @@ mod tests {
         cli.model = Some("gpt-4o".to_string());
         let config = Config::default();
         let registry = ModelRegistry::with_builtins();
-        let (model_id, provider) = resolve_model_and_provider(&cli, &config, &registry).unwrap();
+        let auth_store = empty_auth_store();
+        let (model_id, provider) =
+            resolve_model_and_provider(&cli, &config, &registry, &auth_store).unwrap();
         assert_eq!(model_id, "gpt-4o");
         assert_eq!(provider, "openai");
     }
@@ -1997,7 +2102,9 @@ mod tests {
         let mut config = Config::default();
         config.model = Some("sonnet".to_string());
         let registry = ModelRegistry::with_builtins();
-        let (model_id, _) = resolve_model_and_provider(&cli, &config, &registry).unwrap();
+        let auth_store = empty_auth_store();
+        let (model_id, _) =
+            resolve_model_and_provider(&cli, &config, &registry, &auth_store).unwrap();
         assert!(
             model_id.contains("haiku"),
             "CLI --model should override config"
@@ -2011,7 +2118,95 @@ mod tests {
         // Use default sonnet — provider override just changes provider name
         let config = Config::default();
         let registry = ModelRegistry::with_builtins();
-        let (_, provider) = resolve_model_and_provider(&cli, &config, &registry).unwrap();
+        let auth_store = empty_auth_store();
+        let (_, provider) =
+            resolve_model_and_provider(&cli, &config, &registry, &auth_store).unwrap();
+        assert_eq!(provider, "openai");
+    }
+
+    #[test]
+    fn resolve_model_prefers_chatgpt_provider_when_only_oauth_is_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut auth_store = AuthStore::new(path);
+        auth_store
+            .store(
+                "openai",
+                StoredCredential::OAuth(OAuthCredential {
+                    access_token: "oauth-token".into(),
+                    refresh_token: "refresh-token".into(),
+                    expires_at: imp_llm::now() + 3600,
+                }),
+            )
+            .unwrap();
+
+        let mut config = Config::default();
+        config.model = Some("gpt-5.4".to_string());
+        let registry = ModelRegistry::with_builtins();
+
+        let (model_id, provider) =
+            resolve_model_and_provider(&default_cli(), &config, &registry, &auth_store).unwrap();
+        assert_eq!(model_id, "gpt-5.4");
+        assert_eq!(provider, "openai-codex");
+    }
+
+    #[test]
+    fn resolve_model_keeps_openai_when_api_key_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut auth_store = AuthStore::new(path);
+        auth_store
+            .store(
+                "openai",
+                StoredCredential::ApiKey {
+                    key: "sk-openai".into(),
+                },
+            )
+            .unwrap();
+        auth_store
+            .store(
+                "openai-codex",
+                StoredCredential::OAuth(OAuthCredential {
+                    access_token: "oauth-token".into(),
+                    refresh_token: "refresh-token".into(),
+                    expires_at: imp_llm::now() + 3600,
+                }),
+            )
+            .unwrap();
+
+        let mut config = Config::default();
+        config.model = Some("gpt-5.4".to_string());
+        let registry = ModelRegistry::with_builtins();
+
+        let (model_id, provider) =
+            resolve_model_and_provider(&default_cli(), &config, &registry, &auth_store).unwrap();
+        assert_eq!(model_id, "gpt-5.4");
+        assert_eq!(provider, "openai");
+    }
+
+    #[test]
+    fn resolve_custom_openai_model_does_not_switch_to_chatgpt_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut auth_store = AuthStore::new(path);
+        auth_store
+            .store(
+                "openai",
+                StoredCredential::OAuth(OAuthCredential {
+                    access_token: "oauth-token".into(),
+                    refresh_token: "refresh-token".into(),
+                    expires_at: imp_llm::now() + 3600,
+                }),
+            )
+            .unwrap();
+
+        let mut config = Config::default();
+        config.model = Some("gpt-4o".to_string());
+        let registry = ModelRegistry::with_builtins();
+
+        let (model_id, provider) =
+            resolve_model_and_provider(&default_cli(), &config, &registry, &auth_store).unwrap();
+        assert_eq!(model_id, "gpt-4o");
         assert_eq!(provider, "openai");
     }
 

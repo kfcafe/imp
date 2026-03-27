@@ -24,6 +24,7 @@ use imp_llm::{Cost, Message, Model, StreamEvent, ThinkingLevel, Usage};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
+use ratatui::widgets::Clear;
 use ratatui::{Frame, Terminal};
 
 use crate::highlight::Highlighter;
@@ -34,6 +35,7 @@ use crate::views::chat::{ChatView, DisplayMessage, MessageRole};
 use crate::views::command_palette::{builtin_commands, CommandPaletteState, CommandPaletteView};
 use crate::views::editor::{EditorState, EditorView};
 use crate::views::file_finder::{collect_project_files, FileFinderState, FileFinderView};
+use crate::views::login_picker::{oauth_login_providers, LoginPickerState, LoginPickerView};
 use crate::views::model_selector::{ModelSelection, ModelSelectorState, ModelSelectorView};
 use crate::views::session_picker::{SessionPickerState, SessionPickerView};
 use crate::views::settings::{SettingsState, SettingsView};
@@ -60,6 +62,7 @@ pub enum UiMode {
     ModelSelector(ModelSelectorState),
     CommandPalette(CommandPaletteState),
     FileFinder(FileFinderState),
+    LoginPicker(LoginPickerState),
     TreeView(TreeViewState),
     Settings(SettingsState),
     SessionPicker(SessionPickerState),
@@ -78,6 +81,12 @@ pub enum QueuedMessage {
 pub enum AskReply {
     Select(tokio::sync::oneshot::Sender<Option<usize>>),
     Input(tokio::sync::oneshot::Sender<Option<String>>),
+}
+
+#[derive(Debug)]
+enum LoginStatusEvent {
+    Success(String),
+    Error(String),
 }
 
 pub struct App {
@@ -109,6 +118,10 @@ pub struct App {
     /// Index into the flattened tool call list — `None` means no tool focused.
     pub tool_focus: Option<usize>,
 
+    /// Whether terminal mouse capture is currently enabled. When false, normal
+    /// terminal text selection/copy should work.
+    pub mouse_capture_enabled: bool,
+
     pub ctrl_c_count: u8,
     pub needs_redraw: bool,
     pub last_esc: Option<Instant>,
@@ -117,6 +130,8 @@ pub struct App {
     pub ui_rx: Option<tokio::sync::mpsc::Receiver<crate::tui_interface::UiRequest>>,
     pub ask_state: Option<crate::views::ask_bar::AskState>,
     pub ask_reply: Option<AskReply>,
+    login_status_tx: tokio::sync::mpsc::UnboundedSender<LoginStatusEvent>,
+    login_status_rx: tokio::sync::mpsc::UnboundedReceiver<LoginStatusEvent>,
 
     // Accumulated stats
     pub accumulated_usage: Usage,
@@ -151,6 +166,52 @@ pub struct App {
     pub model_registry: ModelRegistry,
 }
 
+fn model_supports_provider(registry: &ModelRegistry, provider: &str, model_id: &str) -> bool {
+    if provider == "openai-codex" {
+        return imp_llm::model::builtin_openai_codex_models()
+            .iter()
+            .any(|model| model.id == model_id);
+    }
+
+    registry
+        .list_by_provider(provider)
+        .iter()
+        .any(|model| model.id == model_id)
+}
+
+fn should_use_chatgpt_provider(
+    auth_store: &AuthStore,
+    registry: &ModelRegistry,
+    meta: &ModelMeta,
+) -> bool {
+    meta.provider == "openai"
+        && auth_store.resolve_api_key_only("openai").is_err()
+        && (auth_store.get_oauth("openai").is_some()
+            || auth_store.get_oauth("openai-codex").is_some())
+        && model_supports_provider(registry, "openai-codex", &meta.id)
+}
+
+async fn resolve_provider_api_key(
+    auth_store: &mut AuthStore,
+    provider_name: &str,
+) -> Result<String, imp_llm::Error> {
+    match provider_name {
+        "openai" => auth_store.resolve_api_key_only(provider_name),
+        "openai-codex" => auth_store.resolve_chatgpt_oauth().await,
+        _ => auth_store.resolve_with_refresh(provider_name).await,
+    }
+}
+
+fn provider_logged_in(auth_store: &AuthStore, provider: &str) -> bool {
+    match provider {
+        "openai" => {
+            auth_store.get_oauth("openai").is_some()
+                || auth_store.get_oauth("openai-codex").is_some()
+        }
+        _ => auth_store.get_oauth(provider).is_some(),
+    }
+}
+
 impl App {
     pub fn new(
         config: Config,
@@ -165,6 +226,9 @@ impl App {
             .resolve_meta(&model_name, None)
             .map(|m| m.context_window)
             .unwrap_or(200_000);
+        let (login_status_tx, login_status_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mouse_capture_enabled = config.ui.mouse_capture;
 
         Self {
             running: true,
@@ -184,6 +248,7 @@ impl App {
             auto_scroll: true,
             tools_expanded: false,
             tool_focus: None,
+            mouse_capture_enabled,
 
             ctrl_c_count: 0,
             needs_redraw: true,
@@ -193,6 +258,8 @@ impl App {
             ui_rx: None,
             ask_state: None,
             ask_reply: None,
+            login_status_tx,
+            login_status_rx,
             accumulated_usage: Usage::default(),
             accumulated_cost: Cost::default(),
             current_context_tokens: 0,
@@ -213,7 +280,12 @@ impl App {
     /// Load messages from the current session branch into display messages.
     pub fn load_session_messages(&mut self) {
         self.messages.clear();
-        for msg in self.session.get_messages() {
+
+        let mut branch_messages: Vec<Message> =
+            self.session.get_messages().into_iter().cloned().collect();
+        imp_core::session::sanitize_messages(&mut branch_messages);
+
+        for msg in &branch_messages {
             match msg {
                 // Attach tool results to their parent tool call display entry
                 imp_llm::Message::ToolResult(tr) => {
@@ -266,7 +338,10 @@ impl App {
         // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        crossterm::execute!(stdout, EnterAlternateScreen)?;
+        if self.mouse_capture_enabled {
+            crossterm::execute!(stdout, EnableMouseCapture)?;
+        }
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
@@ -274,11 +349,10 @@ impl App {
 
         // Restore terminal (always, even on error)
         disable_raw_mode()?;
-        crossterm::execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
+        crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        if self.mouse_capture_enabled {
+            crossterm::execute!(terminal.backend_mut(), DisableMouseCapture)?;
+        }
         terminal.show_cursor()?;
 
         result
@@ -303,7 +377,9 @@ impl App {
                         self.handle_key(key)?;
                     }
                     Event::Mouse(mouse) => {
-                        self.handle_mouse(mouse);
+                        if self.mouse_capture_enabled {
+                            self.handle_mouse(mouse);
+                        }
                     }
                     Event::Resize(_, _) => {
                         self.needs_redraw = true;
@@ -315,6 +391,7 @@ impl App {
             // Drain agent events and UI requests (non-blocking)
             self.drain_agent_events();
             self.drain_ui_requests();
+            self.drain_login_status();
 
             // Tick + periodic redraw for streaming/spinner
             self.tick = self.tick.wrapping_add(1);
@@ -445,13 +522,16 @@ impl App {
 
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
-
-        // Editor height: at least 3 lines, up to 1/3 of screen
-        let editor_height = (self.editor.line_count() as u16 + 2)
-            .max(3)
-            .min(area.height / 3);
+        frame.render_widget(Clear, area);
 
         let ask_height = self.ask_state.as_ref().map(|s| s.height()).unwrap_or(0);
+
+        // Editor height: grow to fit wrapped prompt text while preserving at least
+        // 3 lines for the chat area and 1 for the top bar.
+        let editor_inner_width = area.width.saturating_sub(2).max(1);
+        let desired_editor_height = self.editor.visual_line_count(editor_inner_width) as u16 + 2;
+        let max_editor_height = area.height.saturating_sub(1 + ask_height + 3).max(3);
+        let editor_height = desired_editor_height.clamp(3, max_editor_height);
 
         let constraints = if ask_height > 0 {
             vec![
@@ -503,10 +583,15 @@ impl App {
 
         // Messages
         let chat_tool_display = self.config.ui.effective_chat_tool_display();
+        let chat_tool_focus = if self.active_pane == Pane::Chat {
+            self.tool_focus
+        } else {
+            None
+        };
         let chat = ChatView::new(&self.messages, &self.theme, &self.highlighter)
             .scroll(self.scroll_offset)
             .tick(self.tick)
-            .tool_focus(self.tool_focus)
+            .tool_focus(chat_tool_focus)
             .word_wrap(self.config.ui.word_wrap)
             .chat_tool_display(chat_tool_display)
             .thinking_lines(self.config.ui.thinking_lines)
@@ -596,6 +681,11 @@ impl App {
                 let view = FileFinderView::new(state, &self.theme);
                 frame.render_widget(view, finder_area);
             }
+            UiMode::LoginPicker(state) => {
+                let overlay_area = centered_rect(60, 40, area);
+                let view = LoginPickerView::new(state, &self.theme);
+                frame.render_widget(view, overlay_area);
+            }
             UiMode::TreeView(state) => {
                 let tree_area = centered_rect(80, 80, area);
                 let view = TreeView::new(state, &self.theme);
@@ -652,6 +742,10 @@ impl App {
         } else {
             0.0
         };
+        let mut extension_items = self.status_items.clone();
+        if let Some(info) = self.current_oauth_display_info() {
+            extension_items.insert("oauth".into(), info.status_summary());
+        }
 
         StatusInfo {
             cwd,
@@ -667,8 +761,19 @@ impl App {
             show_cost: self.config.ui.show_cost,
             show_context_usage: self.config.ui.show_context_usage,
             peek: self.tools_expanded,
-            extension_items: self.status_items.clone(),
+            extension_items,
         }
+    }
+
+    fn current_oauth_display_info(&self) -> Option<imp_llm::auth::OAuthDisplayInfo> {
+        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_store = AuthStore::load(&auth_path).ok()?;
+        let meta = self.model_registry.resolve_meta(&self.model_name, None)?;
+        let mut provider_name = meta.provider.clone();
+        if should_use_chatgpt_provider(&auth_store, &self.model_registry, &meta) {
+            provider_name = "openai-codex".to_string();
+        }
+        auth_store.oauth_display_info(&provider_name)
     }
 
     // ── Key handling ────────────────────────────────────────────
@@ -690,9 +795,10 @@ impl App {
         // Route based on current UI mode
         match &self.mode {
             UiMode::Normal => self.handle_normal_key(key)?,
-            UiMode::ModelSelector(_) | UiMode::CommandPalette(_) | UiMode::FileFinder(_) => {
-                self.handle_overlay_key(key)
-            }
+            UiMode::ModelSelector(_)
+            | UiMode::CommandPalette(_)
+            | UiMode::FileFinder(_)
+            | UiMode::LoginPicker(_) => self.handle_overlay_key(key),
             UiMode::TreeView(_) => self.handle_tree_key(key),
             UiMode::Settings(_) => self.handle_settings_key(key),
             UiMode::SessionPicker(_) => self.handle_session_picker_key(key),
@@ -895,12 +1001,14 @@ impl App {
                 UiMode::ModelSelector(s) => s.move_up(),
                 UiMode::CommandPalette(s) => s.move_up(),
                 UiMode::FileFinder(s) => s.move_up(),
+                UiMode::LoginPicker(s) => s.move_up(),
                 _ => {}
             },
             Some(Action::OverlayDown) => match &mut self.mode {
                 UiMode::ModelSelector(s) => s.move_down(),
                 UiMode::CommandPalette(s) => s.move_down(),
                 UiMode::FileFinder(s) => s.move_down(),
+                UiMode::LoginPicker(s) => s.move_down(),
                 _ => {}
             },
             Some(Action::OverlayFilter(c)) => match &mut self.mode {
@@ -966,6 +1074,11 @@ impl App {
                     for c in file.chars() {
                         self.editor.insert_char(c);
                     }
+                }
+            }
+            UiMode::LoginPicker(state) => {
+                if let Some(provider) = state.selected_provider() {
+                    self.start_login(provider.id);
                 }
             }
             _ => {
@@ -1173,23 +1286,31 @@ impl App {
     // ── Commands ────────────────────────────────────────────────
 
     fn spawn_agent_for_prompt(&mut self, prompt: &str) -> Result<(), String> {
-        let meta = self
-            .model_registry
-            .resolve_meta(&self.model_name, None)
-            .ok_or_else(|| format!("Unknown model: {}", self.model_name))?;
-
-        let provider_name = meta.provider.clone();
-        let provider = create_provider(&provider_name)
-            .ok_or_else(|| format!("Unknown provider: {provider_name}"))?;
-
         let auth_path = Config::user_config_dir().join("auth.json");
         let mut auth_store =
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
 
+        let mut meta = self
+            .model_registry
+            .resolve_meta(&self.model_name, None)
+            .ok_or_else(|| format!("Unknown model: {}", self.model_name))?;
+
+        let mut provider_name = meta.provider.clone();
+        if should_use_chatgpt_provider(&auth_store, &self.model_registry, &meta) {
+            provider_name = "openai-codex".to_string();
+            meta = self
+                .model_registry
+                .resolve_meta(&self.model_name, Some(&provider_name))
+                .ok_or_else(|| format!("Unknown model: {}", self.model_name))?;
+        }
+
+        let provider = create_provider(&provider_name)
+            .ok_or_else(|| format!("Unknown provider: {provider_name}"))?;
+
         // Resolve API key with auto-refresh for expired OAuth tokens
         let api_key = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
-                .block_on(auth_store.resolve_with_refresh(&provider_name))
+                .block_on(resolve_provider_api_key(&mut auth_store, &provider_name))
         })
         .map_err(|e: imp_llm::Error| e.to_string())?;
 
@@ -1461,6 +1582,25 @@ impl App {
                     Err(e) => self.push_system_msg(&format!("Fork failed: {e}")),
                 }
             }
+            "mouse" => {
+                let arg = cmd
+                    .split_whitespace()
+                    .nth(1)
+                    .map(|s| s.to_ascii_lowercase());
+                let enable = match arg.as_deref() {
+                    Some("on") | Some("enable") | Some("enabled") => Some(true),
+                    Some("off") | Some("disable") | Some("disabled") => Some(false),
+                    Some(_) => {
+                        self.push_system_msg("Usage: /mouse [on|off]");
+                        None
+                    }
+                    None => Some(!self.mouse_capture_enabled),
+                };
+
+                if let Some(enable) = enable {
+                    self.set_mouse_capture(enable);
+                }
+            }
             "help" => {
                 self.push_system_msg(concat!(
                     "Commands:\n",
@@ -1473,16 +1613,20 @@ impl App {
                     "  /name <n>   — rename session\n",
                     "  /export [f] — export to markdown\n",
                     "  /copy       — copy last response\n",
+                    "  /mouse [on|off] — toggle mouse mode vs text selection\n",
                     "  /reload     — reload config\n",
                     "  /settings   — edit settings\n",
-                    "  /login      — OAuth login\n",
+                    "  /login [provider] — OAuth login\n",
                     "  /help       — this message\n",
                     "  /quit       — exit",
                 ));
             }
             "login" => {
-                let provider = cmd.split_whitespace().nth(1).unwrap_or("anthropic");
-                self.start_login(provider);
+                if let Some(provider) = cmd.split_whitespace().nth(1) {
+                    self.start_login(provider);
+                } else {
+                    self.open_login_picker();
+                }
             }
             "welcome" | "setup" => {
                 let all_models = self.model_registry.list().to_vec();
@@ -1604,22 +1748,29 @@ impl App {
     }
 
     fn start_login(&mut self, provider: &str) {
-        if provider != "anthropic" {
-            self.messages.push(DisplayMessage {
-                role: MessageRole::Error,
-                content: format!("Login for '{provider}' not supported. Set API key via env var."),
-                thinking: None,
-                tool_calls: Vec::new(),
-                assistant_blocks: Vec::new(),
-                is_streaming: false,
-                timestamp: imp_llm::now(),
-            });
-            return;
-        }
+        let status_message = match provider {
+            "anthropic" => "Opening browser for Anthropic login...",
+            "openai" | "openai-codex" => "Opening browser for OpenAI / ChatGPT login...",
+            _ => {
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::Error,
+                    content: format!(
+                        "Login for '{provider}' not supported. Set API key via env var."
+                    ),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+                return;
+            }
+        };
 
+        self.mode = UiMode::Normal;
         self.messages.push(DisplayMessage {
             role: MessageRole::System,
-            content: "Opening browser for Anthropic login...".into(),
+            content: status_message.into(),
             thinking: None,
             tool_calls: Vec::new(),
             assistant_blocks: Vec::new(),
@@ -1627,53 +1778,136 @@ impl App {
             timestamp: imp_llm::now(),
         });
 
-        // Run OAuth flow in background
+        let login_status_tx = self.login_status_tx.clone();
         let auth_path = Config::user_config_dir().join("auth.json");
+        let provider = provider.to_string();
         tokio::spawn(async move {
-            let oauth = imp_llm::oauth::anthropic::AnthropicOAuth::new();
-            match oauth
-                .login(
-                    |url| {
-                        #[cfg(target_os = "macos")]
-                        {
-                            let _ = std::process::Command::new("open").arg(url).spawn();
-                        }
-                        #[cfg(target_os = "linux")]
-                        {
-                            let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-                        }
-                        #[cfg(target_os = "windows")]
-                        {
-                            let _ = std::process::Command::new("cmd")
-                                .args(["/C", "start", url])
-                                .spawn();
-                        }
-                    },
-                    || async { None }, // No manual fallback in TUI — browser only
-                )
-                .await
-            {
+            let login_result = match provider.as_str() {
+                "anthropic" => {
+                    imp_llm::oauth::anthropic::AnthropicOAuth::new()
+                        .login(
+                            |url| {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    let _ = std::process::Command::new("open").arg(url).spawn();
+                                }
+                                #[cfg(target_os = "linux")]
+                                {
+                                    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+                                }
+                                #[cfg(target_os = "windows")]
+                                {
+                                    let _ = std::process::Command::new("cmd")
+                                        .args(["/C", "start", url])
+                                        .spawn();
+                                }
+                            },
+                            || async { None },
+                        )
+                        .await
+                }
+                "openai" | "openai-codex" => {
+                    imp_llm::oauth::chatgpt::ChatGptOAuth::new()
+                        .login(
+                            |url| {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    let _ = std::process::Command::new("open").arg(url).spawn();
+                                }
+                                #[cfg(target_os = "linux")]
+                                {
+                                    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+                                }
+                                #[cfg(target_os = "windows")]
+                                {
+                                    let _ = std::process::Command::new("cmd")
+                                        .args(["/C", "start", url])
+                                        .spawn();
+                                }
+                            },
+                            || async { None },
+                        )
+                        .await
+                }
+                _ => unreachable!(),
+            };
+
+            match login_result {
                 Ok(credential) => {
+                    let success_message = imp_llm::auth::oauth_display_info_for_credential(
+                        provider.as_str(),
+                        &credential,
+                    )
+                    .map(|info| info.login_message(provider.as_str()))
+                    .unwrap_or_else(|| format!("Logged in to {} successfully.", provider));
+
                     let mut store = AuthStore::load(&auth_path)
                         .unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
-                    let _ = store.store(
-                        "anthropic",
-                        imp_llm::auth::StoredCredential::OAuth(credential),
-                    );
-                    // Note: can't push messages from here without a channel.
-                    // The user will see it worked next time they send a message.
+                    match provider.as_str() {
+                        "anthropic" => {
+                            let _ = store.store(
+                                "anthropic",
+                                imp_llm::auth::StoredCredential::OAuth(credential),
+                            );
+                        }
+                        "openai" | "openai-codex" => {
+                            let _ = store.store(
+                                "openai",
+                                imp_llm::auth::StoredCredential::OAuth(credential.clone()),
+                            );
+                            let _ = store.store(
+                                "openai-codex",
+                                imp_llm::auth::StoredCredential::OAuth(credential),
+                            );
+                        }
+                        _ => {}
+                    }
+                    let _ = login_status_tx.send(LoginStatusEvent::Success(success_message));
                 }
                 Err(e) => {
-                    eprintln!("OAuth login failed: {e}");
+                    let _ = login_status_tx
+                        .send(LoginStatusEvent::Error(format!("OAuth login failed: {e}")));
                 }
             }
         });
+    }
+
+    fn open_login_picker(&mut self) {
+        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_store =
+            AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+        let providers = oauth_login_providers()
+            .into_iter()
+            .map(|mut provider| {
+                provider.logged_in = provider_logged_in(&auth_store, provider.id);
+                provider
+            })
+            .collect();
+        self.mode = UiMode::LoginPicker(LoginPickerState::new(providers));
     }
 
     fn open_settings(&mut self) {
         let models = self.filtered_models();
         let state = SettingsState::new(&self.config, &self.model_name, &models);
         self.mode = UiMode::Settings(state);
+    }
+
+    fn drain_login_status(&mut self) {
+        while let Ok(event) = self.login_status_rx.try_recv() {
+            match event {
+                LoginStatusEvent::Success(message) => self.push_system_msg(&message),
+                LoginStatusEvent::Error(message) => self.messages.push(DisplayMessage {
+                    role: MessageRole::Error,
+                    content: message,
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                }),
+            }
+            self.needs_redraw = true;
+        }
     }
 
     fn handle_session_picker_key(&mut self, key: KeyEvent) {
@@ -2187,6 +2421,27 @@ impl App {
             is_streaming: false,
             timestamp: imp_llm::now(),
         });
+    }
+
+    fn set_mouse_capture(&mut self, enable: bool) {
+        self.mouse_capture_enabled = enable;
+        self.config.ui.mouse_capture = enable;
+
+        #[cfg(not(test))]
+        {
+            let mut stdout = io::stdout();
+            let _ = if enable {
+                crossterm::execute!(stdout, EnableMouseCapture)
+            } else {
+                crossterm::execute!(stdout, DisableMouseCapture)
+            };
+        }
+
+        if enable {
+            self.push_system_msg("Mouse mode enabled. Terminal text selection is disabled; use /mouse off to copy by highlighting.");
+        } else {
+            self.push_system_msg("Mouse mode disabled. You can now highlight terminal text to copy; use /mouse on to restore mouse interactions.");
+        }
     }
 
     fn export_conversation(&self, path: &std::path::Path) -> std::io::Result<()> {
@@ -2704,6 +2959,32 @@ mod session_lifecycle {
     }
 
     #[test]
+    fn tui_integration_slash_mouse_toggles_capture_mode() {
+        let mut app = make_app();
+        assert!(!app.mouse_capture_enabled);
+
+        app.execute_command("mouse");
+        assert!(app.mouse_capture_enabled);
+        assert!(app.config.ui.mouse_capture);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Mouse mode enabled"));
+
+        app.execute_command("mouse off");
+        assert!(!app.mouse_capture_enabled);
+        assert!(!app.config.ui.mouse_capture);
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Mouse mode disabled"));
+    }
+
+    #[test]
     fn tui_integration_slash_unknown_shows_error() {
         let mut app = make_app();
 
@@ -3063,6 +3344,76 @@ mod session_lifecycle {
         assert_eq!(click_map[1].1, "tc-2");
         // tc-2 should be on the row after tc-1
         assert_eq!(click_map[1].0, click_map[0].0 + 1);
+    }
+
+    #[test]
+    fn resumed_session_attaches_tool_results_persisted_before_assistant() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let session_dir = tmp.path().join("sessions");
+
+        let mut session = SessionManager::new(&cwd, &session_dir).unwrap();
+        let session_path = session.path().unwrap().to_path_buf();
+
+        let tool_result = imp_llm::ToolResultMessage {
+            tool_call_id: "tc-1".into(),
+            tool_name: "mana".into(),
+            content: vec![imp_llm::ContentBlock::Text {
+                text: "Invalid priority: 5".into(),
+            }],
+            is_error: true,
+            details: serde_json::Value::Null,
+            timestamp: imp_llm::now(),
+        };
+
+        let assistant = imp_llm::AssistantMessage {
+            content: vec![
+                imp_llm::ContentBlock::Text {
+                    text: "Trying mana create".into(),
+                },
+                imp_llm::ContentBlock::ToolCall {
+                    id: "tc-1".into(),
+                    name: "mana".into(),
+                    arguments: serde_json::json!({"action": "create", "priority": 5}),
+                },
+            ],
+            usage: None,
+            stop_reason: imp_llm::StopReason::ToolUse,
+            timestamp: imp_llm::now(),
+        };
+
+        // Persist in the same order the runtime can produce: tool_result before assistant turn end.
+        session
+            .append(SessionEntry::Message {
+                id: "tr1".into(),
+                parent_id: None,
+                message: imp_llm::Message::ToolResult(tool_result),
+            })
+            .unwrap();
+        session
+            .append(SessionEntry::Message {
+                id: "a1".into(),
+                parent_id: None,
+                message: imp_llm::Message::Assistant(assistant),
+            })
+            .unwrap();
+
+        let reopened = SessionManager::open(&session_path).unwrap();
+        let config = Config::default();
+        let registry = ModelRegistry::with_builtins();
+        let mut app = App::new(config, reopened, registry, cwd);
+        app.load_session_messages();
+
+        let tool_calls: Vec<&crate::views::tools::DisplayToolCall> = app
+            .messages
+            .iter()
+            .flat_map(|m| m.tool_calls.iter())
+            .collect();
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "tc-1");
+        assert_eq!(tool_calls[0].output.as_deref(), Some("Invalid priority: 5"));
+        assert!(tool_calls[0].is_error);
     }
 
     #[test]

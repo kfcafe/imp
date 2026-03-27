@@ -96,8 +96,9 @@ imp works with 11 LLM providers out of the box. Native integrations for Anthropi
 Set an env var and it's auto-detected — no login step needed. Prompt caching is automatic on Anthropic (system prompt, tools, recent turns).
 
 ```bash
-# Login (stores key locally)
+# Login (stores credentials locally)
 imp login              # Anthropic OAuth
+imp login openai       # OpenAI / ChatGPT OAuth
 imp login deepseek     # Prompts for API key
 imp login cerebras     # Any provider works
 

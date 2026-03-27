@@ -12,6 +12,8 @@ pub enum ApiStyle {
     Anthropic,
     /// Native OpenAI Responses API.
     OpenAi,
+    /// ChatGPT/Codex-backed OpenAI Responses API.
+    OpenAiCodex,
     /// Native Google Gemini API.
     Google,
     /// OpenAI-compatible Chat Completions API (DeepSeek, Groq, etc.).
@@ -91,6 +93,14 @@ pub fn builtin_providers() -> Vec<ProviderMeta> {
             api_base_url: None,
             docs_url: "platform.openai.com/api-keys",
             api_style: ApiStyle::OpenAi,
+        },
+        ProviderMeta {
+            id: "openai-codex",
+            name: "ChatGPT",
+            env_vars: &[],
+            api_base_url: Some("https://chatgpt.com/backend-api"),
+            docs_url: "chatgpt.com/codex",
+            api_style: ApiStyle::OpenAiCodex,
         },
         ProviderMeta {
             id: "google",
@@ -306,15 +316,20 @@ impl ModelRegistry {
             .get(model_name)
             .map(String::as_str)
             .unwrap_or(model_name);
+        let validated_provider_hint = provider_hint
+            .filter(|provider| ProviderRegistry::with_builtins().find(provider).is_some());
 
         if let Some(meta) = self.find(canonical_name) {
+            if let Some(provider_hint) = validated_provider_hint {
+                if provider_hint != meta.provider {
+                    return Some(synthesize_custom_model_meta(canonical_name, provider_hint));
+                }
+            }
             return Some(meta.clone());
         }
 
-        let provider_name = guess_provider_for_custom_model(canonical_name).or_else(|| {
-            provider_hint
-                .filter(|provider| ProviderRegistry::with_builtins().find(provider).is_some())
-        })?;
+        let provider_name =
+            validated_provider_hint.or_else(|| guess_provider_for_custom_model(canonical_name))?;
 
         Some(synthesize_custom_model_meta(canonical_name, provider_name))
     }
@@ -864,6 +879,16 @@ pub fn builtin_openai_models() -> Vec<ModelMeta> {
     ]
 }
 
+pub fn builtin_openai_codex_models() -> Vec<ModelMeta> {
+    builtin_openai_models()
+        .into_iter()
+        .map(|mut model| {
+            model.provider = "openai-codex".into();
+            model
+        })
+        .collect()
+}
+
 fn guess_provider_for_custom_model(model_name: &str) -> Option<&'static str> {
     let lower = model_name.to_lowercase();
 
@@ -891,6 +916,11 @@ fn guess_provider_for_custom_model(model_name: &str) -> Option<&'static str> {
 fn synthesize_custom_model_meta(model_id: &str, provider: &str) -> ModelMeta {
     match provider {
         "openai" => synthesize_openai_model_meta(model_id),
+        "openai-codex" => {
+            let mut meta = synthesize_openai_model_meta(model_id);
+            meta.provider = "openai-codex".into();
+            meta
+        }
         "anthropic" => ModelMeta {
             id: model_id.into(),
             provider: provider.into(),
@@ -1249,6 +1279,13 @@ mod tests {
 
         let google = reg.list_by_provider("google");
         assert_eq!(google.len(), 2);
+    }
+
+    #[test]
+    fn builtin_openai_codex_models_retag_openai_models() {
+        let models = builtin_openai_codex_models();
+        assert_eq!(models.len(), 6);
+        assert!(models.iter().all(|model| model.provider == "openai-codex"));
     }
 
     #[test]

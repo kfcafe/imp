@@ -458,6 +458,7 @@ impl SettingsState {
             streaming_lines: self.streaming_lines,
             mouse_scroll_lines: self.mouse_scroll_lines,
             keyboard_scroll_lines: self.keyboard_scroll_lines,
+            mouse_capture: config.ui.mouse_capture,
             show_timestamps: self.show_timestamps,
             show_cost: self.show_cost,
             show_context_usage: self.show_context_usage,

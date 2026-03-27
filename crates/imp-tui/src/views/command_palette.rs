@@ -61,6 +61,10 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
             description: "Export session".into(),
         },
         SlashCommand {
+            name: "mouse".into(),
+            description: "Toggle mouse mode / text selection mode".into(),
+        },
+        SlashCommand {
             name: "reload".into(),
             description: "Reload extensions".into(),
         },
@@ -70,7 +74,7 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
         },
         SlashCommand {
             name: "login".into(),
-            description: "OAuth login (Anthropic)".into(),
+            description: "Open OAuth provider picker (Anthropic, ChatGPT/OpenAI)".into(),
         },
         SlashCommand {
             name: "setup".into(),

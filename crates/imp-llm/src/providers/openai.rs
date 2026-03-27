@@ -385,6 +385,30 @@ fn parse_sse_event(data: &str) -> Result<Option<SseEvent>> {
         .map_err(|e| Error::Stream(format!("Failed to parse SSE data: {e}: {trimmed}")))
 }
 
+fn push_text_block(content: &mut Vec<ContentBlock>, text: String) {
+    if text.is_empty() {
+        return;
+    }
+
+    if let Some(ContentBlock::Text { text: existing }) = content.last_mut() {
+        existing.push_str(&text);
+    } else {
+        content.push(ContentBlock::Text { text });
+    }
+}
+
+fn push_thinking_block(content: &mut Vec<ContentBlock>, text: String) {
+    if text.is_empty() {
+        return;
+    }
+
+    if let Some(ContentBlock::Thinking { text: existing }) = content.last_mut() {
+        existing.push_str(&text);
+    } else {
+        content.push(ContentBlock::Thinking { text });
+    }
+}
+
 fn process_sse_event(event: SseEvent, state: &mut StreamState) -> Vec<StreamEvent> {
     let mut out = Vec::new();
 
@@ -414,9 +438,16 @@ fn process_sse_event(event: SseEvent, state: &mut StreamState) -> Vec<StreamEven
                 state.items[idx] = item_state;
             }
         }
-        "response.content_part.delta" => {
+        "response.content_part.delta" | "response.output_text.delta" => {
             if let Some(delta) = event.delta {
+                push_text_block(&mut state.content, delta.clone());
                 out.push(StreamEvent::TextDelta { text: delta });
+            }
+        }
+        "response.reasoning_text.delta" => {
+            if let Some(delta) = event.delta {
+                push_thinking_block(&mut state.content, delta.clone());
+                out.push(StreamEvent::ThinkingDelta { text: delta });
             }
         }
         "response.function_call_arguments.delta" => {
@@ -524,21 +555,30 @@ fn parse_sse_stream(raw: &str, state: &mut StreamState) -> Vec<Result<StreamEven
 // Streaming implementation
 // ---------------------------------------------------------------------------
 
-fn stream_response(
+pub(crate) fn build_request_json(
+    model: &Model,
+    context: Context,
+    options: RequestOptions,
+) -> serde_json::Value {
+    serde_json::to_value(build_request(model, context, options))
+        .expect("OpenAI request should always serialize")
+}
+
+pub(crate) fn stream_response_json(
     client: reqwest::Client,
-    api_key: String,
-    request: ApiRequest,
+    url: String,
+    headers: Vec<(String, String)>,
+    request: serde_json::Value,
 ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> {
     let (tx, rx) = futures::channel::mpsc::unbounded();
 
     tokio::spawn(async move {
-        let result = client
-            .post(API_URL)
-            .header("authorization", format!("Bearer {api_key}"))
-            .header("content-type", "application/json")
-            .json(&request)
-            .send()
-            .await;
+        let mut builder = client.post(&url);
+        for (name, value) in headers {
+            builder = builder.header(&name, value);
+        }
+
+        let result = builder.json(&request).send().await;
 
         let resp = match result {
             Ok(r) => r,
@@ -598,6 +638,22 @@ fn stream_response(
     });
 
     Box::pin(rx)
+}
+
+fn stream_response(
+    client: reqwest::Client,
+    api_key: String,
+    request: ApiRequest,
+) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> {
+    stream_response_json(
+        client,
+        API_URL.to_string(),
+        vec![
+            ("authorization".to_string(), format!("Bearer {api_key}")),
+            ("content-type".to_string(), "application/json".to_string()),
+        ],
+        serde_json::to_value(request).expect("OpenAI request should always serialize"),
+    )
 }
 
 #[async_trait]
@@ -785,6 +841,57 @@ mod tests {
         let events = process_sse_event(event, &mut state);
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], StreamEvent::TextDelta { text } if text == "Hello world"));
+        assert!(matches!(
+            state.content.as_slice(),
+            [ContentBlock::Text { text }] if text == "Hello world"
+        ));
+    }
+
+    #[test]
+    fn openai_parse_output_text_delta_builds_message_content() {
+        let mut state = StreamState::new();
+
+        for data in [
+            r#"{"type":"response.output_text.delta","delta":"Hello"}"#,
+            r#"{"type":"response.output_text.delta","delta":" world"}"#,
+        ] {
+            let event = parse_sse_event(data).unwrap().unwrap();
+            let events = process_sse_event(event, &mut state);
+            assert_eq!(events.len(), 1);
+            assert!(matches!(events[0], StreamEvent::TextDelta { .. }));
+        }
+
+        let completed = r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":2}}}"#;
+        let event = parse_sse_event(completed).unwrap().unwrap();
+        let events = process_sse_event(event, &mut state);
+
+        assert_eq!(events.len(), 1);
+        if let StreamEvent::MessageEnd { message } = &events[0] {
+            assert!(matches!(
+                message.content.as_slice(),
+                [ContentBlock::Text { text }] if text == "Hello world"
+            ));
+            let usage = message.usage.as_ref().unwrap();
+            assert_eq!(usage.input_tokens, 10);
+            assert_eq!(usage.output_tokens, 2);
+        } else {
+            panic!("expected MessageEnd");
+        }
+    }
+
+    #[test]
+    fn openai_parse_reasoning_text_delta() {
+        let data = r#"{"type":"response.reasoning_text.delta","delta":"Planning"}"#;
+        let event = parse_sse_event(data).unwrap().unwrap();
+        let mut state = StreamState::new();
+        let events = process_sse_event(event, &mut state);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], StreamEvent::ThinkingDelta { text } if text == "Planning"));
+        assert!(matches!(
+            state.content.as_slice(),
+            [ContentBlock::Thinking { text }] if text == "Planning"
+        ));
     }
 
     #[test]

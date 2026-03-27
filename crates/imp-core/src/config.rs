@@ -5,6 +5,7 @@ use imp_llm::ThinkingLevel;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+use crate::guardrails::GuardrailConfig;
 use crate::hooks::HookDef;
 use crate::roles::RoleDef;
 
@@ -234,6 +235,10 @@ pub struct Config {
     #[serde(default)]
     pub shell: ShellConfig,
 
+    /// Engineering guardrails — profile-aware guidance and post-write checks.
+    #[serde(default)]
+    pub guardrails: GuardrailConfig,
+
     /// Agent mode — controls tool and mana action access.
     #[serde(default)]
     pub mode: AgentMode,
@@ -349,6 +354,11 @@ pub struct UiConfig {
     #[serde(default = "default_keyboard_scroll_lines")]
     pub keyboard_scroll_lines: usize,
 
+    /// Capture mouse input for TUI interactions. Disable to allow normal terminal
+    /// text selection/copy. Default: false.
+    #[serde(default)]
+    pub mouse_capture: bool,
+
     /// Show timestamps in chat. Default: false.
     #[serde(default)]
     pub show_timestamps: bool,
@@ -400,6 +410,7 @@ impl Default for UiConfig {
             streaming_lines: 5,
             mouse_scroll_lines: 3,
             keyboard_scroll_lines: 20,
+            mouse_capture: false,
             show_timestamps: false,
             show_cost: true,
             show_context_usage: true,
@@ -549,6 +560,7 @@ impl Config {
         if other.shell != ShellConfig::default() {
             self.shell = other.shell;
         }
+        self.guardrails.merge(other.guardrails);
         if other.mode != AgentMode::default() {
             self.mode = other.mode;
         }
@@ -655,6 +667,7 @@ mod tests {
         assert!((config.context.observation_mask_threshold - 0.6).abs() < f64::EPSILON);
         assert!((config.context.compaction_threshold - 0.8).abs() < f64::EPSILON);
         assert_eq!(config.context.mask_window, 10);
+        assert_eq!(config.guardrails, GuardrailConfig::default());
     }
 
     #[test]
@@ -669,6 +682,13 @@ thinking = "high"
 max_turns = 50
 tools = ["read", "write", "bash"]
 
+[guardrails]
+enabled = true
+level = "enforce"
+profile = "zig"
+critical_paths = ["src/**"]
+after_write = ["zig fmt --check ."]
+
 [context]
 observation_mask_threshold = 0.5
 compaction_threshold = 0.9
@@ -682,6 +702,15 @@ mask_window = 5
         assert_eq!(config.thinking, Some(ThinkingLevel::High));
         assert_eq!(config.max_turns, Some(50));
         assert_eq!(config.tools.as_ref().unwrap().len(), 3);
+        assert_eq!(config.guardrails.enabled, Some(true));
+        assert_eq!(
+            config.guardrails.profile,
+            Some(crate::guardrails::GuardrailProfile::Zig)
+        );
+        assert_eq!(
+            config.guardrails.after_write,
+            Some(vec!["zig fmt --check .".into()])
+        );
         assert!((config.context.observation_mask_threshold - 0.5).abs() < f64::EPSILON);
         assert!((config.context.compaction_threshold - 0.9).abs() < f64::EPSILON);
         assert_eq!(config.context.mask_window, 5);
@@ -796,6 +825,32 @@ mask_window = 5
         assert!((base.context.observation_mask_threshold - 0.5).abs() < f64::EPSILON);
         assert!((base.context.compaction_threshold - 0.9).abs() < f64::EPSILON);
         assert_eq!(base.context.mask_window, 5);
+    }
+
+    #[test]
+    fn config_merge_guardrails_preserves_unspecified_fields() {
+        let mut base = Config::default();
+        base.guardrails.enabled = Some(true);
+        base.guardrails.profile = Some(crate::guardrails::GuardrailProfile::Rust);
+        base.guardrails.critical_paths = Some(vec!["src/**".into()]);
+
+        let mut overlay = Config::default();
+        overlay.guardrails.level = Some(crate::guardrails::GuardrailLevel::Enforce);
+        overlay.guardrails.after_write = Some(vec!["cargo test".into()]);
+
+        base.merge(overlay);
+
+        assert_eq!(base.guardrails.enabled, Some(true));
+        assert_eq!(
+            base.guardrails.profile,
+            Some(crate::guardrails::GuardrailProfile::Rust)
+        );
+        assert_eq!(base.guardrails.critical_paths, Some(vec!["src/**".into()]));
+        assert_eq!(
+            base.guardrails.level,
+            Some(crate::guardrails::GuardrailLevel::Enforce)
+        );
+        assert_eq!(base.guardrails.after_write, Some(vec!["cargo test".into()]));
     }
 
     #[test]

@@ -3,7 +3,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, Widget};
+use unicode_width::UnicodeWidthChar;
 
 use crate::theme::Theme;
 
@@ -198,6 +199,10 @@ impl EditorState {
         self.content.split('\n').count().max(1)
     }
 
+    pub fn visual_line_count(&self, inner_width: u16) -> usize {
+        wrapped_lines(&self.content, inner_width).len().max(1)
+    }
+
     pub fn push_history(&mut self) {
         if !self.content.trim().is_empty() {
             self.history.push(self.content.clone());
@@ -239,12 +244,15 @@ impl EditorState {
         }
     }
 
-    /// Calculate cursor position relative to a render area.
+    /// Calculate cursor position relative to a render area, accounting for soft wraps.
     pub fn cursor_screen_position(&self, area: Rect) -> (u16, u16) {
         let inner_x = area.x + 1; // account for border
         let inner_y = area.y + 1;
-        let x = inner_x + self.cursor_col as u16;
-        let y = inner_y + (self.cursor_line as u16).saturating_sub(self.scroll_offset as u16);
+        let inner_width = area.width.saturating_sub(2).max(1);
+        let (visual_line, visual_col) =
+            cursor_visual_position(&self.content, self.cursor, inner_width);
+        let x = inner_x + visual_col as u16;
+        let y = inner_y + (visual_line as u16).saturating_sub(self.scroll_offset as u16);
         (
             x.min(area.x + area.width - 2),
             y.min(area.y + area.height - 2),
@@ -348,17 +356,24 @@ impl Widget for EditorView<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        // Render editor content
-        let lines: Vec<Line> = self
-            .state
-            .content
-            .split('\n')
+        // Render editor content using wrapped visual lines so auto-grow and cursor math stay aligned.
+        let lines = wrapped_lines(&self.state.content, inner.width)
+            .into_iter()
             .skip(self.state.scroll_offset)
-            .map(|line| Line::raw(line.to_string()))
-            .collect();
+            .take(inner.height as usize)
+            .collect::<Vec<_>>();
 
-        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-        paragraph.render(inner, buf);
+        for (idx, line) in lines.iter().enumerate() {
+            if idx >= inner.height as usize {
+                break;
+            }
+            buf.set_line(
+                inner.x,
+                inner.y + idx as u16,
+                &Line::raw(line.clone()),
+                inner.width,
+            );
+        }
 
         // Placeholder text when empty and not streaming
         if self.state.content.is_empty() && !self.is_streaming {
@@ -406,4 +421,129 @@ fn line_col_to_byte(lines: &[&str], line: usize, col: usize) -> usize {
         byte += l.len() + 1; // +1 for \n
     }
     byte
+}
+
+fn wrapped_lines(text: &str, inner_width: u16) -> Vec<String> {
+    let width = inner_width.max(1) as usize;
+    let mut out = Vec::new();
+
+    for logical in text.split('\n') {
+        if logical.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+
+        let mut current = String::new();
+        let mut current_width = 0usize;
+
+        for ch in logical.chars() {
+            let ch_width = char_display_width(ch);
+
+            if !current.is_empty() && current_width + ch_width > width {
+                out.push(current);
+                current = String::new();
+                current_width = 0;
+            }
+
+            if current.is_empty() && ch_width > width {
+                out.push(ch.to_string());
+                continue;
+            }
+
+            current.push(ch);
+            current_width += ch_width;
+
+            if current_width == width {
+                out.push(current);
+                current = String::new();
+                current_width = 0;
+            }
+        }
+
+        if !current.is_empty() {
+            out.push(current);
+        }
+    }
+
+    if out.is_empty() {
+        out.push(String::new());
+    }
+
+    out
+}
+
+fn cursor_visual_position(text: &str, cursor: usize, inner_width: u16) -> (usize, usize) {
+    let width = inner_width.max(1) as usize;
+    let mut row = 0usize;
+    let mut col = 0usize;
+    let mut byte = 0usize;
+
+    for ch in text.chars() {
+        if byte >= cursor {
+            break;
+        }
+
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+            byte += ch.len_utf8();
+            continue;
+        }
+
+        let ch_width = char_display_width(ch);
+
+        if col > 0 && col + ch_width > width {
+            row += 1;
+            col = 0;
+        }
+
+        if col == 0 && ch_width > width {
+            row += 1;
+            col = 0;
+            byte += ch.len_utf8();
+            continue;
+        }
+
+        col += ch_width;
+        byte += ch.len_utf8();
+
+        if col == width {
+            row += 1;
+            col = 0;
+        }
+    }
+
+    (row, col)
+}
+
+fn char_display_width(ch: char) -> usize {
+    match ch {
+        '\t' => 4,
+        _ => ch.width().unwrap_or(1).max(1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn visual_line_count_includes_soft_wraps() {
+        let mut editor = EditorState::new();
+        editor.set_content("abcdefghij");
+
+        assert_eq!(editor.visual_line_count(4), 3);
+    }
+
+    #[test]
+    fn cursor_screen_position_tracks_soft_wraps() {
+        let mut editor = EditorState::new();
+        editor.set_content("abcdefghij");
+
+        let area = Rect::new(0, 0, 6, 5); // inner width = 4
+        let (x, y) = editor.cursor_screen_position(area);
+
+        assert_eq!((x, y), (3, 3));
+    }
 }

@@ -882,7 +882,7 @@ fn builtin_models() -> Vec<ModelMeta> {
             id: "claude-sonnet-4-6".into(),
             provider: "anthropic".into(),
             name: "Claude Sonnet 4.6".into(),
-            context_window: 200_000,
+            context_window: 1_000_000,
             max_output_tokens: 128_000,
             pricing: ModelPricing {
                 input_per_mtok: 3.0,

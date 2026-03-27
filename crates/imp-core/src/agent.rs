@@ -1,6 +1,3 @@
-use std::collections::hash_map::DefaultHasher;
-use std::collections::VecDeque;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -18,103 +15,6 @@ use crate::error::Result;
 use crate::hooks::{HookEvent, HookRunner};
 use crate::roles::Role;
 use crate::tools::ToolRegistry;
-
-/// Detects infinite tool-call retry loops by tracking a sliding window of
-/// (tool, args, result) hashes. If the same call+result hash appears
-/// `max_repeats` or more times within the last `window_size` entries, the
-/// agent is considered stuck.
-///
-/// The hash covers the tool name, serialized arguments, whether the call
-/// errored, and the first 200 chars of output — so identical calls with
-/// different results are distinct, but repeated identical failures are caught.
-pub struct LoopDetector {
-    window: VecDeque<u64>,
-    window_size: usize,
-    max_repeats: usize,
-}
-
-impl LoopDetector {
-    /// Create a detector with a 20-entry window and a 5-repeat threshold.
-    pub fn new() -> Self {
-        Self {
-            window: VecDeque::with_capacity(20),
-            window_size: 20,
-            max_repeats: 5,
-        }
-    }
-
-    /// Create with custom parameters (used in tests).
-    pub fn with_params(window_size: usize, max_repeats: usize) -> Self {
-        Self {
-            window: VecDeque::with_capacity(window_size),
-            window_size,
-            max_repeats,
-        }
-    }
-
-    /// Record a tool execution result. Returns `true` if the agent is looping.
-    pub fn record(
-        &mut self,
-        tool_name: &str,
-        args: &serde_json::Value,
-        is_error: bool,
-        output_prefix: &str,
-    ) -> bool {
-        let hash = Self::compute_hash(tool_name, args, is_error, output_prefix);
-        if self.window.len() >= self.window_size {
-            self.window.pop_front();
-        }
-        self.window.push_back(hash);
-        self.is_looping()
-    }
-
-    /// Returns `true` if any hash appears `max_repeats` or more times in the window.
-    pub fn is_looping(&self) -> bool {
-        if self.window.len() < self.max_repeats {
-            return false;
-        }
-        // Count occurrences of each hash using a simple linear scan.
-        // Window is small (≤20), so this is cheaper than a HashMap.
-        for (i, hash) in self.window.iter().enumerate() {
-            let count = self.window.iter().skip(i).filter(|h| *h == hash).count();
-            if count >= self.max_repeats {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn compute_hash(
-        tool_name: &str,
-        args: &serde_json::Value,
-        is_error: bool,
-        output_prefix: &str,
-    ) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        tool_name.hash(&mut hasher);
-        // Serialize args deterministically for hashing.
-        args.to_string().hash(&mut hasher);
-        is_error.hash(&mut hasher);
-        let truncated = if output_prefix.len() > 200 {
-            // Find a valid char boundary at or before byte 200
-            let mut end = 200;
-            while !output_prefix.is_char_boundary(end) {
-                end -= 1;
-            }
-            &output_prefix[..end]
-        } else {
-            output_prefix
-        };
-        truncated.hash(&mut hasher);
-        hasher.finish()
-    }
-}
-
-impl Default for LoopDetector {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Events emitted by the agent during execution.
 #[derive(Debug, Clone)]
@@ -200,8 +100,6 @@ pub struct Agent {
     pub file_tracker: Arc<std::sync::Mutex<crate::tools::FileTracker>>,
     /// Cache options for LLM requests.
     pub cache_options: imp_llm::CacheOptions,
-    /// Detects infinite tool-call retry loops.
-    pub loop_detector: LoopDetector,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_rx: mpsc::Receiver<AgentCommand>,
@@ -241,7 +139,6 @@ impl Agent {
                 cache_tools: true,
                 cache_recent_turns: 2,
             },
-            loop_detector: LoopDetector::new(),
 
             event_tx,
             command_rx,
@@ -540,52 +437,8 @@ impl Agent {
             // Execute tool calls
             let results = self.execute_tools(tool_calls).await;
 
-            // Check for infinite retry loops before pushing results onto the
-            // message history — we want to break *before* the LLM sees yet
-            // another copy of the same failure.
-            let mut loop_detected = false;
-            for result in &results {
-                let output_prefix = result
-                    .content
-                    .iter()
-                    .find_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .unwrap_or("");
-                if self.loop_detector.record(
-                    &result.tool_name,
-                    &serde_json::Value::Null, // args not available here; key signal is tool+output
-                    result.is_error,
-                    output_prefix,
-                ) {
-                    loop_detected = true;
-                    break;
-                }
-            }
-
-            // Push tool results onto messages
             for result in &results {
                 self.messages.push(Message::ToolResult(result.clone()));
-            }
-
-            if loop_detected {
-                self.emit(AgentEvent::Error {
-                    error: "Loop detected: agent is calling the same tool with the same result repeatedly. Stopping to avoid burning tokens.".to_string(),
-                })
-                .await;
-                self.emit(AgentEvent::TurnEnd {
-                    index: turn,
-                    message: msg,
-                })
-                .await;
-                let cost = total_usage.cost(&self.model.meta.pricing);
-                self.emit(AgentEvent::AgentEnd {
-                    usage: total_usage,
-                    cost,
-                })
-                .await;
-                return Err(crate::error::Error::LoopDetected);
             }
 
             self.emit(AgentEvent::TurnEnd {
@@ -3475,149 +3328,6 @@ mod mode_tests {
         assert!(
             reviewer_result.text.contains("reviewer") || reviewer_result.text.contains("read"),
             "reviewer prompt should contain mode instructions"
-        );
-    }
-
-    // ── Loop detection unit tests ──────────────────────────────────
-
-    /// Feeding identical (tool, args, result) tuples triggers detection at the threshold.
-    #[test]
-    fn loop_detect_triggers_at_threshold() {
-        let args = serde_json::json!({"path": "/tmp/x"});
-        let mut detector = LoopDetector::with_params(20, 5);
-
-        for i in 0..4 {
-            let looping = detector.record("read", &args, true, "error: file not found");
-            assert!(
-                !looping,
-                "should not trigger before threshold (call {})",
-                i + 1
-            );
-        }
-
-        // 5th identical call should trigger detection
-        assert!(
-            detector.record("read", &args, true, "error: file not found"),
-            "should trigger on 5th identical call"
-        );
-    }
-
-    /// Varied calls with different tools or outputs do not trigger false positives.
-    #[test]
-    fn loop_detect_no_false_positive_varied_calls() {
-        let mut detector = LoopDetector::with_params(20, 5);
-
-        // Different tool names
-        assert!(!detector.record("read", &serde_json::json!({}), false, "content A"));
-        assert!(!detector.record("write", &serde_json::json!({}), false, "wrote"));
-        assert!(!detector.record("bash", &serde_json::json!({}), false, "output"));
-        assert!(!detector.record("ls", &serde_json::json!({}), false, "files"));
-        assert!(!detector.record("grep", &serde_json::json!({}), false, "match"));
-        assert!(!detector.record("read", &serde_json::json!({}), false, "content B")); // same tool, different output
-
-        // Should never have triggered
-        assert!(!detector.is_looping());
-    }
-
-    /// Different outputs for the same tool do not trigger loop detection.
-    #[test]
-    fn loop_detect_no_false_positive_different_outputs() {
-        let args = serde_json::json!({"path": "/tmp/x"});
-        let mut detector = LoopDetector::with_params(20, 5);
-
-        for i in 0..10 {
-            let output = format!("output number {i}");
-            let looping = detector.record("read", &args, false, &output);
-            assert!(
-                !looping,
-                "different outputs should not trigger loop detection"
-            );
-        }
-    }
-
-    /// Detection resets after the window slides past old entries.
-    #[test]
-    fn loop_detect_resets_after_window_slides() {
-        // Window of 6, threshold of 3
-        let args = serde_json::json!({"path": "/tmp/x"});
-        let mut detector = LoopDetector::with_params(6, 3);
-
-        // Fill with 3 identical entries — triggers detection
-        detector.record("read", &args, true, "fail");
-        detector.record("read", &args, true, "fail");
-        assert!(detector.record("read", &args, true, "fail")); // triggers at 3
-
-        // Now push 6 different entries to slide the window past the old ones
-        for i in 0..6 {
-            let output = format!("fresh output {i}");
-            detector.record("other_tool", &args, false, &output);
-        }
-
-        // The identical entries are gone from the window — should no longer loop
-        assert!(
-            !detector.is_looping(),
-            "loop should clear after window slides"
-        );
-    }
-
-    /// Agent integration: a mock provider that always calls the same failing tool
-    /// must be stopped by loop detection before max_turns is reached.
-    #[tokio::test]
-    async fn loop_detect_agent_breaks_on_repeated_failing_tool() {
-        // Build a provider that always calls "echo" with the same args — simulating a
-        // model stuck in a retry loop.
-        let responses: Vec<Vec<StreamEvent>> = (0..50)
-            .map(|_| {
-                tool_call_response(
-                    "call_stuck",
-                    "echo",
-                    serde_json::json!({"text": "same input every time"}),
-                    50,
-                    10,
-                )
-            })
-            .collect();
-
-        let provider = Arc::new(MockProvider::new(responses));
-        let model = test_model(provider);
-        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.tools.register(Arc::new(EchoTool));
-        agent.max_turns = 50; // Would exhaust without loop detection
-                              // Use tight detector params so the test runs fast
-        agent.loop_detector = LoopDetector::with_params(10, 5);
-
-        let events_task = tokio::spawn(collect_events(handle));
-        let result = agent.run("Loop forever".to_string()).await;
-        drop(agent);
-
-        let events = events_task.await.unwrap();
-
-        // Should have returned LoopDetected, not MaxTurns or Ok
-        assert!(
-            matches!(result, Err(crate::error::Error::LoopDetected)),
-            "expected LoopDetected error, got: {:?}",
-            result
-        );
-
-        // Should have emitted an Error event describing the loop
-        let loop_error = events
-            .iter()
-            .find(|e| matches!(e, AgentEvent::Error { error } if error.contains("Loop detected")));
-        assert!(loop_error.is_some(), "expected a Loop detected error event");
-
-        // Should still emit AgentEnd so consumers get a clean shutdown signal
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
-
-        // Should stop well before max_turns (≤ window_size + threshold)
-        let turn_count = events
-            .iter()
-            .filter(|e| matches!(e, AgentEvent::TurnStart { .. }))
-            .count();
-        assert!(
-            turn_count < 50,
-            "loop detection should stop the agent early, but ran {turn_count} turns"
         );
     }
 }

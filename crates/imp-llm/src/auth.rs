@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::error::Result;
 
@@ -26,6 +28,59 @@ impl OAuthCredential {
 pub enum StoredCredential {
     ApiKey { key: String },
     OAuth(OAuthCredential),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthDisplayInfo {
+    pub account_id: Option<String>,
+    pub plan: Option<String>,
+    pub using_subscription: bool,
+}
+
+impl OAuthDisplayInfo {
+    pub fn login_message(&self, provider: &str) -> String {
+        match provider {
+            "openai" | "openai-codex" => {
+                let mut message = String::from("Logged in to OpenAI / ChatGPT");
+                if let Some(account_id) = &self.account_id {
+                    message.push_str(&format!(" as account {account_id}"));
+                }
+                if let Some(plan) = &self.plan {
+                    message.push_str(&format!(", plan: {plan}"));
+                }
+                message.push('.');
+                message
+            }
+            "anthropic" => {
+                if let Some(plan) = &self.plan {
+                    format!("Logged in to Anthropic with {plan} subscription credentials.")
+                } else {
+                    "Logged in to Anthropic with OAuth subscription credentials.".into()
+                }
+            }
+            _ => format!("Logged in to {provider} with OAuth credentials."),
+        }
+    }
+
+    pub fn status_summary(&self) -> String {
+        match (&self.plan, self.short_account_id()) {
+            (Some(plan), Some(account_id)) => format!("{plan} · {account_id}"),
+            (Some(plan), None) => plan.clone(),
+            (None, Some(account_id)) => account_id,
+            (None, None) if self.using_subscription => "subscription".into(),
+            (None, None) => "oauth".into(),
+        }
+    }
+
+    pub fn short_account_id(&self) -> Option<String> {
+        self.account_id.as_ref().map(|account_id| {
+            if account_id.len() > 8 {
+                format!("{}…", &account_id[..8])
+            } else {
+                account_id.clone()
+            }
+        })
+    }
 }
 
 /// Manages API keys and OAuth credentials.
@@ -102,6 +157,69 @@ impl AuthStore {
         Err(crate::error::Error::Auth(format!(
             "No API key found for {provider}. Set {env_var} or run `imp login {provider}`."
         )))
+    }
+
+    /// Resolve an API key without falling back to stored OAuth credentials.
+    pub fn resolve_api_key_only(&self, provider: &str) -> Result<ApiKey> {
+        if let Some(key) = self.runtime_keys.get(provider) {
+            return Ok(key.clone());
+        }
+
+        if let Some(StoredCredential::ApiKey { key }) = self.stored.get(provider) {
+            return Ok(key.clone());
+        }
+
+        let registry = crate::model::ProviderRegistry::with_builtins();
+        if let Some(meta) = registry.find(provider) {
+            for env_var in meta.env_vars {
+                if let Ok(key) = std::env::var(env_var) {
+                    return Ok(key);
+                }
+            }
+            let env_list = meta.env_vars.join(" or ");
+            return Err(crate::error::Error::Auth(format!(
+                "No API key found for {provider}. Set {env_list} or run `imp login {provider}`."
+            )));
+        }
+
+        let env_var = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
+        if let Ok(key) = std::env::var(&env_var) {
+            return Ok(key);
+        }
+
+        Err(crate::error::Error::Auth(format!(
+            "No API key found for {provider}. Set {env_var} or run `imp login {provider}`."
+        )))
+    }
+
+    /// Resolve a ChatGPT/OpenAI OAuth token, preferring `openai-codex` when present.
+    pub async fn resolve_chatgpt_oauth(&mut self) -> Result<ApiKey> {
+        for provider in ["openai-codex", "openai"] {
+            if self.get_oauth(provider).is_none() {
+                continue;
+            }
+
+            return self
+                .resolve_or_refresh(provider, |refresh_token| {
+                    let refresh_token = refresh_token.to_string();
+                    async move {
+                        crate::oauth::chatgpt::ChatGptOAuth::new()
+                            .refresh_token(&refresh_token)
+                            .await
+                    }
+                })
+                .await;
+        }
+
+        Err(crate::error::Error::Auth(
+            "No ChatGPT OAuth credential found. Run `imp login openai` or configure an OpenAI API key."
+                .into(),
+        ))
+    }
+
+    pub fn oauth_display_info(&self, provider: &str) -> Option<OAuthDisplayInfo> {
+        self.get_oauth(provider)
+            .and_then(|credential| oauth_display_info_for_credential(provider, credential))
     }
 
     /// Store a credential and persist to disk.
@@ -198,9 +316,58 @@ impl AuthStore {
     }
 }
 
+pub fn oauth_display_info_for_credential(
+    provider: &str,
+    credential: &OAuthCredential,
+) -> Option<OAuthDisplayInfo> {
+    match provider {
+        "anthropic" => Some(OAuthDisplayInfo {
+            account_id: None,
+            plan: Some("Claude Max/Pro".into()),
+            using_subscription: true,
+        }),
+        "openai" | "openai-codex" => decode_openai_oauth_display_info(&credential.access_token),
+        _ => None,
+    }
+}
+
+fn decode_openai_oauth_display_info(access_token: &str) -> Option<OAuthDisplayInfo> {
+    let payload = access_token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: Value = serde_json::from_slice(&decoded).ok()?;
+    let auth = claims.get("https://api.openai.com/auth")?;
+
+    Some(OAuthDisplayInfo {
+        account_id: auth
+            .get("chatgpt_account_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        plan: auth
+            .get("chatgpt_plan_type")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        using_subscription: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn jwt_with_openai_auth(plan: &str, account_id: &str) -> String {
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(
+            json!({
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": account_id,
+                    "chatgpt_plan_type": plan,
+                }
+            })
+            .to_string(),
+        );
+        format!("{header}.{payload}.signature")
+    }
 
     #[test]
     fn test_oauth_credential_not_expired() {
@@ -424,6 +591,109 @@ mod tests {
 
         let key = store.resolve("openai").unwrap();
         assert_eq!(key, "sk-stored");
+    }
+
+    #[test]
+    fn test_resolve_api_key_only_ignores_oauth_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::new(path);
+
+        store
+            .store(
+                "openai",
+                StoredCredential::OAuth(OAuthCredential {
+                    access_token: "oauth-token".into(),
+                    refresh_token: "refresh-token".into(),
+                    expires_at: crate::now() + 3600,
+                }),
+            )
+            .unwrap();
+
+        assert!(store.resolve_api_key_only("openai").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_chatgpt_oauth_prefers_openai_codex() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::new(path);
+
+        store
+            .store(
+                "openai",
+                StoredCredential::OAuth(OAuthCredential {
+                    access_token: "openai-oauth".into(),
+                    refresh_token: "openai-refresh".into(),
+                    expires_at: crate::now() + 3600,
+                }),
+            )
+            .unwrap();
+        store
+            .store(
+                "openai-codex",
+                StoredCredential::OAuth(OAuthCredential {
+                    access_token: "codex-oauth".into(),
+                    refresh_token: "codex-refresh".into(),
+                    expires_at: crate::now() + 3600,
+                }),
+            )
+            .unwrap();
+
+        let key = store.resolve_chatgpt_oauth().await.unwrap();
+        assert_eq!(key, "codex-oauth");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_chatgpt_oauth_falls_back_to_openai() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::new(path);
+
+        store
+            .store(
+                "openai",
+                StoredCredential::OAuth(OAuthCredential {
+                    access_token: "openai-oauth".into(),
+                    refresh_token: "openai-refresh".into(),
+                    expires_at: crate::now() + 3600,
+                }),
+            )
+            .unwrap();
+
+        let key = store.resolve_chatgpt_oauth().await.unwrap();
+        assert_eq!(key, "openai-oauth");
+    }
+
+    #[test]
+    fn test_oauth_display_info_for_openai_credential() {
+        let credential = OAuthCredential {
+            access_token: jwt_with_openai_auth("pro", "acct-12345678").into(),
+            refresh_token: "refresh".into(),
+            expires_at: crate::now() + 3600,
+        };
+
+        let info = oauth_display_info_for_credential("openai", &credential).unwrap();
+        assert_eq!(info.account_id.as_deref(), Some("acct-12345678"));
+        assert_eq!(info.plan.as_deref(), Some("pro"));
+        assert_eq!(info.short_account_id().as_deref(), Some("acct-123…"));
+    }
+
+    #[test]
+    fn test_oauth_display_info_for_anthropic_credential() {
+        let credential = OAuthCredential {
+            access_token: "sk-ant-oat01-example".into(),
+            refresh_token: "refresh".into(),
+            expires_at: crate::now() + 3600,
+        };
+
+        let info = oauth_display_info_for_credential("anthropic", &credential).unwrap();
+        assert_eq!(info.plan.as_deref(), Some("Claude Max/Pro"));
+        assert!(info.account_id.is_none());
+        assert_eq!(
+            info.login_message("anthropic"),
+            "Logged in to Anthropic with Claude Max/Pro subscription credentials."
+        );
     }
 
     #[test]

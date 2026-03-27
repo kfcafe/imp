@@ -3,6 +3,7 @@ pub mod chat;
 pub mod command_palette;
 pub mod editor;
 pub mod file_finder;
+pub mod login_picker;
 pub mod model_selector;
 pub mod session_picker;
 pub mod settings;

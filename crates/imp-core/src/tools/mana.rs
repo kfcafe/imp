@@ -197,6 +197,9 @@ impl Tool for ManaTool {
                             CloseOutcome::DeferredVerify { unit_id } => {
                                 format!("Deferred verify for {unit_id}")
                             }
+                            CloseOutcome::VerifyFrozenViolation { unit_id, .. } => {
+                                format!("Verify command changed since claim for {unit_id} — judge integrity violated. Use force to override.")
+                            }
                         };
                         Ok(ToolOutput::text(msg))
                     }
