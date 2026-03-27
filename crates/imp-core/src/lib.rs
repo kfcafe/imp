@@ -6,6 +6,7 @@ pub mod context;
 pub mod error;
 pub mod guardrails;
 pub mod hooks;
+pub mod imp_session;
 pub mod import;
 pub mod learning;
 pub mod memory;
