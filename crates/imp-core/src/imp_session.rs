@@ -329,7 +329,7 @@ impl ImpSession {
             .take()
             .ok_or_else(|| Error::Config("Agent already consumed".into()))?;
 
-        let history: Vec<imp_llm::Message> = self
+        let mut history: Vec<imp_llm::Message> = self
             .session_mgr
             .get_messages()
             .iter()
@@ -337,8 +337,23 @@ impl ImpSession {
             .cloned()
             .collect();
 
-        // Replace agent messages with session history (which includes the
-        // new user message we just appended).
+        // The prompt was already appended to session history so resume/tree state
+        // is correct, but Agent::run() will push the active prompt itself. Remove
+        // the just-appended trailing user message to avoid duplicating it in the
+        // model context for this run.
+        if matches!(
+            history.last(),
+            Some(imp_llm::Message::User(user))
+                if matches!(
+                    user.content.as_slice(),
+                    [imp_llm::ContentBlock::Text { text: last_text }] if last_text == text
+                )
+        ) {
+            history.pop();
+        }
+
+        // Replace agent messages with session history. Agent::run() will append
+        // the active prompt as the next user message.
         agent.messages = history;
 
         let prompt = text.to_string();
@@ -367,7 +382,8 @@ impl ImpSession {
                 .await
                 .map_err(|e| Error::Config(format!("Agent task panicked: {e}")))?;
             self.agent = Some(agent);
-            return result;
+            self.completed_run_result = Some(result);
+            self.drain_pending_events_for_persistence();
         }
 
         if let Some(result) = self.completed_run_result.take() {
@@ -417,7 +433,7 @@ impl ImpSession {
         }
 
         let event = self.handle.event_rx.recv().await?;
-        let events = self.persist_event_entries(&event).await;
+        let events = self.persist_event_entries(&event);
 
         if matches!(event, AgentEvent::AgentEnd { .. }) {
             if let Some(task) = self.agent_task.take() {
@@ -536,45 +552,23 @@ impl ImpSession {
         &self.handle.command_tx
     }
 
-    async fn persist_event_entries(&mut self, event: &AgentEvent) -> Vec<&'static str> {
-        let mut persisted = Vec::new();
-
-        match event {
-            AgentEvent::ToolExecutionEnd { result, .. } => {
-                let entry_id = uuid::Uuid::new_v4().to_string();
-                match self.session_mgr.append(SessionEntry::Message {
-                    id: entry_id,
-                    parent_id: None,
-                    message: imp_llm::Message::ToolResult(result.clone()),
-                }) {
-                    Ok(()) => persisted.push("tool result"),
-                    Err(error) => self.push_persistence_error(
-                        persisted.clone(),
-                        format!("failed to persist tool result: {error}"),
-                    ),
-                }
+    fn persist_event_entries(&mut self, event: &AgentEvent) -> Vec<&'static str> {
+        match self.session_mgr.persist_agent_event_entries(&self.model, event) {
+            Ok(persisted) => persisted,
+            Err(error) => {
+                self.push_persistence_error(
+                    Vec::new(),
+                    format!("failed to persist agent event entries: {error}"),
+                );
+                Vec::new()
             }
-            AgentEvent::TurnEnd { index, message } => {
-                match self
-                    .session_mgr
-                    .append_assistant_turn(&self.model, *index, message.clone())
-                {
-                    Ok((_assistant_id, usage_entry_id)) => {
-                        persisted.push("assistant message");
-                        if usage_entry_id.is_some() {
-                            persisted.push("canonical usage");
-                        }
-                    }
-                    Err(error) => self.push_persistence_error(
-                        persisted.clone(),
-                        format!("failed to persist assistant message: {error}"),
-                    ),
-                }
-            }
-            _ => {}
         }
+    }
 
-        persisted
+    fn drain_pending_events_for_persistence(&mut self) {
+        while let Ok(event) = self.handle.event_rx.try_recv() {
+            self.persist_event_entries(&event);
+        }
     }
 
     fn push_persistence_error(&mut self, persisted: Vec<&'static str>, error: String) {
@@ -650,6 +644,11 @@ mod tests {
         models: Vec<ModelMeta>,
     }
 
+    struct SingleResponseProvider {
+        models: Vec<ModelMeta>,
+        events: std::sync::Mutex<Option<Vec<imp_llm::Result<StreamEvent>>>>,
+    }
+
     #[async_trait::async_trait]
     impl Provider for NoopProvider {
         fn stream(
@@ -668,6 +667,37 @@ mod tests {
 
         fn id(&self) -> &str {
             "noop"
+        }
+
+        fn models(&self) -> &[ModelMeta] {
+            &self.models
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for SingleResponseProvider {
+        fn stream(
+            &self,
+            _model: &Model,
+            _context: Context,
+            _options: RequestOptions,
+            _api_key: &str,
+        ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
+            let events = self
+                .events
+                .lock()
+                .expect("single response provider lock")
+                .take()
+                .unwrap_or_default();
+            Box::pin(futures::stream::iter(events))
+        }
+
+        async fn resolve_auth(&self, _auth: &AuthStore) -> imp_llm::Result<ApiKey> {
+            Ok(String::new())
+        }
+
+        fn id(&self) -> &str {
+            "single-response"
         }
 
         fn models(&self) -> &[ModelMeta] {
@@ -697,6 +727,34 @@ mod tests {
         Model {
             meta: meta.clone(),
             provider: Arc::new(NoopProvider { models: vec![meta] }),
+        }
+    }
+
+    fn test_model_with_events(events: Vec<imp_llm::Result<StreamEvent>>) -> Model {
+        let meta = ModelMeta {
+            id: "test-model".into(),
+            provider: "test-provider".into(),
+            name: "Test Model".into(),
+            context_window: 8192,
+            max_output_tokens: 2048,
+            pricing: ModelPricing {
+                input_per_mtok: 2.0,
+                output_per_mtok: 4.0,
+                cache_read_per_mtok: 0.5,
+                cache_write_per_mtok: 1.0,
+            },
+            capabilities: Capabilities {
+                reasoning: false,
+                images: false,
+                tool_use: true,
+            },
+        };
+        Model {
+            meta: meta.clone(),
+            provider: Arc::new(SingleResponseProvider {
+                models: vec![meta],
+                events: std::sync::Mutex::new(Some(events)),
+            }),
         }
     }
 
@@ -755,6 +813,81 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn prompt_uses_session_history_without_duplicate_active_prompt() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let session_dir = tmp.path().join("sessions");
+        let model = test_model_with_events(vec![Ok(StreamEvent::MessageEnd {
+            message: AssistantMessage {
+                content: vec![ContentBlock::Text { text: "done".into() }],
+                usage: None,
+                stop_reason: StopReason::EndTurn,
+                timestamp: 42,
+            },
+        })]);
+        let mut session_mgr = SessionManager::new(&cwd, &session_dir).unwrap();
+        session_mgr
+            .append(SessionEntry::Message {
+                id: "existing-user".into(),
+                parent_id: None,
+                message: imp_llm::Message::user("earlier"),
+            })
+            .unwrap();
+
+        let (agent, handle) = Agent::new(clone_model(&model), cwd.clone());
+        let mut session = ImpSession {
+            agent: Some(agent),
+            handle,
+            session_mgr,
+            config: Config::default(),
+            model,
+            auth_store: AuthStore::new(tmp.path().join("auth.json")),
+            model_registry: ModelRegistry::with_builtins(),
+            cwd,
+            agent_task: None,
+            completed_run_result: None,
+            pending_persistence_errors: VecDeque::new(),
+        };
+
+        session.prompt("latest").await.unwrap();
+        while let Some(event) = session.recv_event().await {
+            if matches!(event, AgentEvent::AgentEnd { .. }) {
+                break;
+            }
+        }
+        session.wait().await.unwrap();
+
+        let messages: Vec<_> = session
+            .session_mgr
+            .get_messages()
+            .into_iter()
+            .cloned()
+            .collect();
+        assert_eq!(messages.len(), 3);
+        match &messages[0] {
+            imp_llm::Message::User(user) => match user.content.as_slice() {
+                [ContentBlock::Text { text }] => assert_eq!(text, "earlier"),
+                other => panic!("unexpected user content: {other:?}"),
+            },
+            other => panic!("unexpected message: {other:?}"),
+        }
+        match &messages[1] {
+            imp_llm::Message::User(user) => match user.content.as_slice() {
+                [ContentBlock::Text { text }] => assert_eq!(text, "latest"),
+                other => panic!("unexpected user content: {other:?}"),
+            },
+            other => panic!("unexpected message: {other:?}"),
+        }
+        match &messages[2] {
+            imp_llm::Message::Assistant(assistant) => match assistant.content.as_slice() {
+                [ContentBlock::Text { text }] => assert_eq!(text, "done"),
+                other => panic!("unexpected assistant content: {other:?}"),
+            },
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
     #[test]
     fn persist_event_entries_writes_assistant_and_canonical_usage() {
         let tmp = TempDir::new().unwrap();
@@ -788,12 +921,10 @@ mod tests {
             }),
         );
 
-        let persisted = futures::executor::block_on(
-            session.persist_event_entries(&AgentEvent::TurnEnd {
-                index: 2,
-                message: message.clone(),
-            }),
-        );
+        let persisted = session.persist_event_entries(&AgentEvent::TurnEnd {
+            index: 2,
+            message: message.clone(),
+        });
 
         assert_eq!(persisted, vec!["assistant message", "canonical usage"]);
 
@@ -836,12 +967,10 @@ mod tests {
             pending_persistence_errors: VecDeque::new(),
         };
 
-        let persisted = futures::executor::block_on(
-            session.persist_event_entries(&AgentEvent::TurnEnd {
-                index: 0,
-                message: test_assistant_message(456, None),
-            }),
-        );
+        let persisted = session.persist_event_entries(&AgentEvent::TurnEnd {
+            index: 0,
+            message: test_assistant_message(456, None),
+        });
 
         assert_eq!(persisted, vec!["assistant message"]);
         assert!(session.session_mgr.usage_records().is_empty());
@@ -870,21 +999,19 @@ mod tests {
             pending_persistence_errors: VecDeque::new(),
         };
 
-        let persisted = futures::executor::block_on(
-            session.persist_event_entries(&AgentEvent::ToolExecutionEnd {
+        let persisted = session.persist_event_entries(&AgentEvent::ToolExecutionEnd {
+            tool_call_id: "call-1".into(),
+            result: imp_llm::ToolResultMessage {
                 tool_call_id: "call-1".into(),
-                result: imp_llm::ToolResultMessage {
-                    tool_call_id: "call-1".into(),
-                    tool_name: "bash".into(),
-                    content: vec![ContentBlock::Text {
-                        text: "ok".into(),
-                    }],
-                    is_error: false,
-                    details: json!({"exit_code": 0}),
-                    timestamp: 999,
-                },
-            }),
-        );
+                tool_name: "bash".into(),
+                content: vec![ContentBlock::Text {
+                    text: "ok".into(),
+                }],
+                is_error: false,
+                details: json!({"exit_code": 0}),
+                timestamp: 999,
+            },
+        });
 
         assert_eq!(persisted, vec!["tool result"]);
         assert!(session

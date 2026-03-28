@@ -82,10 +82,10 @@ impl StartupTimer {
 
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
-use futures::StreamExt;
 use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use imp_core::config::Config;
 
+use imp_core::imp_session::{ImpSession, SessionChoice, SessionOptions};
 use imp_core::session::SessionManager;
 use imp_core::system_prompt::{Attempt as TaskAttempt, TaskContext};
 use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
@@ -94,7 +94,7 @@ use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelRegistry, ProviderRegistry};
 use imp_llm::oauth::anthropic::AnthropicOAuth;
 use imp_llm::oauth::chatgpt::ChatGptOAuth;
-use imp_llm::provider::{Context, RequestOptions, ThinkingLevel};
+use imp_llm::provider::ThinkingLevel;
 use imp_llm::providers::create_provider;
 use imp_llm::{Message, Model, StreamEvent};
 use serde::Deserialize;
@@ -687,88 +687,55 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
     let unit = load_mana_unit(&cwd, unit_id)?;
     let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
     emit_startup_timing(&mut startup_timer, StartupStage::ConfigResolved);
-    let registry = ModelRegistry::with_builtins();
     emit_startup_timing(&mut startup_timer, StartupStage::ModelRegistryReady);
-    let auth_path = Config::user_config_dir().join("auth.json");
-    let mut auth_store =
-        AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
     emit_startup_timing(&mut startup_timer, StartupStage::AuthLoaded);
-    let (model_id, provider_name) =
-        resolve_model_and_provider(cli, &config, &registry, &auth_store)
-            .map_err(io::Error::other)?;
     emit_startup_timing(&mut startup_timer, StartupStage::ModelResolved);
-
-    let provider = create_provider(&provider_name)
-        .ok_or_else(|| io::Error::other(format!("Unknown provider: {provider_name}")))?;
     emit_startup_timing(&mut startup_timer, StartupStage::ProviderReady);
-
-    let meta = registry
-        .resolve_meta(&model_id, Some(&provider_name))
-        .ok_or_else(|| io::Error::other(format!("Model not found: {model_id}")))?;
-
-    if let Some(ref key) = cli.api_key {
-        auth_store.set_runtime_key(&provider_name, key.clone());
-    }
-
-    let api_key = resolve_provider_api_key(&mut auth_store, &provider_name).await?;
     emit_startup_timing(&mut startup_timer, StartupStage::ApiKeyResolved);
-    let model = Model {
-        meta,
-        provider: Arc::from(provider),
+
+    let mut options = SessionOptions {
+        cwd: cwd.clone(),
+        model: cli.model.clone(),
+        provider: cli.provider.clone(),
+        api_key: cli.api_key.clone(),
+        thinking: cli.thinking.as_ref().map(|thinking| parse_thinking_level(thinking)),
+        max_turns: cli.max_turns.or(config.max_turns),
+        system_prompt: cli.system_prompt.clone(),
+        no_tools: cli.no_tools,
+        session: SessionChoice::InMemory,
+        task: Some(unit.task_context()),
+        ..Default::default()
     };
 
-    // Apply CLI thinking level override to config.
-    let mut agent_config = config.clone();
-    if let Some(ref thinking) = cli.thinking {
-        agent_config.thinking = Some(parse_thinking_level(thinking));
-    }
-
-    let task_context = unit.task_context();
-    let (mut agent, mut handle) = if cli.no_tools {
-        // No tools: build manually without native tools registered.
-        let (mut a, h) = imp_core::agent::Agent::new(model, cwd.clone());
-        a.api_key = api_key;
-        a.thinking_level = agent_config.thinking.unwrap_or(ThinkingLevel::Off);
-        if let Some(max_turns) = agent_config.max_turns {
-            a.max_turns = max_turns;
-        }
-        a.system_prompt = cli.system_prompt.clone().unwrap_or_default();
-        (a, h)
-    } else {
+    if !cli.no_tools {
         let lua_cwd = cwd.clone();
-        let mut builder =
-            imp_core::builder::AgentBuilder::new(agent_config, cwd.clone(), model, api_key)
-                .task(task_context.clone())
-                .lua_tool_loader(move |tools| {
-                    let user_config_dir = Config::user_config_dir();
-                    imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
-                });
-        if let Some(ref prompt) = cli.system_prompt {
-            builder = builder.system_prompt(prompt.clone());
-        }
-        builder.build().map_err(io::Error::other)?
-    };
-    emit_startup_timing(&mut startup_timer, StartupStage::AgentBuilt);
-
-    // CLI --max-turns overrides config
-    if let Some(max_turns) = cli.max_turns {
-        agent.max_turns = max_turns;
+        options.lua_loader = Some(Box::new(move |tools| {
+            let user_config_dir = Config::user_config_dir();
+            imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
+        }));
     }
+
+    let mut session = ImpSession::create(options)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    emit_startup_timing(&mut startup_timer, StartupStage::AgentBuilt);
 
     let prompt = unit.task_prompt();
     emit_startup_timing(&mut startup_timer, StartupStage::PromptReady);
-    let agent_task = tokio::spawn(async move { agent.run(prompt).await });
+    session
+        .prompt(&prompt)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
     emit_startup_timing(&mut startup_timer, StartupStage::RunLoopStarted);
 
-    while let Some(event) = handle.event_rx.recv().await {
+    while let Some(event) = session.recv_event().await {
         print_json_event(&event)?;
     }
 
-    let agent_result = agent_task
+    session
+        .wait()
         .await
-        .map_err(|error| io::Error::other(format!("Agent task failed: {error}")))?;
-
-    agent_result?;
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
     // When MANA_BATCH_VERIFY is set the runner handles verification after all
     // agents complete.  Skip inline verify and exit 0 so the runner can batch
@@ -1759,278 +1726,155 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
     emit_startup_timing(&mut startup_timer, StartupStage::ProcessStart);
     let cwd = std::env::current_dir()?;
     emit_startup_timing(&mut startup_timer, StartupStage::CwdResolved);
-    let mut config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+    let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
     emit_startup_timing(&mut startup_timer, StartupStage::ConfigResolved);
 
-    let registry = ModelRegistry::with_builtins();
     emit_startup_timing(&mut startup_timer, StartupStage::ModelRegistryReady);
-    let auth_path = Config::user_config_dir().join("auth.json");
-    let mut auth_store =
-        AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
     emit_startup_timing(&mut startup_timer, StartupStage::AuthLoaded);
-    let (model_id, provider_name) =
-        resolve_model_and_provider(cli, &config, &registry, &auth_store)
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     emit_startup_timing(&mut startup_timer, StartupStage::ModelResolved);
-
-    let provider = create_provider(&provider_name)
-        .ok_or_else(|| format!("Unknown provider: {provider_name}"))?;
     emit_startup_timing(&mut startup_timer, StartupStage::ProviderReady);
-
-    let meta = registry
-        .resolve_meta(&model_id, Some(&provider_name))
-        .ok_or_else(|| format!("Model not found: {model_id}"))?;
-
-    if let Some(ref key) = cli.api_key {
-        auth_store.set_runtime_key(&provider_name, key.clone());
-    }
-
-    let api_key = resolve_provider_api_key(&mut auth_store, &provider_name).await?;
     emit_startup_timing(&mut startup_timer, StartupStage::ApiKeyResolved);
 
-    let model = Model {
-        meta,
-        provider: Arc::from(provider),
+    let session_choice = if cli.no_session {
+        SessionChoice::InMemory
+    } else if cli.cont {
+        SessionChoice::Continue
+    } else if let Some(ref path) = cli.session {
+        SessionChoice::Open(path.clone())
+    } else {
+        SessionChoice::New
     };
 
-    // Apply CLI overrides
-    if let Some(ref thinking) = cli.thinking {
-        config.thinking = Some(parse_thinking_level(thinking));
-    }
-
-    // Session handling — same logic as interactive mode
-    let session_dir = Config::session_dir();
-    let mut session = if cli.no_session {
-        SessionManager::in_memory()
-    } else if cli.cont {
-        SessionManager::continue_recent(&cwd, &session_dir)?
-            .unwrap_or_else(|| SessionManager::new(&cwd, &session_dir).unwrap())
-    } else if let Some(ref path) = cli.session {
-        SessionManager::open(path)?
-    } else {
-        SessionManager::new(&cwd, &session_dir)?
+    let mut options = SessionOptions {
+        cwd: cwd.clone(),
+        model: cli.model.clone(),
+        provider: cli.provider.clone(),
+        api_key: cli.api_key.clone(),
+        thinking: cli.thinking.as_ref().map(|thinking| parse_thinking_level(thinking)),
+        max_turns: cli.max_turns.or(config.max_turns),
+        system_prompt: cli.system_prompt.clone(),
+        no_tools: cli.no_tools,
+        session: session_choice,
+        ..Default::default()
     };
     emit_startup_timing(&mut startup_timer, StartupStage::SessionReady);
 
-    // Load previous messages from the session branch
-    let history: Vec<Message> = session.get_messages().iter().cloned().cloned().collect();
-
-    // Persist the new user prompt to the session
-    let user_msg_id = uuid::Uuid::new_v4().to_string();
-    let _ = session.append(imp_core::session::SessionEntry::Message {
-        id: user_msg_id,
-        parent_id: None,
-        message: Message::user(prompt),
-    });
-
-    // Use agent loop if tools are available (not --no-tools)
-    if cli.no_tools {
-        // Simple streaming — no tools, no agent loop
-        let thinking = config.thinking.unwrap_or(ThinkingLevel::Off);
-        let system_prompt = cli.system_prompt.clone().unwrap_or_default();
-
-        // Build context with session history + new prompt
-        let mut messages: Vec<Message> = history;
-        messages.push(Message::user(prompt));
-        let context = Context { messages };
-
-        let options = RequestOptions {
-            thinking_level: thinking,
-            // Let the provider pick a sane default output budget instead of
-            // always requesting the model's maximum output size.
-            max_tokens: None,
-            system_prompt,
-            ..Default::default()
-        };
-
-        let mut response_text = String::new();
-        let mut stream = model.provider.stream(&model, context, options, &api_key);
-        emit_startup_timing(&mut startup_timer, StartupStage::PromptReady);
-        emit_startup_timing(&mut startup_timer, StartupStage::RunLoopStarted);
-        while let Some(event_result) = stream.next().await {
-            match event_result {
-                Ok(StreamEvent::TextDelta { text }) => {
-                    print!("{text}");
-                    response_text.push_str(&text);
-                }
-                Ok(StreamEvent::ThinkingDelta { text }) => eprint!("{text}"),
-                Ok(StreamEvent::Error { error }) => {
-                    eprintln!("Error: {error}");
-                    std::process::exit(1);
-                }
-                Ok(StreamEvent::MessageEnd { .. }) => println!(),
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("Stream error: {e}");
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        // Persist the assistant response to the session
-        if !response_text.is_empty() {
-            let assistant_msg_id = uuid::Uuid::new_v4().to_string();
-            let _ = session.append(imp_core::session::SessionEntry::Message {
-                id: assistant_msg_id,
-                parent_id: None,
-                message: Message::Assistant(imp_llm::AssistantMessage {
-                    content: vec![imp_llm::ContentBlock::Text {
-                        text: response_text,
-                    }],
-                    usage: None,
-                    stop_reason: imp_llm::StopReason::EndTurn,
-                    timestamp: imp_llm::now(),
-                }),
-            });
-        }
-    } else {
-        // Full agent loop with tools
+    if !cli.no_tools {
         let lua_cwd = std::env::current_dir().unwrap_or_default();
         let user_config_dir = Config::user_config_dir();
-        let (mut agent, mut handle) =
-            imp_core::builder::AgentBuilder::new(config, cwd, model, api_key)
-                .lua_tool_loader(move |tools| {
-                    imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
-                })
-                .build()
-                .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
-        emit_startup_timing(&mut startup_timer, StartupStage::AgentBuilt);
-
-        // Remove ask tool in headless mode
-        agent.tools.retain(|name| name != "ask");
-
-        // CLI --max-turns override
-        if let Some(max_turns) = cli.max_turns {
-            agent.max_turns = max_turns;
-        }
-
-        // Load session history into the agent (same pattern as TUI's spawn_agent_for_prompt)
-        if !history.is_empty() {
-            let mut messages = history;
-            // Sanitize: strip unpaired tool_calls and orphaned tool_results
-            imp_core::session::sanitize_messages(&mut messages);
-
-            agent.messages = messages;
-        }
-
-        let prompt_owned = prompt.to_string();
-        emit_startup_timing(&mut startup_timer, StartupStage::PromptReady);
-        let session_mu = Arc::new(Mutex::new(session));
-        let session_for_events = Arc::clone(&session_mu);
-        tokio::spawn(async move {
-            if let Err(e) = agent.run(prompt_owned).await {
-                eprintln!("[imp] agent error: {e}");
-            }
-        });
-        emit_startup_timing(&mut startup_timer, StartupStage::RunLoopStarted);
-
-        // Consume events and print output
-        use imp_core::agent::AgentEvent;
-        while let Some(event) = handle.event_rx.recv().await {
-            match event {
-                AgentEvent::MessageDelta { delta } => match delta {
-                    StreamEvent::TextDelta { text } => print!("{text}"),
-                    StreamEvent::ThinkingDelta { text } => eprint!("{text}"),
-                    _ => {}
-                },
-                AgentEvent::ToolExecutionStart {
-                    tool_name, args, ..
-                } => {
-                    let summary = match tool_name.as_str() {
-                        "bash" => args
-                            .get("command")
-                            .and_then(|v| v.as_str())
-                            .map(|c| {
-                                if c.len() > 60 {
-                                    format!("{}…", &c[..60])
-                                } else {
-                                    c.to_string()
-                                }
-                            })
-                            .unwrap_or_default(),
-                        "read" | "write" | "edit" => args
-                            .get("path")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        "grep" => args
-                            .get("pattern")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        _ => String::new(),
-                    };
-                    if summary.is_empty() {
-                        eprintln!("[tool: {tool_name}]");
-                    } else {
-                        eprintln!("[tool: {tool_name} {summary}]");
-                    }
-                }
-                AgentEvent::ToolExecutionEnd {
-                    tool_call_id: _,
-                    result,
-                } => {
-                    if result.is_error {
-                        let text: String = result
-                            .content
-                            .iter()
-                            .filter_map(|b| match b {
-                                imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("");
-                        if !text.is_empty() {
-                            eprintln!(
-                                "[error: {}]",
-                                if text.len() > 100 {
-                                    &text[..100]
-                                } else {
-                                    &text
-                                }
-                            );
-                        }
-                    }
-                    // Persist tool result to session
-                    let msg_id = uuid::Uuid::new_v4().to_string();
-                    let mut s = session_for_events.lock().await;
-                    let _ = s.append(imp_core::session::SessionEntry::Message {
-                        id: msg_id,
-                        parent_id: None,
-                        message: Message::ToolResult(result),
-                    });
-                }
-                AgentEvent::TurnEnd { message, .. } => {
-                    // Persist assistant message to session
-                    let msg_id = uuid::Uuid::new_v4().to_string();
-                    let mut s = session_for_events.lock().await;
-                    let _ = s.append(imp_core::session::SessionEntry::Message {
-                        id: msg_id,
-                        parent_id: None,
-                        message: Message::Assistant(message),
-                    });
-                }
-                AgentEvent::Error { error } => {
-                    eprintln!("Error: {error}");
-                }
-                AgentEvent::Timing { timing } => {
-                    if cli.verbose {
-                        eprintln!("{}", format_timing_event(&timing));
-                    }
-                }
-                AgentEvent::AgentEnd { usage, cost } => {
-                    eprintln!(
-                        "\n[tokens: ↑{} ↓{} | cost: ${:.4}]",
-                        usage.input_tokens, usage.output_tokens, cost.total
-                    );
-                    break;
-                }
-                _ => {}
-            }
-        }
-
-        // session_mu is dropped here — no further use needed
+        options.lua_loader = Some(Box::new(move |tools| {
+            imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
+        }));
     }
+
+    let mut session = ImpSession::create(options)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    emit_startup_timing(&mut startup_timer, StartupStage::AgentBuilt);
+
+    emit_startup_timing(&mut startup_timer, StartupStage::PromptReady);
+    session
+        .prompt(prompt)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    emit_startup_timing(&mut startup_timer, StartupStage::RunLoopStarted);
+
+    let mut printed_trailing_newline = false;
+
+    while let Some(event) = session.recv_event().await {
+        match event {
+            AgentEvent::MessageDelta { delta } => match delta {
+                StreamEvent::TextDelta { text } => {
+                    print!("{text}");
+                    printed_trailing_newline = false;
+                }
+                StreamEvent::ThinkingDelta { text } => eprint!("{text}"),
+                _ => {}
+            },
+            AgentEvent::ToolExecutionStart {
+                tool_name, args, ..
+            } if !cli.no_tools => {
+                let summary = match tool_name.as_str() {
+                    "bash" => args
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .map(|c| {
+                            if c.len() > 60 {
+                                format!("{}…", &c[..60])
+                            } else {
+                                c.to_string()
+                            }
+                        })
+                        .unwrap_or_default(),
+                    "read" | "write" | "edit" => args
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    "grep" => args
+                        .get("pattern")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    _ => String::new(),
+                };
+                if summary.is_empty() {
+                    eprintln!("[tool: {tool_name}]");
+                } else {
+                    eprintln!("[tool: {tool_name} {summary}]");
+                }
+            }
+            AgentEvent::ToolExecutionEnd { result, .. } if !cli.no_tools => {
+                if result.is_error {
+                    let text: String = result
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if !text.is_empty() {
+                        eprintln!(
+                            "[error: {}]",
+                            if text.len() > 100 {
+                                &text[..100]
+                            } else {
+                                &text
+                            }
+                        );
+                    }
+                }
+            }
+            AgentEvent::TurnEnd { .. } => {
+                if !printed_trailing_newline {
+                    println!();
+                    printed_trailing_newline = true;
+                }
+            }
+            AgentEvent::Error { error } => {
+                eprintln!("Error: {error}");
+            }
+            AgentEvent::Timing { timing } => {
+                if cli.verbose {
+                    eprintln!("{}", format_timing_event(&timing));
+                }
+            }
+            AgentEvent::AgentEnd { usage, cost } => {
+                eprintln!(
+                    "\n[tokens: ↑{} ↓{} | cost: ${:.4}]",
+                    usage.input_tokens, usage.output_tokens, cost.total
+                );
+            }
+            _ => {}
+        }
+    }
+
+    session
+        .wait()
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
     Ok(())
 }

@@ -1,4 +1,4 @@
-use imp_llm::{AssistantMessage, Cost, Message, Model, Usage};
+use imp_llm::{model::ModelMeta, AssistantMessage, Cost, Message, Model, Usage};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -294,6 +294,23 @@ pub fn canonical_usage_record_for_assistant_turn(
     turn_index: u32,
     message: &AssistantMessage,
 ) -> Option<UsageRecordV1> {
+    canonical_usage_record_for_assistant_turn_with_model_meta(
+        session,
+        &model.meta,
+        assistant_message_id,
+        turn_index,
+        message,
+    )
+}
+
+/// Build a canonical usage record for a persisted assistant turn from model metadata.
+pub fn canonical_usage_record_for_assistant_turn_with_model_meta(
+    session: &SessionManager,
+    model_meta: &ModelMeta,
+    assistant_message_id: &str,
+    turn_index: u32,
+    message: &AssistantMessage,
+) -> Option<UsageRecordV1> {
     let usage = message.usage.as_ref()?;
     let request_id = canonical_request_id(assistant_message_id);
 
@@ -307,10 +324,10 @@ pub fn canonical_usage_record_for_assistant_turn(
         UsageRecordV1::new(
             request_id,
             message.timestamp,
-            model.meta.provider.clone(),
-            model.meta.id.clone(),
+            model_meta.provider.clone(),
+            model_meta.id.clone(),
             usage,
-            usage.cost(&model.meta.pricing),
+            usage.cost(&model_meta.pricing),
         )
         .with_session_context(
             session.session_id(),

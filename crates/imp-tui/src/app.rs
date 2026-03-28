@@ -892,6 +892,22 @@ impl App {
         auth_store.oauth_display_info(&provider_name)
     }
 
+    fn current_model_meta_for_persistence(&self) -> Option<ModelMeta> {
+        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_store = AuthStore::load(&auth_path).ok();
+        let mut meta = self.model_registry.resolve_meta(&self.model_name, None)?;
+
+        if let Some(auth_store) = auth_store.as_ref() {
+            if should_use_chatgpt_provider(auth_store, &self.model_registry, &meta) {
+                meta = self
+                    .model_registry
+                    .resolve_meta(&self.model_name, Some("openai-codex"))?;
+            }
+        }
+
+        Some(meta)
+    }
+
     // ── Key handling ────────────────────────────────────────────
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
@@ -3247,12 +3263,7 @@ impl App {
                 }
 
                 // Persist tool result to session so resume has full conversation
-                let msg_id = uuid::Uuid::new_v4().to_string();
-                let _ = self.session.append(SessionEntry::Message {
-                    id: msg_id,
-                    parent_id: None,
-                    message: imp_llm::Message::ToolResult(result),
-                });
+                let _ = self.session.append_tool_result_message(result);
             }
             AgentEvent::Timing { timing } => {
                 self.status_items.insert(
@@ -3260,20 +3271,26 @@ impl App {
                     format!("{} {}ms", timing.stage.as_str(), timing.since_llm_request_start_ms),
                 );
             }
-            AgentEvent::TurnEnd { message, .. } => {
+            AgentEvent::TurnEnd { index, message } => {
                 // Update context tracking from this turn's usage
                 if let Some(ref usage) = message.usage {
                     self.current_context_tokens = usage.input_tokens + usage.cache_read_tokens;
                     self.accumulated_usage.add(usage);
                 }
 
-                // Persist assistant message to session
-                let msg_id = uuid::Uuid::new_v4().to_string();
-                let _ = self.session.append(SessionEntry::Message {
-                    id: msg_id,
-                    parent_id: None,
-                    message: imp_llm::Message::Assistant(message),
-                });
+                // Persist assistant message to session, plus canonical usage when possible.
+                if let Some(model_meta) = self.current_model_meta_for_persistence() {
+                    let _ = self
+                        .session
+                        .append_assistant_turn_with_model_meta(&model_meta, index, message);
+                } else {
+                    let msg_id = uuid::Uuid::new_v4().to_string();
+                    let _ = self.session.append(SessionEntry::Message {
+                        id: msg_id,
+                        parent_id: None,
+                        message: imp_llm::Message::Assistant(message),
+                    });
+                }
             }
             AgentEvent::Error { error } => {
                 // Stop streaming — errors can be terminal (no AgentEnd follows)

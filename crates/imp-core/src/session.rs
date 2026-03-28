@@ -1,13 +1,18 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use imp_llm::{AssistantMessage, Message, Model};
+use imp_llm::{AssistantMessage, Message, Model, ToolResultMessage};
 use serde::{Deserialize, Serialize};
 
+use crate::agent::AgentEvent;
 use crate::error::Result;
 use crate::usage::{
-    canonical_usage_record_for_assistant_turn, usage_record_entry, usage_records_from_session,
-    SessionUsageRecord, UsageRecordV1, USAGE_CUSTOM_TYPE,
+    canonical_usage_record_for_assistant_turn_with_model_meta,
+    usage_record_entry,
+    usage_records_from_session,
+    SessionUsageRecord,
+    UsageRecordV1,
+    USAGE_CUSTOM_TYPE,
 };
 
 /// A single entry in the session JSONL file.
@@ -267,6 +272,16 @@ impl SessionManager {
         turn_index: u32,
         message: AssistantMessage,
     ) -> Result<(String, Option<String>)> {
+        self.append_assistant_turn_with_model_meta(&model.meta, turn_index, message)
+    }
+
+    /// Append an assistant turn and, when available, its canonical usage record.
+    pub fn append_assistant_turn_with_model_meta(
+        &mut self,
+        model_meta: &imp_llm::model::ModelMeta,
+        turn_index: u32,
+        message: AssistantMessage,
+    ) -> Result<(String, Option<String>)> {
         let assistant_message_id = uuid::Uuid::new_v4().to_string();
         self.append(SessionEntry::Message {
             id: assistant_message_id.clone(),
@@ -274,14 +289,67 @@ impl SessionManager {
             message: Message::Assistant(message.clone()),
         })?;
 
-        let usage_entry_id = self.append_canonical_usage_for_assistant_turn(
-            model,
+        let usage_entry_id = self.append_canonical_usage_for_assistant_turn_with_model_meta(
+            model_meta,
             &assistant_message_id,
             turn_index,
             &message,
         )?;
 
         Ok((assistant_message_id, usage_entry_id))
+    }
+
+    /// Append a tool result message and return the persisted entry id.
+    pub fn append_tool_result_message(&mut self, result: ToolResultMessage) -> Result<String> {
+        let entry_id = uuid::Uuid::new_v4().to_string();
+        self.append(SessionEntry::Message {
+            id: entry_id.clone(),
+            parent_id: None,
+            message: Message::ToolResult(result),
+        })?;
+        Ok(entry_id)
+    }
+
+    /// Persist the session entries implied by an agent event.
+    ///
+    /// Returns a short description of what was written so callers can surface
+    /// best-effort persistence diagnostics without owning the persistence logic.
+    pub fn persist_agent_event_entries(
+        &mut self,
+        model: &Model,
+        event: &AgentEvent,
+    ) -> Result<Vec<&'static str>> {
+        self.persist_agent_event_entries_with_model_meta(&model.meta, event)
+    }
+
+    /// Persist the session entries implied by an agent event.
+    ///
+    /// Returns a short description of what was written so callers can surface
+    /// best-effort persistence diagnostics without owning the persistence logic.
+    pub fn persist_agent_event_entries_with_model_meta(
+        &mut self,
+        model_meta: &imp_llm::model::ModelMeta,
+        event: &AgentEvent,
+    ) -> Result<Vec<&'static str>> {
+        let mut persisted = Vec::new();
+
+        match event {
+            AgentEvent::ToolExecutionEnd { result, .. } => {
+                self.append_tool_result_message(result.clone())?;
+                persisted.push("tool result");
+            }
+            AgentEvent::TurnEnd { index, message } => {
+                let (_assistant_id, usage_entry_id) =
+                    self.append_assistant_turn_with_model_meta(model_meta, *index, message.clone())?;
+                persisted.push("assistant message");
+                if usage_entry_id.is_some() {
+                    persisted.push("canonical usage");
+                }
+            }
+            _ => {}
+        }
+
+        Ok(persisted)
     }
 
     /// Append a canonical usage entry for an assistant turn, if the turn reports usage
@@ -296,9 +364,29 @@ impl SessionManager {
         turn_index: u32,
         message: &AssistantMessage,
     ) -> Result<Option<String>> {
-        let Some(record) = canonical_usage_record_for_assistant_turn(
+        self.append_canonical_usage_for_assistant_turn_with_model_meta(
+            &model.meta,
+            assistant_message_id,
+            turn_index,
+            message,
+        )
+    }
+
+    /// Append a canonical usage entry for an assistant turn, if the turn reports usage
+    /// and no equivalent canonical record already exists.
+    ///
+    /// This is best-effort metadata persistence: callers should treat errors as
+    /// non-fatal to the main agent flow.
+    pub fn append_canonical_usage_for_assistant_turn_with_model_meta(
+        &mut self,
+        model_meta: &imp_llm::model::ModelMeta,
+        assistant_message_id: &str,
+        turn_index: u32,
+        message: &AssistantMessage,
+    ) -> Result<Option<String>> {
+        let Some(record) = canonical_usage_record_for_assistant_turn_with_model_meta(
             self,
-            model,
+            model_meta,
             assistant_message_id,
             turn_index,
             message,
