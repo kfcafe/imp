@@ -1,3 +1,4 @@
+use imp_llm::truncate_chars_with_suffix;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -112,11 +113,7 @@ pub fn flatten_tree(tree: &[imp_core::session::TreeNode], depth: usize) -> Vec<F
         match &node.entry {
             imp_core::session::SessionEntry::Message { id, message, .. } => {
                 let text = extract_text(message);
-                let truncated = if text.len() > 60 {
-                    format!("{}…", &text[..57])
-                } else {
-                    text
-                };
+                let truncated = truncate_chars_with_suffix(&text, 57, "…");
                 let is_user = message.is_user();
                 let is_tool = message.is_tool_result();
                 result.push(FlatTreeNode {
@@ -267,9 +264,5 @@ fn extract_text(msg: &imp_llm::Message) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
-    }
+    truncate_chars_with_suffix(s, max.saturating_sub(1), "…")
 }

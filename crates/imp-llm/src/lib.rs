@@ -12,6 +12,7 @@ pub mod oauth;
 pub mod provider;
 pub mod providers;
 pub mod stream;
+pub mod text;
 pub mod usage;
 
 pub use error::{Error, Result};
@@ -26,6 +27,7 @@ pub use provider::{
     CacheOptions, Context, Provider, RequestOptions, ThinkingLevel, ToolDefinition,
 };
 pub use stream::{ProviderError, StreamEvent};
+pub use text::{prefix_chars, truncate_chars, truncate_chars_with_suffix};
 pub use usage::{Cost, Usage};
 
 /// Current unix timestamp in seconds.

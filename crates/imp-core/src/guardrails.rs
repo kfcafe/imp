@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::process::Stdio;
 
+use imp_llm::truncate_chars_with_suffix;
 use project_detect::{detect_walk, ProjectKind};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -227,7 +228,10 @@ pub async fn run_after_write_checks(
                 };
                 // Truncate to avoid flooding context
                 let truncated = if combined.len() > 2000 {
-                    format!("{}\n... (truncated)", &combined[..2000])
+                    format!(
+                        "{}\n... (truncated)",
+                        truncate_chars_with_suffix(&combined, 2000, "")
+                    )
                 } else {
                     combined
                 };

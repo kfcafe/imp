@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 
-use imp_llm::{ContentBlock, Message, Model};
+use imp_llm::{truncate_chars_with_suffix, ContentBlock, Message, Model};
+
+fn truncate_for_display(text: &str, max_chars: usize) -> String {
+    truncate_chars_with_suffix(text, max_chars, "...")
+}
 
 /// Context usage stats.
 #[derive(Debug, Clone)]
@@ -64,11 +68,7 @@ pub fn mask_observations(messages: &mut [Message], keep_recent_turns: usize) {
             for block in &assistant.content {
                 if let ContentBlock::ToolCall { id, arguments, .. } = block {
                     let args_json = serde_json::to_string(arguments).unwrap_or_default();
-                    let summary = if args_json.len() > 100 {
-                        format!("{}...", &args_json[..100])
-                    } else {
-                        args_json
-                    };
+                    let summary = truncate_for_display(&args_json, 100);
                     args_map.insert(id.clone(), summary);
                 }
             }
@@ -394,6 +394,26 @@ mod tests {
         assert!(text.contains("read_file"), "should contain tool name");
         assert!(text.contains("/src/main.rs"), "should contain args summary");
         assert!(text.contains("bytes"), "should contain byte count");
+    }
+
+    #[test]
+    fn mask_observations_handles_multibyte_args_without_panicking() {
+        let mut messages = vec![make_user("do stuff")];
+
+        let long_text = format!("{}—bbb", "a".repeat(86));
+        messages.push(make_assistant_tool_call(
+            "c1",
+            "edit",
+            serde_json::json!({"newText": long_text}),
+        ));
+        messages.push(make_tool_result("c1", "edit", "ok"));
+        messages.push(make_assistant_text("done"));
+
+        mask_observations(&mut messages, 1);
+
+        let text = tool_result_text(&messages[2]);
+        assert!(text.starts_with("[Output omitted"));
+        assert!(text.contains("..."));
     }
 
     #[test]

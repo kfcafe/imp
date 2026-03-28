@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use imp_llm::truncate_chars_with_suffix;
 use serde_json::json;
 
 use super::fuzzy;
@@ -160,11 +161,10 @@ pub(crate) fn apply_edit(
     }
 
     // No match — build helpful error
-    let preview_len = 200.min(content.len());
-    let preview = &content[..preview_len];
+    let preview = truncate_chars_with_suffix(content, 200, "");
     let msg = format!(
         "Could not find the specified text to replace.\n\
-         First {preview_len} chars of file:\n{preview}"
+         First 200 chars of file:\n{preview}"
     );
     Err(ToolOutput::error(msg))
 }

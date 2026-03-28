@@ -97,7 +97,7 @@ use imp_llm::oauth::anthropic::AnthropicOAuth;
 use imp_llm::oauth::chatgpt::ChatGptOAuth;
 use imp_llm::provider::ThinkingLevel;
 use imp_llm::providers::create_provider;
-use imp_llm::{Message, Model, StreamEvent};
+use imp_llm::{truncate_chars_with_suffix, Message, Model, StreamEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -1989,11 +1989,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                         .get("command")
                         .and_then(|v| v.as_str())
                         .map(|c| {
-                            if c.len() > 60 {
-                                format!("{}…", &c[..60])
-                            } else {
-                                c.to_string()
-                            }
+                            truncate_chars_with_suffix(c, 60, "…")
                         })
                         .unwrap_or_default(),
                     "read" | "write" | "edit" => args
@@ -2028,11 +2024,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                     if !text.is_empty() {
                         eprintln!(
                             "[error: {}]",
-                            if text.len() > 100 {
-                                &text[..100]
-                            } else {
-                                &text
-                            }
+                            truncate_chars_with_suffix(&text, 100, "")
                         );
                     }
                 }
@@ -2725,11 +2717,7 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
         if !source.skills.is_empty() {
             println!("    {} skills:", source.skills.len());
             for skill in &source.skills {
-                let desc = if skill.description.len() > 60 {
-                    format!("{}…", &skill.description[..60])
-                } else {
-                    skill.description.clone()
-                };
+                let desc = truncate_chars_with_suffix(&skill.description, 60, "…");
                 println!("      - {} — {}", skill.name, desc);
             }
             total_skills += source.skills.len();

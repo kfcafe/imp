@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use crate::truncate_chars_with_suffix;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -74,11 +75,7 @@ impl OAuthDisplayInfo {
 
     pub fn short_account_id(&self) -> Option<String> {
         self.account_id.as_ref().map(|account_id| {
-            if account_id.len() > 8 {
-                format!("{}…", &account_id[..8])
-            } else {
-                account_id.clone()
-            }
+            truncate_chars_with_suffix(account_id, 8, "…")
         })
     }
 }

@@ -20,7 +20,7 @@ use imp_core::session::{SessionEntry, SessionManager};
 use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelMeta, ModelRegistry};
 use imp_llm::providers::create_provider;
-use imp_llm::{Cost, Message, Model, StreamEvent, ThinkingLevel, Usage};
+use imp_llm::{truncate_chars_with_suffix, Cost, Message, Model, StreamEvent, ThinkingLevel, Usage};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
@@ -831,11 +831,7 @@ impl App {
             .and_then(|p| p.file_stem())
             .map(|s| {
                 let name = s.to_string_lossy();
-                if name.len() > 8 {
-                    format!("{}…", &name[..7])
-                } else {
-                    name.to_string()
-                }
+                truncate_chars_with_suffix(&name, 7, "…")
             })
             .unwrap_or_default();
 
@@ -3095,11 +3091,7 @@ impl App {
             for tc in &msg.tool_calls {
                 writeln!(f, "> `{}`: {}", tc.name, tc.args_summary)?;
                 if let Some(ref output) = tc.output {
-                    let preview = if output.len() > 200 {
-                        &output[..200]
-                    } else {
-                        output
-                    };
+                    let preview = truncate_chars_with_suffix(output, 200, "");
                     writeln!(f, "> {preview}\n")?;
                 }
             }

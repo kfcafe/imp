@@ -1,4 +1,5 @@
 use imp_core::config::AnimationLevel;
+use imp_llm::truncate_chars_with_suffix;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -142,11 +143,7 @@ impl DisplayToolCall {
                 .to_string(),
             "bash" => {
                 let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                let truncated = if cmd.len() > 60 {
-                    format!("{}…", &cmd[..57])
-                } else {
-                    cmd.to_string()
-                };
+                let truncated = truncate_chars_with_suffix(cmd, 57, "…");
                 format!("$ {truncated}")
             }
             "edit" | "write" => args
@@ -171,7 +168,7 @@ impl DisplayToolCall {
             _ => {
                 let json = serde_json::to_string(args).unwrap_or_default();
                 if json.len() > 60 {
-                    format!("{}…", &json[..57])
+                    truncate_chars_with_suffix(&json, 57, "…")
                 } else {
                     json
                 }
@@ -315,7 +312,7 @@ fn short_args(args: &str) -> String {
     // For "$ command" bash summaries, take first 20 chars
     if let Some(cmd) = args.strip_prefix("$ ") {
         let short = if cmd.len() > 20 {
-            format!("$ {}…", &cmd[..17])
+            format!("$ {}", truncate_chars_with_suffix(cmd, 17, "…"))
         } else {
             format!("$ {cmd}")
         };
@@ -325,7 +322,7 @@ fn short_args(args: &str) -> String {
     if args.len() <= 24 {
         return args.to_string();
     }
-    format!("{}…", &args[..21])
+    truncate_chars_with_suffix(args, 21, "…")
 }
 
 #[cfg(test)]

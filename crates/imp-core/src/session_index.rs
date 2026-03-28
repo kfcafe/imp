@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use imp_llm::truncate_chars_with_suffix;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::Result;
@@ -195,11 +196,7 @@ fn extract_message_text(message: &imp_llm::Message) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max])
-    }
+    truncate_chars_with_suffix(s, max, "...")
 }
 
 #[cfg(test)]

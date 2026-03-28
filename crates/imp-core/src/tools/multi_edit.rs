@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use imp_llm::truncate_chars_with_suffix;
 use serde_json::json;
 
 use super::edit::apply_edit;
@@ -123,7 +124,7 @@ impl Tool for MultiEditTool {
                          oldText starts with: {:?}",
                         i + 1,
                         edits.len(),
-                        &old_text[..old_text.len().min(80)]
+                        truncate_chars_with_suffix(&old_text, 80, "")
                     )));
                 }
             }
