@@ -31,7 +31,7 @@ impl Default for OpenAiCodexProvider {
 impl OpenAiCodexProvider {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: super::streaming_http_client(),
             models: crate::model::builtin_openai_codex_models(),
         }
     }

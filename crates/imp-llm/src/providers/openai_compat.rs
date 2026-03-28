@@ -164,7 +164,7 @@ impl OpenAiCompatProvider {
     /// - `models`: models this provider can serve
     pub fn new(provider_id: &str, base_url: &str, models: Vec<ModelMeta>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: super::streaming_http_client(),
             provider_id: provider_id.to_string(),
             base_url: base_url.to_string(),
             models,

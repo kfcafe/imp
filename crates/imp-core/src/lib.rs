@@ -17,6 +17,7 @@ pub mod session_index;
 pub mod system_prompt;
 pub mod tools;
 pub mod ui;
+pub mod usage;
 
 pub use agent::{TimingEvent, TimingStage};
 pub use error::{Error, Result};

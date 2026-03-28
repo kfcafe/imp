@@ -240,7 +240,7 @@ impl Default for GoogleProvider {
 impl GoogleProvider {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: super::streaming_http_client(),
             models: builtin_models(),
         }
     }

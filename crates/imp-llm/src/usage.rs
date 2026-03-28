@@ -16,7 +16,7 @@ pub struct Usage {
 }
 
 /// Dollar cost breakdown for a request.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Cost {
     /// Cost of input tokens.
     pub input: f64,
@@ -59,6 +59,17 @@ impl Usage {
         self.output_tokens += other.output_tokens;
         self.cache_read_tokens += other.cache_read_tokens;
         self.cache_write_tokens += other.cache_write_tokens;
+    }
+}
+
+impl Cost {
+    /// Accumulate another cost breakdown into this one.
+    pub fn add(&mut self, other: &Cost) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+        self.total += other.total;
     }
 }
 
@@ -140,6 +151,35 @@ mod tests {
                 output_tokens: 150,
                 cache_read_tokens: 30,
                 cache_write_tokens: 15,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_add_accumulates_all_fields() {
+        let mut a = Cost {
+            input: 1.0,
+            output: 2.0,
+            cache_read: 0.5,
+            cache_write: 0.25,
+            total: 3.75,
+        };
+        let b = Cost {
+            input: 0.5,
+            output: 1.5,
+            cache_read: 0.25,
+            cache_write: 0.75,
+            total: 3.0,
+        };
+        a.add(&b);
+        assert_eq!(
+            a,
+            Cost {
+                input: 1.5,
+                output: 3.5,
+                cache_read: 0.75,
+                cache_write: 1.0,
+                total: 6.75,
             }
         );
     }

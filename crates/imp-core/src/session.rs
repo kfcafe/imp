@@ -461,6 +461,14 @@ impl SessionManager {
         self.leaf_id.as_deref()
     }
 
+    /// Get the stable session id derived from the persisted file name, if any.
+    pub fn session_id(&self) -> Option<String> {
+        self.path
+            .as_ref()
+            .and_then(|path| path.file_stem())
+            .map(|stem| stem.to_string_lossy().to_string())
+    }
+
     /// List available sessions in a directory.
     pub fn list(session_dir: &Path) -> Result<Vec<SessionInfo>> {
         let mut sessions = Vec::new();

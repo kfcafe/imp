@@ -121,13 +121,17 @@ where
                         }
                     }
                     Err(err) => {
-                        let retry_after = if let imp_llm::Error::RateLimited { retry_after_secs } = &err {
-                            *retry_after_secs
-                        } else {
-                            None
-                        };
+                        let retry_after =
+                            if let imp_llm::Error::RateLimited { retry_after_secs } = &err {
+                                *retry_after_secs
+                            } else {
+                                None
+                            };
 
-                        if !emitted_meaningful_event && is_retryable(&err) && attempt < policy.max_retries {
+                        if !emitted_meaningful_event
+                            && is_retryable(&err)
+                            && attempt < policy.max_retries
+                        {
                             match backoff_delay(attempt, &policy, retry_after) {
                                 None => {
                                     let _ = tx.unbounded_send(Err(err));
@@ -332,9 +336,8 @@ mod tests {
         let mut stream = stream_with_retry(
             move || {
                 *call_count_clone.lock().unwrap() += 1;
-                let events: Vec<imp_llm::Result<StreamEvent>> = vec![Err(imp_llm::Error::Stream(
-                    "always fails".into(),
-                ))];
+                let events: Vec<imp_llm::Result<StreamEvent>> =
+                    vec![Err(imp_llm::Error::Stream("always fails".into()))];
                 futures::stream::iter(events)
             },
             policy,
@@ -442,4 +445,3 @@ mod tests {
         assert!(matches!(result[1], Err(imp_llm::Error::Stream(_))));
     }
 }
-

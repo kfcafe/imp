@@ -289,7 +289,11 @@ impl Agent {
             let options = options.clone();
             let api_key = self.api_key.clone();
             let mut stream = crate::retry::stream_with_retry(
-                move || model.provider.stream(&model, context.clone(), options.clone(), &api_key),
+                move || {
+                    model
+                        .provider
+                        .stream(&model, context.clone(), options.clone(), &api_key)
+                },
                 self.retry_policy.clone(),
             );
 
@@ -1283,7 +1287,9 @@ mod tests {
         assert_eq!(timings[0].stage, TimingStage::LlmRequestStart);
         assert_eq!(timings[1].stage, TimingStage::FirstStreamEvent);
         assert_eq!(timings[2].stage, TimingStage::FirstTextDelta);
-        assert!(timings.iter().any(|timing| timing.stage == TimingStage::MessageEnd));
+        assert!(timings
+            .iter()
+            .any(|timing| timing.stage == TimingStage::MessageEnd));
 
         for timing in timings {
             assert_eq!(timing.turn, 0);
@@ -1428,9 +1434,9 @@ mod tests {
                 } if text == "partial"
             )
         });
-        let error_idx = events
-            .iter()
-            .position(|e| matches!(e, AgentEvent::Error { error } if error.contains("mid-stream failure")));
+        let error_idx = events.iter().position(
+            |e| matches!(e, AgentEvent::Error { error } if error.contains("mid-stream failure")),
+        );
 
         assert!(text_delta.is_some());
         assert!(error_idx.is_some());

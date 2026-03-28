@@ -334,12 +334,18 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert!(result.details["path"].as_str().unwrap().ends_with("preview.rs"));
+        assert!(result.details["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("preview.rs"));
         assert!(result.details["summary"]
             .as_str()
             .unwrap()
             .ends_with("preview.rs: 34 bytes created"));
-        assert_eq!(result.details["display_content"], "fn main() {\n    println!(\"hi\");\n}");
+        assert_eq!(
+            result.details["display_content"],
+            "fn main() {\n    println!(\"hi\");\n}"
+        );
         assert_eq!(result.details["display_note"], "");
     }
 
