@@ -66,7 +66,8 @@ fn styled_read_output(
         .unwrap_or(&tc.args_summary);
     let language = language_token_from_path(path);
 
-    let mut rendered = highlight_code_lines(highlighter, &code, &language, with_line_numbers, theme);
+    let mut rendered =
+        highlight_code_lines(highlighter, &code, &language, with_line_numbers, theme);
     for line in extra_lines {
         rendered.push(Line::from(Span::styled(
             line.to_string(),
@@ -75,7 +76,10 @@ fn styled_read_output(
     }
 
     if rendered.is_empty() {
-        vec![Line::from(Span::styled("(empty file)", theme.muted_style()))]
+        vec![Line::from(Span::styled(
+            "(empty file)",
+            theme.muted_style(),
+        ))]
     } else {
         rendered
     }
@@ -98,7 +102,8 @@ fn styled_write_output(
         .get("warnings")
         .and_then(|v| v.as_array())
         .map(|items| {
-            items.iter()
+            items
+                .iter()
                 .filter_map(|item| item.as_str().map(str::to_string))
                 .collect::<Vec<_>>()
         })
@@ -131,7 +136,10 @@ fn styled_write_output(
     }
 
     if display_content.is_empty() {
-        rendered.push(Line::from(Span::styled("(empty file)", theme.muted_style())));
+        rendered.push(Line::from(Span::styled(
+            "(empty file)",
+            theme.muted_style(),
+        )));
     } else {
         rendered.extend(highlight_code_lines(
             highlighter,
@@ -268,7 +276,10 @@ fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
     }
 
     let chunks = wrap_styled_chars(&chars, width.max(1));
-    chunks.into_iter().map(|chunk| Line::from(chars_to_spans(&chunk))).collect()
+    chunks
+        .into_iter()
+        .map(|chunk| Line::from(chars_to_spans(&chunk)))
+        .collect()
 }
 
 fn flatten_line_chars(line: &Line<'static>) -> Vec<(char, Style)> {

@@ -454,6 +454,23 @@ pub fn usage_records_from_session(session: &SessionManager) -> Vec<SessionUsageR
     records
 }
 
+/// Return a deduped record set while preserving a stable canonical ordering.
+///
+/// Records are sorted so canonical rows win over legacy fallbacks, then the
+/// earliest observation of a request is kept. This gives downstream reporting a
+/// deterministic per-request representative row for grouping by model, day, or
+/// session.
+pub fn dedupe_usage_records(records: &[SessionUsageRecord]) -> Vec<SessionUsageRecord> {
+    let mut sorted = records.to_vec();
+    sorted.sort_by(usage_record_preference);
+
+    let mut seen = std::collections::HashSet::new();
+    sorted
+        .into_iter()
+        .filter(|record| seen.insert(record.dedupe_key()))
+        .collect()
+}
+
 /// Sum usage rows without dedupe.
 pub fn aggregate_usage(records: &[SessionUsageRecord]) -> UsageTotals {
     let mut totals = UsageTotals::default();
@@ -465,16 +482,28 @@ pub fn aggregate_usage(records: &[SessionUsageRecord]) -> UsageTotals {
 
 /// Sum usage rows while deduping copied/forked history by stable request id.
 pub fn aggregate_usage_deduped(records: &[SessionUsageRecord]) -> UsageTotals {
-    let mut seen = std::collections::HashSet::new();
-    let mut totals = UsageTotals::default();
+    let deduped = dedupe_usage_records(records);
+    aggregate_usage(&deduped)
+}
 
-    for record in records {
-        if seen.insert(record.dedupe_key()) {
-            totals.add_record(record);
-        }
+fn usage_record_preference(a: &SessionUsageRecord, b: &SessionUsageRecord) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    usage_source_rank(a.source)
+        .cmp(&usage_source_rank(b.source))
+        .then_with(|| a.recorded_at.cmp(&b.recorded_at))
+        .then_with(|| a.session_id.cmp(&b.session_id))
+        .then_with(|| a.session_path.cmp(&b.session_path))
+        .then_with(|| a.assistant_message_id.cmp(&b.assistant_message_id))
+        .then_with(|| a.entry_id.cmp(&b.entry_id))
+        .then(Ordering::Equal)
+}
+
+fn usage_source_rank(source: UsageRecordSource) -> u8 {
+    match source {
+        UsageRecordSource::Canonical => 0,
+        UsageRecordSource::LegacyAssistantMessage => 1,
     }
-
-    totals
 }
 
 /// Build a canonical session custom entry for persistence.
@@ -763,6 +792,61 @@ mod tests {
         assert_eq!(deduped.usage.input_tokens, 100);
         assert_eq!(deduped.usage.output_tokens, 25);
         assert!((deduped.cost.total - 3.7).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn dedupe_usage_records_keeps_earliest_duplicate_row() {
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 25,
+            cache_read_tokens: 10,
+            cache_write_tokens: 5,
+        };
+        let cost = Cost {
+            input: 1.0,
+            output: 2.0,
+            cache_read: 0.3,
+            cache_write: 0.4,
+            total: 3.7,
+        };
+
+        let records = vec![
+            SessionUsageRecord {
+                entry_id: "late".into(),
+                parent_id: None,
+                request_id: "req-shared".into(),
+                recorded_at: 200,
+                provider: Some("anthropic".into()),
+                model: Some("claude-3-7-sonnet".into()),
+                session_id: Some("session-b".into()),
+                session_path: Some("/tmp/b.jsonl".into()),
+                assistant_message_id: Some("assistant-1".into()),
+                turn_index: Some(0),
+                usage: UsageTokens::from(usage.clone()),
+                cost: Some(UsageCostBreakdown::from(cost.clone())),
+                source: UsageRecordSource::Canonical,
+            },
+            SessionUsageRecord {
+                entry_id: "early".into(),
+                parent_id: None,
+                request_id: "req-shared".into(),
+                recorded_at: 100,
+                provider: Some("anthropic".into()),
+                model: Some("claude-3-7-sonnet".into()),
+                session_id: Some("session-a".into()),
+                session_path: Some("/tmp/a.jsonl".into()),
+                assistant_message_id: Some("assistant-1".into()),
+                turn_index: Some(0),
+                usage: UsageTokens::from(usage),
+                cost: Some(UsageCostBreakdown::from(cost)),
+                source: UsageRecordSource::Canonical,
+            },
+        ];
+
+        let deduped = dedupe_usage_records(&records);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].entry_id, "early");
+        assert_eq!(deduped[0].session_id.as_deref(), Some("session-a"));
     }
 
     #[test]

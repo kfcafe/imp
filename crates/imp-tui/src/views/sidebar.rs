@@ -453,7 +453,12 @@ fn render_detail(
     let total = lines.len();
     let start = scroll.min(total.saturating_sub(area.height as usize));
 
-    for (i, line) in lines.iter().skip(start).take(area.height as usize).enumerate() {
+    for (i, line) in lines
+        .iter()
+        .skip(start)
+        .take(area.height as usize)
+        .enumerate()
+    {
         let row = area.y + i as u16;
         buf.set_line(area.x, row, line, area.width);
     }
@@ -521,7 +526,13 @@ fn styled_output_lines(
     }
 
     if tc.output.is_none() {
-        return wrap_plain_lines(vec!["Running…".to_string()], width, config, theme, tc.is_error);
+        return wrap_plain_lines(
+            vec!["Running…".to_string()],
+            width,
+            config,
+            theme,
+            tc.is_error,
+        );
     }
 
     let styled = styled_tool_output_lines(tc, highlighter, theme, tc.name == "read");
@@ -1000,7 +1011,16 @@ mod tests {
         let tc1 = make_tc("read", "file.rs", Some("fn main() {}"), false);
         let tc2 = make_tc("bash", "$ ls", Some("file1\nfile2"), false);
         let highlighter = crate::highlight::Highlighter::new();
-        let view = SidebarView::new(vec![&tc1, &tc2], Some(0), &theme, &highlighter, 0, 0, 0, &config);
+        let view = SidebarView::new(
+            vec![&tc1, &tc2],
+            Some(0),
+            &theme,
+            &highlighter,
+            0,
+            0,
+            0,
+            &config,
+        );
         let area = Rect::new(0, 0, 50, 20);
         let mut buf = Buffer::empty(area);
         view.render(area, &mut buf);
@@ -1016,7 +1036,16 @@ mod tests {
         let tc1 = make_tc("read", "file.rs", Some("fn main() {}"), false);
         let tc2 = make_tc("bash", "$ ls", Some("file1\nfile2"), false);
         let highlighter = crate::highlight::Highlighter::new();
-        let view = SidebarView::new(vec![&tc1, &tc2], Some(1), &theme, &highlighter, 0, 0, 0, &config);
+        let view = SidebarView::new(
+            vec![&tc1, &tc2],
+            Some(1),
+            &theme,
+            &highlighter,
+            0,
+            0,
+            0,
+            &config,
+        );
         let area = Rect::new(0, 0, 50, 20);
         let mut buf = Buffer::empty(area);
         view.render(area, &mut buf);

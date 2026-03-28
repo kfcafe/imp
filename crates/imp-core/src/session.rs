@@ -7,12 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::agent::AgentEvent;
 use crate::error::Result;
 use crate::usage::{
-    canonical_usage_record_for_assistant_turn_with_model_meta,
-    usage_record_entry,
-    usage_records_from_session,
-    SessionUsageRecord,
-    UsageRecordV1,
-    USAGE_CUSTOM_TYPE,
+    canonical_usage_record_for_assistant_turn_with_model_meta, usage_record_entry,
+    usage_records_from_session, SessionUsageRecord, UsageRecordV1, USAGE_CUSTOM_TYPE,
 };
 
 /// A single entry in the session JSONL file.
@@ -339,8 +335,11 @@ impl SessionManager {
                 persisted.push("tool result");
             }
             AgentEvent::TurnEnd { index, message } => {
-                let (_assistant_id, usage_entry_id) =
-                    self.append_assistant_turn_with_model_meta(model_meta, *index, message.clone())?;
+                let (_assistant_id, usage_entry_id) = self.append_assistant_turn_with_model_meta(
+                    model_meta,
+                    *index,
+                    message.clone(),
+                )?;
                 persisted.push("assistant message");
                 if usage_entry_id.is_some() {
                     persisted.push("canonical usage");
@@ -900,7 +899,8 @@ mod tests {
             _context: Context,
             _options: RequestOptions,
             _api_key: &str,
-        ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
+        ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = imp_llm::Result<StreamEvent>> + Send>>
+        {
             Box::pin(stream::empty())
         }
 

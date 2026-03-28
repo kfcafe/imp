@@ -655,11 +655,10 @@ fn push_tool_call_chat_lines(
     }
 
     if tc.expanded && !is_running {
-        let output_lines = styled_tool_output_lines(tc, &Highlighter::new(), theme, tc.name == "read");
+        let output_lines =
+            styled_tool_output_lines(tc, &Highlighter::new(), theme, tc.name == "read");
         for line in output_lines.into_iter().take(50) {
-            all_lines.extend(wrap_line_with_prefix(
-                &line, &rail, &rail, width, word_wrap,
-            ));
+            all_lines.extend(wrap_line_with_prefix(&line, &rail, &rail, width, word_wrap));
         }
     }
 }

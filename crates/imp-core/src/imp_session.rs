@@ -553,7 +553,10 @@ impl ImpSession {
     }
 
     fn persist_event_entries(&mut self, event: &AgentEvent) -> Vec<&'static str> {
-        match self.session_mgr.persist_agent_event_entries(&self.model, event) {
+        match self
+            .session_mgr
+            .persist_agent_event_entries(&self.model, event)
+        {
             Ok(persisted) => persisted,
             Err(error) => {
                 self.push_persistence_error(
@@ -632,10 +635,10 @@ fn codex_supports_model(_registry: &ModelRegistry, model_id: &str) -> bool {
 mod tests {
     use super::*;
     use imp_llm::{
-        AssistantMessage, ContentBlock, ModelMeta, StopReason, StreamEvent, Usage,
         auth::{ApiKey, AuthStore},
         model::{Capabilities, ModelPricing},
         provider::{Context, Provider, RequestOptions},
+        AssistantMessage, ContentBlock, ModelMeta, StopReason, StreamEvent, Usage,
     };
     use serde_json::json;
     use tempfile::TempDir;
@@ -657,7 +660,8 @@ mod tests {
             _context: Context,
             _options: RequestOptions,
             _api_key: &str,
-        ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
+        ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = imp_llm::Result<StreamEvent>> + Send>>
+        {
             Box::pin(futures::stream::empty())
         }
 
@@ -682,7 +686,8 @@ mod tests {
             _context: Context,
             _options: RequestOptions,
             _api_key: &str,
-        ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
+        ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = imp_llm::Result<StreamEvent>> + Send>>
+        {
             let events = self
                 .events
                 .lock()
@@ -820,7 +825,9 @@ mod tests {
         let session_dir = tmp.path().join("sessions");
         let model = test_model_with_events(vec![Ok(StreamEvent::MessageEnd {
             message: AssistantMessage {
-                content: vec![ContentBlock::Text { text: "done".into() }],
+                content: vec![ContentBlock::Text {
+                    text: "done".into(),
+                }],
                 usage: None,
                 stop_reason: StopReason::EndTurn,
                 timestamp: 42,
@@ -1004,9 +1011,7 @@ mod tests {
             result: imp_llm::ToolResultMessage {
                 tool_call_id: "call-1".into(),
                 tool_name: "bash".into(),
-                content: vec![ContentBlock::Text {
-                    text: "ok".into(),
-                }],
+                content: vec![ContentBlock::Text { text: "ok".into() }],
                 is_error: false,
                 details: json!({"exit_code": 0}),
                 timestamp: 999,
@@ -1014,11 +1019,12 @@ mod tests {
         });
 
         assert_eq!(persisted, vec!["tool result"]);
-        assert!(session
-            .session_mgr
-            .entries()
-            .iter()
-            .any(|entry| matches!(entry, SessionEntry::Message { message: imp_llm::Message::ToolResult(_), .. })));
+        assert!(session.session_mgr.entries().iter().any(|entry| matches!(
+            entry,
+            SessionEntry::Message {
+                message: imp_llm::Message::ToolResult(_),
+                ..
+            }
+        )));
     }
 }
-

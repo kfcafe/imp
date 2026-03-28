@@ -374,7 +374,11 @@ impl App {
 
         // Restore terminal (always, even on error)
         disable_raw_mode()?;
-        crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+        crossterm::execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
         terminal.show_cursor()?;
 
         result
@@ -3268,7 +3272,11 @@ impl App {
             AgentEvent::Timing { timing } => {
                 self.status_items.insert(
                     "timing".to_string(),
-                    format!("{} {}ms", timing.stage.as_str(), timing.since_llm_request_start_ms),
+                    format!(
+                        "{} {}ms",
+                        timing.stage.as_str(),
+                        timing.since_llm_request_start_ms
+                    ),
                 );
             }
             AgentEvent::TurnEnd { index, message } => {
@@ -3280,9 +3288,11 @@ impl App {
 
                 // Persist assistant message to session, plus canonical usage when possible.
                 if let Some(model_meta) = self.current_model_meta_for_persistence() {
-                    let _ = self
-                        .session
-                        .append_assistant_turn_with_model_meta(&model_meta, index, message);
+                    let _ = self.session.append_assistant_turn_with_model_meta(
+                        &model_meta,
+                        index,
+                        message,
+                    );
                 } else {
                     let msg_id = uuid::Uuid::new_v4().to_string();
                     let _ = self.session.append(SessionEntry::Message {
