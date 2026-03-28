@@ -11,6 +11,7 @@ use crate::theme::Theme;
 pub struct SessionPickerState {
     pub sessions: Vec<SessionInfo>,
     pub selected: usize,
+    pub scroll_offset: usize,
 }
 
 impl SessionPickerState {
@@ -18,18 +19,34 @@ impl SessionPickerState {
         Self {
             sessions,
             selected: 0,
+            scroll_offset: 0,
         }
     }
 
     pub fn move_up(&mut self) {
         if self.selected > 0 {
             self.selected -= 1;
+            if self.selected < self.scroll_offset {
+                self.scroll_offset = self.selected;
+            }
         }
     }
 
     pub fn move_down(&mut self) {
         if self.selected + 1 < self.sessions.len() {
             self.selected += 1;
+        }
+    }
+
+    /// Adjust scroll_offset so the selected item is visible within `visible_height` rows.
+    pub fn clamp_scroll(&mut self, visible_height: usize) {
+        if visible_height == 0 {
+            return;
+        }
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + visible_height {
+            self.scroll_offset = self.selected + 1 - visible_height;
         }
     }
 
@@ -72,11 +89,19 @@ impl Widget for SessionPickerView<'_> {
             return;
         }
 
-        for (i, session) in self.state.sessions.iter().enumerate() {
-            if i >= inner.height as usize {
-                break;
-            }
+        let visible_height = inner.height as usize;
+        let scroll_offset = self.state.scroll_offset;
+        let total = self.state.sessions.len();
 
+        let visible_sessions = self
+            .state
+            .sessions
+            .iter()
+            .enumerate()
+            .skip(scroll_offset)
+            .take(visible_height);
+
+        for (row, (i, session)) in visible_sessions.enumerate() {
             let is_selected = i == self.state.selected;
             let style = if is_selected {
                 self.theme.selected_style()
@@ -107,7 +132,27 @@ impl Widget for SessionPickerView<'_> {
                 Span::styled(age, self.theme.muted_style()),
             ]);
 
-            buf.set_line(inner.x, inner.y + i as u16, &line, inner.width);
+            buf.set_line(inner.x, inner.y + row as u16, &line, inner.width);
+        }
+
+        // Scroll indicators
+        if scroll_offset > 0 {
+            let indicator = Line::from(Span::styled("▲", self.theme.muted_style()));
+            buf.set_line(
+                inner.x + inner.width.saturating_sub(1),
+                inner.y,
+                &indicator,
+                1,
+            );
+        }
+        if scroll_offset + visible_height < total {
+            let indicator = Line::from(Span::styled("▼", self.theme.muted_style()));
+            buf.set_line(
+                inner.x + inner.width.saturating_sub(1),
+                inner.y + inner.height.saturating_sub(1),
+                &indicator,
+                1,
+            );
         }
     }
 }

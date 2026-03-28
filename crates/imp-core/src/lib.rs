@@ -1,6 +1,5 @@
 pub mod agent;
 pub mod builder;
-pub mod compaction;
 pub mod config;
 pub mod context;
 pub mod error;
@@ -19,6 +18,7 @@ pub mod system_prompt;
 pub mod tools;
 pub mod ui;
 
+pub use agent::{TimingEvent, TimingStage};
 pub use error::{Error, Result};
 
 // Re-export imp-llm for downstream crates

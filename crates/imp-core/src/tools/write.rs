@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use super::{Tool, ToolContext, ToolOutput};
+use super::{truncate_head, Tool, ToolContext, ToolOutput};
 use crate::error::Result;
 
 pub struct WriteTool;
@@ -95,11 +95,39 @@ impl Tool for WriteTool {
 
         let action = if existed { "overwritten" } else { "created" };
         let display = path.display().to_string();
+        let summary = format!("{display}: {bytes_written} bytes {action}");
 
-        let mut text = format!("{display}: {bytes_written} bytes {action}");
+        const DISPLAY_MAX_LINES: usize = 40;
+        const DISPLAY_MAX_BYTES: usize = 8_000;
+        let display_source = normalized.replace("\r\n", "\n");
+        let display_result = truncate_head(&display_source, DISPLAY_MAX_LINES, DISPLAY_MAX_BYTES);
+        let display_content = display_result.content.trim_end_matches('\n').to_string();
+        let display_note = if display_result.truncated {
+            let note = format!(
+                "[output truncated: showing {}/{} lines, {}/{} bytes]",
+                display_result.output_lines,
+                display_result.total_lines,
+                display_result.output_bytes,
+                display_result.total_bytes,
+            );
+            if let Some(ref tf) = display_result.temp_file {
+                format!("{note} full output: {}", tf.display())
+            } else {
+                note
+            }
+        } else {
+            String::new()
+        };
+
+        let mut warnings = Vec::new();
         if let Some(warning) = tracker_warning {
+            warnings.push(warning);
+        }
+
+        let mut text = summary.clone();
+        for warning in &warnings {
             text.push('\n');
-            text.push_str(&warning);
+            text.push_str(warning);
         }
 
         Ok(ToolOutput {
@@ -108,6 +136,10 @@ impl Tool for WriteTool {
                 "path": display,
                 "bytes": bytes_written,
                 "created": !existed,
+                "summary": summary,
+                "warnings": warnings,
+                "display_content": display_content,
+                "display_note": display_note,
             }),
             is_error: false,
         })
@@ -149,6 +181,12 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
+        let details = &result.details;
+        assert_eq!(details["display_content"], "hello world");
+        assert!(details["summary"]
+            .as_str()
+            .unwrap()
+            .ends_with("new.txt: 11 bytes created"));
         let written = std::fs::read_to_string(dir.path().join("new.txt")).unwrap();
         assert_eq!(written, "hello world");
     }
@@ -189,6 +227,7 @@ mod tests {
         assert!(!result.is_error);
         let written = std::fs::read_to_string(dir.path().join("empty.txt")).unwrap();
         assert_eq!(written, "");
+        assert_eq!(result.details["display_content"], "");
     }
 
     #[tokio::test]
@@ -278,5 +317,56 @@ mod tests {
         assert!(text.contains("overwritten"));
         let written = std::fs::read_to_string(&file).unwrap();
         assert_eq!(written, "new content");
+    }
+
+    #[tokio::test]
+    async fn write_includes_display_content_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteTool;
+
+        let result = tool
+            .execute(
+                "c8",
+                serde_json::json!({"path": "preview.rs", "content": "fn main() {\n    println!(\"hi\");\n}\n"}),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.details["path"].as_str().unwrap().ends_with("preview.rs"));
+        assert!(result.details["summary"]
+            .as_str()
+            .unwrap()
+            .ends_with("preview.rs: 34 bytes created"));
+        assert_eq!(result.details["display_content"], "fn main() {\n    println!(\"hi\");\n}");
+        assert_eq!(result.details["display_note"], "");
+    }
+
+    #[tokio::test]
+    async fn write_display_content_truncates_large_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteTool;
+        let content = (0..100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let result = tool
+            .execute(
+                "c9",
+                serde_json::json!({"path": "large.txt", "content": content}),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let display_content = result.details["display_content"].as_str().unwrap();
+        assert!(display_content.lines().count() <= 40);
+        assert!(result.details["display_note"]
+            .as_str()
+            .unwrap()
+            .contains("output truncated"));
     }
 }

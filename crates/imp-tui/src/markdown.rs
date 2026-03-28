@@ -84,7 +84,8 @@ pub fn render_markdown<'a>(text: &str, theme: &Theme, highlighter: &Highlighter)
         } else if is_ordered_list(raw_line) {
             let dot = raw_line.find('.').unwrap_or(0);
             let prefix = format!("  {}. ", &raw_line[..dot]);
-            (prefix, raw_line[dot + 2..].trim_start())
+            let rest_start = (dot + 2).min(raw_line.len());
+            (prefix, raw_line[rest_start..].trim_start())
         } else {
             (String::new(), raw_line)
         };
@@ -230,6 +231,11 @@ fn is_ordered_list(line: &str) -> bool {
     if let Some(dot_pos) = trimmed.find('.') {
         if dot_pos > 0 && dot_pos <= 3 {
             let prefix = &trimmed[..dot_pos];
+            // Require "N. " or "N." at end — must have space after dot if content follows
+            let after_dot = &trimmed[dot_pos + 1..];
+            if !after_dot.is_empty() && !after_dot.starts_with(' ') {
+                return false;
+            }
             return prefix.chars().all(|c| c.is_ascii_digit());
         }
     }

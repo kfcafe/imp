@@ -186,6 +186,7 @@ fn shorten_path(path: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
     use crate::views::status::StatusInfo;
+    use imp_core::config::AnimationLevel;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
@@ -202,6 +203,11 @@ mod tests {
             show_context_usage: true,
             cwd: "~/tower/imp".into(),
             session_name: "debug-oauth".into(),
+            is_streaming: false,
+            active_tools: 0,
+            turn_elapsed: None,
+            tick: 0,
+            animation_level: AnimationLevel::Minimal,
             ..StatusInfo::default()
         }
     }

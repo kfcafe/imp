@@ -62,7 +62,6 @@ pub enum SessionChoice {
     Open(PathBuf),
 }
 
-
 /// Configuration for creating an `ImpSession`.
 ///
 /// All fields have sensible defaults — only `cwd` is typically required.

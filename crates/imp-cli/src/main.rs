@@ -6,6 +6,80 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupStage {
+    ProcessStart,
+    CwdResolved,
+    ConfigResolved,
+    SessionReady,
+    AuthLoaded,
+    ModelRegistryReady,
+    ModelResolved,
+    ProviderReady,
+    ApiKeyResolved,
+    AgentBuilt,
+    PromptReady,
+    RunLoopStarted,
+}
+
+impl StartupStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProcessStart => "process_start",
+            Self::CwdResolved => "cwd_resolved",
+            Self::ConfigResolved => "config_resolved",
+            Self::SessionReady => "session_ready",
+            Self::AuthLoaded => "auth_loaded",
+            Self::ModelRegistryReady => "model_registry_ready",
+            Self::ModelResolved => "model_resolved",
+            Self::ProviderReady => "provider_ready",
+            Self::ApiKeyResolved => "api_key_resolved",
+            Self::AgentBuilt => "agent_built",
+            Self::PromptReady => "prompt_ready",
+            Self::RunLoopStarted => "run_loop_started",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupTiming {
+    pub stage: StartupStage,
+    pub since_start_ms: u64,
+    pub since_previous_ms: u64,
+}
+
+#[derive(Debug)]
+struct StartupTimer {
+    started_at: std::time::Instant,
+    last_mark_at: std::time::Instant,
+    enabled: bool,
+}
+
+impl StartupTimer {
+    fn new(enabled: bool) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            started_at: now,
+            last_mark_at: now,
+            enabled,
+        }
+    }
+
+    fn mark(&mut self, stage: StartupStage) -> Option<StartupTiming> {
+        if !self.enabled {
+            return None;
+        }
+        let now = std::time::Instant::now();
+        let timing = StartupTiming {
+            stage,
+            since_start_ms: now.duration_since(self.started_at).as_millis() as u64,
+            since_previous_ms: now.duration_since(self.last_mark_at).as_millis() as u64,
+        };
+        self.last_mark_at = now;
+        Some(timing)
+    }
+}
+
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
@@ -14,8 +88,8 @@ use imp_core::config::Config;
 
 use imp_core::session::SessionManager;
 use imp_core::system_prompt::{Attempt as TaskAttempt, TaskContext};
-
 use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
+use imp_core::TimingEvent;
 use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelRegistry, ProviderRegistry};
 use imp_llm::oauth::anthropic::AnthropicOAuth;
@@ -606,19 +680,27 @@ async fn resolve_provider_api_key(
 }
 
 async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut startup_timer = StartupTimer::new(cli.verbose);
+    emit_startup_timing(&mut startup_timer, StartupStage::ProcessStart);
     let cwd = std::env::current_dir()?;
+    emit_startup_timing(&mut startup_timer, StartupStage::CwdResolved);
     let unit = load_mana_unit(&cwd, unit_id)?;
     let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+    emit_startup_timing(&mut startup_timer, StartupStage::ConfigResolved);
     let registry = ModelRegistry::with_builtins();
+    emit_startup_timing(&mut startup_timer, StartupStage::ModelRegistryReady);
     let auth_path = Config::user_config_dir().join("auth.json");
     let mut auth_store =
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+    emit_startup_timing(&mut startup_timer, StartupStage::AuthLoaded);
     let (model_id, provider_name) =
         resolve_model_and_provider(cli, &config, &registry, &auth_store)
             .map_err(io::Error::other)?;
+    emit_startup_timing(&mut startup_timer, StartupStage::ModelResolved);
 
     let provider = create_provider(&provider_name)
         .ok_or_else(|| io::Error::other(format!("Unknown provider: {provider_name}")))?;
+    emit_startup_timing(&mut startup_timer, StartupStage::ProviderReady);
 
     let meta = registry
         .resolve_meta(&model_id, Some(&provider_name))
@@ -629,6 +711,7 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
     }
 
     let api_key = resolve_provider_api_key(&mut auth_store, &provider_name).await?;
+    emit_startup_timing(&mut startup_timer, StartupStage::ApiKeyResolved);
     let model = Model {
         meta,
         provider: Arc::from(provider),
@@ -665,6 +748,7 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
         }
         builder.build().map_err(io::Error::other)?
     };
+    emit_startup_timing(&mut startup_timer, StartupStage::AgentBuilt);
 
     // CLI --max-turns overrides config
     if let Some(max_turns) = cli.max_turns {
@@ -672,7 +756,9 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
     }
 
     let prompt = unit.task_prompt();
+    emit_startup_timing(&mut startup_timer, StartupStage::PromptReady);
     let agent_task = tokio::spawn(async move { agent.run(prompt).await });
+    emit_startup_timing(&mut startup_timer, StartupStage::RunLoopStarted);
 
     while let Some(event) = handle.event_rx.recv().await {
         print_json_event(&event)?;
@@ -898,6 +984,27 @@ fn format_attempt(attempt: &UnitAttempt) -> String {
     }
 }
 
+fn emit_startup_timing(timer: &mut StartupTimer, stage: StartupStage) {
+    if let Some(timing) = timer.mark(stage) {
+        eprintln!(
+            "[startup stage={} total={}ms delta={}ms]",
+            timing.stage.as_str(),
+            timing.since_start_ms,
+            timing.since_previous_ms,
+        );
+    }
+}
+
+fn format_timing_event(timing: &TimingEvent) -> String {
+    format!(
+        "[timing turn={} stage={} turn={}ms llm={}ms]",
+        timing.turn,
+        timing.stage.as_str(),
+        timing.since_turn_start_ms,
+        timing.since_llm_request_start_ms,
+    )
+}
+
 fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>> {
     let value = match event {
         AgentEvent::AgentStart { model, timestamp } => {
@@ -937,10 +1044,13 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
                 "result": result,
             })
         }
-        AgentEvent::CompactionStart => json!({ "type": "compaction_start" }),
-        AgentEvent::CompactionEnd { summary } => {
-            json!({ "type": "compaction_end", "summary": summary })
-        }
+        AgentEvent::Timing { timing } => json!({
+            "type": "timing",
+            "turn": timing.turn,
+            "stage": timing.stage.as_str(),
+            "since_turn_start_ms": timing.since_turn_start_ms,
+            "since_llm_request_start_ms": timing.since_llm_request_start_ms,
+        }),
         AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
         AgentEvent::ToolOutputDelta { .. } => return Ok(()), // handled in TUI only
     };
@@ -1130,9 +1240,14 @@ impl UserInterface for RpcUi {
 }
 
 async fn run_rpc_mode(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let mut startup_timer = StartupTimer::new(cli.verbose);
+    emit_startup_timing(&mut startup_timer, StartupStage::ProcessStart);
     let cwd = std::env::current_dir()?;
+    emit_startup_timing(&mut startup_timer, StartupStage::CwdResolved);
     let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+    emit_startup_timing(&mut startup_timer, StartupStage::ConfigResolved);
     let registry = ModelRegistry::with_builtins();
+    emit_startup_timing(&mut startup_timer, StartupStage::ModelRegistryReady);
 
     let stdout_tx = spawn_json_lines_stdout_writer();
     let rpc_ui = Arc::new(RpcUi::new(stdout_tx.clone()));
@@ -1309,15 +1424,19 @@ fn spawn_rpc_agent(
     stdout_tx: mpsc::Sender<Value>,
     prompt: String,
 ) -> Result<(mpsc::Sender<AgentCommand>, RpcAgentJoinHandle), Box<dyn std::error::Error>> {
+    let mut startup_timer = StartupTimer::new(cli.verbose);
+    emit_startup_timing(&mut startup_timer, StartupStage::ProcessStart);
     let (mut agent, handle) = create_rpc_agent(cli, cwd, config, registry, history, rpc_ui)?;
     let command_tx = handle.command_tx.clone();
 
     tokio::spawn(forward_rpc_events(handle, stdout_tx));
 
+    emit_startup_timing(&mut startup_timer, StartupStage::PromptReady);
     let join_handle = tokio::spawn(async move {
         let result = agent.run(prompt).await;
         (agent, result)
     });
+    emit_startup_timing(&mut startup_timer, StartupStage::RunLoopStarted);
 
     Ok((command_tx, join_handle))
 }
@@ -1330,14 +1449,19 @@ fn create_rpc_agent(
     history: Vec<Message>,
     rpc_ui: Arc<RpcUi>,
 ) -> Result<(Agent, AgentHandle), Box<dyn std::error::Error>> {
+    let mut startup_timer = StartupTimer::new(cli.verbose);
+    emit_startup_timing(&mut startup_timer, StartupStage::ProcessStart);
     let auth_path = Config::user_config_dir().join("auth.json");
     let mut auth_store =
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+    emit_startup_timing(&mut startup_timer, StartupStage::AuthLoaded);
     let (model_id, provider_name) =
         resolve_model_and_provider(cli, config, registry, &auth_store).map_err(io::Error::other)?;
+    emit_startup_timing(&mut startup_timer, StartupStage::ModelResolved);
 
     let provider = create_provider(&provider_name)
         .ok_or_else(|| io::Error::other(format!("Unknown provider: {provider_name}")))?;
+    emit_startup_timing(&mut startup_timer, StartupStage::ProviderReady);
 
     let meta = registry
         .resolve_meta(&model_id, Some(&provider_name))
@@ -1351,6 +1475,7 @@ fn create_rpc_agent(
         tokio::runtime::Handle::current()
             .block_on(resolve_provider_api_key(&mut auth_store, &provider_name))
     })?;
+    emit_startup_timing(&mut startup_timer, StartupStage::ApiKeyResolved);
     let model = Model {
         meta,
         provider: Arc::from(provider),
@@ -1374,6 +1499,7 @@ fn create_rpc_agent(
         builder = builder.system_prompt(prompt.clone());
     }
     let (mut agent, handle) = builder.build()?;
+    emit_startup_timing(&mut startup_timer, StartupStage::AgentBuilt);
     agent.ui = rpc_ui_clone;
     agent.messages = history;
 
@@ -1549,10 +1675,13 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             "details": result.details,
             "timestamp": result.timestamp,
         }),
-        AgentEvent::CompactionStart => json!({ "type": "compaction_start" }),
-        AgentEvent::CompactionEnd { summary } => {
-            json!({ "type": "compaction_end", "summary": summary })
-        }
+        AgentEvent::Timing { timing } => json!({
+            "type": "timing",
+            "turn": timing.turn,
+            "stage": timing.stage.as_str(),
+            "since_turn_start_ms": timing.since_turn_start_ms,
+            "since_llm_request_start_ms": timing.since_llm_request_start_ms,
+        }),
         AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
         AgentEvent::ToolOutputDelta { tool_call_id, text } => {
             json!({ "type": "tool_output_delta", "tool_call_id": tool_call_id, "text": text })
@@ -1626,19 +1755,27 @@ fn run_shell_command(command: &str, cwd: &Path) -> TokioCommand {
 }
 
 async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut startup_timer = StartupTimer::new(cli.verbose);
+    emit_startup_timing(&mut startup_timer, StartupStage::ProcessStart);
     let cwd = std::env::current_dir()?;
+    emit_startup_timing(&mut startup_timer, StartupStage::CwdResolved);
     let mut config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+    emit_startup_timing(&mut startup_timer, StartupStage::ConfigResolved);
 
     let registry = ModelRegistry::with_builtins();
+    emit_startup_timing(&mut startup_timer, StartupStage::ModelRegistryReady);
     let auth_path = Config::user_config_dir().join("auth.json");
     let mut auth_store =
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+    emit_startup_timing(&mut startup_timer, StartupStage::AuthLoaded);
     let (model_id, provider_name) =
         resolve_model_and_provider(cli, &config, &registry, &auth_store)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    emit_startup_timing(&mut startup_timer, StartupStage::ModelResolved);
 
     let provider = create_provider(&provider_name)
         .ok_or_else(|| format!("Unknown provider: {provider_name}"))?;
+    emit_startup_timing(&mut startup_timer, StartupStage::ProviderReady);
 
     let meta = registry
         .resolve_meta(&model_id, Some(&provider_name))
@@ -1649,6 +1786,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
     }
 
     let api_key = resolve_provider_api_key(&mut auth_store, &provider_name).await?;
+    emit_startup_timing(&mut startup_timer, StartupStage::ApiKeyResolved);
 
     let model = Model {
         meta,
@@ -1672,6 +1810,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
     } else {
         SessionManager::new(&cwd, &session_dir)?
     };
+    emit_startup_timing(&mut startup_timer, StartupStage::SessionReady);
 
     // Load previous messages from the session branch
     let history: Vec<Message> = session.get_messages().iter().cloned().cloned().collect();
@@ -1697,13 +1836,17 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
 
         let options = RequestOptions {
             thinking_level: thinking,
-            max_tokens: Some(model.meta.max_output_tokens),
+            // Let the provider pick a sane default output budget instead of
+            // always requesting the model's maximum output size.
+            max_tokens: None,
             system_prompt,
             ..Default::default()
         };
 
         let mut response_text = String::new();
         let mut stream = model.provider.stream(&model, context, options, &api_key);
+        emit_startup_timing(&mut startup_timer, StartupStage::PromptReady);
+        emit_startup_timing(&mut startup_timer, StartupStage::RunLoopStarted);
         while let Some(event_result) = stream.next().await {
             match event_result {
                 Ok(StreamEvent::TextDelta { text }) => {
@@ -1751,6 +1894,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                 })
                 .build()
                 .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+        emit_startup_timing(&mut startup_timer, StartupStage::AgentBuilt);
 
         // Remove ask tool in headless mode
         agent.tools.retain(|name| name != "ask");
@@ -1770,6 +1914,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         }
 
         let prompt_owned = prompt.to_string();
+        emit_startup_timing(&mut startup_timer, StartupStage::PromptReady);
         let session_mu = Arc::new(Mutex::new(session));
         let session_for_events = Arc::clone(&session_mu);
         tokio::spawn(async move {
@@ -1777,6 +1922,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                 eprintln!("[imp] agent error: {e}");
             }
         });
+        emit_startup_timing(&mut startup_timer, StartupStage::RunLoopStarted);
 
         // Consume events and print output
         use imp_core::agent::AgentEvent;
@@ -1866,6 +2012,11 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                 }
                 AgentEvent::Error { error } => {
                     eprintln!("Error: {error}");
+                }
+                AgentEvent::Timing { timing } => {
+                    if cli.verbose {
+                        eprintln!("{}", format_timing_event(&timing));
+                    }
                 }
                 AgentEvent::AgentEnd { usage, cost } => {
                     eprintln!(
@@ -2426,6 +2577,30 @@ mod tests {
         assert_eq!(json["output_tokens"], 500);
         assert_eq!(json["cache_read_tokens"], 100);
         assert_eq!(json["cost_total"], 0.0107175);
+    }
+
+    #[test]
+    fn rpc_agent_event_timing() {
+        let event = AgentEvent::Timing {
+            timing: TimingEvent {
+                turn: 2,
+                stage: imp_core::TimingStage::FirstTextDelta,
+                since_turn_start_ms: 150,
+                since_llm_request_start_ms: 120,
+            },
+        };
+        let json = rpc_agent_event_to_json(&event);
+        assert_eq!(json["type"], "timing");
+        assert_eq!(json["turn"], 2);
+        assert_eq!(json["stage"], "first_text_delta");
+        assert_eq!(json["since_turn_start_ms"], 150);
+        assert_eq!(json["since_llm_request_start_ms"], 120);
+    }
+
+    #[test]
+    fn startup_stage_names_are_stable() {
+        assert_eq!(StartupStage::ProcessStart.as_str(), "process_start");
+        assert_eq!(StartupStage::RunLoopStarted.as_str(), "run_loop_started");
     }
 
     // ── parse_mana_unit (integration with tempfile) ────────────────

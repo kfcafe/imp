@@ -1,7 +1,9 @@
+pub mod animation;
 pub mod app;
 pub mod highlight;
 pub mod keybindings;
 pub mod markdown;
+pub mod selection;
 pub mod theme;
 pub mod tui_interface;
 pub mod turn_tracker;

@@ -9,6 +9,7 @@ pub mod session_picker;
 pub mod settings;
 pub mod sidebar;
 pub mod status;
+pub mod tool_output;
 pub mod tools;
 pub mod top_bar;
 pub mod tree;

@@ -61,8 +61,8 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
             description: "Export session".into(),
         },
         SlashCommand {
-            name: "mouse".into(),
-            description: "Toggle mouse mode / text selection mode".into(),
+            name: "memory".into(),
+            description: "View/edit agent memory".into(),
         },
         SlashCommand {
             name: "reload".into(),

@@ -136,6 +136,14 @@ impl AgentBuilder {
         // Wire agent mode from config
         agent.mode = self.config.mode;
 
+        // Wire guardrails config
+        agent.guardrail_config = self.config.guardrails.clone();
+        agent.guardrail_profile = if self.config.guardrails.is_enabled() {
+            Some(self.config.guardrails.resolve_effective_profile(&self.cwd))
+        } else {
+            None
+        };
+
         // Register native tools
         register_native_tools(&mut agent.tools);
 
@@ -197,6 +205,7 @@ impl AgentBuilder {
                 user_profile: user_block.as_deref(),
                 cwd: Some(&self.cwd),
                 learning_enabled: self.config.learning.enabled,
+                guardrail_profile: agent.guardrail_profile,
             })
             .text
         };
@@ -313,7 +322,6 @@ mod tests {
     fn builder_applies_context_config_thresholds() {
         let mut config = Config::default();
         config.context.observation_mask_threshold = 0.5;
-        config.context.compaction_threshold = 0.75;
         config.context.mask_window = 7;
 
         let (agent, _handle) =
@@ -322,7 +330,6 @@ mod tests {
                 .unwrap();
 
         assert!((agent.context_config.observation_mask_threshold - 0.5).abs() < f64::EPSILON);
-        assert!((agent.context_config.compaction_threshold - 0.75).abs() < f64::EPSILON);
         assert_eq!(agent.context_config.mask_window, 7);
     }
 
@@ -338,7 +345,6 @@ mod tests {
         .unwrap();
 
         assert!((agent.context_config.observation_mask_threshold - 0.6).abs() < f64::EPSILON);
-        assert!((agent.context_config.compaction_threshold - 0.8).abs() < f64::EPSILON);
         assert_eq!(agent.context_config.mask_window, 10);
     }
 

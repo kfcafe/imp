@@ -299,6 +299,20 @@ pub enum ChatToolDisplay {
     Hidden,
 }
 
+/// UI animation intensity.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnimationLevel {
+    /// No animated motion; show static state labels only.
+    None,
+    /// Basic spinner-only motion.
+    Spinner,
+    /// Restrained motion with concise state-specific labels.
+    #[default]
+    #[serde(alias = "full")]
+    Minimal,
+}
+
 /// UI display configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UiConfig {
@@ -321,6 +335,10 @@ pub struct UiConfig {
     /// Word-wrap long lines in tool output. Default: true.
     #[serde(default = "default_true")]
     pub word_wrap: bool,
+
+    /// Animation intensity for the TUI. Default: minimal.
+    #[serde(default)]
+    pub animations: AnimationLevel,
 
     /// Legacy compatibility flag for older configs. Prefer `chat_tool_display`.
     #[serde(default)]
@@ -354,9 +372,10 @@ pub struct UiConfig {
     #[serde(default = "default_keyboard_scroll_lines")]
     pub keyboard_scroll_lines: usize,
 
-    /// Capture mouse input for TUI interactions. Disable to allow normal terminal
-    /// text selection/copy. Default: false.
+    /// Deprecated: mouse capture is now always enabled. This field is retained
+    /// only for backwards-compatible deserialization of existing config files.
     #[serde(default)]
+    #[doc(hidden)]
     pub mouse_capture: bool,
 
     /// Show timestamps in chat. Default: false.
@@ -402,6 +421,7 @@ impl Default for UiConfig {
             tool_output_lines: 10,
             sidebar_width: 40,
             word_wrap: true,
+            animations: AnimationLevel::Minimal,
             hide_tools_in_chat: false,
             chat_tool_display: ChatToolDisplay::default(),
             auto_open_sidebar: true,
@@ -477,9 +497,6 @@ pub struct ContextConfig {
     /// Mask old tool outputs at this ratio (default: 0.6).
     pub observation_mask_threshold: f64,
 
-    /// LLM compaction at this ratio (default: 0.8).
-    pub compaction_threshold: f64,
-
     /// Keep last N turns unmasked (default: 10).
     pub mask_window: usize,
 }
@@ -488,7 +505,6 @@ impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             observation_mask_threshold: 0.6,
-            compaction_threshold: 0.8,
             mask_window: 10,
         }
     }
@@ -665,7 +681,6 @@ mod tests {
         assert!(config.roles.is_empty());
         assert!(config.hooks.is_empty());
         assert!((config.context.observation_mask_threshold - 0.6).abs() < f64::EPSILON);
-        assert!((config.context.compaction_threshold - 0.8).abs() < f64::EPSILON);
         assert_eq!(config.context.mask_window, 10);
         assert_eq!(config.guardrails, GuardrailConfig::default());
     }
@@ -691,7 +706,6 @@ after_write = ["zig fmt --check ."]
 
 [context]
 observation_mask_threshold = 0.5
-compaction_threshold = 0.9
 mask_window = 5
 "#,
         )
@@ -712,7 +726,6 @@ mask_window = 5
             Some(vec!["zig fmt --check .".into()])
         );
         assert!((config.context.observation_mask_threshold - 0.5).abs() < f64::EPSILON);
-        assert!((config.context.compaction_threshold - 0.9).abs() < f64::EPSILON);
         assert_eq!(config.context.mask_window, 5);
     }
 
@@ -815,7 +828,6 @@ mask_window = 5
         let overlay = Config {
             context: ContextConfig {
                 observation_mask_threshold: 0.5,
-                compaction_threshold: 0.9,
                 mask_window: 5,
             },
             ..Default::default()
@@ -823,7 +835,6 @@ mask_window = 5
 
         base.merge(overlay);
         assert!((base.context.observation_mask_threshold - 0.5).abs() < f64::EPSILON);
-        assert!((base.context.compaction_threshold - 0.9).abs() < f64::EPSILON);
         assert_eq!(base.context.mask_window, 5);
     }
 
@@ -874,7 +885,6 @@ max_turns = 20
 
 [context]
 observation_mask_threshold = 0.55
-compaction_threshold = 0.85
 mask_window = 9
 "#,
         )
@@ -888,7 +898,6 @@ model = "sonnet"
 
 [context]
 observation_mask_threshold = 0.5
-compaction_threshold = 0.9
 mask_window = 5
 "#,
         )
@@ -898,7 +907,6 @@ mask_window = 5
         assert_eq!(config.model.as_deref(), Some("sonnet"));
         assert_eq!(config.max_turns, Some(20));
         assert!((config.context.observation_mask_threshold - 0.5).abs() < f64::EPSILON);
-        assert!((config.context.compaction_threshold - 0.9).abs() < f64::EPSILON);
         assert_eq!(config.context.mask_window, 5);
     }
 

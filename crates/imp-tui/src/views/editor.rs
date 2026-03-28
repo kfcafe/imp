@@ -1,3 +1,4 @@
+use imp_core::config::AnimationLevel;
 use imp_llm::ThinkingLevel;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
@@ -283,6 +284,8 @@ pub struct EditorView<'a> {
     model_name: &'a str,
     is_streaming: bool,
     has_queued: bool,
+    tick: u64,
+    animation_level: AnimationLevel,
 }
 
 impl<'a> EditorView<'a> {
@@ -294,6 +297,8 @@ impl<'a> EditorView<'a> {
             model_name: "",
             is_streaming: false,
             has_queued: false,
+            tick: 0,
+            animation_level: AnimationLevel::Minimal,
         }
     }
 
@@ -312,6 +317,16 @@ impl<'a> EditorView<'a> {
         self.has_queued = has_queued;
         self
     }
+
+    pub fn tick(mut self, tick: u64) -> Self {
+        self.tick = tick;
+        self
+    }
+
+    pub fn animation_level(mut self, level: AnimationLevel) -> Self {
+        self.animation_level = level;
+        self
+    }
 }
 
 impl Widget for EditorView<'_> {
@@ -320,17 +335,10 @@ impl Widget for EditorView<'_> {
             return;
         }
 
-        let border_color = self.theme.thinking_border_color(self.thinking_level);
+        let base_border_color = self.theme.thinking_border_color(self.thinking_level);
+        let border_color = base_border_color;
 
-        let top_title = if self.is_streaming {
-            if self.has_queued {
-                " streaming [queued] ".to_string()
-            } else {
-                " streaming… ".to_string()
-            }
-        } else {
-            String::new()
-        };
+        let top_title = String::new();
 
         // Build bottom-right model + thinking indicator
         let thinking_label = match self.thinking_level {
@@ -341,10 +349,16 @@ impl Widget for EditorView<'_> {
             ThinkingLevel::High => "high",
             ThinkingLevel::XHigh => "xhigh",
         };
-        let bottom_title = if !thinking_label.is_empty() {
-            format!(" {thinking_label} ")
+        let queue_label = if self.has_queued {
+            Some("queued".to_string())
         } else {
-            String::new()
+            None
+        };
+        let bottom_title = match (queue_label, !thinking_label.is_empty()) {
+            (Some(queue), true) => format!(" {queue} · {thinking_label} "),
+            (Some(queue), false) => format!(" {queue} "),
+            (None, true) => format!(" {thinking_label} "),
+            (None, false) => String::new(),
         };
 
         let block = Block::default()

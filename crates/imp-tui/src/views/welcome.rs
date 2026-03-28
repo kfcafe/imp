@@ -194,29 +194,26 @@ impl WelcomeState {
 
     pub fn push_key_char(&mut self, c: char) {
         self.key_input.push(c);
-        self.key_error = None;
     }
 
     pub fn pop_key_char(&mut self) {
         self.key_input.pop();
-        self.key_error = None;
     }
 
     /// Check whether auth is available for the current provider (env or entered key).
-    pub fn check_auth_resolved(&mut self) -> bool {
+    pub fn check_auth_resolved(&mut self) -> Result<(), String> {
         let status = &self.providers[self.provider_selected];
         if status.has_auth() {
             self.auth_resolved = true;
             self.resolved_key = None;
-            return true;
+            return Ok(());
         }
         if !self.key_input.trim().is_empty() {
             self.auth_resolved = true;
             self.resolved_key = Some(self.key_input.trim().to_string());
-            return true;
+            return Ok(());
         }
-        self.key_error = Some("Please enter an API key or set the environment variable.".into());
-        false
+        Err("Please enter an API key or set the environment variable.".into())
     }
 
     pub fn update_models(&mut self, all_models: &[ModelMeta]) {
@@ -227,7 +224,6 @@ impl WelcomeState {
 
     fn on_provider_changed(&mut self) {
         self.key_input.clear();
-        self.key_error = None;
         self.key_editing = false;
         self.auth_resolved = false;
         self.resolved_key = None;

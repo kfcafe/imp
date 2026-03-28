@@ -1,9 +1,11 @@
+use imp_core::config::AnimationLevel;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use crate::animation::spinner_frame;
 use crate::theme::Theme;
 
 /// A tool call ready for display.
@@ -13,6 +15,7 @@ pub struct DisplayToolCall {
     pub name: String,
     pub args_summary: String,
     pub output: Option<String>,
+    pub details: serde_json::Value,
     pub is_error: bool,
     pub expanded: bool,
     /// Rolling buffer of streaming output lines (last 5)
@@ -22,12 +25,17 @@ pub struct DisplayToolCall {
 impl DisplayToolCall {
     /// Build a compact one-line summary for the tool call header.
     pub fn header_line(&self, theme: &Theme) -> Line<'static> {
-        self.header_line_animated(theme, 0)
+        self.header_line_animated(theme, 0, AnimationLevel::Minimal)
     }
 
     /// Header with animated spinner for running tools.
-    pub fn header_line_animated(&self, theme: &Theme, tick: u64) -> Line<'static> {
-        self.header_line_animated_focused(theme, tick, false)
+    pub fn header_line_animated(
+        &self,
+        theme: &Theme,
+        tick: u64,
+        animation_level: AnimationLevel,
+    ) -> Line<'static> {
+        self.header_line_animated_focused(theme, tick, false, animation_level)
     }
 
     /// Header with animated spinner and optional focus indicator.
@@ -36,13 +44,18 @@ impl DisplayToolCall {
         theme: &Theme,
         tick: u64,
         focused: bool,
+        animation_level: AnimationLevel,
     ) -> Line<'static> {
         let is_running = self.output.is_none() && !self.is_error;
         let icon = if self.is_error {
             "✗".to_string()
         } else if is_running {
-            const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            SPINNER[(tick / 2) as usize % SPINNER.len()].to_string()
+            match animation_level {
+                AnimationLevel::None => "•".to_string(),
+                AnimationLevel::Spinner | AnimationLevel::Minimal => {
+                    spinner_frame(tick).to_string()
+                }
+            }
         } else {
             "✓".to_string()
         };
@@ -195,7 +208,7 @@ impl Widget for ToolCallView<'_> {
                 let output_style = if self.tool_call.is_error {
                     self.theme.error_style()
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    self.theme.muted_style()
                 };
 
                 for (i, line_str) in output.lines().enumerate() {
@@ -325,6 +338,7 @@ mod tests {
             name: name.into(),
             args_summary: args.into(),
             output: output.map(String::from),
+            details: serde_json::Value::Null,
             is_error,
             expanded: false,
             streaming_lines: Vec::new(),

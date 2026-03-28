@@ -85,22 +85,15 @@ impl ModelSelectorState {
 
     pub fn selected_choice(&self) -> Option<ModelSelection<'_>> {
         let filtered = self.filtered();
-        let has_custom = self.custom_model();
 
-        if let Some(custom) = has_custom {
-            if self.selected == 0 {
-                return Some(ModelSelection::Custom(custom));
-            }
-            return filtered
-                .get(self.selected - 1)
-                .copied()
-                .map(ModelSelection::Builtin);
+        if let Some(model) = filtered.get(self.selected).copied() {
+            return Some(ModelSelection::Builtin(model));
         }
 
-        filtered
-            .get(self.selected)
-            .copied()
-            .map(ModelSelection::Builtin)
+        let custom_index = filtered.len();
+        self.custom_model().and_then(|custom| {
+            (self.selected == custom_index).then_some(ModelSelection::Custom(custom))
+        })
     }
 }
 
@@ -139,27 +132,8 @@ impl Widget for ModelSelectorView<'_> {
 
         let filtered = self.state.filtered();
         let mut row: usize = 0;
+        let custom_model = self.state.custom_model();
 
-        if let Some(custom_model) = self.state.custom_model() {
-            let is_selected = self.state.selected == 0;
-            let is_current = custom_model == self.state.current_model;
-            let marker = if is_current { "✓ " } else { "  " };
-            let style = if is_selected {
-                self.theme.selected_style()
-            } else {
-                Style::default()
-            };
-
-            let line = Line::from(vec![
-                Span::styled(format!("  {marker}"), self.theme.accent_style()),
-                Span::styled("Use custom model: ", self.theme.muted_style()),
-                Span::styled(custom_model, style),
-            ]);
-            buf.set_line(inner.x, inner.y + row as u16, &line, inner.width);
-            row += 1;
-        }
-
-        let selection_offset = usize::from(self.state.custom_model().is_some());
         let mut current_provider = String::new();
 
         for (i, model) in filtered.iter().enumerate() {
@@ -182,7 +156,7 @@ impl Widget for ModelSelectorView<'_> {
                 }
             }
 
-            let is_selected = i + selection_offset == self.state.selected;
+            let is_selected = i == self.state.selected;
             let is_current = model.id == self.state.current_model;
 
             let marker = if is_current { "✓ " } else { "  " };
@@ -216,7 +190,39 @@ impl Widget for ModelSelectorView<'_> {
             row += 1;
         }
 
-        if filtered.is_empty() && self.state.custom_model().is_none() {
+        if let Some(ref custom_model) = custom_model {
+            if row < inner.height as usize && !filtered.is_empty() {
+                let spacer = Line::from(Span::styled(
+                    "  Custom",
+                    Style::default()
+                        .fg(self.theme.muted)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                buf.set_line(inner.x, inner.y + row as u16, &spacer, inner.width);
+                row += 1;
+            }
+
+            if row < inner.height as usize {
+                let custom_index = filtered.len();
+                let is_selected = self.state.selected == custom_index;
+                let is_current = custom_model == &self.state.current_model;
+                let marker = if is_current { "✓ " } else { "  " };
+                let style = if is_selected {
+                    self.theme.selected_style()
+                } else {
+                    Style::default()
+                };
+
+                let line = Line::from(vec![
+                    Span::styled(format!("  {marker}"), self.theme.accent_style()),
+                    Span::styled("Use custom model: ", self.theme.muted_style()),
+                    Span::styled(custom_model, style),
+                ]);
+                buf.set_line(inner.x, inner.y + row as u16, &line, inner.width);
+            }
+        }
+
+        if filtered.is_empty() && custom_model.is_none() {
             let line = Line::from(Span::styled(
                 "  No matching models",
                 self.theme.muted_style(),
@@ -248,7 +254,29 @@ mod tests {
     }
 
     #[test]
-    fn custom_model_is_selected_first_when_filtering() {
+    fn custom_model_is_available_after_builtin_matches() {
+        let mut state = ModelSelectorState::new(vec![test_model("gpt-4o")], "gpt-4o".into());
+        state.push_filter('g');
+        state.push_filter('p');
+        state.push_filter('t');
+        state.push_filter('-');
+        state.push_filter('4');
+        state.push_filter('o');
+
+        match state.selected_choice() {
+            Some(ModelSelection::Builtin(model)) => assert_eq!(model.id, "gpt-4o"),
+            _ => panic!("expected builtin model selection"),
+        }
+
+        state.move_down();
+        match state.selected_choice() {
+            Some(ModelSelection::Custom(model)) => assert_eq!(model, "gpt-4o"),
+            _ => panic!("expected custom model selection after builtin matches"),
+        }
+    }
+
+    #[test]
+    fn custom_model_is_selected_when_no_builtin_matches() {
         let mut state = ModelSelectorState::new(vec![test_model("gpt-5.4")], "gpt-5.4".into());
         state.push_filter('g');
         state.push_filter('p');
@@ -257,6 +285,7 @@ mod tests {
         state.push_filter('4');
         state.push_filter('o');
 
+        state.move_down();
         match state.selected_choice() {
             Some(ModelSelection::Custom(model)) => assert_eq!(model, "gpt-4o"),
             _ => panic!("expected custom model selection"),

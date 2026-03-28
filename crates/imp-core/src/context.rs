@@ -111,11 +111,7 @@ mod tests {
     use futures_core::Stream;
     use imp_llm::model::{Capabilities, ModelMeta, ModelPricing};
     use imp_llm::provider::Provider;
-    use imp_llm::{
-        AssistantMessage, RequestOptions, StopReason, StreamEvent, ToolResultMessage, Usage,
-    };
-
-    use crate::compaction::{compact, CompactionOptions};
+    use imp_llm::{AssistantMessage, RequestOptions, StopReason, StreamEvent, ToolResultMessage};
 
     // -- helpers --
 
@@ -457,61 +453,6 @@ mod tests {
         );
     }
 
-    // -- mock provider for compact flow test --
-
-    /// Returns a fixed summary text. Used only for mask_then_compact_flow.
-    struct MockSummaryProvider {
-        text: String,
-    }
-
-    #[async_trait]
-    impl Provider for MockSummaryProvider {
-        fn stream(
-            &self,
-            _model: &Model,
-            _context: imp_llm::Context,
-            _options: RequestOptions,
-            _api_key: &str,
-        ) -> Pin<Box<dyn Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
-            let text = self.text.clone();
-            let events = vec![
-                StreamEvent::MessageStart {
-                    model: "mock".into(),
-                },
-                StreamEvent::TextDelta { text: text.clone() },
-                StreamEvent::MessageEnd {
-                    message: AssistantMessage {
-                        content: vec![ContentBlock::Text { text }],
-                        usage: Some(Usage {
-                            input_tokens: 100,
-                            output_tokens: 50,
-                            cache_read_tokens: 0,
-                            cache_write_tokens: 0,
-                        }),
-                        stop_reason: StopReason::EndTurn,
-                        timestamp: 3000,
-                    },
-                },
-            ];
-            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
-        }
-
-        async fn resolve_auth(
-            &self,
-            _auth: &imp_llm::auth::AuthStore,
-        ) -> imp_llm::Result<imp_llm::auth::ApiKey> {
-            Ok("mock".into())
-        }
-
-        fn id(&self) -> &str {
-            "mock-summary"
-        }
-
-        fn models(&self) -> &[ModelMeta] {
-            &[]
-        }
-    }
-
     // -- edge case tests --
 
     #[test]
@@ -664,88 +605,6 @@ mod tests {
         assert!(
             assistant_texts.contains(&"I see the issue — the struct is missing a field."),
             "mid-conversation assistant reasoning must survive masking"
-        );
-    }
-
-    #[tokio::test]
-    async fn mask_then_compact_flow() {
-        // Simulate the two-stage context management pipeline:
-        // 1. mask_observations at keep_recent=3
-        // 2. compact at keep_recent=2
-        let mut messages = vec![make_user("Build the authentication module")];
-        for i in 0..8 {
-            let cid = format!("c{i}");
-            messages.push(make_assistant_tool_call(
-                &cid,
-                "edit",
-                serde_json::json!({"file": format!("auth_{i}.rs")}),
-            ));
-            messages.push(make_tool_result(
-                &cid,
-                "edit",
-                &"fn auth() { /* impl */ } ".repeat(20),
-            ));
-        }
-
-        // Stage 1: Mask old observations (keep recent 3 turns).
-        mask_observations(&mut messages, 3);
-
-        // First 5 tool turns should be masked.
-        for i in 0..5 {
-            let tr_idx = 2 + i * 2;
-            let text = tool_result_text(&messages[tr_idx]);
-            assert!(
-                text.starts_with("[Output omitted"),
-                "turn {i} should be masked after stage 1"
-            );
-        }
-        // Last 3 tool turns should be intact.
-        for i in 5..8 {
-            let tr_idx = 2 + i * 2;
-            let text = tool_result_text(&messages[tr_idx]);
-            assert!(
-                text.contains("auth()"),
-                "turn {i} should be intact after stage 1"
-            );
-        }
-
-        // Stage 2: Compact (keep recent 2 turns).
-        let provider = Arc::new(MockSummaryProvider {
-            text: "Summary: building auth module, 8 files edited.".into(),
-        });
-        let model = Model {
-            meta: ModelMeta {
-                id: "mock".into(),
-                provider: "mock".into(),
-                name: "Mock".into(),
-                context_window: 200_000,
-                max_output_tokens: 4096,
-                pricing: ModelPricing::default(),
-                capabilities: Capabilities::default(),
-            },
-            provider,
-        };
-        let options = CompactionOptions {
-            keep_recent_turns: 2,
-            ..Default::default()
-        };
-
-        let result = compact(&messages, &model, options, "test-key")
-            .await
-            .unwrap();
-
-        // Compact should produce a valid result without data corruption.
-        assert_eq!(
-            result.summary,
-            "Summary: building auth module, 8 files edited."
-        );
-        assert!(result.tokens_before > 0);
-        assert!(result.tokens_after > 0);
-        assert!(
-            result.tokens_after < result.tokens_before,
-            "compacted should be smaller: after={}, before={}",
-            result.tokens_after,
-            result.tokens_before
         );
     }
 }

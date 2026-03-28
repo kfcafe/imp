@@ -77,10 +77,11 @@ pub fn resolve_normal(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('l') if ctrl => Some(Action::SelectModel),
         KeyCode::Char('p') if ctrl && shift => Some(Action::CycleModelBackward),
         KeyCode::Char('p') if ctrl => Some(Action::SidebarToggle),
+        KeyCode::Char('o') if ctrl => Some(Action::ToolToggle),
         KeyCode::BackTab => Some(Action::CycleThinking),
 
-        // Toggle tool/thinking
-        KeyCode::Tab => Some(Action::ToolToggle),
+        // Sidebar / tool navigation
+        KeyCode::Tab => Some(Action::SidebarToggle),
 
         // Cursor movement
         KeyCode::Left if ctrl => Some(Action::WordLeft),
@@ -108,6 +109,8 @@ pub fn resolve_normal(key: KeyEvent) -> Option<Action> {
         // Scroll
         KeyCode::PageUp => Some(Action::PageUp),
         KeyCode::PageDown => Some(Action::PageDown),
+        KeyCode::Char('b') if ctrl => Some(Action::PageUp),
+        KeyCode::Char('f') if ctrl => Some(Action::PageDown),
 
         // Character input
         KeyCode::Char(c) => Some(Action::InsertChar(c)),

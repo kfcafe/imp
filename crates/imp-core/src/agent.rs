@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
-use futures::future::join_all;
+use futures::{future::join_all, StreamExt};
 use imp_llm::{
     AssistantMessage, ContentBlock, Context, Cost, Message, Model, RequestOptions, StopReason,
     StreamEvent, ThinkingLevel, Usage,
@@ -12,9 +13,39 @@ use imp_llm::provider::RetryPolicy;
 
 use crate::config::{AgentMode, ContextConfig};
 use crate::error::Result;
+use crate::guardrails::{self, GuardrailConfig, GuardrailLevel, GuardrailProfile};
 use crate::hooks::{HookEvent, HookRunner};
 use crate::roles::Role;
 use crate::tools::ToolRegistry;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimingStage {
+    LlmRequestStart,
+    FirstStreamEvent,
+    FirstTextDelta,
+    FirstToolCall,
+    MessageEnd,
+}
+
+impl TimingStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LlmRequestStart => "llm_request_start",
+            Self::FirstStreamEvent => "first_stream_event",
+            Self::FirstTextDelta => "first_text_delta",
+            Self::FirstToolCall => "first_tool_call",
+            Self::MessageEnd => "message_end",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimingEvent {
+    pub turn: u32,
+    pub stage: TimingStage,
+    pub since_turn_start_ms: u64,
+    pub since_llm_request_start_ms: u64,
+}
 
 /// Events emitted by the agent during execution.
 #[derive(Debug, Clone)]
@@ -56,9 +87,8 @@ pub enum AgentEvent {
         tool_call_id: String,
         result: imp_llm::ToolResultMessage,
     },
-    CompactionStart,
-    CompactionEnd {
-        summary: String,
+    Timing {
+        timing: TimingEvent,
     },
     Error {
         error: String,
@@ -90,10 +120,12 @@ pub struct Agent {
     pub context_config: ContextConfig,
     /// Retry policy for transient LLM stream failures.
     pub retry_policy: RetryPolicy,
-    /// The original prompt passed to `run()`, used to re-orient the model after compaction.
-    pub original_prompt: Option<String>,
     /// Active agent mode — controls which tools are permitted.
     pub mode: AgentMode,
+    /// Engineering guardrails config.
+    pub guardrail_config: GuardrailConfig,
+    /// Resolved guardrail profile (None = disabled).
+    pub guardrail_profile: Option<GuardrailProfile>,
     /// In-session file content cache, shared across tool calls.
     pub file_cache: Arc<crate::tools::FileCache>,
     /// Tracks which files have been read; used for staleness and unread-edit warnings.
@@ -130,8 +162,9 @@ impl Agent {
             ui: Arc::new(crate::ui::NullInterface),
             context_config: ContextConfig::default(),
             retry_policy: RetryPolicy::default(),
-            original_prompt: None,
             mode: AgentMode::Full,
+            guardrail_config: GuardrailConfig::default(),
+            guardrail_profile: None,
             file_cache: Arc::new(crate::tools::FileCache::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
             cache_options: imp_llm::CacheOptions {
@@ -163,7 +196,6 @@ impl Agent {
             .fire(&HookEvent::OnAgentStart { prompt: &prompt })
             .await;
 
-        self.original_prompt = Some(prompt.clone());
         self.messages.push(Message::user(&prompt));
 
         let mut turn: u32 = 0;
@@ -204,8 +236,9 @@ impl Agent {
             }
 
             self.emit(AgentEvent::TurnStart { index: turn }).await;
+            let turn_started_at = Instant::now();
 
-            let usage = crate::context::context_usage(&self.messages, &self.model);
+            let mut usage = crate::context::context_usage(&self.messages, &self.model);
             if usage.ratio >= self.context_config.observation_mask_threshold {
                 crate::context::mask_observations(
                     &mut self.messages,
@@ -214,52 +247,14 @@ impl Agent {
                 self.hooks
                     .fire(&HookEvent::OnContextThreshold { ratio: usage.ratio })
                     .await;
+                // Masking can materially reduce context size, so any subsequent
+                // logic must use fresh usage rather than the pre-masking snapshot.
+                usage = crate::context::context_usage(&self.messages, &self.model);
             }
 
-            if usage.ratio >= self.context_config.compaction_threshold {
-                self.emit(AgentEvent::CompactionStart).await;
-                match crate::compaction::compact(
-                    &self.messages,
-                    &self.model,
-                    Default::default(),
-                    &self.api_key,
-                )
-                .await
-                {
-                    Ok(result) => {
-                        replace_with_compacted_messages(
-                            &mut self.messages,
-                            &result.summary,
-                            &result.first_kept_id,
-                        );
-                        // Re-orient the model after compaction so it resumes
-                        // the original task rather than losing its thread.
-                        // Skip turn 0 — if compaction fires on the first turn,
-                        // the task itself is too large and re-queueing won't help.
-                        if turn > 0 {
-                            if let Some(ref original) = self.original_prompt {
-                                let resume_msg = format!(
-                                    "[Context was compacted to manage the conversation length. \
-                                     The original request was: \"{original}\". \
-                                     Continue where you left off — check what's already been \
-                                     done and proceed with remaining work.]"
-                                );
-                                self.messages.push(Message::user(&resume_msg));
-                            }
-                        }
-                        self.emit(AgentEvent::CompactionEnd {
-                            summary: result.summary,
-                        })
-                        .await;
-                    }
-                    Err(error) => {
-                        self.emit(AgentEvent::Error {
-                            error: format!("Compaction failed: {error}"),
-                        })
-                        .await;
-                    }
-                }
-            }
+            // Context management is observation-mask only. Full conversation
+            // compaction has been removed because the rewrite-based behavior
+            // was too error-prone to keep in the runtime.
 
             // Build context and options for the LLM
             let context = Context {
@@ -268,7 +263,10 @@ impl Agent {
 
             let options = RequestOptions {
                 thinking_level: self.thinking_level,
-                max_tokens: Some(self.model.meta.max_output_tokens),
+                // Let providers choose their own sensible default output budget.
+                // Anthropic in particular should not default to the model's absolute
+                // max output size for every request.
+                max_tokens: None,
                 temperature: None,
                 system_prompt: self.system_prompt.clone(),
                 tools: self.tools.definitions(),
@@ -277,45 +275,32 @@ impl Agent {
 
             self.hooks.fire(&HookEvent::BeforeLlmCall).await;
 
-            // Stream the LLM response with retry on transient errors.
-            let model_ref = &self.model;
-            let api_key_ref = &self.api_key;
-            let retry_result: imp_llm::Result<Vec<imp_llm::Result<StreamEvent>>> =
-                crate::retry::run_with_retry(
-                    || {
-                        model_ref.provider.stream(
-                            model_ref,
-                            context.clone(),
-                            options.clone(),
-                            api_key_ref,
-                        )
-                    },
-                    &self.retry_policy,
-                )
-                .await;
-
-            let stream_events = match retry_result {
-                Ok(events) => events,
-                Err(e) => {
-                    self.emit(AgentEvent::Error {
-                        error: e.to_string(),
-                    })
-                    .await;
-                    let cost = total_usage.cost(&self.model.meta.pricing);
-                    self.emit(AgentEvent::AgentEnd {
-                        usage: total_usage,
-                        cost,
-                    })
-                    .await;
-                    return Err(e.into());
-                }
-            };
+            // Stream the LLM response with retry on transient startup failures.
+            let llm_request_started_at = Instant::now();
+            self.emit_timing(
+                turn,
+                TimingStage::LlmRequestStart,
+                turn_started_at,
+                llm_request_started_at,
+            )
+            .await;
+            let model = clone_model(&self.model);
+            let context = context.clone();
+            let options = options.clone();
+            let api_key = self.api_key.clone();
+            let mut stream = crate::retry::stream_with_retry(
+                move || model.provider.stream(&model, context.clone(), options.clone(), &api_key),
+                self.retry_policy.clone(),
+            );
 
             let mut ordered_content: Vec<ContentBlock> = Vec::new();
             let mut tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
             let mut assistant_msg: Option<AssistantMessage> = None;
+            let mut saw_first_stream_event = false;
+            let mut saw_first_text_delta = false;
+            let mut saw_first_tool_call = false;
 
-            for event_result in stream_events {
+            while let Some(event_result) = stream.next().await {
                 // Check for cancel during event processing
                 if let Ok(AgentCommand::Cancel) = self.command_rx.try_recv() {
                     cancelled = true;
@@ -324,6 +309,16 @@ impl Agent {
 
                 match event_result {
                     Ok(event) => {
+                        if !saw_first_stream_event {
+                            saw_first_stream_event = true;
+                            self.emit_timing(
+                                turn,
+                                TimingStage::FirstStreamEvent,
+                                turn_started_at,
+                                llm_request_started_at,
+                            )
+                            .await;
+                        }
                         // Forward as delta
                         self.emit(AgentEvent::MessageDelta {
                             delta: event.clone(),
@@ -332,6 +327,16 @@ impl Agent {
 
                         match event {
                             StreamEvent::TextDelta { text } => {
+                                if !saw_first_text_delta {
+                                    saw_first_text_delta = true;
+                                    self.emit_timing(
+                                        turn,
+                                        TimingStage::FirstTextDelta,
+                                        turn_started_at,
+                                        llm_request_started_at,
+                                    )
+                                    .await;
+                                }
                                 push_stream_text_block(&mut ordered_content, text);
                             }
                             StreamEvent::ThinkingDelta { text } => {
@@ -342,6 +347,16 @@ impl Agent {
                                 name,
                                 arguments,
                             } => {
+                                if !saw_first_tool_call {
+                                    saw_first_tool_call = true;
+                                    self.emit_timing(
+                                        turn,
+                                        TimingStage::FirstToolCall,
+                                        turn_started_at,
+                                        llm_request_started_at,
+                                    )
+                                    .await;
+                                }
                                 ordered_content.push(ContentBlock::ToolCall {
                                     id: id.clone(),
                                     name: name.clone(),
@@ -350,6 +365,13 @@ impl Agent {
                                 tool_calls.push((id, name, arguments));
                             }
                             StreamEvent::MessageEnd { message } => {
+                                self.emit_timing(
+                                    turn,
+                                    TimingStage::MessageEnd,
+                                    turn_started_at,
+                                    llm_request_started_at,
+                                )
+                                .await;
                                 if let Some(ref usage) = message.usage {
                                     total_usage.add(usage);
                                 }
@@ -387,8 +409,6 @@ impl Agent {
                         }
                     }
                     Err(e) => {
-                        // Errors here shouldn't happen (run_with_retry handles them)
-                        // but propagate just in case.
                         self.emit(AgentEvent::Error {
                             error: e.to_string(),
                         })
@@ -485,6 +505,24 @@ impl Agent {
             _ => {}
         }
         let _ = self.event_tx.send(event).await;
+    }
+
+    async fn emit_timing(
+        &self,
+        turn: u32,
+        stage: TimingStage,
+        turn_started_at: Instant,
+        llm_request_started_at: Instant,
+    ) {
+        let now = Instant::now();
+        let timing = TimingEvent {
+            turn,
+            stage,
+            since_turn_start_ms: now.duration_since(turn_started_at).as_millis() as u64,
+            since_llm_request_start_ms: now.duration_since(llm_request_started_at).as_millis()
+                as u64,
+        };
+        let _ = self.event_tx.send(AgentEvent::Timing { timing }).await;
     }
 
     /// Execute tool calls from a single assistant message.
@@ -653,6 +691,34 @@ impl Agent {
                         file: path.as_path(),
                     })
                     .await;
+
+                // Run guardrail after-write checks when enabled
+                if let Some(profile) = self.guardrail_profile {
+                    if self.guardrail_config.should_check_path(&path) {
+                        let check_results = guardrails::run_after_write_checks(
+                            &self.guardrail_config,
+                            profile,
+                            &self.cwd,
+                        )
+                        .await;
+
+                        if !check_results.is_empty() {
+                            let level = self.guardrail_config.effective_level();
+                            let msg = guardrails::format_check_results(&check_results, level);
+                            if !msg.is_empty() && msg != "Guardrail checks passed." {
+                                // Append guardrail output to the tool result
+                                result.content.push(imp_llm::ContentBlock::Text {
+                                    text: format!("\n\n{msg}"),
+                                });
+                                if level == GuardrailLevel::Enforce
+                                    && check_results.iter().any(|r| !r.success)
+                                {
+                                    result.is_error = true;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -663,33 +729,6 @@ impl Agent {
         .await;
 
         result
-    }
-}
-
-fn replace_with_compacted_messages(
-    messages: &mut Vec<Message>,
-    summary: &str,
-    first_kept_id: &str,
-) {
-    let keep_from = messages
-        .iter()
-        .position(|message| message_matches_compaction_id(message, first_kept_id))
-        .unwrap_or(messages.len());
-
-    let mut compacted = vec![Message::user(summary)];
-    compacted.extend(messages.drain(keep_from..));
-    *messages = compacted;
-}
-
-fn message_matches_compaction_id(message: &Message, first_kept_id: &str) -> bool {
-    match message {
-        Message::ToolResult(result) => result.tool_call_id == first_kept_id,
-        Message::Assistant(assistant) => {
-            assistant.content.iter().any(
-                |block| matches!(block, ContentBlock::ToolCall { id, .. } if id == first_kept_id),
-            ) || format!("assistant_{}", assistant.timestamp) == first_kept_id
-        }
-        Message::User(user) => format!("user_{}", user.timestamp) == first_kept_id,
     }
 }
 
@@ -738,6 +777,13 @@ fn build_assistant_message(
     }
 }
 
+fn clone_model(model: &Model) -> Model {
+    Model {
+        meta: model.meta.clone(),
+        provider: Arc::clone(&model.provider),
+    }
+}
+
 fn extract_file_path(cwd: &Path, args: &serde_json::Value) -> Option<PathBuf> {
     let raw_path = args.get("path")?.as_str()?;
     if raw_path.is_empty() {
@@ -772,11 +818,22 @@ mod tests {
     /// A mock provider that returns pre-programmed responses.
     /// Each call to `stream()` pops the next response from the queue.
     struct MockProvider {
-        responses: Mutex<Vec<Vec<StreamEvent>>>,
+        responses: Mutex<Vec<Vec<imp_llm::Result<StreamEvent>>>>,
     }
 
     impl MockProvider {
         fn new(responses: Vec<Vec<StreamEvent>>) -> Self {
+            Self {
+                responses: Mutex::new(
+                    responses
+                        .into_iter()
+                        .map(|events| events.into_iter().map(Ok).collect())
+                        .collect(),
+                ),
+            }
+        }
+
+        fn new_results(responses: Vec<Vec<imp_llm::Result<StreamEvent>>>) -> Self {
             Self {
                 responses: Mutex::new(responses),
             }
@@ -796,13 +853,13 @@ mod tests {
             // tests are single-threaded per agent run.
             let mut responses = self.responses.try_lock().expect("MockProvider lock");
             let events = if responses.is_empty() {
-                vec![StreamEvent::Error {
+                vec![Ok(StreamEvent::Error {
                     error: "No more mock responses".to_string(),
-                }]
+                })]
             } else {
                 responses.remove(0)
             };
-            let stream = futures::stream::iter(events.into_iter().map(Ok));
+            let stream = futures::stream::iter(events);
             Box::pin(stream)
         }
 
@@ -1201,6 +1258,183 @@ mod tests {
             events.push(event);
         }
         events
+    }
+
+    #[tokio::test]
+    async fn agent_emits_timing_events_in_order() {
+        let provider = Arc::new(MockProvider::new(vec![text_response("timed", 10, 5)]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("time this".to_string()).await.unwrap();
+        drop(agent);
+
+        let events = events_task.await.unwrap();
+        let timings: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Timing { timing } => Some(*timing),
+                _ => None,
+            })
+            .collect();
+
+        assert!(timings.len() >= 4);
+        assert_eq!(timings[0].stage, TimingStage::LlmRequestStart);
+        assert_eq!(timings[1].stage, TimingStage::FirstStreamEvent);
+        assert_eq!(timings[2].stage, TimingStage::FirstTextDelta);
+        assert!(timings.iter().any(|timing| timing.stage == TimingStage::MessageEnd));
+
+        for timing in timings {
+            assert_eq!(timing.turn, 0);
+            assert!(timing.since_turn_start_ms >= timing.since_llm_request_start_ms);
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_streams_message_delta_before_message_end() {
+        let provider = Arc::new(MockProvider::new_results(vec![vec![
+            Ok(StreamEvent::MessageStart {
+                model: "test-model".to_string(),
+            }),
+            Ok(StreamEvent::TextDelta {
+                text: "streaming".to_string(),
+            }),
+            Ok(StreamEvent::MessageEnd {
+                message: AssistantMessage {
+                    content: vec![ContentBlock::Text {
+                        text: "streaming".to_string(),
+                    }],
+                    usage: Some(Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    }),
+                    stop_reason: StopReason::EndTurn,
+                    timestamp: 1000,
+                },
+            }),
+        ]]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Say hi".to_string()).await.unwrap();
+        drop(agent);
+
+        let events = events_task.await.unwrap();
+        let text_delta_idx = events.iter().position(|event| {
+            matches!(
+                event,
+                AgentEvent::MessageDelta {
+                    delta: StreamEvent::TextDelta { text }
+                } if text == "streaming"
+            )
+        });
+        let turn_end_idx = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::TurnEnd { .. }));
+
+        assert!(text_delta_idx.is_some());
+        assert!(turn_end_idx.is_some());
+        assert!(text_delta_idx.unwrap() < turn_end_idx.unwrap());
+    }
+
+    #[tokio::test]
+    async fn agent_retries_before_first_meaningful_event_but_not_after() {
+        let provider = Arc::new(MockProvider::new_results(vec![
+            vec![
+                Ok(StreamEvent::MessageStart {
+                    model: "test-model".to_string(),
+                }),
+                Err(imp_llm::Error::Stream("startup failure".into())),
+            ],
+            vec![
+                Ok(StreamEvent::MessageStart {
+                    model: "test-model".to_string(),
+                }),
+                Ok(StreamEvent::TextDelta {
+                    text: "recovered".to_string(),
+                }),
+                Ok(StreamEvent::MessageEnd {
+                    message: AssistantMessage {
+                        content: vec![ContentBlock::Text {
+                            text: "recovered".to_string(),
+                        }],
+                        usage: Some(Usage {
+                            input_tokens: 10,
+                            output_tokens: 5,
+                            cache_read_tokens: 0,
+                            cache_write_tokens: 0,
+                        }),
+                        stop_reason: StopReason::EndTurn,
+                        timestamp: 1000,
+                    },
+                }),
+            ],
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Recover".to_string()).await.unwrap();
+        drop(agent);
+
+        let events = events_task.await.unwrap();
+        let text_delta = events.iter().position(|e| {
+            matches!(
+                e,
+                AgentEvent::MessageDelta {
+                    delta: StreamEvent::TextDelta { text }
+                } if text == "recovered"
+            )
+        });
+        let turn_end = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::TurnEnd { .. }));
+
+        assert!(text_delta.is_some());
+        assert!(turn_end.is_some());
+        assert!(text_delta.unwrap() < turn_end.unwrap());
+    }
+
+    #[tokio::test]
+    async fn agent_surfaces_error_after_partial_stream_without_retrying() {
+        let provider = Arc::new(MockProvider::new_results(vec![vec![
+            Ok(StreamEvent::TextDelta {
+                text: "partial".to_string(),
+            }),
+            Err(imp_llm::Error::Stream("mid-stream failure".into())),
+        ]]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        let result = agent.run("Fail midway".to_string()).await;
+        drop(agent);
+
+        assert!(result.is_err());
+
+        let events = events_task.await.unwrap();
+        let text_delta = events.iter().position(|e| {
+            matches!(
+                e,
+                AgentEvent::MessageDelta {
+                    delta: StreamEvent::TextDelta { text }
+                } if text == "partial"
+            )
+        });
+        let error_idx = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::Error { error } if error.contains("mid-stream failure")));
+
+        assert!(text_delta.is_some());
+        assert!(error_idx.is_some());
+        assert!(text_delta.unwrap() < error_idx.unwrap());
     }
 
     // ── Test 1: Simple text response ───────────────────────────────
@@ -1747,6 +1981,53 @@ mod tests {
         assert_eq!(recent, expected_recent.as_str());
     }
 
+    #[tokio::test]
+    async fn agent_masks_observations_when_context_is_tight() {
+        let provider = Arc::new(MockProvider::new(vec![text_response("done", 100, 20)]));
+
+        let mut seeded_messages = Vec::new();
+        for index in 0..12 {
+            let call_id = format!("call_{index}");
+            seeded_messages.push(make_assistant_tool_call(
+                &call_id,
+                "read",
+                serde_json::json!({"path": format!("src/file_{index}.rs")}),
+            ));
+            seeded_messages.push(make_tool_result(&call_id, "read", &"x".repeat(400)));
+        }
+
+        let mut usage_messages = seeded_messages.clone();
+        usage_messages.push(Message::user("trigger masking"));
+        let provisional_model = test_model(provider.clone());
+        let usage_before = crate::context::context_usage(&usage_messages, &provisional_model);
+
+        let mut masked_messages = usage_messages.clone();
+        crate::context::mask_observations(&mut masked_messages, 10);
+        let usage_after = crate::context::context_usage(&masked_messages, &provisional_model);
+
+        assert!(usage_before.used > usage_after.used);
+
+        // Pick a window where masking definitely triggers.
+        let context_window = ((usage_before.used as f64) / 0.7).ceil() as u32;
+
+        let model = test_model_with_context_window(provider, context_window.max(1));
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.messages = seeded_messages;
+
+        agent.run("trigger masking".to_string()).await.unwrap();
+        drop(agent);
+
+        let events = events_task.await.unwrap();
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TurnStart { index: 0 })),
+            "agent should still run normally"
+        );
+    }
+
     // ── Usage/cost accumulation ────────────────────────────────────
 
     #[tokio::test]
@@ -2016,312 +2297,6 @@ mod tests {
             call_ref.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "auth errors should not be retried"
-        );
-    }
-
-    // ── Compaction resume tests ────────────────────────────────────
-
-    /// A mock provider that intercepts the context passed to each call so tests
-    /// can inspect what messages the agent sent to the model.
-    struct CapturingMockProvider {
-        /// Pre-programmed responses, popped in order.
-        responses: Mutex<Vec<Vec<StreamEvent>>>,
-        /// All contexts ever sent to `stream()`.
-        captured_contexts: Mutex<Vec<Vec<Message>>>,
-    }
-
-    impl CapturingMockProvider {
-        fn new(responses: Vec<Vec<StreamEvent>>) -> Self {
-            Self {
-                responses: Mutex::new(responses),
-                captured_contexts: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Provider for CapturingMockProvider {
-        fn stream(
-            &self,
-            _model: &Model,
-            context: Context,
-            _options: RequestOptions,
-            _api_key: &str,
-        ) -> Pin<Box<dyn Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
-            self.captured_contexts
-                .try_lock()
-                .expect("capturing lock")
-                .push(context.messages.clone());
-
-            let mut responses = self.responses.try_lock().expect("responses lock");
-            let events = if responses.is_empty() {
-                vec![StreamEvent::Error {
-                    error: "No more mock responses".to_string(),
-                }]
-            } else {
-                responses.remove(0)
-            };
-            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
-        }
-
-        async fn resolve_auth(
-            &self,
-            _auth: &imp_llm::auth::AuthStore,
-        ) -> imp_llm::Result<imp_llm::auth::ApiKey> {
-            Ok("mock-key".to_string())
-        }
-
-        fn id(&self) -> &str {
-            "capturing-mock"
-        }
-
-        fn models(&self) -> &[ModelMeta] {
-            &[]
-        }
-    }
-
-    fn user_message_text(msg: &Message) -> Option<&str> {
-        match msg {
-            Message::User(u) => u.content.iter().find_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            }),
-            _ => None,
-        }
-    }
-
-    /// Build a large tool-result message to bulk up context.
-    ///
-    /// JSON size: "x".repeat(2000) → ~2100 chars → ~525 estimated tokens
-    /// (estimate_tokens uses chars/4).
-    fn make_big_tool_result(call_id: &str) -> Message {
-        Message::ToolResult(imp_llm::ToolResultMessage {
-            tool_call_id: call_id.to_string(),
-            tool_name: "read".to_string(),
-            content: vec![ContentBlock::Text {
-                text: "x".repeat(2000),
-            }],
-            is_error: false,
-            details: serde_json::Value::Null,
-            timestamp: imp_llm::now(),
-        })
-    }
-
-    /// Build an agent whose pre-seeded history puts context just BELOW the
-    /// compaction threshold on turn 0, so compaction fires on turn 1 after
-    /// the tool call + result push it over.
-    ///
-    /// Token math (estimate_tokens = chars/4):
-    ///   - 3 pre-seeded exchanges: each is ~2200 chars (tool_call ~200 + tool_result ~2000)
-    ///     → 3 × 2200 / 4 = ~1650 tokens
-    ///   - User prompt: ~50 chars → ~12 tokens
-    ///   - Total before turn 0 LLM call: ~1662 tokens
-    ///   - Context window = 4000, threshold = 0.8 → fires at 3200 tokens
-    ///   - 1662 < 3200 → compaction does NOT fire on turn 0 ✓
-    ///
-    ///   - Turn 0: LLM returns tool call (~200 chars / 4 = 50 tokens) + echo result (~100 chars / 4 = 25 tokens)
-    ///   - Total after turn 0: ~1737 tokens → still < 3200, no compaction yet
-    ///
-    ///   BUT we also need the context to exceed threshold. So we bump the
-    ///   pre-filled data: use 5 exchanges with 1500-char results instead.
-    ///   - 5 × ~1700 chars = 8500 chars → 8500/4 = 2125 tokens
-    ///   - Plus prompt: 2125 + 12 = 2137 → < 3200 at turn 0 ✓
-    ///   - After turn 0 tool call + result: 2137 + 75 = 2212 → < 3200 still
-    ///
-    /// Actually let's simplify: use a LOW context window (3000) and threshold 0.9
-    /// (fires at 2700). Pre-fill with 4 × 600-char results → 4 × 800 chars/4 = 800 tokens.
-    /// After turn 0 adds ~300 tokens → 1100. Still not enough.
-    ///
-    /// Simplest: pre-fill LOTS of data, use a high threshold (0.95) and a
-    /// modest window, so turn 0's prompt + response tips it over.
-    ///
-    /// Final approach: context_window=4000, threshold=0.7 (fires at 2800).
-    ///   Pre-fill: 5 × (200 + 2000) chars = 11000 chars → 2750 tokens. Just below 2800.
-    ///   Turn 0: user prompt adds ~50/4 = 12 tokens → 2762. Still below.
-    ///   Agent turn 0 LLM call → response adds to messages → turn 0 ends.
-    ///   Turn 1: context check with tool call + result → 2762 + ~200 = 2962 > 2800 → fires!
-    ///
-    /// Provider call ordering:
-    ///   call 0 — agent turn 0: tool call (context below threshold)
-    ///   call 1 — compaction LLM: fires at start of turn 1
-    ///   call 2 — agent turn 1: text response after compaction (ends run)
-    fn make_compaction_agent_turn1(
-        compaction_summary: &str,
-        post_compaction_response: Vec<StreamEvent>,
-    ) -> (Agent, AgentHandle, Arc<CapturingMockProvider>) {
-        let provider = Arc::new(CapturingMockProvider::new(vec![
-            // call 0: turn 0 — tool call (compaction hasn't fired yet)
-            tool_call_response(
-                "call_t0",
-                "echo",
-                serde_json::json!({"text": "check"}),
-                50,
-                10,
-            ),
-            // call 1: compaction summary (fires at start of turn 1)
-            text_response(compaction_summary, 400, 80),
-            // call 2: turn 1 — agent's text response after compaction
-            post_compaction_response,
-        ]));
-
-        // context_window=8000, threshold=0.5 → fires at 4000 tokens.
-        // Pre-fill: 5 pairs × ~575 tokens = ~2875 tokens. Below 4000 on turn 0.
-        // After turn 0 adds user prompt (~50) + tool call (~50) + tool result (~30)
-        //   = 2875 + 130 = 3005 tokens. Still below 4000 on turn 1.
-        // But we need it to fire! So use 6 pairs instead:
-        //   6 × 575 = 3450 tokens. Plus turn 0 additions = ~3580. Below 4000.
-        // Need threshold lower or more data. Let's use 7 pairs:
-        //   7 × 575 = 4025. Over 4000 on turn 0 again!
-        //
-        // Different approach: smaller results. Use 500-char results:
-        //   result JSON ~600 chars → 150 tokens. + assistant 50 = 200 per pair.
-        //   Need >4000 tokens after turn 0 but ≤4000 before.
-        //   20 pairs × 200 = 4000. With turn 0 = 4130. Threshold = 4000.
-        //   Before turn 0: 4000 tokens → ratio = 4000/8000 = 0.5 → AT threshold.
-        //
-        // Simplest: context_window=200_000 (large), threshold=0.015 (fires at 3000).
-        // Pre-fill 5 big pairs = 2875 tokens < 3000. Turn 0 adds ~130 = 3005 > 3000.
-        let model = test_model_with_context_window(provider.clone(), 200_000);
-        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.tools.register(Arc::new(EchoTool));
-        agent.context_config.compaction_threshold = 0.015; // fires at ~3000 tokens
-                                                           // Disable observation masking so it doesn't interfere.
-        agent.context_config.observation_mask_threshold = 1.0;
-
-        // Pre-fill 5 exchanges: ~2875 tokens total. Below 3000 threshold.
-        // After turn 0 tool call adds ~130 tokens → 3005 > 3000 → compaction fires at turn 1.
-        for i in 0..5 {
-            let cid = format!("pre_{i}");
-            agent.messages.push(make_assistant_tool_call(
-                &cid,
-                "read",
-                serde_json::json!({"path": format!("file_{i}.rs")}),
-            ));
-            agent.messages.push(make_big_tool_result(&cid));
-        }
-
-        (agent, handle, provider)
-    }
-
-    /// After compaction fires mid-run (turn > 0), a resume message containing
-    /// the original prompt must be present in agent.messages.
-    #[tokio::test]
-    #[ignore = "hangs — compaction agent loop doesn't terminate with current mock setup"]
-    async fn compaction_resume_injects_original_prompt() {
-        let original_prompt = "Please implement the authentication module";
-        let compaction_summary = "Summary: user wants to implement auth.";
-
-        let (mut agent, handle, _provider) = make_compaction_agent_turn1(
-            compaction_summary,
-            text_response("Resuming work on auth.", 50, 20),
-        );
-
-        let events_task = tokio::spawn(collect_events(handle));
-        agent.run(original_prompt.to_string()).await.unwrap();
-
-        let _events = events_task.await.unwrap();
-
-        // After compaction the messages list should contain a user message that
-        // re-states the original prompt.
-        let resume_msg = agent
-            .messages
-            .iter()
-            .find_map(|m| user_message_text(m).filter(|t| t.contains("original request was")));
-
-        assert!(
-            resume_msg.is_some(),
-            "expected a resume message in agent.messages after compaction, messages: {:?}",
-            agent
-                .messages
-                .iter()
-                .map(|m| format!("{m:?}"))
-                .collect::<Vec<_>>()
-        );
-
-        assert!(
-            resume_msg.unwrap().contains(original_prompt),
-            "resume message must contain the original prompt verbatim, got: {}",
-            resume_msg.unwrap()
-        );
-    }
-
-    /// The original prompt is preserved verbatim (not truncated or paraphrased).
-    #[tokio::test]
-    #[ignore = "hangs — compaction agent loop doesn't terminate with current mock setup"]
-    async fn compaction_resume_preserves_prompt_verbatim() {
-        let original_prompt = "Refactor src/auth.rs to use JWT tokens and update all 42 call sites";
-
-        let (mut agent, handle, _provider) = make_compaction_agent_turn1(
-            "Summary of auth refactor progress.",
-            text_response("Continuing refactor.", 50, 20),
-        );
-
-        let events_task = tokio::spawn(collect_events(handle));
-        agent.run(original_prompt.to_string()).await.unwrap();
-
-        let _events = events_task.await.unwrap();
-
-        let found = agent.messages.iter().any(|m| {
-            user_message_text(m)
-                .map(|t| t.contains(original_prompt))
-                .unwrap_or(false)
-        });
-
-        assert!(
-            found,
-            "original prompt must appear verbatim in agent.messages after compaction"
-        );
-    }
-
-    /// When compaction fires on turn 0 no resume message is injected — the task
-    /// is just too big, re-queueing the prompt won't help.
-    #[tokio::test]
-    #[ignore = "hangs — compaction agent loop doesn't terminate with current mock setup"]
-    async fn compaction_resume_no_inject_on_turn_zero() {
-        // Pre-seed MORE messages so context already exceeds threshold before the
-        // new prompt is added, ensuring compaction fires on turn 0.
-        let compaction_summary = "Summary: nothing done yet.";
-
-        let provider = Arc::new(CapturingMockProvider::new(vec![
-            // call 0: compaction LLM (fires on turn 0)
-            text_response(compaction_summary, 400, 80),
-            // call 1: agent turn 0 after compaction
-            text_response("Starting work.", 50, 20),
-        ]));
-
-        // context_window=4000, threshold=0.5 → fires at 2000 tokens.
-        // 10 × 2200-char exchanges → ~5500 tokens → well over threshold on turn 0.
-        let model = test_model_with_context_window(provider.clone(), 4000);
-        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.context_config.compaction_threshold = 0.5;
-        agent.context_config.observation_mask_threshold = 1.0; // disable masking
-
-        // Pre-seed with enough to exceed the threshold on turn 0 (before any LLM call)
-        for i in 0..10 {
-            let cid = format!("pre_{i}");
-            agent.messages.push(make_assistant_tool_call(
-                &cid,
-                "read",
-                serde_json::json!({"path": format!("file_{i}.rs")}),
-            ));
-            agent.messages.push(make_big_tool_result(&cid));
-        }
-
-        let events_task = tokio::spawn(collect_events(handle));
-        agent.run("Do the task".to_string()).await.unwrap();
-
-        let _events = events_task.await.unwrap();
-
-        // No resume message should appear — compaction fired on turn 0 before any real work
-        let has_resume = agent.messages.iter().any(|m| {
-            user_message_text(m)
-                .map(|t| t.contains("original request was"))
-                .unwrap_or(false)
-        });
-
-        assert!(
-            !has_resume,
-            "no resume message should be injected when compaction fires on turn 0"
         );
     }
 }
@@ -3216,6 +3191,7 @@ mod mode_tests {
             user_profile: None,
             cwd: None,
             learning_enabled: false,
+            guardrail_profile: None,
         });
 
         // Orchestrator allows "read" — should appear in system prompt
@@ -3261,6 +3237,7 @@ mod mode_tests {
             user_profile: None,
             cwd: None,
             learning_enabled: false,
+            guardrail_profile: None,
         });
         // Full mode has no instructions
         assert!(
@@ -3285,6 +3262,7 @@ mod mode_tests {
             user_profile: None,
             cwd: None,
             learning_enabled: false,
+            guardrail_profile: None,
         });
         assert!(
             orch_result.text.contains("orchestrator"),
@@ -3305,6 +3283,7 @@ mod mode_tests {
             user_profile: None,
             cwd: None,
             learning_enabled: false,
+            guardrail_profile: None,
         });
         assert!(
             worker_result.text.contains("worker"),
@@ -3324,6 +3303,7 @@ mod mode_tests {
             user_profile: None,
             cwd: None,
             learning_enabled: false,
+            guardrail_profile: None,
         });
         assert!(
             reviewer_result.text.contains("reviewer") || reviewer_result.text.contains("read"),

@@ -1,4 +1,8 @@
 use std::collections::HashMap;
+use std::time::Duration;
+
+use crate::animation::AnimationState;
+use imp_core::config::AnimationLevel;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -24,6 +28,12 @@ pub struct StatusInfo {
     pub show_context_usage: bool,
     pub peek: bool,
     pub extension_items: HashMap<String, String>,
+    pub is_streaming: bool,
+    pub active_tools: u32,
+    pub turn_elapsed: Option<Duration>,
+    pub tick: u64,
+    pub animation_level: AnimationLevel,
+    pub activity_state: AnimationState,
 }
 
 /// Footer status bar: cwd | session | tokens (↑input ↓output) | cost ($X.XX) | context% | model.
@@ -73,7 +83,7 @@ impl Widget for StatusBar<'_> {
         );
         let cost_str = format!("${:.2}", self.info.cost);
         let context_str = format!("{:.0}%", self.info.context_percent * 100.0);
-        // Color the context% to give an at-a-glance warning before compaction fires.
+        // Color the context% to give an at-a-glance warning as context gets tight.
         let context_style = if self.info.context_percent > 0.75 {
             self.theme.error_style()
         } else if self.info.context_percent > 0.50 {

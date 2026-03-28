@@ -1,3 +1,4 @@
+use std::pin::Pin;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -68,72 +69,95 @@ pub fn backoff_delay(
     Some(Duration::from_millis(capped_ms + jitter_ms))
 }
 
-/// Run a streaming LLM call with automatic retry on transient errors.
+/// Stream an LLM call with automatic retry on transient startup errors.
 ///
-/// `make_stream` is called once per attempt. If the stream yields an `Err`
-/// that is retryable (and we have attempts left), the whole stream is
-/// discarded and `make_stream` is called again after a backoff delay.
+/// This preserves true streaming semantics: successful events are forwarded to
+/// the caller as soon as they arrive.
 ///
-/// Transparent to the caller: it receives the same `Vec<StreamEvent>` items
-/// that would have come from a successful first attempt.
-///
-/// Returns `Err` if:
-/// - A non-retryable error is encountered
-/// - `max_retries` is exhausted
-/// - A `RateLimited` retry-after exceeds `max_delay`
-pub async fn run_with_retry<F, S>(
+/// Retry is only transparent before the first meaningful event is emitted.
+/// Leading `MessageStart` events are buffered so we can still retry if the
+/// connection dies before the first text delta / tool call / completed message.
+/// Once any non-`MessageStart` event is forwarded, further errors are surfaced
+/// directly instead of replaying the stream.
+pub fn stream_with_retry<F, S>(
     mut make_stream: F,
-    policy: &RetryPolicy,
-) -> imp_llm::Result<Vec<imp_llm::Result<StreamEvent>>>
+    policy: RetryPolicy,
+) -> Pin<Box<dyn futures_core::Stream<Item = imp_llm::Result<StreamEvent>> + Send>>
 where
-    F: FnMut() -> S,
-    S: futures_core::Stream<Item = imp_llm::Result<StreamEvent>> + Unpin,
+    F: FnMut() -> S + Send + 'static,
+    S: futures_core::Stream<Item = imp_llm::Result<StreamEvent>> + Unpin + Send + 'static,
 {
-    let mut attempt = 0u32;
-    loop {
-        let mut stream = make_stream();
-        let mut events: Vec<imp_llm::Result<StreamEvent>> = Vec::new();
-        let mut stream_error: Option<imp_llm::Error> = None;
+    let (tx, rx) = futures::channel::mpsc::unbounded();
 
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(ev) => events.push(Ok(ev)),
-                Err(e) => {
-                    stream_error = Some(e);
-                    break;
-                }
-            }
-        }
+    tokio::spawn(async move {
+        let mut attempt = 0u32;
 
-        match stream_error {
-            None => {
-                // Stream completed without error.
-                return Ok(events);
-            }
-            Some(err) => {
-                let retry_after = if let imp_llm::Error::RateLimited { retry_after_secs } = &err {
-                    *retry_after_secs
-                } else {
-                    None
-                };
+        'attempt: loop {
+            let mut stream = make_stream();
+            let mut buffered_starts: Vec<StreamEvent> = Vec::new();
+            let mut emitted_meaningful_event = false;
 
-                if !is_retryable(&err) || attempt >= policy.max_retries {
-                    return Err(err);
-                }
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(event) => {
+                        if !emitted_meaningful_event
+                            && matches!(event, StreamEvent::MessageStart { .. })
+                        {
+                            buffered_starts.push(event);
+                            continue;
+                        }
 
-                match backoff_delay(attempt, policy, retry_after) {
-                    None => {
-                        // retry-after exceeds max_delay — abort.
-                        return Err(err);
+                        if !emitted_meaningful_event {
+                            emitted_meaningful_event = true;
+                            for buffered in buffered_starts.drain(..) {
+                                if tx.unbounded_send(Ok(buffered)).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+
+                        if tx.unbounded_send(Ok(event)).is_err() {
+                            return;
+                        }
                     }
-                    Some(delay) => {
-                        tokio::time::sleep(delay).await;
-                        attempt += 1;
+                    Err(err) => {
+                        let retry_after = if let imp_llm::Error::RateLimited { retry_after_secs } = &err {
+                            *retry_after_secs
+                        } else {
+                            None
+                        };
+
+                        if !emitted_meaningful_event && is_retryable(&err) && attempt < policy.max_retries {
+                            match backoff_delay(attempt, &policy, retry_after) {
+                                None => {
+                                    let _ = tx.unbounded_send(Err(err));
+                                    return;
+                                }
+                                Some(delay) => {
+                                    tokio::time::sleep(delay).await;
+                                    attempt += 1;
+                                    continue 'attempt;
+                                }
+                            }
+                        }
+
+                        let _ = tx.unbounded_send(Err(err));
+                        return;
                     }
                 }
             }
+
+            for buffered in buffered_starts {
+                if tx.unbounded_send(Ok(buffered)).is_err() {
+                    return;
+                }
+            }
+
+            return;
         }
-    }
+    });
+
+    Box::pin(rx)
 }
 
 #[cfg(test)]
@@ -234,10 +258,10 @@ mod tests {
         assert!(result.is_none());
     }
 
-    // ── run_with_retry ────────────────────────────────────────────
+    // ── stream_with_retry ────────────────────────────────────────
 
     #[tokio::test]
-    async fn retry_succeeds_after_transient_failures() {
+    async fn retry_succeeds_after_transient_failures_before_first_meaningful_event() {
         use std::sync::{Arc, Mutex};
 
         let call_count = Arc::new(Mutex::new(0u32));
@@ -250,14 +274,13 @@ mod tests {
         };
 
         let call_count_clone = call_count.clone();
-        let result = run_with_retry(
+        let mut stream = stream_with_retry(
             move || {
                 let mut count = call_count_clone.lock().unwrap();
                 *count += 1;
                 let attempt = *count;
                 drop(count);
 
-                // Fail the first 2 calls with a retryable error, succeed on 3rd
                 if attempt < 3 {
                     let events: Vec<imp_llm::Result<StreamEvent>> = vec![
                         Ok(StreamEvent::MessageStart {
@@ -278,19 +301,22 @@ mod tests {
                     futures::stream::iter(events)
                 }
             },
-            &policy,
-        )
-        .await
-        .unwrap();
+            policy,
+        );
+
+        let mut result = Vec::new();
+        while let Some(item) = stream.next().await {
+            result.push(item);
+        }
 
         assert_eq!(*call_count.lock().unwrap(), 3);
-        assert_eq!(result.len(), 2); // MessageStart + TextDelta from successful attempt
+        assert_eq!(result.len(), 2);
         assert!(matches!(result[0], Ok(StreamEvent::MessageStart { .. })));
         assert!(matches!(result[1], Ok(StreamEvent::TextDelta { .. })));
     }
 
     #[tokio::test]
-    async fn retry_exhausts_max_retries() {
+    async fn retry_exhausts_max_retries_before_first_meaningful_event() {
         use std::sync::{Arc, Mutex};
 
         let call_count = Arc::new(Mutex::new(0u32));
@@ -303,20 +329,25 @@ mod tests {
         };
 
         let call_count_clone = call_count.clone();
-        let result = run_with_retry(
+        let mut stream = stream_with_retry(
             move || {
                 *call_count_clone.lock().unwrap() += 1;
-                let events: Vec<imp_llm::Result<StreamEvent>> =
-                    vec![Err(imp_llm::Error::Stream("always fails".into()))];
+                let events: Vec<imp_llm::Result<StreamEvent>> = vec![Err(imp_llm::Error::Stream(
+                    "always fails".into(),
+                ))];
                 futures::stream::iter(events)
             },
-            &policy,
-        )
-        .await;
+            policy,
+        );
 
-        // max_retries=2 means: 1 initial attempt + 2 retries = 3 total calls
+        let mut result = Vec::new();
+        while let Some(item) = stream.next().await {
+            result.push(item);
+        }
+
         assert_eq!(*call_count.lock().unwrap(), 3);
-        assert!(result.is_err());
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0], Err(imp_llm::Error::Stream(_))));
     }
 
     #[tokio::test]
@@ -333,29 +364,31 @@ mod tests {
         };
 
         let call_count_clone = call_count.clone();
-        let result = run_with_retry(
+        let mut stream = stream_with_retry(
             move || {
                 *call_count_clone.lock().unwrap() += 1;
-                // Auth errors are not retryable
                 let events: Vec<imp_llm::Result<StreamEvent>> =
                     vec![Err(imp_llm::Error::Auth("invalid key".into()))];
                 futures::stream::iter(events)
             },
-            &policy,
-        )
-        .await;
+            policy,
+        );
 
-        // Should fail immediately without retry
+        let mut result = Vec::new();
+        while let Some(item) = stream.next().await {
+            result.push(item);
+        }
+
         assert_eq!(*call_count.lock().unwrap(), 1);
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), imp_llm::Error::Auth(_)));
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0], Err(imp_llm::Error::Auth(_))));
     }
 
     #[tokio::test]
     async fn retry_no_error_passes_through() {
         let policy = default_policy();
 
-        let result = run_with_retry(
+        let mut stream = stream_with_retry(
             || {
                 let events: Vec<imp_llm::Result<StreamEvent>> = vec![
                     Ok(StreamEvent::MessageStart {
@@ -365,11 +398,48 @@ mod tests {
                 ];
                 futures::stream::iter(events)
             },
-            &policy,
-        )
-        .await
-        .unwrap();
+            policy,
+        );
+
+        let mut result = Vec::new();
+        while let Some(item) = stream.next().await {
+            result.push(item);
+        }
 
         assert_eq!(result.len(), 2);
     }
+
+    #[tokio::test]
+    async fn retry_does_not_replay_after_meaningful_event_has_streamed() {
+        use std::sync::{Arc, Mutex};
+
+        let call_count = Arc::new(Mutex::new(0u32));
+        let policy = default_policy();
+        let call_count_clone = call_count.clone();
+
+        let mut stream = stream_with_retry(
+            move || {
+                *call_count_clone.lock().unwrap() += 1;
+                let events: Vec<imp_llm::Result<StreamEvent>> = vec![
+                    Ok(StreamEvent::TextDelta {
+                        text: "partial".into(),
+                    }),
+                    Err(imp_llm::Error::Stream("boom".into())),
+                ];
+                futures::stream::iter(events)
+            },
+            policy,
+        );
+
+        let mut result = Vec::new();
+        while let Some(item) = stream.next().await {
+            result.push(item);
+        }
+
+        assert_eq!(*call_count.lock().unwrap(), 1);
+        assert_eq!(result.len(), 2);
+        assert!(matches!(result[0], Ok(StreamEvent::TextDelta { .. })));
+        assert!(matches!(result[1], Err(imp_llm::Error::Stream(_))));
+    }
 }
+

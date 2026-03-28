@@ -1,9 +1,10 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use mana::commands::run::{RunArgs, RunView};
 use serde_json::json;
 
-use super::{Tool, ToolContext, ToolOutput};
+use super::{Tool, ToolContext, ToolOutput, ToolUpdate};
 use crate::error::Result;
 
 fn find_mana_dir(cwd: &Path) -> std::result::Result<std::path::PathBuf, String> {
@@ -12,9 +13,62 @@ fn find_mana_dir(cwd: &Path) -> std::result::Result<std::path::PathBuf, String> 
 
 fn json_output(value: &impl serde::Serialize) -> ToolOutput {
     match serde_json::to_string_pretty(value) {
-        Ok(json) => ToolOutput::text(json),
+        Ok(json) => ToolOutput {
+            content: vec![imp_llm::ContentBlock::Text { text: json }],
+            details: serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
+            is_error: false,
+        },
         Err(e) => ToolOutput::error(format!("Failed to serialize: {e}")),
     }
+}
+
+fn send_update(ctx: &ToolContext, text: impl Into<String>, details: serde_json::Value) {
+    let _ = ctx.update_tx.try_send(ToolUpdate {
+        content: vec![imp_llm::ContentBlock::Text { text: text.into() }],
+        details,
+    });
+}
+
+fn run_summary_lines(view: &RunView) -> Vec<String> {
+    let mut lines = vec![format!(
+        "Mana run: {} total · {} done · {} failed · {} awaiting verify · {} skipped",
+        view.summary.total_units,
+        view.summary.total_closed,
+        view.summary.total_failed,
+        view.summary.total_awaiting_verify,
+        view.summary.total_skipped
+    )];
+
+    for unit in &view.units {
+        let marker = match unit.status.as_str() {
+            "running" => "▶",
+            "done" => "✓",
+            "failed" => "✗",
+            "blocked" => "!",
+            _ => "…",
+        };
+        let mut extras = Vec::new();
+        if let Some(round) = unit.round {
+            extras.push(format!("wave {round}"));
+        }
+        if let Some(agent) = &unit.agent {
+            extras.push(agent.clone());
+        }
+        if let Some(duration) = unit.duration_secs {
+            extras.push(format!("{}s", duration));
+        }
+        let extra_suffix = if extras.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", extras.join(" · "))
+        };
+        lines.push(format!(
+            "{marker} {}  {}  {}{}",
+            unit.id, unit.title, unit.status, extra_suffix
+        ));
+    }
+
+    lines
 }
 
 pub struct ManaTool;
@@ -28,13 +82,13 @@ impl Tool for ManaTool {
         "Mana"
     }
     fn description(&self) -> &str {
-        "Work units: status, list, show, create, close, update."
+        "Work coordination substrate. Create verifiable jobs, spawn subagents to complete them, track progress, close on verify. Use for complex tasks or to delegate work."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["status", "list", "show", "create", "close", "update"] },
+                "action": { "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run"] },
                 "id": { "type": "string" },
                 "title": { "type": "string" },
                 "verify": { "type": "string", "description": "Shell command, must exit 0" },
@@ -232,8 +286,95 @@ impl Tool for ManaTool {
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
+            "run" => {
+                let run_args = RunArgs {
+                    id: params["id"].as_str().map(|s| s.to_string()),
+                    jobs: params["jobs"].as_u64().unwrap_or(4) as u32,
+                    dry_run: params["dry_run"].as_bool().unwrap_or(false),
+                    loop_mode: params["loop"].as_bool().unwrap_or(false),
+                    keep_going: params["keep_going"].as_bool().unwrap_or(false),
+                    timeout: params["timeout"].as_u64().unwrap_or(30) as u32,
+                    idle_timeout: params["idle_timeout"].as_u64().unwrap_or(5) as u32,
+                    json_stream: true,
+                    review: params["review"].as_bool().unwrap_or(false),
+                };
+
+                send_update(
+                    &ctx,
+                    "Starting mana run...",
+                    json!({"kind": "mana_run_status", "status": "starting"}),
+                );
+
+                match mana::commands::run::run_with_stream_capture_and_sink(
+                    &mana_dir,
+                    run_args,
+                    Some(std::sync::Arc::new({
+                        let update_tx = ctx.update_tx.clone();
+                        move |event| {
+                            let line = match &event {
+                                mana::stream::StreamEvent::RunStart {
+                                    total_units,
+                                    total_rounds,
+                                    ..
+                                } => format!(
+                                    "Mana run started: {total_units} jobs across {total_rounds} waves"
+                                ),
+                                mana::stream::StreamEvent::UnitStart { id, title, round, .. } => {
+                                    format!("▶ {id}  {title}  wave {round}")
+                                }
+                                mana::stream::StreamEvent::UnitDone {
+                                    id,
+                                    success,
+                                    duration_secs,
+                                    error,
+                                    ..
+                                } => {
+                                    if *success {
+                                        format!("✓ {id}  done  {}s", duration_secs)
+                                    } else {
+                                        format!(
+                                            "✗ {id}  failed  {}",
+                                            error.clone().unwrap_or_else(|| "error".to_string())
+                                        )
+                                    }
+                                }
+                                mana::stream::StreamEvent::RunEnd {
+                                    total_closed,
+                                    total_failed,
+                                    duration_secs,
+                                    ..
+                                } => format!(
+                                    "Mana run finished: {total_closed} done · {total_failed} failed · {}s",
+                                    duration_secs
+                                ),
+                                _ => return,
+                            };
+                            let _ = update_tx.try_send(ToolUpdate {
+                                content: vec![imp_llm::ContentBlock::Text { text: line }],
+                                details: serde_json::to_value(&event)
+                                    .unwrap_or(serde_json::Value::Null),
+                            });
+                        }
+                    })),
+                ) {
+                    Ok(view) => {
+                        for line in run_summary_lines(&view) {
+                            send_update(&ctx, line, json!({"kind": "mana_run_view", "view": view}));
+                        }
+                        Ok(ToolOutput {
+                            content: run_summary_lines(&view)
+                                .into_iter()
+                                .map(|text| imp_llm::ContentBlock::Text { text })
+                                .collect(),
+                            details: serde_json::to_value(&view).unwrap_or(serde_json::Value::Null),
+                            is_error: false,
+                        })
+                    }
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
             other => Ok(ToolOutput::error(format!(
-                "Unknown action: {other}. Use: status, list, show, create, close, update"
+                "Unknown action: {other}. Use: status, list, show, create, close, update, run"
             ))),
         }
     }
@@ -388,7 +529,7 @@ mod tests {
     #[tokio::test]
     async fn agent_mode_mana_orchestrator_allows_all() {
         // Orchestrator allows all standard actions — none should hit the mode guard.
-        for action in &["status", "list", "show", "create", "close", "update"] {
+        for action in &["status", "list", "show", "create", "close", "update", "run"] {
             match run_with_mode("orchestrator", action).await {
                 ManaResult::Attempted(_) => {} // correct
                 ManaResult::ModeBlocked(msg) => {
@@ -494,7 +635,7 @@ mod tests {
     #[tokio::test]
     async fn agent_mode_mana_ctx_full_allows_all() {
         // Full mode via ctx allows every action (none should hit the mode guard).
-        for action in &["status", "list", "show", "create", "close", "update"] {
+        for action in &["status", "list", "show", "create", "close", "update", "run"] {
             match run_with_ctx_mode(crate::config::AgentMode::Full, action).await {
                 ManaResult::Attempted(_) => {} // correct — mode guard passed
                 ManaResult::ModeBlocked(msg) => {

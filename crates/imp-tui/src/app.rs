@@ -27,11 +27,17 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::Clear;
 use ratatui::{Frame, Terminal};
 
+use crate::animation::AnimationState;
 use crate::highlight::Highlighter;
 use crate::keybindings::{self, Action};
+use crate::selection::{
+    extract_selected_text, SelectablePane, SelectionOverlay, SelectionState, TextSurface,
+};
 use crate::theme::Theme;
 use crate::turn_tracker::TurnTracker;
-use crate::views::chat::{ChatView, DisplayMessage, MessageRole};
+use crate::views::chat::{
+    build_text_surface, clamped_scroll_offset, ChatView, DisplayMessage, MessageRole,
+};
 use crate::views::command_palette::{builtin_commands, CommandPaletteState, CommandPaletteView};
 use crate::views::editor::{EditorState, EditorView};
 use crate::views::file_finder::{collect_project_files, FileFinderState, FileFinderView};
@@ -39,7 +45,7 @@ use crate::views::login_picker::{oauth_login_providers, LoginPickerState, LoginP
 use crate::views::model_selector::{ModelSelection, ModelSelectorState, ModelSelectorView};
 use crate::views::session_picker::{SessionPickerState, SessionPickerView};
 use crate::views::settings::{SettingsState, SettingsView};
-use crate::views::sidebar::{sidebar_sub_areas, Sidebar, SidebarView};
+use crate::views::sidebar::{build_detail_text_surface, sidebar_sub_areas, Sidebar, SidebarView};
 use crate::views::status::StatusInfo;
 use crate::views::tools::DisplayToolCall;
 use crate::views::top_bar::TopBar;
@@ -52,7 +58,8 @@ type Tui = Terminal<CrosstermBackend<io::Stdout>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     Chat,
-    Sidebar,
+    SidebarList,
+    SidebarDetail,
 }
 
 /// UI mode — determines what overlay is displayed.
@@ -89,6 +96,21 @@ enum LoginStatusEvent {
     Error(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollDirection {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DragAutoScroll {
+    pane: SelectablePane,
+    direction: ScrollDirection,
+    speed: usize,
+    column: u16,
+    row: u16,
+}
+
 pub struct App {
     // Core
     pub running: bool,
@@ -118,10 +140,6 @@ pub struct App {
     /// Index into the flattened tool call list — `None` means no tool focused.
     pub tool_focus: Option<usize>,
 
-    /// Whether terminal mouse capture is currently enabled. When false, normal
-    /// terminal text selection/copy should work.
-    pub mouse_capture_enabled: bool,
-
     pub ctrl_c_count: u8,
     pub needs_redraw: bool,
     pub last_esc: Option<Instant>,
@@ -148,14 +166,22 @@ pub struct App {
     // Sidebar
     pub sidebar: Sidebar,
 
-    // Mouse click map: Y coordinate → tool_call_id (rebuilt each render)
-    pub click_map: Vec<(u16, String)>,
     /// Which pane has focus for scroll routing.
     pub active_pane: Pane,
     /// Sidebar list area cached from last render (for click/scroll detection).
     pub sidebar_list_rect: Option<Rect>,
     /// Sidebar detail area cached from last render (for click/scroll detection).
     pub sidebar_detail_rect: Option<Rect>,
+    /// Cached selectable chat surface from last render.
+    pub chat_surface: Option<TextSurface>,
+    /// Cached selectable sidebar detail surface from last render.
+    pub sidebar_detail_surface: Option<TextSurface>,
+    /// Current app-native text selection.
+    pub selection: Option<SelectionState>,
+    /// Selection anchor while dragging with the mouse.
+    pub drag_selection: Option<SelectablePane>,
+    /// Active edge-autoscroll while dragging a selection.
+    drag_autoscroll: Option<DragAutoScroll>,
 
     // Turn activity tracking
     pub turn_tracker: TurnTracker,
@@ -228,8 +254,6 @@ impl App {
             .unwrap_or(200_000);
         let (login_status_tx, login_status_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let mouse_capture_enabled = config.ui.mouse_capture;
-
         Self {
             running: true,
             messages: Vec::new(),
@@ -248,7 +272,6 @@ impl App {
             auto_scroll: true,
             tools_expanded: false,
             tool_focus: None,
-            mouse_capture_enabled,
 
             ctrl_c_count: 0,
             needs_redraw: true,
@@ -266,10 +289,14 @@ impl App {
             status_items: HashMap::new(),
             lua_runtime: None,
             sidebar: Sidebar::default(),
-            click_map: Vec::new(),
             active_pane: Pane::Chat,
             sidebar_list_rect: None,
             sidebar_detail_rect: None,
+            chat_surface: None,
+            sidebar_detail_surface: None,
+            selection: None,
+            drag_selection: None,
+            drag_autoscroll: None,
             turn_tracker: TurnTracker::new(),
             theme,
             highlighter: Highlighter::new(),
@@ -303,6 +330,7 @@ impl App {
                         for tc in &mut display_msg.tool_calls {
                             if tc.id == tr.tool_call_id {
                                 tc.output = Some(output_text.clone());
+                                tc.details = tr.details.clone();
                                 tc.is_error = tr.is_error;
                                 attached = true;
                                 break;
@@ -338,10 +366,7 @@ impl App {
         // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        crossterm::execute!(stdout, EnterAlternateScreen)?;
-        if self.mouse_capture_enabled {
-            crossterm::execute!(stdout, EnableMouseCapture)?;
-        }
+        crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
@@ -349,10 +374,7 @@ impl App {
 
         // Restore terminal (always, even on error)
         disable_raw_mode()?;
-        crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-        if self.mouse_capture_enabled {
-            crossterm::execute!(terminal.backend_mut(), DisableMouseCapture)?;
-        }
+        crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
         terminal.show_cursor()?;
 
         result
@@ -377,9 +399,7 @@ impl App {
                         self.handle_key(key)?;
                     }
                     Event::Mouse(mouse) => {
-                        if self.mouse_capture_enabled {
-                            self.handle_mouse(mouse);
-                        }
+                        self.handle_mouse(mouse);
                     }
                     Event::Resize(_, _) => {
                         self.needs_redraw = true;
@@ -395,6 +415,7 @@ impl App {
 
             // Tick + periodic redraw for streaming/spinner
             self.tick = self.tick.wrapping_add(1);
+            self.maybe_autoscroll_selection();
             if self.is_streaming {
                 self.needs_redraw = true;
             }
@@ -520,6 +541,31 @@ impl App {
 
     // ── Rendering ───────────────────────────────────────────────
 
+    fn current_activity_state(&self) -> AnimationState {
+        let active_tools = self
+            .messages
+            .iter()
+            .flat_map(|m| m.tool_calls.iter())
+            .filter(|tc| tc.output.is_none() && !tc.is_error)
+            .count() as u32;
+
+        let latest_streaming = self.messages.iter().rev().find(|m| m.is_streaming);
+        let has_visible_content = latest_streaming
+            .map(|m| !m.content.trim().is_empty())
+            .unwrap_or(false);
+        let has_tools_in_turn = latest_streaming
+            .map(|m| !m.tool_calls.is_empty())
+            .unwrap_or(active_tools > 0);
+
+        AnimationState::from_streaming(
+            self.is_streaming,
+            has_visible_content,
+            has_tools_in_turn,
+            active_tools,
+            !self.message_queue.is_empty(),
+        )
+    }
+
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
         frame.render_widget(Clear, area);
@@ -588,6 +634,26 @@ impl App {
         } else {
             None
         };
+        let activity_state = self.current_activity_state();
+        self.scroll_offset = clamped_scroll_offset(
+            &self.messages,
+            &self.theme,
+            &self.highlighter,
+            chat_area,
+            self.scroll_offset,
+            self.tick,
+            chat_tool_focus,
+            self.config.ui.word_wrap,
+            chat_tool_display,
+            self.config.ui.thinking_lines,
+            self.config.ui.show_timestamps,
+            self.config.ui.animations,
+            activity_state,
+        );
+        if self.scroll_offset == 0 {
+            self.auto_scroll = true;
+        }
+
         let chat = ChatView::new(&self.messages, &self.theme, &self.highlighter)
             .scroll(self.scroll_offset)
             .tick(self.tick)
@@ -595,23 +661,26 @@ impl App {
             .word_wrap(self.config.ui.word_wrap)
             .chat_tool_display(chat_tool_display)
             .thinking_lines(self.config.ui.thinking_lines)
-            .show_timestamps(self.config.ui.show_timestamps);
+            .show_timestamps(self.config.ui.show_timestamps)
+            .animation_level(self.config.ui.animations)
+            .activity_state(activity_state);
         frame.render_widget(chat, chat_area);
 
-        // Build click_map: Y coordinate → tool_call_id for mouse click handling.
-        // We mirror the ChatView line-building logic to know which rendered rows
-        // correspond to tool call headers.
-        self.click_map = build_click_map(
+        self.chat_surface = Some(build_text_surface(
             &self.messages,
             &self.theme,
             &self.highlighter,
             chat_area,
             self.scroll_offset,
+            self.tick,
+            chat_tool_focus,
             self.config.ui.word_wrap,
             chat_tool_display,
             self.config.ui.thinking_lines,
             self.config.ui.show_timestamps,
-        );
+            self.config.ui.animations,
+            activity_state,
+        ));
 
         // Sidebar
         if let Some(sidebar_area) = sidebar_area {
@@ -629,6 +698,7 @@ impl App {
                     all_tool_calls,
                     self.tool_focus,
                     &self.theme,
+                    &self.highlighter,
                     self.tick,
                     self.sidebar.list_scroll,
                     self.sidebar.detail_scroll,
@@ -640,9 +710,24 @@ impl App {
             self.sidebar_list_rect = Some(sub.0);
             self.sidebar_detail_rect = Some(sub.1);
             self.sidebar.list_height = sub.0.height;
+            let selected_tc = self.tool_focus.and_then(|i| {
+                self.messages
+                    .iter()
+                    .flat_map(|m| m.tool_calls.iter())
+                    .nth(i)
+            });
+            self.sidebar_detail_surface = Some(build_detail_text_surface(
+                selected_tc,
+                sub.1,
+                self.sidebar.detail_scroll,
+                &self.config.ui,
+                &self.highlighter,
+                &self.theme,
+            ));
         } else {
             self.sidebar_list_rect = None;
             self.sidebar_detail_rect = None;
+            self.sidebar_detail_surface = None;
         }
 
         // Ask overlay (between chat and editor)
@@ -655,13 +740,32 @@ impl App {
         let editor = EditorView::new(&self.editor, &self.theme, self.thinking_level)
             .model(&self.model_name)
             .streaming(self.is_streaming)
-            .queued(!self.message_queue.is_empty());
+            .queued(!self.message_queue.is_empty())
+            .tick(self.tick)
+            .animation_level(self.config.ui.animations);
         frame.render_widget(editor, editor_area);
 
         // Top bar (header line)
         let status_info = self.build_status_info();
         let top_bar = TopBar::new(&status_info, &self.theme);
         frame.render_widget(top_bar, top_bar_area);
+
+        frame.render_widget(
+            SelectionOverlay::new(
+                &self.theme,
+                self.selection.as_ref(),
+                self.chat_surface.as_ref(),
+                self.sidebar_detail_surface.as_ref(),
+            ),
+            area,
+        );
+
+        // Pre-render: clamp session picker scroll so selected item is visible
+        if let UiMode::SessionPicker(ref mut sp) = self.mode {
+            let overlay_area = centered_rect(60, 50, area);
+            let inner_h = overlay_area.height.saturating_sub(2) as usize;
+            sp.clamp_scroll(inner_h);
+        }
 
         // Render overlays
         match &self.mode {
@@ -746,6 +850,12 @@ impl App {
         if let Some(info) = self.current_oauth_display_info() {
             extension_items.insert("oauth".into(), info.status_summary());
         }
+        let active_tools = self
+            .messages
+            .iter()
+            .flat_map(|m| m.tool_calls.iter())
+            .filter(|tc| tc.output.is_none() && !tc.is_error)
+            .count() as u32;
 
         StatusInfo {
             cwd,
@@ -762,6 +872,12 @@ impl App {
             show_context_usage: self.config.ui.show_context_usage,
             peek: self.tools_expanded,
             extension_items,
+            is_streaming: self.is_streaming,
+            active_tools,
+            turn_elapsed: self.is_streaming.then(|| self.turn_tracker.elapsed()),
+            tick: self.tick,
+            animation_level: self.config.ui.animations,
+            activity_state: self.current_activity_state(),
         }
     }
 
@@ -809,6 +925,41 @@ impl App {
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            match key.code {
+                KeyCode::Up => {
+                    if self.extend_selection_lines(-1) {
+                        return Ok(());
+                    }
+                }
+                KeyCode::Down => {
+                    if self.extend_selection_lines(1) {
+                        return Ok(());
+                    }
+                }
+                KeyCode::PageUp => {
+                    if self.extend_selection_lines(-(self.config.ui.keyboard_scroll_lines as isize))
+                    {
+                        return Ok(());
+                    }
+                }
+                KeyCode::PageDown => {
+                    if self.extend_selection_lines(self.config.ui.keyboard_scroll_lines as isize) {
+                        return Ok(());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if key.code == KeyCode::Char('y') && self.copy_selection() {
+            return Ok(());
+        }
+        if key.code == KeyCode::Esc && self.selection.is_some() {
+            self.clear_selection();
+            return Ok(());
+        }
+
         let action = keybindings::resolve_normal(key);
 
         match action {
@@ -864,7 +1015,7 @@ impl App {
                 self.cycle_thinking_level();
             }
             Some(Action::SidebarToggle) => {
-                self.sidebar.open = !self.sidebar.open;
+                self.toggle_sidebar();
             }
             Some(Action::Peek) => {
                 // Legacy alias — behaves the same as ToolToggle with no focus
@@ -894,21 +1045,31 @@ impl App {
             Some(Action::ToolFocusNext) => {
                 let total = self.total_tool_calls();
                 if total > 0 {
-                    let idx = match self.tool_focus {
-                        None => 0,
-                        Some(i) => (i + 1).min(total - 1),
-                    };
-                    self.focus_tool(idx);
+                    if !self.sidebar.open {
+                        self.sidebar.open = true;
+                        self.focus_latest_tool();
+                    } else {
+                        let idx = match self.tool_focus {
+                            None => 0,
+                            Some(i) => (i + 1).min(total - 1),
+                        };
+                        self.focus_tool(idx);
+                    }
                 }
             }
             Some(Action::ToolFocusPrev) => {
                 let total = self.total_tool_calls();
                 if total > 0 {
-                    let idx = match self.tool_focus {
-                        None => total.saturating_sub(1),
-                        Some(i) => i.saturating_sub(1),
-                    };
-                    self.focus_tool(idx);
+                    if !self.sidebar.open {
+                        self.sidebar.open = true;
+                        self.focus_latest_tool();
+                    } else {
+                        let idx = match self.tool_focus {
+                            None => total.saturating_sub(1),
+                            Some(i) => i.saturating_sub(1),
+                        };
+                        self.focus_tool(idx);
+                    }
                 }
             }
             Some(Action::InsertChar('@')) => {
@@ -935,12 +1096,30 @@ impl App {
                 self.editor.move_right();
             }
             Some(Action::CursorUp) => {
-                if !self.editor.move_up() {
+                if self.sidebar.open && self.active_pane == Pane::SidebarList {
+                    let total = self.total_tool_calls();
+                    if total > 0 {
+                        let idx = match self.tool_focus {
+                            None => total.saturating_sub(1),
+                            Some(i) => i.saturating_sub(1),
+                        };
+                        self.focus_tool(idx);
+                    }
+                } else if !self.editor.move_up() {
                     self.editor.history_prev();
                 }
             }
             Some(Action::CursorDown) => {
-                if !self.editor.move_down() {
+                if self.sidebar.open && self.active_pane == Pane::SidebarList {
+                    let total = self.total_tool_calls();
+                    if total > 0 {
+                        let idx = match self.tool_focus {
+                            None => 0,
+                            Some(i) => (i + 1).min(total - 1),
+                        };
+                        self.focus_tool(idx);
+                    }
+                } else if !self.editor.move_down() {
                     self.editor.history_next();
                 }
             }
@@ -966,16 +1145,10 @@ impl App {
                 self.editor.delete_to_end();
             }
             Some(Action::ScrollUp) | Some(Action::PageUp) => {
-                self.scroll_offset += self.config.ui.keyboard_scroll_lines;
-                self.auto_scroll = false;
+                self.scroll_active_pane_up(self.config.ui.keyboard_scroll_lines);
             }
             Some(Action::ScrollDown) | Some(Action::PageDown) => {
-                self.scroll_offset = self
-                    .scroll_offset
-                    .saturating_sub(self.config.ui.keyboard_scroll_lines);
-                if self.scroll_offset == 0 {
-                    self.auto_scroll = true;
-                }
+                self.scroll_active_pane_down(self.config.ui.keyboard_scroll_lines);
             }
             Some(Action::Quit) => {
                 self.handle_cancel();
@@ -1089,15 +1262,15 @@ impl App {
 
     fn handle_tree_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc | KeyCode::Tab => {
                 self.mode = UiMode::Normal;
             }
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 if let UiMode::TreeView(ref mut state) = self.mode {
                     state.move_up();
                 }
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 if let UiMode::TreeView(ref mut state) = self.mode {
                     state.move_down();
                 }
@@ -1142,9 +1315,36 @@ impl App {
     /// Focus a tool call by flat index: update tool_focus and sync sidebar.
     fn focus_tool(&mut self, index: usize) {
         self.tool_focus = Some(index);
+        self.active_pane = if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Split
+        {
+            Pane::SidebarList
+        } else {
+            Pane::SidebarDetail
+        };
         if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Split {
             self.sidebar.reset_detail_scroll();
             self.sidebar.ensure_selected_visible(index);
+        }
+    }
+
+    fn focus_latest_tool(&mut self) -> bool {
+        let total = self.total_tool_calls();
+        if total == 0 {
+            return false;
+        }
+        self.focus_tool(total - 1);
+        true
+    }
+
+    fn toggle_sidebar(&mut self) {
+        if self.sidebar.open {
+            self.sidebar.open = false;
+            self.active_pane = Pane::Chat;
+        } else {
+            self.sidebar.open = true;
+            if !self.focus_latest_tool() {
+                self.active_pane = Pane::Chat;
+            }
         }
     }
 
@@ -1168,95 +1368,355 @@ impl App {
         None
     }
 
+    fn scroll_chat_up(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_add(lines);
+        self.auto_scroll = false;
+    }
+
+    fn scroll_chat_down(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        if self.scroll_offset == 0 {
+            self.auto_scroll = true;
+        }
+    }
+
+    fn scroll_active_pane_up(&mut self, lines: usize) {
+        match self.active_pane {
+            Pane::SidebarList if self.sidebar.open => self.sidebar.scroll_list_up(lines),
+            Pane::SidebarDetail if self.sidebar.open => self.sidebar.scroll_detail_up(lines),
+            _ => self.scroll_chat_up(lines),
+        }
+    }
+
+    fn scroll_active_pane_down(&mut self, lines: usize) {
+        match self.active_pane {
+            Pane::SidebarList if self.sidebar.open => self.sidebar.scroll_list_down(lines),
+            Pane::SidebarDetail if self.sidebar.open => self.sidebar.scroll_detail_down(lines),
+            _ => self.scroll_chat_down(lines),
+        }
+    }
+
+    fn selection_surface(&self, pane: SelectablePane) -> Option<&TextSurface> {
+        match pane {
+            SelectablePane::Chat => self.chat_surface.as_ref(),
+            SelectablePane::SidebarDetail => self.sidebar_detail_surface.as_ref(),
+        }
+    }
+
+    fn clear_selection(&mut self) {
+        self.selection = None;
+        self.drag_selection = None;
+        self.drag_autoscroll = None;
+    }
+
+    fn selection_text(&self) -> Option<String> {
+        let selection = self.selection.as_ref()?;
+        let surface = self.selection_surface(selection.pane)?;
+        extract_selected_text(surface, selection).filter(|text| !text.is_empty())
+    }
+
+    fn copy_to_clipboard(&self, text: &str) {
+        #[cfg(target_os = "macos")]
+        {
+            use std::io::Write;
+            if let Ok(mut child) = std::process::Command::new("pbcopy")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                let _ = child.wait();
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::io::Write;
+            if let Ok(mut child) = std::process::Command::new("xclip")
+                .args(["-selection", "clipboard"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn copy_selection(&mut self) -> bool {
+        if let Some(text) = self.selection_text() {
+            self.copy_to_clipboard(&text);
+            self.push_system_msg("Copied selection to clipboard.");
+            true
+        } else {
+            false
+        }
+    }
+
+    fn extend_selection_lines(&mut self, delta: isize) -> bool {
+        let Some(mut selection) = self.selection.clone() else {
+            return false;
+        };
+        let Some(surface) = self.selection_surface(selection.pane) else {
+            return false;
+        };
+
+        selection.focus = surface.move_pos(selection.focus, delta, 0);
+        match selection.pane {
+            SelectablePane::Chat => {
+                if selection.focus.line < surface.top_line {
+                    self.scroll_chat_up(surface.top_line - selection.focus.line);
+                } else {
+                    let bottom = surface.top_line + surface.rect.height.saturating_sub(1) as usize;
+                    if selection.focus.line > bottom {
+                        self.scroll_chat_down(selection.focus.line - bottom);
+                    }
+                }
+            }
+            SelectablePane::SidebarDetail => {
+                if selection.focus.line < surface.top_line {
+                    self.sidebar
+                        .scroll_detail_up(surface.top_line - selection.focus.line);
+                } else {
+                    let bottom = surface.top_line + surface.rect.height.saturating_sub(1) as usize;
+                    if selection.focus.line > bottom {
+                        self.sidebar
+                            .scroll_detail_down(selection.focus.line - bottom);
+                    }
+                }
+            }
+        }
+
+        self.selection = Some(selection);
+        true
+    }
+
+    fn set_drag_autoscroll(
+        &mut self,
+        pane: SelectablePane,
+        surface: &TextSurface,
+        col: u16,
+        row: u16,
+    ) {
+        let top_margin = surface.rect.y.saturating_add(1);
+        let bottom_margin = surface
+            .rect
+            .y
+            .saturating_add(surface.rect.height.saturating_sub(2));
+
+        let next = if row <= top_margin {
+            let speed = if row <= surface.rect.y { 3 } else { 1 };
+            Some(DragAutoScroll {
+                pane,
+                direction: ScrollDirection::Up,
+                speed,
+                column: col,
+                row,
+            })
+        } else if row >= bottom_margin {
+            let lower_edge = surface.rect.y + surface.rect.height.saturating_sub(1);
+            let speed = if row >= lower_edge { 3 } else { 1 };
+            Some(DragAutoScroll {
+                pane,
+                direction: ScrollDirection::Down,
+                speed,
+                column: col,
+                row,
+            })
+        } else {
+            None
+        };
+
+        self.drag_autoscroll = next;
+    }
+
+    fn maybe_autoscroll_selection(&mut self) {
+        let Some(auto) = self.drag_autoscroll else {
+            return;
+        };
+        if self.drag_selection != Some(auto.pane) {
+            self.drag_autoscroll = None;
+            return;
+        }
+
+        let Some(surface) = self.selection_surface(auto.pane).cloned() else {
+            self.drag_autoscroll = None;
+            return;
+        };
+
+        let changed = match (auto.pane, auto.direction) {
+            (SelectablePane::Chat, ScrollDirection::Up) => {
+                let before = self.scroll_offset;
+                self.scroll_chat_up(auto.speed);
+                self.scroll_offset != before
+            }
+            (SelectablePane::Chat, ScrollDirection::Down) => {
+                let before = self.scroll_offset;
+                self.scroll_chat_down(auto.speed);
+                self.scroll_offset != before
+            }
+            (SelectablePane::SidebarDetail, ScrollDirection::Up) => {
+                let before = self.sidebar.detail_scroll;
+                self.sidebar.scroll_detail_up(auto.speed);
+                self.sidebar.detail_scroll != before
+            }
+            (SelectablePane::SidebarDetail, ScrollDirection::Down) => {
+                let before = self.sidebar.detail_scroll;
+                self.sidebar.scroll_detail_down(auto.speed);
+                self.sidebar.detail_scroll != before
+            }
+        };
+
+        if !changed {
+            return;
+        }
+
+        if let Some(selection) = self.selection.as_mut() {
+            if selection.pane == auto.pane {
+                selection.focus = surface.pos_from_screen_clamped(auto.column, auto.row);
+                self.needs_redraw = true;
+            }
+        }
+    }
+
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         self.needs_redraw = true;
+
+        // Session picker intercepts scroll events
+        if matches!(self.mode, UiMode::SessionPicker(_)) {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if let UiMode::SessionPicker(ref mut state) = self.mode {
+                        state.move_up();
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if let UiMode::SessionPicker(ref mut state) = self.mode {
+                        state.move_down();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         let col = mouse.column;
         let row = mouse.row;
 
         let is_stream = self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Stream;
-        // In stream mode, sidebar_list_rect covers the whole sidebar and
-        // scrolls detail_scroll. In split mode, list and detail scroll independently.
-        let in_sidebar = point_in_rect(col, row, self.sidebar_list_rect)
-            || point_in_rect(col, row, self.sidebar_detail_rect);
+        let in_list = point_in_rect(col, row, self.sidebar_list_rect);
+        let in_detail = point_in_rect(col, row, self.sidebar_detail_rect);
+        let in_sidebar = in_list || in_detail;
 
         match mouse.kind {
             MouseEventKind::ScrollUp => {
-                if in_sidebar {
-                    if is_stream {
-                        self.sidebar
-                            .scroll_detail_up(self.config.ui.mouse_scroll_lines);
-                    } else if point_in_rect(col, row, self.sidebar_list_rect) {
-                        self.sidebar
-                            .scroll_list_up(self.config.ui.mouse_scroll_lines);
-                    } else {
-                        self.sidebar
-                            .scroll_detail_up(self.config.ui.mouse_scroll_lines);
-                    }
+                if in_list {
+                    self.active_pane = Pane::SidebarList;
+                    self.sidebar
+                        .scroll_list_up(self.config.ui.mouse_scroll_lines);
+                } else if in_detail {
+                    self.active_pane = Pane::SidebarDetail;
+                    self.sidebar
+                        .scroll_detail_up(self.config.ui.mouse_scroll_lines);
+                } else if in_sidebar && is_stream {
+                    self.active_pane = Pane::SidebarDetail;
+                    self.sidebar
+                        .scroll_detail_up(self.config.ui.mouse_scroll_lines);
                 } else {
-                    self.scroll_offset += self.config.ui.mouse_scroll_lines;
-                    self.auto_scroll = false;
+                    self.active_pane = Pane::Chat;
+                    self.scroll_chat_up(self.config.ui.mouse_scroll_lines);
                 }
             }
             MouseEventKind::ScrollDown => {
-                if in_sidebar {
-                    if is_stream {
-                        self.sidebar
-                            .scroll_detail_down(self.config.ui.mouse_scroll_lines);
-                    } else if point_in_rect(col, row, self.sidebar_list_rect) {
-                        self.sidebar
-                            .scroll_list_down(self.config.ui.mouse_scroll_lines);
-                    } else {
-                        self.sidebar
-                            .scroll_detail_down(self.config.ui.mouse_scroll_lines);
-                    }
+                if in_list {
+                    self.active_pane = Pane::SidebarList;
+                    self.sidebar
+                        .scroll_list_down(self.config.ui.mouse_scroll_lines);
+                } else if in_detail {
+                    self.active_pane = Pane::SidebarDetail;
+                    self.sidebar
+                        .scroll_detail_down(self.config.ui.mouse_scroll_lines);
+                } else if in_sidebar && is_stream {
+                    self.active_pane = Pane::SidebarDetail;
+                    self.sidebar
+                        .scroll_detail_down(self.config.ui.mouse_scroll_lines);
                 } else {
-                    self.scroll_offset = self
-                        .scroll_offset
-                        .saturating_sub(self.config.ui.mouse_scroll_lines);
-                    if self.scroll_offset == 0 {
-                        self.auto_scroll = true;
-                    }
+                    self.active_pane = Pane::Chat;
+                    self.scroll_chat_down(self.config.ui.mouse_scroll_lines);
                 }
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                if in_sidebar {
-                    if !is_stream {
-                        // Split mode: click in list selects a tool
-                        if let Some(lr) = self.sidebar_list_rect {
-                            if col >= lr.x
-                                && col < lr.x + lr.width
-                                && row >= lr.y
-                                && row < lr.y + lr.height
-                            {
-                                let clicked_row = (row - lr.y) as usize;
-                                let clicked_idx = self.sidebar.list_scroll + clicked_row;
-                                let total = self.total_tool_calls();
-                                if clicked_idx < total {
-                                    self.focus_tool(clicked_idx);
-                                }
-                            }
+                if in_list {
+                    self.clear_selection();
+                    self.active_pane = Pane::SidebarList;
+                    if let Some(lr) = self.sidebar_list_rect {
+                        let clicked_row = (row - lr.y) as usize;
+                        let clicked_idx = self.sidebar.list_scroll + clicked_row;
+                        let total = self.total_tool_calls();
+                        if clicked_idx < total {
+                            self.focus_tool(clicked_idx);
                         }
                     }
-                    self.active_pane = Pane::Sidebar;
                     return;
                 }
 
-                // Click is in the chat area
-                self.active_pane = Pane::Chat;
-
-                // Check click_map for tool call hits in chat
-                if let Some(tool_id) = self
-                    .click_map
-                    .iter()
-                    .find(|(y, _)| *y == row)
-                    .map(|(_, id)| id.clone())
-                {
-                    if let Some(idx) = self.find_tool_call_index(&tool_id) {
-                        self.focus_tool(idx);
+                if in_detail || (in_sidebar && is_stream) {
+                    self.active_pane = Pane::SidebarDetail;
+                    if let Some(surface) = self.sidebar_detail_surface.as_ref().cloned() {
+                        if !surface.is_empty() {
+                            let pos = surface.pos_from_screen_clamped(col, row);
+                            self.selection =
+                                Some(SelectionState::new(SelectablePane::SidebarDetail, pos, pos));
+                            self.drag_selection = Some(SelectablePane::SidebarDetail);
+                            self.set_drag_autoscroll(
+                                SelectablePane::SidebarDetail,
+                                &surface,
+                                col,
+                                row,
+                            );
+                        }
                     }
-                    self.sidebar.open = true;
-                    self.active_pane = Pane::Sidebar;
+                    return;
                 }
+
+                self.active_pane = Pane::Chat;
+                if let Some(surface) = self.chat_surface.as_ref().cloned() {
+                    if !surface.is_empty() {
+                        let pos = surface.pos_from_screen_clamped(col, row);
+                        self.selection = Some(SelectionState::new(SelectablePane::Chat, pos, pos));
+                        self.drag_selection = Some(SelectablePane::Chat);
+                        self.set_drag_autoscroll(SelectablePane::Chat, &surface, col, row);
+                    }
+                }
+            }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                let Some(pane) = self.drag_selection else {
+                    return;
+                };
+                let Some(surface) = self.selection_surface(pane).cloned() else {
+                    return;
+                };
+                let pos = surface.pos_from_screen_clamped(col, row);
+                if let Some(selection) = self.selection.as_mut() {
+                    if selection.pane == pane {
+                        selection.focus = pos;
+                    }
+                }
+                self.set_drag_autoscroll(pane, &surface, col, row);
+                match pane {
+                    SelectablePane::Chat => {
+                        self.active_pane = Pane::Chat;
+                    }
+                    SelectablePane::SidebarDetail => {
+                        self.active_pane = Pane::SidebarDetail;
+                    }
+                }
+            }
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                self.drag_selection = None;
+                self.drag_autoscroll = None;
             }
             _ => {}
         }
@@ -1470,7 +1930,7 @@ impl App {
             "compact" => {
                 self.messages.push(DisplayMessage {
                     role: MessageRole::Compaction,
-                    content: "Context compaction requested".into(),
+                    content: "Context compaction is disabled in imp.".into(),
                     thinking: None,
                     tool_calls: Vec::new(),
                     assistant_blocks: Vec::new(),
@@ -1582,24 +2042,8 @@ impl App {
                     Err(e) => self.push_system_msg(&format!("Fork failed: {e}")),
                 }
             }
-            "mouse" => {
-                let arg = cmd
-                    .split_whitespace()
-                    .nth(1)
-                    .map(|s| s.to_ascii_lowercase());
-                let enable = match arg.as_deref() {
-                    Some("on") | Some("enable") | Some("enabled") => Some(true),
-                    Some("off") | Some("disable") | Some("disabled") => Some(false),
-                    Some(_) => {
-                        self.push_system_msg("Usage: /mouse [on|off]");
-                        None
-                    }
-                    None => Some(!self.mouse_capture_enabled),
-                };
-
-                if let Some(enable) = enable {
-                    self.set_mouse_capture(enable);
-                }
+            "memory" | "mem" => {
+                self.handle_memory_command(cmd);
             }
             "help" => {
                 self.push_system_msg(concat!(
@@ -1612,8 +2056,8 @@ impl App {
                     "  /fork       — branch conversation\n",
                     "  /name <n>   — rename session\n",
                     "  /export [f] — export to markdown\n",
-                    "  /copy       — copy last response\n",
-                    "  /mouse [on|off] — toggle mouse mode vs text selection\n",
+                    "  /copy       — copy selection or last response\n",
+                    "  /memory     — view/edit agent memory\n",
                     "  /reload     — reload config\n",
                     "  /settings   — edit settings\n",
                     "  /login [provider] — OAuth login\n",
@@ -1633,6 +2077,9 @@ impl App {
                 self.mode = UiMode::Welcome(WelcomeState::new(&all_models));
             }
             "copy" => {
+                if self.copy_selection() {
+                    return;
+                }
                 // Copy last assistant message to clipboard
                 if let Some(last) = self
                     .messages
@@ -1641,33 +2088,7 @@ impl App {
                     .find(|m| m.role == MessageRole::Assistant || m.role == MessageRole::Error)
                 {
                     let text = last.content.clone();
-                    #[cfg(target_os = "macos")]
-                    {
-                        use std::io::Write;
-                        if let Ok(mut child) = std::process::Command::new("pbcopy")
-                            .stdin(std::process::Stdio::piped())
-                            .spawn()
-                        {
-                            if let Some(mut stdin) = child.stdin.take() {
-                                let _ = stdin.write_all(text.as_bytes());
-                            }
-                            let _ = child.wait();
-                        }
-                    }
-                    #[cfg(target_os = "linux")]
-                    {
-                        use std::io::Write;
-                        if let Ok(mut child) = std::process::Command::new("xclip")
-                            .args(["-selection", "clipboard"])
-                            .stdin(std::process::Stdio::piped())
-                            .spawn()
-                        {
-                            if let Some(mut stdin) = child.stdin.take() {
-                                let _ = stdin.write_all(text.as_bytes());
-                            }
-                            let _ = child.wait();
-                        }
-                    }
+                    self.copy_to_clipboard(&text);
                     self.messages.push(DisplayMessage {
                         role: MessageRole::System,
                         content: "Copied to clipboard.".into(),
@@ -1695,6 +2116,206 @@ impl App {
             }
         }
         self.editor.clear();
+    }
+
+    /// Handle `/memory` subcommands.
+    ///
+    /// - `/memory`           — show both stores
+    /// - `/memory add <t>`   — add entry to memory.md
+    /// - `/memory user <t>`  — add entry to user.md
+    /// - `/memory remove <t>` — remove matching entry from memory.md
+    /// - `/memory remove user <t>` — remove matching entry from user.md
+    /// - `/memory clear`     — wipe memory.md
+    /// - `/memory clear user` — wipe user.md
+    fn handle_memory_command(&mut self, cmd: &str) {
+        use imp_core::memory::MemoryStore;
+
+        let config_dir = Config::user_config_dir();
+        let mem_path = config_dir.join("memory.md");
+        let user_path = config_dir.join("user.md");
+        let mem_limit = self.config.learning.memory_char_limit;
+        let user_limit = self.config.learning.user_char_limit;
+
+        // Strip the command name prefix ("memory" or "mem") to get arguments
+        let rest = cmd
+            .strip_prefix("memory")
+            .or_else(|| cmd.strip_prefix("mem"))
+            .unwrap_or("")
+            .trim();
+
+        if rest.is_empty() {
+            // Show both stores
+            let mut output = String::new();
+
+            match MemoryStore::load(&mem_path, mem_limit) {
+                Ok(store) => {
+                    let (used, limit) = store.usage();
+                    output.push_str(&format!("Memory ({used}/{limit} chars):\n"));
+                    if store.entries().is_empty() {
+                        output.push_str("  (empty)\n");
+                    } else {
+                        for (i, entry) in store.entries().iter().enumerate() {
+                            output.push_str(&format!("  {}. {}\n", i + 1, entry));
+                        }
+                    }
+                }
+                Err(e) => output.push_str(&format!("Error loading memory.md: {e}\n")),
+            }
+
+            output.push('\n');
+
+            match MemoryStore::load(&user_path, user_limit) {
+                Ok(store) => {
+                    let (used, limit) = store.usage();
+                    output.push_str(&format!("User profile ({used}/{limit} chars):\n"));
+                    if store.entries().is_empty() {
+                        output.push_str("  (empty)\n");
+                    } else {
+                        for (i, entry) in store.entries().iter().enumerate() {
+                            output.push_str(&format!("  {}. {}\n", i + 1, entry));
+                        }
+                    }
+                }
+                Err(e) => output.push_str(&format!("Error loading user.md: {e}\n")),
+            }
+
+            if !self.config.learning.enabled {
+                output.push_str("\n⚠ Learning is disabled in config. Memory won't be loaded into the system prompt.");
+            }
+
+            self.push_system_msg(output.trim_end());
+            return;
+        }
+
+        let mut words = rest.splitn(2, char::is_whitespace);
+        let sub = words.next().unwrap_or("");
+        let arg = words.next().unwrap_or("").trim();
+
+        match sub {
+            "add" => {
+                if arg.is_empty() {
+                    self.push_system_msg("Usage: /memory add <text>");
+                    return;
+                }
+                match MemoryStore::load(&mem_path, mem_limit) {
+                    Ok(mut store) => match store.add(arg) {
+                        Ok(result) => {
+                            self.push_system_msg(&format!("{} [{}]", result.message, result.usage))
+                        }
+                        Err(e) => self.push_system_msg(&format!("Error: {e}")),
+                    },
+                    Err(e) => self.push_system_msg(&format!("Error: {e}")),
+                }
+            }
+            "user" => {
+                if arg.is_empty() {
+                    self.push_system_msg("Usage: /memory user <text>");
+                    return;
+                }
+                match MemoryStore::load(&user_path, user_limit) {
+                    Ok(mut store) => match store.add(arg) {
+                        Ok(result) => {
+                            self.push_system_msg(&format!("{} [{}]", result.message, result.usage))
+                        }
+                        Err(e) => self.push_system_msg(&format!("Error: {e}")),
+                    },
+                    Err(e) => self.push_system_msg(&format!("Error: {e}")),
+                }
+            }
+            "remove" | "rm" => {
+                if arg.is_empty() {
+                    self.push_system_msg("Usage: /memory remove <text>");
+                    return;
+                }
+                // Check if removing from user store: "/memory remove user <text>"
+                if let Some(user_arg) = arg.strip_prefix("user ").map(|s| s.trim()) {
+                    if user_arg.is_empty() {
+                        self.push_system_msg("Usage: /memory remove user <text>");
+                        return;
+                    }
+                    match MemoryStore::load(&user_path, user_limit) {
+                        Ok(mut store) => match store.remove(user_arg) {
+                            Ok(result) => self
+                                .push_system_msg(&format!("{} [{}]", result.message, result.usage)),
+                            Err(e) => self.push_system_msg(&format!("Error: {e}")),
+                        },
+                        Err(e) => self.push_system_msg(&format!("Error: {e}")),
+                    }
+                } else {
+                    match MemoryStore::load(&mem_path, mem_limit) {
+                        Ok(mut store) => match store.remove(arg) {
+                            Ok(result) => self
+                                .push_system_msg(&format!("{} [{}]", result.message, result.usage)),
+                            Err(e) => self.push_system_msg(&format!("Error: {e}")),
+                        },
+                        Err(e) => self.push_system_msg(&format!("Error: {e}")),
+                    }
+                }
+            }
+            "replace" => {
+                // "/memory replace <old> -> <new>"
+                if let Some((old, new)) = arg.split_once("->") {
+                    let old = old.trim();
+                    let new = new.trim();
+                    if old.is_empty() || new.is_empty() {
+                        self.push_system_msg("Usage: /memory replace <old text> -> <new text>");
+                        return;
+                    }
+                    match MemoryStore::load(&mem_path, mem_limit) {
+                        Ok(mut store) => match store.replace(old, new) {
+                            Ok(result) => self
+                                .push_system_msg(&format!("{} [{}]", result.message, result.usage)),
+                            Err(e) => self.push_system_msg(&format!("Error: {e}")),
+                        },
+                        Err(e) => self.push_system_msg(&format!("Error: {e}")),
+                    }
+                } else {
+                    self.push_system_msg("Usage: /memory replace <old text> -> <new text>");
+                }
+            }
+            "clear" => {
+                let target = arg;
+                if target == "user" {
+                    if user_path.exists() {
+                        match std::fs::write(&user_path, "") {
+                            Ok(_) => self.push_system_msg("User profile cleared."),
+                            Err(e) => self.push_system_msg(&format!("Error: {e}")),
+                        }
+                    } else {
+                        self.push_system_msg("User profile is already empty.");
+                    }
+                } else if target.is_empty() {
+                    if mem_path.exists() {
+                        match std::fs::write(&mem_path, "") {
+                            Ok(_) => self.push_system_msg("Memory cleared."),
+                            Err(e) => self.push_system_msg(&format!("Error: {e}")),
+                        }
+                    } else {
+                        self.push_system_msg("Memory is already empty.");
+                    }
+                } else {
+                    self.push_system_msg("Usage: /memory clear [user]");
+                }
+            }
+            "help" => {
+                self.push_system_msg(concat!(
+                    "Memory commands:\n",
+                    "  /memory              — show all entries\n",
+                    "  /memory add <text>   — add to memory\n",
+                    "  /memory user <text>  — add to user profile\n",
+                    "  /memory remove <text>  — remove from memory\n",
+                    "  /memory remove user <text> — remove from user profile\n",
+                    "  /memory replace <old> -> <new> — replace entry\n",
+                    "  /memory clear        — clear memory\n",
+                    "  /memory clear user   — clear user profile",
+                ));
+            }
+            _ => {
+                self.push_system_msg(&format!(
+                    "Unknown memory subcommand: {sub}\nUse /memory help for usage."
+                ));
+            }
+        }
     }
 
     /// Reload Lua extensions: re-scan directories, re-create runtime, and update
@@ -1915,12 +2536,12 @@ impl App {
             KeyCode::Esc => {
                 self.mode = UiMode::Normal;
             }
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 if let UiMode::SessionPicker(ref mut state) = self.mode {
                     state.move_up();
                 }
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 if let UiMode::SessionPicker(ref mut state) = self.mode {
                     state.move_down();
                 }
@@ -2153,14 +2774,27 @@ impl App {
                     }
                 }
                 KeyCode::Enter => {
-                    let can_advance = if let UiMode::Welcome(ref mut state) = self.mode {
+                    let auth_result = if let UiMode::Welcome(ref mut state) = self.mode {
                         state.check_auth_resolved()
                     } else {
-                        false
+                        Ok(())
                     };
-                    if can_advance {
-                        if let UiMode::Welcome(ref mut state) = self.mode {
-                            state.advance();
+                    match auth_result {
+                        Ok(()) => {
+                            if let UiMode::Welcome(ref mut state) = self.mode {
+                                state.advance();
+                            }
+                        }
+                        Err(error) => {
+                            self.messages.push(DisplayMessage {
+                                role: MessageRole::Error,
+                                content: error,
+                                thinking: None,
+                                tool_calls: Vec::new(),
+                                assistant_blocks: Vec::new(),
+                                is_streaming: false,
+                                timestamp: imp_llm::now(),
+                            });
                         }
                     }
                 }
@@ -2374,6 +3008,10 @@ impl App {
     fn open_tree_view(&mut self) {
         let tree = self.session.get_tree();
         let flat = flatten_tree(&tree, 0);
+        if flat.is_empty() {
+            self.push_system_msg("No session history yet.");
+            return;
+        }
         let current_id = self.session.leaf_id().map(String::from);
         self.mode = UiMode::TreeView(TreeViewState::new(flat, current_id));
     }
@@ -2421,27 +3059,6 @@ impl App {
             is_streaming: false,
             timestamp: imp_llm::now(),
         });
-    }
-
-    fn set_mouse_capture(&mut self, enable: bool) {
-        self.mouse_capture_enabled = enable;
-        self.config.ui.mouse_capture = enable;
-
-        #[cfg(not(test))]
-        {
-            let mut stdout = io::stdout();
-            let _ = if enable {
-                crossterm::execute!(stdout, EnableMouseCapture)
-            } else {
-                crossterm::execute!(stdout, DisableMouseCapture)
-            };
-        }
-
-        if enable {
-            self.push_system_msg("Mouse mode enabled. Terminal text selection is disabled; use /mouse off to copy by highlighting.");
-        } else {
-            self.push_system_msg("Mouse mode disabled. You can now highlight terminal text to copy; use /mouse on to restore mouse interactions.");
-        }
     }
 
     fn export_conversation(&self, path: &std::path::Path) -> std::io::Result<()> {
@@ -2525,6 +3142,7 @@ impl App {
                                 args_summary: DisplayToolCall::make_args_summary(&name, &arguments),
                                 name,
                                 output: None,
+                                details: serde_json::Value::Null,
                                 is_error: false,
                                 expanded: self.tools_expanded,
                                 streaming_lines: Vec::new(),
@@ -2617,6 +3235,7 @@ impl App {
                     for tc in &mut msg.tool_calls {
                         if tc.id == tool_call_id {
                             tc.output = Some(output_text.clone());
+                            tc.details = result.details.clone();
                             tc.is_error = is_error;
                             // Auto-expand failed tool calls so the error is immediately visible
                             if is_error {
@@ -2635,6 +3254,12 @@ impl App {
                     message: imp_llm::Message::ToolResult(result),
                 });
             }
+            AgentEvent::Timing { timing } => {
+                self.status_items.insert(
+                    "timing".to_string(),
+                    format!("{} {}ms", timing.stage.as_str(), timing.since_llm_request_start_ms),
+                );
+            }
             AgentEvent::TurnEnd { message, .. } => {
                 // Update context tracking from this turn's usage
                 if let Some(ref usage) = message.usage {
@@ -2648,19 +3273,6 @@ impl App {
                     id: msg_id,
                     parent_id: None,
                     message: imp_llm::Message::Assistant(message),
-                });
-            }
-            AgentEvent::CompactionEnd { summary } => {
-                // Context shrunk — reset so % shows 0 until the next turn updates it.
-                self.current_context_tokens = 0;
-                self.messages.push(DisplayMessage {
-                    role: MessageRole::Compaction,
-                    content: summary,
-                    thinking: None,
-                    tool_calls: Vec::new(),
-                    assistant_blocks: Vec::new(),
-                    is_streaming: false,
-                    timestamp: imp_llm::now(),
                 });
             }
             AgentEvent::Error { error } => {
@@ -2694,7 +3306,7 @@ impl App {
 /// Input: "Provider error: HTTP 401 Unauthorized: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired...\"}}"
 /// Output: "OAuth token has expired. Please obtain a new token or refresh your existing token. (use /login)"
 fn parse_api_error(raw: &str) -> String {
-    // Try to extract JSON from the error string
+    // Try to extract JSON from the error string.
     if let Some(json_start) = raw.find('{') {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw[json_start..]) {
             // Anthropic error format: {"type":"error","error":{"type":"...","message":"..."}}
@@ -2716,7 +3328,92 @@ fn parse_api_error(raw: &str) -> String {
             }
         }
     }
+
+    // Some gateways / auth layers return full HTML error pages. Showing raw HTML
+    // in the chat transcript is noisy and unhelpful, so collapse it to a short
+    // summary instead.
+    if looks_like_html_error(raw) {
+        let status = extract_http_status(raw);
+        let title = extract_html_title(raw);
+
+        return match (status, title) {
+            (Some(status), Some(title)) => format!(
+                "Provider returned an HTML error page ({status}: {title}). This usually means an auth, gateway, proxy, or rate-limit issue."
+            ),
+            (Some(status), None) => format!(
+                "Provider returned an HTML error page ({status}). This usually means an auth, gateway, proxy, or rate-limit issue."
+            ),
+            (None, Some(title)) => format!(
+                "Provider returned an HTML error page ({title}). This usually means an auth, gateway, proxy, or rate-limit issue."
+            ),
+            (None, None) => "Provider returned an HTML error page. This usually means an auth, gateway, proxy, or rate-limit issue.".to_string(),
+        };
+    }
+
     raw.to_string()
+}
+
+fn looks_like_html_error(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    lower.contains("<!doctype html")
+        || lower.contains("<html")
+        || lower.contains("<head")
+        || lower.contains("<body")
+        || lower.contains("<title")
+}
+
+fn extract_http_status(raw: &str) -> Option<String> {
+    let start = raw.find("HTTP ")?;
+    let rest = &raw[start..];
+    let end = rest
+        .find(|c: char| c == ':' || c == '\n' || c == '<')
+        .unwrap_or(rest.len());
+    let status = rest[..end].trim();
+    (!status.is_empty()).then(|| status.to_string())
+}
+
+fn extract_html_title(raw: &str) -> Option<String> {
+    let lower = raw.to_ascii_lowercase();
+    let title_start = lower.find("<title")?;
+    let open_end = lower[title_start..].find('>')? + title_start + 1;
+    let close_start = lower[open_end..].find("</title>")? + open_end;
+    let title = raw[open_end..close_start].trim();
+    (!title.is_empty()).then(|| title.to_string())
+}
+
+#[cfg(test)]
+mod parse_api_error_tests {
+    use super::parse_api_error;
+
+    #[test]
+    fn extracts_nested_json_error_message() {
+        let raw = "Provider error: HTTP 401 Unauthorized: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired\"}}";
+        assert_eq!(
+            parse_api_error(raw),
+            "OAuth token has expired (use /login to refresh)"
+        );
+    }
+
+    #[test]
+    fn extracts_simple_json_message() {
+        let raw = "Provider error: HTTP 429 Too Many Requests: {\"message\":\"Rate limited\"}";
+        assert_eq!(parse_api_error(raw), "Rate limited");
+    }
+
+    #[test]
+    fn collapses_html_error_pages_to_summary() {
+        let raw = "Provider error: HTTP 403 Forbidden: <!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>";
+        assert_eq!(
+            parse_api_error(raw),
+            "Provider returned an HTML error page (HTTP 403 Forbidden: Attention Required! | Cloudflare). This usually means an auth, gateway, proxy, or rate-limit issue."
+        );
+    }
+
+    #[test]
+    fn leaves_plain_text_errors_alone() {
+        let raw = "Provider error: connection reset by peer";
+        assert_eq!(parse_api_error(raw), raw);
+    }
 }
 
 // ── Layout helpers ──────────────────────────────────────────────
@@ -2740,33 +3437,6 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
-}
-
-/// Build a click map: Vec<(screen_y, tool_call_id)> for each tool call header
-/// line that is visible in the chat area.
-#[allow(clippy::too_many_arguments)]
-fn build_click_map(
-    messages: &[DisplayMessage],
-    theme: &Theme,
-    highlighter: &Highlighter,
-    chat_area: Rect,
-    scroll_offset: usize,
-    word_wrap: bool,
-    chat_tool_display: imp_core::config::ChatToolDisplay,
-    thinking_lines: usize,
-    show_timestamps: bool,
-) -> Vec<(u16, String)> {
-    crate::views::chat::build_click_map(
-        messages,
-        theme,
-        highlighter,
-        chat_area,
-        scroll_offset,
-        word_wrap,
-        chat_tool_display,
-        thinking_lines,
-        show_timestamps,
-    )
 }
 
 /// Check if a point is inside an optional rect.
@@ -2946,7 +3616,10 @@ mod session_lifecycle {
 
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].role, MessageRole::Compaction);
-        assert!(app.messages[0].content.contains("compaction"));
+        assert_eq!(
+            app.messages[0].content,
+            "Context compaction is disabled in imp."
+        );
     }
 
     #[test]
@@ -2959,29 +3632,16 @@ mod session_lifecycle {
     }
 
     #[test]
-    fn tui_integration_slash_mouse_toggles_capture_mode() {
+    fn tui_integration_slash_mouse_command_is_removed() {
         let mut app = make_app();
-        assert!(!app.mouse_capture_enabled);
-
+        // /mouse is no longer a recognized command — it should fall through to unknown
         app.execute_command("mouse");
-        assert!(app.mouse_capture_enabled);
-        assert!(app.config.ui.mouse_capture);
         assert!(app
             .messages
             .last()
             .unwrap()
             .content
-            .contains("Mouse mode enabled"));
-
-        app.execute_command("mouse off");
-        assert!(!app.mouse_capture_enabled);
-        assert!(!app.config.ui.mouse_capture);
-        assert!(app
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("Mouse mode disabled"));
+            .contains("Unknown command"));
     }
 
     #[test]
@@ -2993,6 +3653,61 @@ mod session_lifecycle {
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].role, MessageRole::Error);
         assert!(app.messages[0].content.contains("nonexistent"));
+    }
+
+    #[test]
+    fn tui_integration_slash_memory_shows_stores() {
+        let mut app = make_app();
+
+        app.execute_command("memory");
+
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].role, MessageRole::System);
+        assert!(app.messages[0].content.contains("Memory ("));
+        assert!(app.messages[0].content.contains("User profile ("));
+    }
+
+    #[test]
+    fn tui_integration_slash_memory_add_and_show() {
+        let tmp = TempDir::new().unwrap();
+        // Point config dir to temp so we don't touch real memory
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
+
+        let mut app = make_app();
+
+        app.execute_command("memory add Test entry from slash command");
+        assert!(app.messages.last().unwrap().content.contains("Added"));
+
+        // Show should list the entry
+        app.execute_command("memory");
+        let content = &app.messages.last().unwrap().content;
+        assert!(content.contains("Test entry from slash command"));
+
+        // Clean up env var
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn tui_integration_slash_memory_help() {
+        let mut app = make_app();
+
+        app.execute_command("memory help");
+
+        let content = &app.messages.last().unwrap().content;
+        assert!(content.contains("/memory add"));
+        assert!(content.contains("/memory remove"));
+        assert!(content.contains("/memory clear"));
+    }
+
+    #[test]
+    fn tui_integration_slash_memory_unknown_subcommand() {
+        let mut app = make_app();
+
+        app.execute_command("memory frobnicate");
+
+        let content = &app.messages.last().unwrap().content;
+        assert!(content.contains("Unknown memory subcommand"));
+        assert!(content.contains("frobnicate"));
     }
 
     #[test]
@@ -3148,15 +3863,15 @@ mod session_lifecycle {
     // ── 6. Mouse click handling ─────────────────────────────────
 
     #[test]
-    fn click_map_defaults_empty() {
+    fn app_starts_without_selection_state() {
         let app = make_app();
-        assert!(app.click_map.is_empty());
-        assert_eq!(app.active_pane, Pane::Chat);
+        assert!(app.selection.is_none());
+        assert!(app.chat_surface.is_none());
         assert!(app.sidebar_list_rect.is_none());
     }
 
     #[test]
-    fn mouse_click_on_tool_call_opens_sidebar() {
+    fn mouse_click_on_chat_area_starts_selection_instead_of_opening_sidebar() {
         let mut app = make_app();
 
         // Simulate a message with a tool call
@@ -3169,6 +3884,7 @@ mod session_lifecycle {
                 name: "bash".into(),
                 args_summary: "$ ls".into(),
                 output: Some("file1\nfile2".into()),
+                details: serde_json::Value::Null,
                 is_error: false,
                 expanded: false,
                 streaming_lines: Vec::new(),
@@ -3178,8 +3894,13 @@ mod session_lifecycle {
             timestamp: 0,
         });
 
-        // Pre-populate click_map as if render had run
-        app.click_map = vec![(5, "tc-42".into())];
+        // Pre-populate chat surface; chat clicks now start selection instead of opening sidebar
+        app.chat_surface = Some(TextSurface::new(
+            SelectablePane::Chat,
+            Rect::new(0, 0, 40, 5),
+            vec!["checking...".into()],
+            0,
+        ));
 
         // Simulate a mouse click at row 5
         let mouse = crossterm::event::MouseEvent {
@@ -3190,9 +3911,9 @@ mod session_lifecycle {
         };
         app.handle_mouse(mouse);
 
-        assert!(app.sidebar.open);
-        assert_eq!(app.tool_focus, Some(0)); // first (only) tool call
-        assert_eq!(app.active_pane, Pane::Sidebar);
+        assert!(!app.sidebar.open);
+        assert_eq!(app.active_pane, Pane::Chat);
+        assert!(app.selection.is_some());
     }
 
     #[test]
@@ -3200,6 +3921,13 @@ mod session_lifecycle {
         let mut app = make_app();
         app.sidebar.open = true;
         app.sidebar_detail_rect = Some(Rect::new(50, 10, 30, 10));
+
+        app.sidebar_detail_surface = Some(TextSurface::new(
+            SelectablePane::SidebarDetail,
+            Rect::new(50, 12, 30, 8),
+            vec!["detail".into()],
+            0,
+        ));
 
         // Click inside sidebar detail
         let mouse = crossterm::event::MouseEvent {
@@ -3210,13 +3938,13 @@ mod session_lifecycle {
         };
         app.handle_mouse(mouse);
 
-        assert_eq!(app.active_pane, Pane::Sidebar);
+        assert_eq!(app.active_pane, Pane::SidebarDetail);
     }
 
     #[test]
     fn mouse_click_on_chat_area_sets_chat_focus() {
         let mut app = make_app();
-        app.active_pane = Pane::Sidebar;
+        app.active_pane = Pane::SidebarDetail;
         app.sidebar_list_rect = Some(Rect::new(50, 1, 30, 5));
         app.sidebar_detail_rect = Some(Rect::new(50, 7, 30, 13));
 
@@ -3230,6 +3958,50 @@ mod session_lifecycle {
         app.handle_mouse(mouse);
 
         assert_eq!(app.active_pane, Pane::Chat);
+    }
+
+    #[test]
+    fn keyboard_page_scroll_targets_chat_or_sidebar_detail() {
+        let mut app = make_app();
+        let lines = app.config.ui.keyboard_scroll_lines;
+
+        app.handle_normal_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty()))
+            .unwrap();
+        assert_eq!(app.scroll_offset, lines);
+        assert!(!app.auto_scroll);
+        assert_eq!(app.sidebar.detail_scroll, 0);
+
+        app.sidebar.open = true;
+        app.active_pane = Pane::SidebarDetail;
+        app.handle_normal_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty()))
+            .unwrap();
+        assert_eq!(app.sidebar.detail_scroll, 0);
+        assert_eq!(app.scroll_offset, lines);
+
+        app.handle_normal_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::empty()))
+            .unwrap();
+        assert_eq!(app.sidebar.detail_scroll, lines);
+        assert_eq!(app.scroll_offset, lines);
+
+        app.active_pane = Pane::Chat;
+        app.handle_normal_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::empty()))
+            .unwrap();
+        assert_eq!(app.scroll_offset, 0);
+        assert!(app.auto_scroll);
+    }
+
+    #[test]
+    fn ctrl_b_and_ctrl_f_map_to_page_scroll() {
+        let mut app = make_app();
+        let lines = app.config.ui.keyboard_scroll_lines;
+
+        app.handle_normal_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(app.scroll_offset, lines);
+
+        app.handle_normal_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(app.scroll_offset, 0);
     }
 
     #[test]
@@ -3277,6 +4049,142 @@ mod session_lifecycle {
     }
 
     #[test]
+    fn mouse_drag_in_chat_creates_selection() {
+        let mut app = make_app();
+        app.chat_surface = Some(TextSurface::new(
+            SelectablePane::Chat,
+            Rect::new(0, 0, 40, 5),
+            vec!["hello world".into(), "second line".into()],
+            0,
+        ));
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 1,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        });
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: 4,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        });
+
+        let selection = app.selection.clone().expect("selection created");
+        assert_eq!(selection.pane, SelectablePane::Chat);
+        let text = app.selection_text().unwrap();
+        assert_eq!(text, "ello");
+        assert_eq!(app.active_pane, Pane::Chat);
+    }
+
+    #[test]
+    fn mouse_click_on_sidebar_list_selects_tool_for_review() {
+        let mut app = make_app();
+        app.sidebar.open = true;
+        app.config.ui.sidebar_style = imp_core::config::SidebarStyle::Split;
+        app.sidebar_list_rect = Some(Rect::new(50, 1, 30, 5));
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "checking...".into(),
+            thinking: None,
+            tool_calls: vec![crate::views::tools::DisplayToolCall {
+                id: "tc-42".into(),
+                name: "bash".into(),
+                args_summary: "$ ls".into(),
+                output: Some("file1\nfile2".into()),
+                details: serde_json::Value::Null,
+                is_error: false,
+                expanded: false,
+                streaming_lines: Vec::new(),
+            }],
+            assistant_blocks: Vec::new(),
+            is_streaming: false,
+            timestamp: 0,
+        });
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 60,
+            row: 1,
+            modifiers: KeyModifiers::empty(),
+        });
+
+        assert_eq!(app.tool_focus, Some(0));
+        assert_eq!(app.active_pane, Pane::SidebarList);
+    }
+
+    #[test]
+    fn shift_down_extends_selection_and_y_copies_it() {
+        let mut app = make_app();
+        app.selection = Some(SelectionState::new(
+            SelectablePane::Chat,
+            crate::selection::SelectionPos { line: 0, col: 0 },
+            crate::selection::SelectionPos { line: 0, col: 0 },
+        ));
+        app.chat_surface = Some(TextSurface::new(
+            SelectablePane::Chat,
+            Rect::new(0, 0, 40, 5),
+            vec!["one".into(), "two".into(), "three".into()],
+            0,
+        ));
+
+        app.handle_normal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT))
+            .unwrap();
+        let selection = app.selection.clone().unwrap();
+        assert_eq!(selection.focus.line, 1);
+
+        app.handle_normal_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()))
+            .unwrap();
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Copied selection"));
+    }
+
+    #[test]
+    fn drag_near_chat_edge_enables_and_clears_autoscroll() {
+        let mut app = make_app();
+        app.chat_surface = Some(TextSurface::new(
+            SelectablePane::Chat,
+            Rect::new(0, 0, 40, 5),
+            vec![
+                "a".into(),
+                "b".into(),
+                "c".into(),
+                "d".into(),
+                "e".into(),
+                "f".into(),
+            ],
+            0,
+        ));
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::empty(),
+        });
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: 1,
+            row: 4,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(app.drag_autoscroll.is_some());
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 1,
+            row: 4,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(app.drag_autoscroll.is_none());
+    }
+
+    #[test]
     fn build_click_map_with_tool_calls() {
         use crate::highlight::Highlighter;
         use crate::theme::Theme;
@@ -3304,6 +4212,7 @@ mod session_lifecycle {
                         name: "read".into(),
                         args_summary: "file.rs".into(),
                         output: Some("contents".into()),
+                        details: serde_json::Value::Null,
                         is_error: false,
                         expanded: false,
                         streaming_lines: Vec::new(),
@@ -3313,6 +4222,7 @@ mod session_lifecycle {
                         name: "edit".into(),
                         args_summary: "file.rs".into(),
                         output: Some("done".into()),
+                        details: serde_json::Value::Null,
                         is_error: false,
                         expanded: false,
                         streaming_lines: Vec::new(),
@@ -3326,7 +4236,7 @@ mod session_lifecycle {
 
         // Large chat area so everything is visible
         let area = Rect::new(0, 0, 80, 50);
-        let click_map = super::build_click_map(
+        let click_map = crate::views::chat::build_click_map(
             &messages,
             &theme,
             &highlighter,
@@ -3342,7 +4252,6 @@ mod session_lifecycle {
         assert_eq!(click_map.len(), 2);
         assert_eq!(click_map[0].1, "tc-1");
         assert_eq!(click_map[1].1, "tc-2");
-        // tc-2 should be on the row after tc-1
         assert_eq!(click_map[1].0, click_map[0].0 + 1);
     }
 

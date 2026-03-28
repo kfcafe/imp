@@ -513,6 +513,11 @@ impl SessionManager {
                     _ => None,
                 });
 
+                // Skip sessions with no messages — nothing to resume
+                if message_count == 0 {
+                    continue;
+                }
+
                 sessions.push(SessionInfo {
                     id: path
                         .file_stem()

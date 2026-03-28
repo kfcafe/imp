@@ -33,7 +33,7 @@ imp is an agent engine — not a wrapper around an LLM API. It runs a full ReAct
 
 **Tools** — File I/O, shell execution, code search (grep, find, AST scan), web search, diff preview/apply, user prompts, mana unit management, and persistent memory. Readonly tools run in parallel.
 
-**Context management** — As conversations grow, imp masks old tool outputs, keeps a sliding window of recent turns, and compacts the full conversation via LLM summarization when context hits 80%. The original task is re-injected after compaction so the model never loses the goal.
+**Context management** — As conversations grow, imp masks old tool outputs and keeps a sliding window of recent turns so the model can continue working without dragging full historical tool output forward.
 
 **Modes** — Control what the agent can do. `full` for interactive use, `worker` for scoped tasks, `orchestrator` for planning and delegation, `reviewer` for read-only analysis. Enforced at both tool registration and execution time — disallowed tools never appear in the prompt.
 
@@ -70,7 +70,7 @@ The interactive terminal UI gives you:
 | `scan` | Tree-sitter AST extraction — types, functions, imports |
 | `web` | Web search (Tavily/Exa) and page content extraction |
 | `ask` | Prompt the user for input or multiple-choice |
-| `mana` | Unit management — create, update, close, status |
+| `mana` | Unit management — status, list, show, create, update, close, run |
 | `memory` | Persistent key-value store across sessions |
 
 You can also define shell tools via TOML config, or register tools from Lua extensions.
@@ -129,7 +129,6 @@ max_turns = 100
 
 [context]
 observation_mask_threshold = 0.6
-compaction_threshold = 0.8
 mask_window = 10
 ```
 
@@ -200,6 +199,35 @@ imp/
 ```
 
 **imp-llm** is standalone — you can use it as a Rust library for streaming LLM access without the agent engine.
+
+## Benchmarks
+
+`imp-core` includes focused benchmarks for grep/search and other hot paths:
+
+```bash
+cargo bench -p imp-core --bench grep_vs_probe
+cargo bench -p imp-core --bench core_hot_paths
+```
+
+Convenience wrapper:
+
+```bash
+cd imp && bash tools/run-benchmarks.sh
+```
+
+## Memory / leak checks
+
+For local diagnostics on macOS:
+
+```bash
+cd imp && bash tools/run-leaks.sh
+cd imp && bash tools/run-miri.sh
+cd imp && bash tools/run-asan.sh
+cd imp && bash tools/run-tsan.sh
+cd imp && bash tools/run-stress.sh
+```
+
+See `imp/tools/README.md` for caveats and requirements.
 
 ## Integration with mana
 

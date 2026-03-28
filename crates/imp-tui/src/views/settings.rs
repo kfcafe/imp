@@ -1,6 +1,6 @@
 use imp_core::config::{
-    ChatToolDisplay, Config, ContextConfig, ShellBackend, ShellConfig, SidebarStyle,
-    ToolOutputDisplay,
+    AnimationLevel, ChatToolDisplay, Config, ContextConfig, ShellBackend, ShellConfig,
+    SidebarStyle, ToolOutputDisplay,
 };
 use imp_llm::model::ModelMeta;
 use imp_llm::ThinkingLevel;
@@ -20,13 +20,13 @@ pub enum SettingsField {
     ThinkingLevel,
     MaxTurns,
     ObservationMask,
-    CompactionThreshold,
     ShellBackend,
     SidebarStyle,
     ToolOutput,
     ToolOutputLines,
     SidebarWidth,
     WordWrap,
+    Animations,
     ChatToolDisplay,
     AutoOpenSidebar,
     SidebarAutoOpenWidth,
@@ -46,13 +46,13 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::ThinkingLevel,
     SettingsField::MaxTurns,
     SettingsField::ObservationMask,
-    SettingsField::CompactionThreshold,
     SettingsField::ShellBackend,
     SettingsField::SidebarStyle,
     SettingsField::ToolOutput,
     SettingsField::ToolOutputLines,
     SettingsField::SidebarWidth,
     SettingsField::WordWrap,
+    SettingsField::Animations,
     SettingsField::ChatToolDisplay,
     SettingsField::AutoOpenSidebar,
     SettingsField::SidebarAutoOpenWidth,
@@ -77,13 +77,13 @@ pub struct SettingsState {
     pub thinking_level: ThinkingLevel,
     pub max_turns: u32,
     pub observation_mask: f64,
-    pub compaction_threshold: f64,
     pub shell_backend: ShellBackend,
     pub sidebar_style: SidebarStyle,
     pub tool_output: ToolOutputDisplay,
     pub tool_output_lines: usize,
     pub sidebar_width: u16,
     pub word_wrap: bool,
+    pub animations: AnimationLevel,
     pub chat_tool_display: ChatToolDisplay,
     pub auto_open_sidebar: bool,
     pub sidebar_auto_open_width: u16,
@@ -110,13 +110,13 @@ impl SettingsState {
             thinking_level: config.thinking.unwrap_or(ThinkingLevel::Medium),
             max_turns: config.max_turns.unwrap_or(100),
             observation_mask: config.context.observation_mask_threshold,
-            compaction_threshold: config.context.compaction_threshold,
             shell_backend: config.shell.backend.clone(),
             sidebar_style: config.ui.sidebar_style,
             tool_output: config.ui.tool_output,
             tool_output_lines: config.ui.tool_output_lines,
             sidebar_width: config.ui.sidebar_width,
             word_wrap: config.ui.word_wrap,
+            animations: config.ui.animations,
             chat_tool_display: config.ui.effective_chat_tool_display(),
             auto_open_sidebar: config.ui.auto_open_sidebar,
             sidebar_auto_open_width: config.ui.sidebar_auto_open_width,
@@ -183,9 +183,6 @@ impl SettingsState {
             SettingsField::ObservationMask => {
                 self.observation_mask = (self.observation_mask + 0.05).min(1.0);
             }
-            SettingsField::CompactionThreshold => {
-                self.compaction_threshold = (self.compaction_threshold + 0.05).min(1.0);
-            }
             SettingsField::SidebarStyle => {
                 self.sidebar_style = match self.sidebar_style {
                     SidebarStyle::Stream => SidebarStyle::Split,
@@ -207,6 +204,13 @@ impl SettingsState {
             }
             SettingsField::WordWrap => {
                 self.word_wrap = !self.word_wrap;
+            }
+            SettingsField::Animations => {
+                self.animations = match self.animations {
+                    AnimationLevel::None => AnimationLevel::Spinner,
+                    AnimationLevel::Spinner => AnimationLevel::Minimal,
+                    AnimationLevel::Minimal => AnimationLevel::None,
+                };
             }
             SettingsField::ChatToolDisplay => {
                 self.chat_tool_display = match self.chat_tool_display {
@@ -286,9 +290,6 @@ impl SettingsState {
             SettingsField::ObservationMask => {
                 self.observation_mask = (self.observation_mask - 0.05).max(0.0);
             }
-            SettingsField::CompactionThreshold => {
-                self.compaction_threshold = (self.compaction_threshold - 0.05).max(0.0);
-            }
             SettingsField::SidebarStyle => {
                 self.sidebar_style = match self.sidebar_style {
                     SidebarStyle::Stream => SidebarStyle::Split,
@@ -310,6 +311,13 @@ impl SettingsState {
             }
             SettingsField::WordWrap => {
                 self.word_wrap = !self.word_wrap;
+            }
+            SettingsField::Animations => {
+                self.animations = match self.animations {
+                    AnimationLevel::None => AnimationLevel::Minimal,
+                    AnimationLevel::Spinner => AnimationLevel::None,
+                    AnimationLevel::Minimal => AnimationLevel::Spinner,
+                };
             }
             SettingsField::ChatToolDisplay => {
                 self.chat_tool_display = match self.chat_tool_display {
@@ -361,10 +369,6 @@ impl SettingsState {
                 self.editing_number = true;
                 self.edit_buffer = format!("{:.2}", self.observation_mask);
             }
-            SettingsField::CompactionThreshold => {
-                self.editing_number = true;
-                self.edit_buffer = format!("{:.2}", self.compaction_threshold);
-            }
             SettingsField::ToolOutputLines => {
                 self.editing_number = true;
                 self.edit_buffer = self.tool_output_lines.to_string();
@@ -410,11 +414,6 @@ impl SettingsState {
                     self.observation_mask = v.clamp(0.0, 1.0);
                 }
             }
-            SettingsField::CompactionThreshold => {
-                if let Ok(v) = self.edit_buffer.parse::<f64>() {
-                    self.compaction_threshold = v.clamp(0.0, 1.0);
-                }
-            }
             SettingsField::ToolOutputLines => {
                 if let Ok(v) = self.edit_buffer.parse::<usize>() {
                     self.tool_output_lines = v.clamp(1, 100);
@@ -438,7 +437,6 @@ impl SettingsState {
         config.max_turns = Some(self.max_turns);
         config.context = ContextConfig {
             observation_mask_threshold: self.observation_mask,
-            compaction_threshold: self.compaction_threshold,
             ..config.context.clone()
         };
         config.shell = ShellConfig {
@@ -450,6 +448,7 @@ impl SettingsState {
             tool_output_lines: self.tool_output_lines,
             sidebar_width: self.sidebar_width,
             word_wrap: self.word_wrap,
+            animations: self.animations,
             hide_tools_in_chat: self.chat_tool_display == ChatToolDisplay::Hidden,
             chat_tool_display: self.chat_tool_display,
             auto_open_sidebar: self.auto_open_sidebar,
@@ -520,6 +519,14 @@ fn shell_label(backend: &ShellBackend) -> &'static str {
         ShellBackend::Sh => "sh",
         ShellBackend::Rush => "rush",
         ShellBackend::RushDaemon => "rush-daemon",
+    }
+}
+
+fn animation_label(level: AnimationLevel) -> &'static str {
+    match level {
+        AnimationLevel::None => "none",
+        AnimationLevel::Spinner => "spinner",
+        AnimationLevel::Minimal => "minimal",
     }
 }
 
@@ -645,26 +652,6 @@ impl Widget for SettingsView<'_> {
             "← →",
         );
 
-        // Compaction threshold
-        let comp_val = if self.state.editing_number
-            && self.state.current_field() == SettingsField::CompactionThreshold
-        {
-            format!("{}▎", self.state.edit_buffer)
-        } else {
-            format!("{:.0}%", self.state.compaction_threshold * 100.0)
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            &mut row,
-            5,
-            "Compaction threshold",
-            &comp_val,
-            "← →",
-        );
-
         // Shell backend
         render_field(
             self.state,
@@ -672,7 +659,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            6,
+            5,
             "Shell backend",
             shell_label(&self.state.shell_backend),
             "← →",
@@ -692,7 +679,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            7,
+            6,
             "Sidebar style",
             sidebar_label,
             "← →",
@@ -710,7 +697,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            8,
+            7,
             "Tool output",
             tool_output_label,
             "← →",
@@ -730,7 +717,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            9,
+            8,
             "Tool output lines",
             &tol_val,
             "← → / type",
@@ -750,7 +737,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            10,
+            9,
             "Sidebar width",
             &sw_val,
             "← → / type",
@@ -763,9 +750,21 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            11,
+            10,
             "Word wrap",
             if self.state.word_wrap { "on" } else { "off" },
+            "← →",
+        );
+
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            11,
+            "Animations",
+            animation_label(self.state.animations),
             "← →",
         );
 

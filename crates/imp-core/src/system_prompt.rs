@@ -2,6 +2,7 @@ use std::fmt;
 
 use crate::config::AgentMode;
 use crate::context::estimate_tokens;
+use crate::guardrails::{self, GuardrailProfile};
 use crate::resources::{AgentsMd, Skill};
 use crate::roles::Role;
 use crate::tools::ToolRegistry;
@@ -66,6 +67,8 @@ pub struct AssembleParams<'a> {
     pub cwd: Option<&'a std::path::Path>,
     /// Whether to include learning instructions in the system prompt.
     pub learning_enabled: bool,
+    /// Resolved guardrail profile (None = guardrails disabled).
+    pub guardrail_profile: Option<GuardrailProfile>,
 }
 
 /// Assemble the system prompt from six layers.
@@ -102,6 +105,11 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
     // Layer 4: Mana facts
     if !p.facts.is_empty() {
         parts.push(facts_layer(p.facts));
+    }
+
+    // Layer 4.5: Engineering guardrails (when enabled)
+    if let Some(profile) = p.guardrail_profile {
+        parts.push(guardrails::guardrails_layer(profile));
     }
 
     // Layer 5: Task context (headless mode only)
@@ -406,6 +414,7 @@ mod tests {
             user_profile: None,
             cwd: None,
             learning_enabled: false,
+            guardrail_profile: None,
         })
     }
 
@@ -796,6 +805,7 @@ mod tests {
             user_profile: None,
             cwd: None,
             learning_enabled: false,
+            guardrail_profile: None,
         });
         assert!(result.text.contains("MEMORY"));
         assert!(result.text.contains("User runs macOS"));
@@ -818,6 +828,7 @@ mod tests {
             user_profile: Some(user),
             cwd: None,
             learning_enabled: false,
+            guardrail_profile: None,
         });
         assert!(result.text.contains("USER PROFILE"));
         assert!(result.text.contains("Prefers concise"));
@@ -838,6 +849,7 @@ mod tests {
             user_profile: Some(""),
             cwd: None,
             learning_enabled: false,
+            guardrail_profile: None,
         });
         assert!(!result.text.contains("MEMORY"));
         assert!(!result.text.contains("USER PROFILE"));
@@ -872,6 +884,7 @@ mod tests {
             user_profile: None,
             cwd: None,
             learning_enabled: false,
+            guardrail_profile: None,
         });
 
         let identity_pos = result.text.find("You are imp").unwrap();

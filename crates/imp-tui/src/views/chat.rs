@@ -1,13 +1,16 @@
-use imp_core::config::ChatToolDisplay;
+use imp_core::config::{AnimationLevel, ChatToolDisplay};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use crate::animation::AnimationState;
 use crate::highlight::Highlighter;
 use crate::markdown;
+use crate::selection::TextSurface;
 use crate::theme::Theme;
+use crate::views::tool_output::styled_tool_output_lines;
 use crate::views::tools::{tool_call_height, DisplayToolCall};
 
 /// Role of a display message.
@@ -94,6 +97,7 @@ impl DisplayMessage {
                                 name: name.clone(),
                                 args_summary: DisplayToolCall::make_args_summary(name, arguments),
                                 output: None,
+                                details: arguments.clone(),
                                 is_error: false,
                                 expanded: false,
                                 streaming_lines: Vec::new(),
@@ -212,6 +216,8 @@ pub struct ChatView<'a> {
     thinking_lines: usize,
     /// Whether to show timestamps above messages.
     show_timestamps: bool,
+    animation_level: AnimationLevel,
+    activity_state: AnimationState,
 }
 
 impl<'a> ChatView<'a> {
@@ -231,6 +237,8 @@ impl<'a> ChatView<'a> {
             chat_tool_display: ChatToolDisplay::Interleaved,
             thinking_lines: 5,
             show_timestamps: false,
+            animation_level: AnimationLevel::Minimal,
+            activity_state: AnimationState::Idle,
         }
     }
 
@@ -260,12 +268,22 @@ impl<'a> ChatView<'a> {
     }
 
     pub fn thinking_lines(mut self, lines: usize) -> Self {
-        self.thinking_lines = lines.max(1);
+        self.thinking_lines = lines;
         self
     }
 
     pub fn show_timestamps(mut self, show: bool) -> Self {
         self.show_timestamps = show;
+        self
+    }
+
+    pub fn animation_level(mut self, level: AnimationLevel) -> Self {
+        self.animation_level = level;
+        self
+    }
+
+    pub fn activity_state(mut self, state: AnimationState) -> Self {
+        self.activity_state = state;
         self
     }
 }
@@ -287,18 +305,12 @@ impl Widget for ChatView<'_> {
             self.chat_tool_display,
             self.thinking_lines,
             self.show_timestamps,
+            self.animation_level,
+            self.activity_state,
         );
 
-        let total_lines = all_lines.len();
-        let visible_height = area.height as usize;
-
-        let start = if self.scroll_offset == 0 {
-            total_lines.saturating_sub(visible_height)
-        } else {
-            total_lines.saturating_sub(visible_height + self.scroll_offset)
-        };
-
-        let visible = &all_lines[start..total_lines.min(start + visible_height)];
+        let window = visible_line_window(all_lines.len(), area.height as usize, self.scroll_offset);
+        let visible = &all_lines[window.start..window.end];
 
         for (i, line) in visible.iter().enumerate() {
             let y = area.y + i as u16;
@@ -308,6 +320,71 @@ impl Widget for ChatView<'_> {
             buf.set_line(area.x, y, line, area.width);
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VisibleLineWindow {
+    scroll_offset: usize,
+    start: usize,
+    end: usize,
+}
+
+fn clamp_scroll_offset_to_view(
+    total_lines: usize,
+    visible_height: usize,
+    scroll_offset: usize,
+) -> usize {
+    scroll_offset.min(total_lines.saturating_sub(visible_height))
+}
+
+fn visible_line_window(
+    total_lines: usize,
+    visible_height: usize,
+    scroll_offset: usize,
+) -> VisibleLineWindow {
+    let scroll_offset = clamp_scroll_offset_to_view(total_lines, visible_height, scroll_offset);
+    let start = total_lines.saturating_sub(visible_height + scroll_offset);
+    let end = total_lines.min(start + visible_height);
+
+    VisibleLineWindow {
+        scroll_offset,
+        start,
+        end,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn clamped_scroll_offset(
+    messages: &[DisplayMessage],
+    theme: &Theme,
+    highlighter: &Highlighter,
+    chat_area: Rect,
+    scroll_offset: usize,
+    tick: u64,
+    tool_focus: Option<usize>,
+    word_wrap: bool,
+    chat_tool_display: ChatToolDisplay,
+    thinking_lines: usize,
+    show_timestamps: bool,
+    animation_level: AnimationLevel,
+    activity_state: AnimationState,
+) -> usize {
+    let (all_lines, _) = build_chat_lines(
+        messages,
+        theme,
+        highlighter,
+        chat_area.width as usize,
+        tick,
+        tool_focus,
+        word_wrap,
+        chat_tool_display,
+        thinking_lines,
+        show_timestamps,
+        animation_level,
+        activity_state,
+    );
+
+    clamp_scroll_offset_to_view(all_lines.len(), chat_area.height as usize, scroll_offset)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -322,6 +399,8 @@ fn build_chat_lines(
     chat_tool_display: ChatToolDisplay,
     thinking_lines: usize,
     show_timestamps: bool,
+    animation_level: AnimationLevel,
+    activity_state: AnimationState,
 ) -> (Vec<Line<'static>>, Vec<(usize, String)>) {
     let mut all_lines: Vec<Line<'static>> = Vec::new();
     let mut tool_line_indices: Vec<(usize, String)> = Vec::new();
@@ -366,7 +445,7 @@ fn build_chat_lines(
             }
             MessageRole::Assistant => {
                 if let Some(ref thinking) = msg.thinking {
-                    if !thinking.is_empty() {
+                    if !thinking.is_empty() && thinking_lines > 0 {
                         let lines: Vec<&str> = thinking.lines().collect();
                         let total = lines.len();
                         let tail = if total > thinking_lines {
@@ -375,7 +454,7 @@ fn build_chat_lines(
                             &lines[..]
                         };
                         for (i, line) in tail.iter().enumerate() {
-                            let prefix = if i == 0 && tail.len() == thinking_lines {
+                            let prefix = if i == 0 && total > thinking_lines {
                                 "💭"
                             } else {
                                 "  "
@@ -421,6 +500,7 @@ fn build_chat_lines(
                                         word_wrap,
                                         focused,
                                         chat_tool_display,
+                                        animation_level,
                                     );
                                 }
                             }
@@ -449,32 +529,49 @@ fn build_chat_lines(
                             word_wrap,
                             focused,
                             chat_tool_display,
+                            animation_level,
                         );
                     }
                 }
 
-                if msg.is_streaming {
-                    const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                    let frame = SPINNER[(tick / 2) as usize % SPINNER.len()];
-                    let has_running_tool = msg
-                        .tool_calls
-                        .iter()
-                        .any(|tc| tc.output.is_none() && !tc.is_error);
-                    let label = if has_running_tool {
-                        ""
-                    } else if msg.content.is_empty() && !msg.tool_calls.is_empty() {
-                        " thinking…"
-                    } else {
-                        ""
+                if msg.is_streaming && msg.content.trim().is_empty() {
+                    let label = match activity_state {
+                        AnimationState::WaitingForResponse => match animation_level {
+                            AnimationLevel::None => "waiting".to_string(),
+                            AnimationLevel::Spinner => {
+                                format!("{} waiting", crate::animation::spinner_frame(tick))
+                            }
+                            AnimationLevel::Minimal => {
+                                format!(
+                                    "{} waiting",
+                                    crate::animation::waiting_badge(tick, animation_level)
+                                )
+                            }
+                        },
+                        AnimationState::Thinking => match animation_level {
+                            AnimationLevel::None => "thinking".to_string(),
+                            AnimationLevel::Spinner => {
+                                format!("{} thinking", crate::animation::spinner_frame(tick))
+                            }
+                            AnimationLevel::Minimal => {
+                                format!(
+                                    "{} thinking",
+                                    crate::animation::waiting_badge(tick, animation_level)
+                                )
+                            }
+                        },
+                        _ => String::new(),
                     };
-                    all_lines.extend(wrap_text_with_prefix(
-                        &format!("  {frame}{label}"),
-                        &[],
-                        &[],
-                        theme.accent_style(),
-                        width,
-                        word_wrap,
-                    ));
+                    if !label.is_empty() {
+                        all_lines.extend(wrap_text_with_prefix(
+                            &format!("  {label}"),
+                            &[],
+                            &[],
+                            theme.accent_style(),
+                            width,
+                            word_wrap,
+                        ));
+                    }
                 }
             }
             MessageRole::System => {
@@ -491,7 +588,7 @@ fn build_chat_lines(
             }
             MessageRole::Compaction => {
                 all_lines.extend(wrap_text_with_prefix(
-                    &format!("  [{}]", msg.content),
+                    &format!("  [context compacted] {}", msg.content),
                     &[],
                     &[],
                     theme.muted_style(),
@@ -528,6 +625,7 @@ fn push_tool_call_chat_lines(
     word_wrap: bool,
     focused: bool,
     chat_tool_display: ChatToolDisplay,
+    animation_level: AnimationLevel,
 ) {
     if chat_tool_display == ChatToolDisplay::Hidden {
         return;
@@ -535,7 +633,7 @@ fn push_tool_call_chat_lines(
 
     let is_running = tc.output.is_none() && !tc.is_error;
     let rail = vec![Span::styled("  │".to_string(), theme.muted_style())];
-    let header = tc.header_line_animated_focused(theme, tick, focused);
+    let header = tc.header_line_animated_focused(theme, tick, focused, animation_level);
     let header_lines = wrap_line_with_prefix(&header, &rail, &rail, width, word_wrap);
     let header_start = all_lines.len();
     for offset in 0..header_lines.len() {
@@ -557,18 +655,11 @@ fn push_tool_call_chat_lines(
     }
 
     if tc.expanded && !is_running {
-        if let Some(ref output) = tc.output {
-            let output_style = if tc.is_error {
-                theme.error_style()
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            for output_line in output.lines().take(50) {
-                let content = Line::from(Span::styled(format!("    {output_line}"), output_style));
-                all_lines.extend(wrap_line_with_prefix(
-                    &content, &rail, &rail, width, word_wrap,
-                ));
-            }
+        let output_lines = styled_tool_output_lines(tc, &Highlighter::new(), theme, tc.name == "read");
+        for line in output_lines.into_iter().take(50) {
+            all_lines.extend(wrap_line_with_prefix(
+                &line, &rail, &rail, width, word_wrap,
+            ));
         }
     }
 }
@@ -636,6 +727,10 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
         .iter()
         .map(|span| span.content.chars().count())
         .sum::<usize>()
+}
+
+fn line_to_plain_text(line: Line<'_>) -> String {
+    line.spans.into_iter().map(|span| span.content).collect()
 }
 
 fn flatten_line_chars(line: &Line<'_>) -> Vec<(char, Style)> {
@@ -738,6 +833,49 @@ fn format_timestamp(ts: u64) -> String {
 /// Build a click map: Vec<(screen_y, tool_call_id)> for each tool call header
 /// line that is visible in the chat area.
 #[allow(clippy::too_many_arguments)]
+pub fn build_text_surface(
+    messages: &[DisplayMessage],
+    theme: &Theme,
+    highlighter: &Highlighter,
+    chat_area: Rect,
+    scroll_offset: usize,
+    tick: u64,
+    tool_focus: Option<usize>,
+    word_wrap: bool,
+    chat_tool_display: ChatToolDisplay,
+    thinking_lines: usize,
+    show_timestamps: bool,
+    animation_level: AnimationLevel,
+    activity_state: AnimationState,
+) -> TextSurface {
+    let (all_lines, _) = build_chat_lines(
+        messages,
+        theme,
+        highlighter,
+        chat_area.width as usize,
+        tick,
+        tool_focus,
+        word_wrap,
+        chat_tool_display,
+        thinking_lines,
+        show_timestamps,
+        animation_level,
+        activity_state,
+    );
+
+    let lines: Vec<String> = all_lines.into_iter().map(line_to_plain_text).collect();
+    let total_lines = lines.len();
+    let start = visible_line_window(total_lines, chat_area.height as usize, scroll_offset).start;
+
+    TextSurface::new(
+        crate::selection::SelectablePane::Chat,
+        chat_area,
+        lines,
+        start,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn build_click_map(
     messages: &[DisplayMessage],
     theme: &Theme,
@@ -760,23 +898,16 @@ pub fn build_click_map(
         chat_tool_display,
         thinking_lines,
         show_timestamps,
+        AnimationLevel::Minimal,
+        AnimationState::Idle,
     );
 
-    let total_lines = all_lines.len();
-    let visible_height = chat_area.height as usize;
-
-    let start = if scroll_offset == 0 {
-        total_lines.saturating_sub(visible_height)
-    } else {
-        total_lines.saturating_sub(visible_height + scroll_offset)
-    };
-
-    let end = total_lines.min(start + visible_height);
+    let window = visible_line_window(all_lines.len(), chat_area.height as usize, scroll_offset);
 
     let mut result = Vec::new();
     for (line_index, id) in &tool_line_indices {
-        if *line_index >= start && *line_index < end {
-            let screen_y = chat_area.y + (*line_index - start) as u16;
+        if *line_index >= window.start && *line_index < window.end {
+            let screen_y = chat_area.y + (*line_index - window.start) as u16;
             result.push((screen_y, id.clone()));
         }
     }
@@ -794,6 +925,7 @@ mod tests {
             name: "read".into(),
             args_summary: "src/main.rs".into(),
             output: Some("fn main() {}".into()),
+            details: serde_json::json!({"path": "src/main.rs"}),
             is_error: false,
             expanded: false,
             streaming_lines: Vec::new(),
@@ -832,6 +964,8 @@ mod tests {
             ChatToolDisplay::Interleaved,
             5,
             false,
+            AnimationLevel::Minimal,
+            AnimationState::Idle,
         );
 
         assert!(lines.len() > 2, "expected wrapped content plus separator");
@@ -862,6 +996,8 @@ mod tests {
             ChatToolDisplay::Hidden,
             5,
             false,
+            AnimationLevel::Minimal,
+            AnimationState::Idle,
         );
 
         assert!(visible_tools.is_empty());
@@ -928,6 +1064,8 @@ mod tests {
             ChatToolDisplay::Interleaved,
             5,
             false,
+            AnimationLevel::Minimal,
+            AnimationState::Idle,
         );
 
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
@@ -974,6 +1112,8 @@ mod tests {
             ChatToolDisplay::Summary,
             5,
             false,
+            AnimationLevel::Minimal,
+            AnimationState::Idle,
         );
 
         let rendered: Vec<String> = lines.iter().map(line_text).collect();

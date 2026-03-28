@@ -311,11 +311,26 @@ fn thinking_budget(level: ThinkingLevel) -> Option<u32> {
     }
 }
 
+fn default_max_tokens(model: &Model, thinking_budget: Option<u32>) -> u32 {
+    // Anthropic is much happier when we do not default every request to the
+    // model's absolute max output size, especially on larger Opus models.
+    // Use a moderate default and only scale up when explicit thinking budgets
+    // require it.
+    let base = model.meta.max_output_tokens.min(8_192);
+    match thinking_budget {
+        Some(budget) => base.max(budget.saturating_add(1024)),
+        None => base,
+    }
+}
+
 fn build_request(model: &Model, context: Context, options: RequestOptions) -> ApiRequest {
     let budget = thinking_budget(options.thinking_level);
 
-    // max_tokens: use explicit value, or model default, ensuring it exceeds thinking budget
-    let mut max_tokens = options.max_tokens.unwrap_or(model.meta.max_output_tokens);
+    // max_tokens: use explicit value, or a provider-tuned default, ensuring it
+    // exceeds the requested thinking budget.
+    let mut max_tokens = options
+        .max_tokens
+        .unwrap_or_else(|| default_max_tokens(model, budget));
     if let Some(b) = budget {
         if max_tokens <= b {
             max_tokens = b + 1024;
@@ -1181,6 +1196,27 @@ mod tests {
     #[test]
     fn thinking_budget_xhigh() {
         assert_eq!(thinking_budget(ThinkingLevel::XHigh), Some(100_000));
+    }
+
+    #[test]
+    fn default_max_tokens_caps_large_models() {
+        let model_meta = ModelMeta {
+            id: "claude-opus-4-6".into(),
+            provider: "anthropic".into(),
+            name: "test".into(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let provider = AnthropicProvider::new();
+        let model = Model {
+            meta: model_meta,
+            provider: Arc::new(provider),
+        };
+        let req = build_request(&model, Context::default(), RequestOptions::default());
+        assert_eq!(req.max_tokens, 8_192);
+        assert!(req.thinking.is_none());
     }
 
     #[test]
