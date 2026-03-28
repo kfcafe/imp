@@ -79,15 +79,19 @@ pub enum AskReply {
 }
 
 #[derive(Debug)]
-enum LoginStatusEvent {
+enum LoginTaskExit {
     Success(String),
-    Error(String),
+    Failed(String),
 }
 
 #[derive(Debug)]
-enum AgentTaskExit {
-    Completed,
-    Failed(ImpCoreError),
+enum RuntimeSignal {
+    AgentEvent(AgentEvent),
+    AgentTaskCompleted,
+    AgentTaskFailed(String),
+    LoginTaskSucceeded(String),
+    LoginTaskFailed(String),
+    UiRequest(crate::tui_interface::UiRequest),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,7 +118,7 @@ pub struct App {
 
     // Agent
     pub agent_handle: Option<AgentHandle>,
-    agent_task: Option<tokio::task::JoinHandle<AgentTaskExit>>,
+    agent_task: Option<tokio::task::JoinHandle<Result<(), ImpCoreError>>>,
     pub is_streaming: bool,
     pub message_queue: Vec<QueuedMessage>,
 
@@ -143,8 +147,7 @@ pub struct App {
     pub ui_rx: Option<tokio::sync::mpsc::Receiver<crate::tui_interface::UiRequest>>,
     pub ask_state: Option<crate::views::ask_bar::AskState>,
     pub ask_reply: Option<AskReply>,
-    login_status_tx: tokio::sync::mpsc::UnboundedSender<LoginStatusEvent>,
-    login_status_rx: tokio::sync::mpsc::UnboundedReceiver<LoginStatusEvent>,
+    login_task: Option<tokio::task::JoinHandle<LoginTaskExit>>,
 
     // Accumulated stats
     pub accumulated_usage: Usage,
@@ -247,7 +250,6 @@ impl App {
             .resolve_meta(&model_name, None)
             .map(|m| m.context_window)
             .unwrap_or(200_000);
-        let (login_status_tx, login_status_rx) = tokio::sync::mpsc::unbounded_channel();
 
         Self {
             running: true,
@@ -277,8 +279,7 @@ impl App {
             ui_rx: None,
             ask_state: None,
             ask_reply: None,
-            login_status_tx,
-            login_status_rx,
+            login_task: None,
             accumulated_usage: Usage::default(),
             accumulated_cost: Cost::default(),
             current_context_tokens: 0,
@@ -399,10 +400,7 @@ impl App {
             }
 
             // Drain agent events and UI requests (non-blocking)
-            self.drain_agent_events();
-            self.check_agent_task();
-            self.drain_ui_requests();
-            self.drain_login_status();
+            self.pump_runtime_signals();
 
             // Tick + periodic redraw for streaming/spinner
             self.tick = self.tick.wrapping_add(1);
@@ -419,52 +417,86 @@ impl App {
         Ok(())
     }
 
-    fn drain_agent_events(&mut self) {
-        // Collect events first to avoid double-borrow of self
-        let events: Vec<AgentEvent> = self
-            .agent_handle
-            .as_mut()
-            .map(|h| {
-                let mut evts = Vec::new();
-                while let Ok(event) = h.event_rx.try_recv() {
-                    evts.push(event);
-                }
-                evts
-            })
-            .unwrap_or_default();
-
-        for event in events {
-            self.handle_agent_event(event);
-            self.needs_redraw = true;
+    fn pump_runtime_signals(&mut self) {
+        let signals = self.collect_runtime_signals();
+        for signal in signals {
+            self.handle_runtime_signal(signal);
         }
     }
 
-    fn check_agent_task(&mut self) {
-        let task_finished = self
+    fn collect_runtime_signals(&mut self) -> Vec<RuntimeSignal> {
+        let mut signals = Vec::new();
+
+        if let Some(handle) = self.agent_handle.as_mut() {
+            while let Ok(event) = handle.event_rx.try_recv() {
+                signals.push(RuntimeSignal::AgentEvent(event));
+            }
+        }
+
+        let agent_task_finished = self
             .agent_task
             .as_ref()
             .is_some_and(tokio::task::JoinHandle::is_finished);
-        if !task_finished {
-            return;
-        }
-
-        let Some(task) = self.agent_task.take() else {
-            return;
-        };
-
-        match tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(task)) {
-            Ok(AgentTaskExit::Completed) => {
-                self.agent_handle = None;
-            }
-            Ok(AgentTaskExit::Failed(error)) => {
-                self.agent_handle = None;
-                self.present_agent_failure(error.to_string());
-            }
-            Err(error) => {
-                self.agent_handle = None;
-                self.present_agent_failure(format!("Internal agent task failure: {error}"));
+        if agent_task_finished {
+            if let Some(task) = self.agent_task.take() {
+                match tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(task)) {
+                    Ok(Ok(())) | Ok(Err(ImpCoreError::Cancelled)) => {
+                        signals.push(RuntimeSignal::AgentTaskCompleted);
+                    }
+                    Ok(Err(error)) => {
+                        signals.push(RuntimeSignal::AgentTaskFailed(error.to_string()));
+                    }
+                    Err(error) => signals.push(RuntimeSignal::AgentTaskFailed(format!(
+                        "Internal agent task failure: {error}"
+                    ))),
+                }
             }
         }
+
+        let login_task_finished = self
+            .login_task
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished);
+        if login_task_finished {
+            if let Some(task) = self.login_task.take() {
+                match tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(task)) {
+                    Ok(LoginTaskExit::Success(message)) => {
+                        signals.push(RuntimeSignal::LoginTaskSucceeded(message));
+                    }
+                    Ok(LoginTaskExit::Failed(message)) => {
+                        signals.push(RuntimeSignal::LoginTaskFailed(message));
+                    }
+                    Err(error) => signals.push(RuntimeSignal::LoginTaskFailed(format!(
+                        "Login task failure: {error}"
+                    ))),
+                }
+            }
+        }
+
+        if let Some(rx) = self.ui_rx.as_mut() {
+            while let Ok(req) = rx.try_recv() {
+                signals.push(RuntimeSignal::UiRequest(req));
+            }
+        }
+
+        signals
+    }
+
+    fn handle_runtime_signal(&mut self, signal: RuntimeSignal) {
+        match signal {
+            RuntimeSignal::AgentEvent(event) => self.handle_agent_event(event),
+            RuntimeSignal::AgentTaskCompleted => {
+                self.agent_handle = None;
+            }
+            RuntimeSignal::AgentTaskFailed(error) => {
+                self.agent_handle = None;
+                self.present_agent_failure(error);
+            }
+            RuntimeSignal::LoginTaskSucceeded(message) => self.push_system_msg(&message),
+            RuntimeSignal::LoginTaskFailed(message) => self.push_error_msg(&message),
+            RuntimeSignal::UiRequest(req) => self.handle_ui_request(req),
+        }
+        self.needs_redraw = true;
     }
 
     fn present_agent_failure(&mut self, error: String) {
@@ -472,106 +504,75 @@ impl App {
         if let Some(last) = self.messages.last_mut() {
             last.is_streaming = false;
         }
-        self.messages.push(DisplayMessage {
-            role: MessageRole::Error,
-            content: parse_api_error(&error),
-            thinking: None,
-            tool_calls: Vec::new(),
-            assistant_blocks: Vec::new(),
-            is_streaming: false,
-            timestamp: imp_llm::now(),
-        });
-        self.needs_redraw = true;
+        self.push_error_msg(&parse_api_error(&error));
     }
 
-    fn drain_ui_requests(&mut self) {
+    fn handle_ui_request(&mut self, req: crate::tui_interface::UiRequest) {
         use crate::tui_interface::UiRequest;
         use crate::views::ask_bar::{AskOption, AskState};
 
-        let requests: Vec<UiRequest> = self
-            .ui_rx
-            .as_mut()
-            .map(|rx| {
-                let mut reqs = Vec::new();
-                while let Ok(req) = rx.try_recv() {
-                    reqs.push(req);
-                }
-                reqs
-            })
-            .unwrap_or_default();
-
-        for req in requests {
-            match req {
-                UiRequest::Select {
-                    title,
-                    options,
-                    reply,
-                } => {
-                    let ask_options: Vec<AskOption> = options
-                        .into_iter()
-                        .map(|o| AskOption {
-                            label: o.label,
-                            description: o.description,
-                            checked: false,
-                        })
-                        .collect();
-                    self.ask_state = Some(AskState::new(title, String::new(), ask_options, false));
-                    self.ask_reply = Some(AskReply::Select(reply));
-                    self.needs_redraw = true;
-                }
-                UiRequest::Input {
-                    title,
-                    placeholder: _,
-                    reply,
-                } => {
-                    self.ask_state = Some(AskState::new(title, String::new(), vec![], false));
-                    self.ask_reply = Some(AskReply::Input(reply));
-                    self.needs_redraw = true;
-                }
-                UiRequest::Confirm {
-                    title,
-                    message,
-                    reply,
-                } => {
-                    // Render as a select with Yes/No
-                    let options = vec![
-                        AskOption {
-                            label: "Yes".into(),
-                            description: None,
-                            checked: false,
-                        },
-                        AskOption {
-                            label: "No".into(),
-                            description: None,
-                            checked: false,
-                        },
-                    ];
-                    self.ask_state = Some(AskState::new(title, message, options, false));
-                    // Wrap: convert selected index to bool
-                    let (bool_tx, bool_rx) = tokio::sync::oneshot::channel();
-                    self.ask_reply = Some(AskReply::Select(bool_tx));
-                    // Spawn a task to convert index → bool
-                    let confirm_reply = reply;
-                    tokio::spawn(async move {
-                        let result = bool_rx.await.ok().flatten();
-                        let _ = confirm_reply.send(result.map(|idx| idx == 0)); // 0 = Yes
-                    });
-                    self.needs_redraw = true;
-                }
-                UiRequest::Notify { message, level: _ } => {
-                    self.push_system_msg(&message);
-                    self.needs_redraw = true;
-                }
-                UiRequest::SetStatus { key, text } => {
-                    if let Some(t) = text {
-                        self.status_items.insert(key, t);
-                    } else {
-                        self.status_items.remove(&key);
-                    }
-                    self.needs_redraw = true;
-                }
-                _ => {} // SetWidget, Custom — not yet handled
+        match req {
+            UiRequest::Select {
+                title,
+                options,
+                reply,
+            } => {
+                let ask_options: Vec<AskOption> = options
+                    .into_iter()
+                    .map(|o| AskOption {
+                        label: o.label,
+                        description: o.description,
+                        checked: false,
+                    })
+                    .collect();
+                self.ask_state = Some(AskState::new(title, String::new(), ask_options, false));
+                self.ask_reply = Some(AskReply::Select(reply));
             }
+            UiRequest::Input {
+                title,
+                placeholder: _,
+                reply,
+            } => {
+                self.ask_state = Some(AskState::new(title, String::new(), vec![], false));
+                self.ask_reply = Some(AskReply::Input(reply));
+            }
+            UiRequest::Confirm {
+                title,
+                message,
+                reply,
+            } => {
+                let options = vec![
+                    AskOption {
+                        label: "Yes".into(),
+                        description: None,
+                        checked: false,
+                    },
+                    AskOption {
+                        label: "No".into(),
+                        description: None,
+                        checked: false,
+                    },
+                ];
+                self.ask_state = Some(AskState::new(title, message, options, false));
+                let (bool_tx, bool_rx) = tokio::sync::oneshot::channel();
+                self.ask_reply = Some(AskReply::Select(bool_tx));
+                let confirm_reply = reply;
+                tokio::spawn(async move {
+                    let result = bool_rx.await.ok().flatten();
+                    let _ = confirm_reply.send(result.map(|idx| idx == 0));
+                });
+            }
+            UiRequest::Notify { message, level: _ } => {
+                self.push_system_msg(&message);
+            }
+            UiRequest::SetStatus { key, text } => {
+                if let Some(t) = text {
+                    self.status_items.insert(key, t);
+                } else {
+                    self.status_items.remove(&key);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1875,12 +1876,7 @@ impl App {
         agent.messages = messages;
 
         let prompt = prompt.to_string();
-        let task = tokio::spawn(async move {
-            match agent.run(prompt).await {
-                Ok(()) | Err(ImpCoreError::Cancelled) => AgentTaskExit::Completed,
-                Err(error) => AgentTaskExit::Failed(error),
-            }
-        });
+        let task = tokio::spawn(async move { agent.run(prompt).await });
 
         self.agent_handle = Some(handle);
         self.agent_task = Some(task);
@@ -2439,20 +2435,11 @@ impl App {
         };
 
         self.mode = UiMode::Normal;
-        self.messages.push(DisplayMessage {
-            role: MessageRole::System,
-            content: status_message.into(),
-            thinking: None,
-            tool_calls: Vec::new(),
-            assistant_blocks: Vec::new(),
-            is_streaming: false,
-            timestamp: imp_llm::now(),
-        });
+        self.push_system_msg(status_message);
 
-        let login_status_tx = self.login_status_tx.clone();
         let auth_path = Config::user_config_dir().join("auth.json");
         let provider = provider.to_string();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let login_result = match provider.as_str() {
                 "anthropic" => {
                     imp_llm::oauth::anthropic::AnthropicOAuth::new()
@@ -2533,14 +2520,12 @@ impl App {
                         }
                         _ => {}
                     }
-                    let _ = login_status_tx.send(LoginStatusEvent::Success(success_message));
+                    LoginTaskExit::Success(success_message)
                 }
-                Err(e) => {
-                    let _ = login_status_tx
-                        .send(LoginStatusEvent::Error(format!("OAuth login failed: {e}")));
-                }
+                Err(e) => LoginTaskExit::Failed(format!("OAuth login failed: {e}")),
             }
         });
+        self.login_task = Some(task);
     }
 
     fn open_login_picker(&mut self) {
@@ -2561,24 +2546,6 @@ impl App {
         let models = self.filtered_models();
         let state = SettingsState::new(&self.config, &self.model_name, &models);
         self.mode = UiMode::Settings(state);
-    }
-
-    fn drain_login_status(&mut self) {
-        while let Ok(event) = self.login_status_rx.try_recv() {
-            match event {
-                LoginStatusEvent::Success(message) => self.push_system_msg(&message),
-                LoginStatusEvent::Error(message) => self.messages.push(DisplayMessage {
-                    role: MessageRole::Error,
-                    content: message,
-                    thinking: None,
-                    tool_calls: Vec::new(),
-                    assistant_blocks: Vec::new(),
-                    is_streaming: false,
-                    timestamp: imp_llm::now(),
-                }),
-            }
-            self.needs_redraw = true;
-        }
     }
 
     fn handle_session_picker_key(&mut self, key: KeyEvent) {
@@ -3102,6 +3069,18 @@ impl App {
     fn push_system_msg(&mut self, content: &str) {
         self.messages.push(DisplayMessage {
             role: MessageRole::System,
+            content: content.to_string(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: false,
+            timestamp: imp_llm::now(),
+        });
+    }
+
+    fn push_error_msg(&mut self, content: &str) {
+        self.messages.push(DisplayMessage {
+            role: MessageRole::Error,
             content: content.to_string(),
             thinking: None,
             tool_calls: Vec::new(),
