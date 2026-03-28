@@ -1,4 +1,4 @@
-use imp_llm::{Cost, Message, Usage};
+use imp_llm::{AssistantMessage, Cost, Message, Model, Usage};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -283,6 +283,44 @@ impl UsageTotals {
     }
 }
 
+/// Build a canonical usage record for a persisted assistant turn.
+///
+/// Returns `None` when the assistant message has no usage or when an equivalent
+/// canonical record already exists for the same assistant turn.
+pub fn canonical_usage_record_for_assistant_turn(
+    session: &SessionManager,
+    model: &Model,
+    assistant_message_id: &str,
+    turn_index: u32,
+    message: &AssistantMessage,
+) -> Option<UsageRecordV1> {
+    let usage = message.usage.as_ref()?;
+    let request_id = canonical_request_id(assistant_message_id);
+
+    if session.has_canonical_usage_request_id(&request_id)
+        || session.has_canonical_usage_for_assistant_message(assistant_message_id)
+    {
+        return None;
+    }
+
+    Some(
+        UsageRecordV1::new(
+            request_id,
+            message.timestamp,
+            model.meta.provider.clone(),
+            model.meta.id.clone(),
+            usage,
+            usage.cost(&model.meta.pricing),
+        )
+        .with_session_context(
+            session.session_id(),
+            session.path().map(|p| p.display().to_string()),
+            Some(assistant_message_id.to_string()),
+            Some(turn_index),
+        ),
+    )
+}
+
 /// Read usage rows from a single session entry slice.
 ///
 /// Canonical custom records are preferred. Legacy assistant-message usage is
@@ -508,6 +546,10 @@ fn infer_session_path_from_entries(entries: &[SessionEntry]) -> Option<String> {
             .ok()
             .and_then(|record| record.session_path)
     })
+}
+
+fn canonical_request_id(assistant_message_id: &str) -> String {
+    format!("assistant:{assistant_message_id}")
 }
 
 fn legacy_request_id(assistant_message_id: &str) -> String {

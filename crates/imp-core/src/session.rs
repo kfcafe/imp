@@ -1,10 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use imp_llm::Message;
+use imp_llm::{AssistantMessage, Message, Model};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+use crate::usage::{
+    canonical_usage_record_for_assistant_turn, usage_record_entry, usage_records_from_session,
+    SessionUsageRecord, UsageRecordV1, USAGE_CUSTOM_TYPE,
+};
 
 /// A single entry in the session JSONL file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,6 +258,105 @@ impl SessionManager {
 
         self.entries.push(entry);
         Ok(())
+    }
+
+    /// Append an assistant turn and, when available, its canonical usage record.
+    pub fn append_assistant_turn(
+        &mut self,
+        model: &Model,
+        turn_index: u32,
+        message: AssistantMessage,
+    ) -> Result<(String, Option<String>)> {
+        let assistant_message_id = uuid::Uuid::new_v4().to_string();
+        self.append(SessionEntry::Message {
+            id: assistant_message_id.clone(),
+            parent_id: None,
+            message: Message::Assistant(message.clone()),
+        })?;
+
+        let usage_entry_id = self.append_canonical_usage_for_assistant_turn(
+            model,
+            &assistant_message_id,
+            turn_index,
+            &message,
+        )?;
+
+        Ok((assistant_message_id, usage_entry_id))
+    }
+
+    /// Append a canonical usage entry for an assistant turn, if the turn reports usage
+    /// and no equivalent canonical record already exists.
+    ///
+    /// This is best-effort metadata persistence: callers should treat errors as
+    /// non-fatal to the main agent flow.
+    pub fn append_canonical_usage_for_assistant_turn(
+        &mut self,
+        model: &Model,
+        assistant_message_id: &str,
+        turn_index: u32,
+        message: &AssistantMessage,
+    ) -> Result<Option<String>> {
+        let Some(record) = canonical_usage_record_for_assistant_turn(
+            self,
+            model,
+            assistant_message_id,
+            turn_index,
+            message,
+        ) else {
+            return Ok(None);
+        };
+
+        let entry_id = uuid::Uuid::new_v4().to_string();
+        let entry = usage_record_entry(entry_id.clone(), record)?;
+        self.append(entry)?;
+        Ok(Some(entry_id))
+    }
+
+    /// Read canonical usage rows attached to this session.
+    pub fn usage_records(&self) -> Vec<SessionUsageRecord> {
+        usage_records_from_session(self)
+    }
+
+    /// Check whether a canonical usage record already exists for the given request id.
+    pub fn has_canonical_usage_request_id(&self, request_id: &str) -> bool {
+        self.entries.iter().any(|entry| {
+            let SessionEntry::Custom {
+                custom_type, data, ..
+            } = entry
+            else {
+                return false;
+            };
+
+            if custom_type != USAGE_CUSTOM_TYPE {
+                return false;
+            }
+
+            UsageRecordV1::from_custom_data(data.clone())
+                .map(|record| record.request_id == request_id)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Check whether a canonical usage record already exists for the given assistant turn.
+    pub fn has_canonical_usage_for_assistant_message(&self, assistant_message_id: &str) -> bool {
+        self.entries.iter().any(|entry| {
+            let SessionEntry::Custom {
+                custom_type, data, ..
+            } = entry
+            else {
+                return false;
+            };
+
+            if custom_type != USAGE_CUSTOM_TYPE {
+                return false;
+            }
+
+            UsageRecordV1::from_custom_data(data.clone())
+                .ok()
+                .and_then(|record| record.assistant_message_id)
+                .as_deref()
+                == Some(assistant_message_id)
+        })
     }
 
     /// Walk parent_ids from leaf_id to root, return entries in chronological order.
@@ -687,8 +790,44 @@ fn read_first_line(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imp_llm::Message;
+    use async_trait::async_trait;
+    use futures::stream;
+    use imp_llm::{
+        auth::{ApiKey, AuthStore},
+        model::{Capabilities, ModelMeta, ModelPricing},
+        provider::{Context, Provider, RequestOptions},
+        AssistantMessage, Message, StreamEvent,
+    };
     use tempfile::TempDir;
+
+    struct NoopProvider {
+        models: Vec<ModelMeta>,
+    }
+
+    #[async_trait]
+    impl Provider for NoopProvider {
+        fn stream(
+            &self,
+            _model: &Model,
+            _context: Context,
+            _options: RequestOptions,
+            _api_key: &str,
+        ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
+            Box::pin(stream::empty())
+        }
+
+        async fn resolve_auth(&self, _auth: &AuthStore) -> imp_llm::Result<ApiKey> {
+            Ok(String::new())
+        }
+
+        fn id(&self) -> &str {
+            "noop"
+        }
+
+        fn models(&self) -> &[ModelMeta] {
+            &self.models
+        }
+    }
 
     fn make_msg_entry(id: &str, text: &str) -> SessionEntry {
         SessionEntry::Message {
@@ -934,6 +1073,72 @@ mod tests {
         let child_ids: Vec<Option<&str>> = m2_node.children.iter().map(|n| n.entry.id()).collect();
         assert!(child_ids.contains(&Some("m3")));
         assert!(child_ids.contains(&Some("b1")));
+    }
+
+    #[test]
+    fn append_assistant_turn_persists_canonical_usage_once() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join("sessions");
+        let cwd = tmp.path().join("project");
+        let model = Model {
+            meta: imp_llm::ModelMeta {
+                id: "test-model".into(),
+                provider: "test-provider".into(),
+                name: "Test Model".into(),
+                context_window: 8192,
+                max_output_tokens: 2048,
+                pricing: ModelPricing {
+                    input_per_mtok: 1.0,
+                    output_per_mtok: 2.0,
+                    cache_read_per_mtok: 0.5,
+                    cache_write_per_mtok: 1.0,
+                },
+                capabilities: Capabilities {
+                    reasoning: false,
+                    images: false,
+                    tool_use: true,
+                },
+            },
+            provider: std::sync::Arc::new(NoopProvider { models: Vec::new() }),
+        };
+
+        let mut mgr = SessionManager::new(&cwd, &session_dir).unwrap();
+        let message = AssistantMessage {
+            content: vec![imp_llm::ContentBlock::Text {
+                text: "done".into(),
+            }],
+            usage: Some(imp_llm::Usage {
+                input_tokens: 100,
+                output_tokens: 25,
+                cache_read_tokens: 10,
+                cache_write_tokens: 5,
+            }),
+            stop_reason: imp_llm::StopReason::EndTurn,
+            timestamp: 123,
+        };
+
+        let (_assistant_id, usage_id) = mgr
+            .append_assistant_turn(&model, 3, message.clone())
+            .unwrap();
+        assert!(usage_id.is_some());
+
+        let (_assistant_id_2, usage_id_2) = mgr
+            .append_assistant_turn(
+                &model,
+                4,
+                AssistantMessage {
+                    usage: None,
+                    ..message
+                },
+            )
+            .unwrap();
+        assert!(usage_id_2.is_none());
+
+        let usage_records = mgr.usage_records();
+        assert_eq!(usage_records.len(), 1);
+        assert_eq!(usage_records[0].turn_index, Some(3));
+        assert_eq!(usage_records[0].provider.as_deref(), Some("test-provider"));
+        assert_eq!(usage_records[0].model.as_deref(), Some("test-model"));
     }
 
     #[test]

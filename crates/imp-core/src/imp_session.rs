@@ -27,6 +27,7 @@
 //! # }
 //! ```
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -42,7 +43,7 @@ use crate::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use crate::builder::AgentBuilder;
 use crate::config::{AgentMode, Config};
 use crate::error::{Error, Result};
-use crate::session::SessionManager;
+use crate::session::{SessionEntry, SessionManager};
 use crate::system_prompt::TaskContext;
 use crate::ui::UserInterface;
 
@@ -150,7 +151,9 @@ pub struct ImpSession {
     model_registry: ModelRegistry,
     cwd: PathBuf,
     /// Task handle for the currently running agent loop, if any.
-    agent_task: Option<JoinHandle<Result<()>>>,
+    agent_task: Option<JoinHandle<(Agent, Result<()>)>>,
+    completed_run_result: Option<Result<()>>,
+    pending_persistence_errors: VecDeque<String>,
 }
 
 impl ImpSession {
@@ -289,6 +292,8 @@ impl ImpSession {
             model_registry,
             cwd,
             agent_task: None,
+            completed_run_result: None,
+            pending_persistence_errors: VecDeque::new(),
         })
     }
 
@@ -307,15 +312,16 @@ impl ImpSession {
             ));
         }
 
+        self.completed_run_result = None;
+        self.pending_persistence_errors.clear();
+
         // Persist user message to session
         let msg_id = uuid::Uuid::new_v4().to_string();
-        let _ = self
-            .session_mgr
-            .append(crate::session::SessionEntry::Message {
-                id: msg_id,
-                parent_id: None,
-                message: imp_llm::Message::user(text),
-            });
+        let _ = self.session_mgr.append(SessionEntry::Message {
+            id: msg_id,
+            parent_id: None,
+            message: imp_llm::Message::user(text),
+        });
 
         // Load prior messages from session history into agent
         let mut agent = self
@@ -337,11 +343,9 @@ impl ImpSession {
 
         let prompt = text.to_string();
         let task = tokio::spawn(async move {
-            agent.run(prompt).await?;
-            Ok(())
+            let result = agent.run(prompt).await;
+            (agent, result)
         });
-        // We can't get the agent back from the task easily, so we store
-        // the task handle and reconstruct state from events when it ends.
         self.agent_task = Some(task);
 
         Ok(())
@@ -359,9 +363,17 @@ impl ImpSession {
     /// Wait for the running agent to finish.
     pub async fn wait(&mut self) -> Result<()> {
         if let Some(task) = self.agent_task.take() {
-            task.await
-                .map_err(|e| Error::Config(format!("Agent task panicked: {e}")))??;
+            let (agent, result) = task
+                .await
+                .map_err(|e| Error::Config(format!("Agent task panicked: {e}")))?;
+            self.agent = Some(agent);
+            return result;
         }
+
+        if let Some(result) = self.completed_run_result.take() {
+            return result;
+        }
+
         Ok(())
     }
 
@@ -400,7 +412,31 @@ impl ImpSession {
     /// Returns `None` when the agent has finished and all events have
     /// been consumed.
     pub async fn recv_event(&mut self) -> Option<AgentEvent> {
-        self.handle.event_rx.recv().await
+        if let Some(error) = self.take_persistence_error() {
+            return Some(AgentEvent::Error { error });
+        }
+
+        let event = self.handle.event_rx.recv().await?;
+        let events = self.persist_event_entries(&event).await;
+
+        if matches!(event, AgentEvent::AgentEnd { .. }) {
+            if let Some(task) = self.agent_task.take() {
+                match task.await {
+                    Ok((agent, result)) => {
+                        self.agent = Some(agent);
+                        self.completed_run_result = Some(result);
+                    }
+                    Err(join_error) => {
+                        self.push_persistence_error(
+                            events,
+                            format!("agent task panicked: {join_error}"),
+                        );
+                    }
+                }
+            }
+        }
+
+        Some(event)
     }
 
     /// Get mutable access to the raw event receiver.
@@ -499,8 +535,62 @@ impl ImpSession {
     pub fn command_tx(&self) -> &mpsc::Sender<AgentCommand> {
         &self.handle.command_tx
     }
-}
 
+    async fn persist_event_entries(&mut self, event: &AgentEvent) -> Vec<&'static str> {
+        let mut persisted = Vec::new();
+
+        match event {
+            AgentEvent::ToolExecutionEnd { result, .. } => {
+                let entry_id = uuid::Uuid::new_v4().to_string();
+                match self.session_mgr.append(SessionEntry::Message {
+                    id: entry_id,
+                    parent_id: None,
+                    message: imp_llm::Message::ToolResult(result.clone()),
+                }) {
+                    Ok(()) => persisted.push("tool result"),
+                    Err(error) => self.push_persistence_error(
+                        persisted.clone(),
+                        format!("failed to persist tool result: {error}"),
+                    ),
+                }
+            }
+            AgentEvent::TurnEnd { index, message } => {
+                match self
+                    .session_mgr
+                    .append_assistant_turn(&self.model, *index, message.clone())
+                {
+                    Ok((_assistant_id, usage_entry_id)) => {
+                        persisted.push("assistant message");
+                        if usage_entry_id.is_some() {
+                            persisted.push("canonical usage");
+                        }
+                    }
+                    Err(error) => self.push_persistence_error(
+                        persisted.clone(),
+                        format!("failed to persist assistant message: {error}"),
+                    ),
+                }
+            }
+            _ => {}
+        }
+
+        persisted
+    }
+
+    fn push_persistence_error(&mut self, persisted: Vec<&'static str>, error: String) {
+        let prefix = if persisted.is_empty() {
+            "session persistence warning".to_string()
+        } else {
+            format!("session persistence warning after {}", persisted.join(", "))
+        };
+        self.pending_persistence_errors
+            .push_back(format!("{prefix}: {error}"));
+    }
+
+    fn take_persistence_error(&mut self) -> Option<String> {
+        self.pending_persistence_errors.pop_front()
+    }
+}
 // ── Helpers ─────────────────────────────────────────────────────
 
 /// Resolve the API key for a provider, handling OAuth refresh.
@@ -547,6 +637,79 @@ fn codex_supports_model(_registry: &ModelRegistry, model_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use imp_llm::{
+        AssistantMessage, ContentBlock, ModelMeta, StopReason, StreamEvent, Usage,
+        auth::{ApiKey, AuthStore},
+        model::{Capabilities, ModelPricing},
+        provider::{Context, Provider, RequestOptions},
+    };
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    struct NoopProvider {
+        models: Vec<ModelMeta>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for NoopProvider {
+        fn stream(
+            &self,
+            _model: &Model,
+            _context: Context,
+            _options: RequestOptions,
+            _api_key: &str,
+        ) -> std::pin::Pin<Box<dyn futures_core::Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
+            Box::pin(futures::stream::empty())
+        }
+
+        async fn resolve_auth(&self, _auth: &AuthStore) -> imp_llm::Result<ApiKey> {
+            Ok(String::new())
+        }
+
+        fn id(&self) -> &str {
+            "noop"
+        }
+
+        fn models(&self) -> &[ModelMeta] {
+            &self.models
+        }
+    }
+
+    fn test_model() -> Model {
+        let meta = ModelMeta {
+            id: "test-model".into(),
+            provider: "test-provider".into(),
+            name: "Test Model".into(),
+            context_window: 8192,
+            max_output_tokens: 2048,
+            pricing: ModelPricing {
+                input_per_mtok: 2.0,
+                output_per_mtok: 4.0,
+                cache_read_per_mtok: 0.5,
+                cache_write_per_mtok: 1.0,
+            },
+            capabilities: Capabilities {
+                reasoning: false,
+                images: false,
+                tool_use: true,
+            },
+        };
+        Model {
+            meta: meta.clone(),
+            provider: Arc::new(NoopProvider { models: vec![meta] }),
+        }
+    }
+
+    fn test_assistant_message(timestamp: u64, usage: Option<Usage>) -> AssistantMessage {
+        AssistantMessage {
+            content: vec![ContentBlock::Text {
+                text: "done".into(),
+            }],
+            usage,
+            stop_reason: StopReason::EndTurn,
+            timestamp,
+        }
+    }
 
     #[test]
     fn session_options_default_is_sensible() {
@@ -591,4 +754,144 @@ mod tests {
             "openai"
         ));
     }
+
+    #[test]
+    fn persist_event_entries_writes_assistant_and_canonical_usage() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let session_dir = tmp.path().join("sessions");
+        let model = test_model();
+        let session_mgr = SessionManager::new(&cwd, &session_dir).unwrap();
+        let (_agent, handle) = Agent::new(clone_model(&model), cwd.clone());
+
+        let mut session = ImpSession {
+            agent: None,
+            handle,
+            session_mgr,
+            config: Config::default(),
+            model,
+            auth_store: AuthStore::new(tmp.path().join("auth.json")),
+            model_registry: ModelRegistry::with_builtins(),
+            cwd,
+            agent_task: None,
+            completed_run_result: None,
+            pending_persistence_errors: VecDeque::new(),
+        };
+
+        let message = test_assistant_message(
+            123,
+            Some(Usage {
+                input_tokens: 1_000,
+                output_tokens: 250,
+                cache_read_tokens: 100,
+                cache_write_tokens: 50,
+            }),
+        );
+
+        let persisted = futures::executor::block_on(
+            session.persist_event_entries(&AgentEvent::TurnEnd {
+                index: 2,
+                message: message.clone(),
+            }),
+        );
+
+        assert_eq!(persisted, vec!["assistant message", "canonical usage"]);
+
+        let usage_records = session.session_mgr.usage_records();
+        assert_eq!(usage_records.len(), 1);
+        let record = &usage_records[0];
+        assert_eq!(record.turn_index, Some(2));
+        assert_eq!(record.provider.as_deref(), Some("test-provider"));
+        assert_eq!(record.model.as_deref(), Some("test-model"));
+        assert!(record.request_id.starts_with("assistant:"));
+        assert!(record.assistant_message_id.is_some());
+        let cost = record.cost.as_ref().unwrap();
+        assert!((cost.input - 0.002).abs() < 1e-12);
+        assert!((cost.output - 0.001).abs() < 1e-12);
+        assert!((cost.cache_read - 0.00005).abs() < 1e-12);
+        assert!((cost.cache_write - 0.00005).abs() < 1e-12);
+        assert!((cost.total - 0.0031).abs() < 1e-12);
+    }
+
+    #[test]
+    fn persist_event_entries_skips_usage_record_when_usage_missing() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let session_dir = tmp.path().join("sessions");
+        let model = test_model();
+        let session_mgr = SessionManager::new(&cwd, &session_dir).unwrap();
+        let (_agent, handle) = Agent::new(clone_model(&model), cwd.clone());
+
+        let mut session = ImpSession {
+            agent: None,
+            handle,
+            session_mgr,
+            config: Config::default(),
+            model,
+            auth_store: AuthStore::new(tmp.path().join("auth.json")),
+            model_registry: ModelRegistry::with_builtins(),
+            cwd,
+            agent_task: None,
+            completed_run_result: None,
+            pending_persistence_errors: VecDeque::new(),
+        };
+
+        let persisted = futures::executor::block_on(
+            session.persist_event_entries(&AgentEvent::TurnEnd {
+                index: 0,
+                message: test_assistant_message(456, None),
+            }),
+        );
+
+        assert_eq!(persisted, vec!["assistant message"]);
+        assert!(session.session_mgr.usage_records().is_empty());
+    }
+
+    #[test]
+    fn persist_event_entries_writes_tool_results() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let session_dir = tmp.path().join("sessions");
+        let model = test_model();
+        let session_mgr = SessionManager::new(&cwd, &session_dir).unwrap();
+        let (_agent, handle) = Agent::new(clone_model(&model), cwd.clone());
+
+        let mut session = ImpSession {
+            agent: None,
+            handle,
+            session_mgr,
+            config: Config::default(),
+            model,
+            auth_store: AuthStore::new(tmp.path().join("auth.json")),
+            model_registry: ModelRegistry::with_builtins(),
+            cwd,
+            agent_task: None,
+            completed_run_result: None,
+            pending_persistence_errors: VecDeque::new(),
+        };
+
+        let persisted = futures::executor::block_on(
+            session.persist_event_entries(&AgentEvent::ToolExecutionEnd {
+                tool_call_id: "call-1".into(),
+                result: imp_llm::ToolResultMessage {
+                    tool_call_id: "call-1".into(),
+                    tool_name: "bash".into(),
+                    content: vec![ContentBlock::Text {
+                        text: "ok".into(),
+                    }],
+                    is_error: false,
+                    details: json!({"exit_code": 0}),
+                    timestamp: 999,
+                },
+            }),
+        );
+
+        assert_eq!(persisted, vec!["tool result"]);
+        assert!(session
+            .session_mgr
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, SessionEntry::Message { message: imp_llm::Message::ToolResult(_), .. })));
+    }
 }
+
