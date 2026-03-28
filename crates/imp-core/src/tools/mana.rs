@@ -1,11 +1,17 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use mana::commands::agents::load_agents;
+use mana::commands::logs::find_all_logs;
+use mana::commands::next::ScoredUnit;
 use mana::commands::run::{RunArgs, RunView};
+use mana_core::ops::claim::ClaimParams;
 use serde_json::json;
 
-use super::{Tool, ToolContext, ToolOutput, ToolUpdate};
+use super::{truncate_head, Tool, ToolContext, ToolOutput, ToolUpdate};
 use crate::error::Result;
+const MAX_OUTPUT_LINES: usize = 2000;
+const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 
 fn find_mana_dir(cwd: &Path) -> std::result::Result<std::path::PathBuf, String> {
     mana_core::discovery::find_mana_dir(cwd).map_err(|e| e.to_string())
@@ -71,6 +77,117 @@ fn run_summary_lines(view: &RunView) -> Vec<String> {
     lines
 }
 
+fn text_output(text: String, details: serde_json::Value) -> ToolOutput {
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details,
+        is_error: false,
+    }
+}
+
+fn claim_output(result: &mana_core::ops::claim::ClaimResult) -> ToolOutput {
+    let text = format!(
+        "Claimed unit {} ({}) by {}",
+        result.unit.id, result.unit.title, result.claimer
+    );
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "unit": {
+                "id": result.unit.id,
+                "title": result.unit.title,
+                "status": result.unit.status,
+                "claimed_by": result.unit.claimed_by,
+            },
+            "claimer": result.claimer,
+            "is_goal": result.is_goal,
+            "path": result.path,
+        }),
+        is_error: false,
+    }
+}
+
+fn release_output(result: &mana_core::ops::claim::ReleaseResult) -> ToolOutput {
+    let text = format!(
+        "Released unit {} ({}) back to {}",
+        result.unit.id, result.unit.title, result.unit.status
+    );
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "unit": {
+                "id": result.unit.id,
+                "title": result.unit.title,
+                "status": result.unit.status,
+                "claimed_by": result.unit.claimed_by,
+            },
+            "path": result.path,
+        }),
+        is_error: false,
+    }
+}
+
+fn truncate_with_note(text: &str) -> String {
+    let result = truncate_head(text, MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES);
+    if !result.truncated {
+        return result.content;
+    }
+
+    let mut output = result.content;
+    output.push_str(&format!(
+        "\n[Output truncated: showing first {} of {} lines{}]",
+        result.output_lines,
+        result.total_lines,
+        result
+            .temp_file
+            .as_ref()
+            .map(|p| format!(". Full output saved to {}", p.display()))
+            .unwrap_or_default()
+    ));
+    output
+}
+
+fn scored_units_to_text(units: &[ScoredUnit]) -> String {
+    if units.is_empty() {
+        return "No ready units. Create one with: mana create \"task\" --verify \"cmd\""
+            .to_string();
+    }
+
+    let mut lines = Vec::new();
+    for unit in units {
+        lines.push(format!(
+            "P{}  {:.1}  {}",
+            unit.priority, unit.score, unit.title
+        ));
+        if !unit.unblocks.is_empty() {
+            lines.push(format!("      Unblocks: {}", unit.unblocks.join(", ")));
+        }
+        let attempts = if unit.attempts > 0 {
+            format!(" | Attempts: {}", unit.attempts)
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "      ID: {} | Age: {} days{}",
+            unit.id, unit.age_days, attempts
+        ));
+        lines.push(String::new());
+    }
+    lines.join("\n")
+}
+
+fn tree_lines(node: &mana_core::api::TreeNode, indent: usize, out: &mut Vec<String>) {
+    let prefix = "  ".repeat(indent);
+    let verify = if node.has_verify { "spec" } else { "goal" };
+    out.push(format!(
+        "{}{} {} [{} P{} · {}]",
+        prefix, node.id, node.title, node.status, node.priority, verify
+    ));
+    for child in &node.children {
+        tree_lines(child, indent + 1, out);
+    }
+}
+
 pub struct ManaTool;
 
 #[async_trait]
@@ -82,13 +199,13 @@ impl Tool for ManaTool {
         "Mana"
     }
     fn description(&self) -> &str {
-        "Work coordination substrate. Create verifiable jobs, spawn subagents to complete them, track progress, close on verify. Use for complex tasks or to delegate work."
+        "Work coordination substrate. Prefer this over bash for mana operations: inspect units, create/update/claim/release/close work, inspect logs/agents, and run orchestration natively. Use for complex tasks or delegation."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run"] },
+                "action": { "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "claim", "release", "logs", "agents", "next", "tree"] },
                 "id": { "type": "string" },
                 "title": { "type": "string" },
                 "verify": { "type": "string", "description": "Shell command, must exit 0" },
@@ -102,6 +219,8 @@ impl Tool for ManaTool {
                 "force": { "type": "boolean" },
                 "reason": { "type": "string" },
                 "all": { "type": "boolean" },
+                "by": { "type": "string", "description": "Who is claiming the unit" },
+                "count": { "type": "integer", "description": "Number of next recommendations to return" }
             },
             "required": ["action"],
         })
@@ -120,9 +239,6 @@ impl Tool for ManaTool {
             .as_str()
             .ok_or_else(|| crate::error::Error::Tool("missing 'action' parameter".into()))?;
 
-        // Mode-based sub-action guard. The active mode is read from the context so
-        // it always matches the Agent's actual mode. Full mode (default) allows
-        // everything; restricted modes block specific sub-actions at execution time.
         let mode = ctx.mode;
 
         if !mode.allows_mana_action(action) {
@@ -213,6 +329,28 @@ impl Tool for ManaTool {
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
+            "claim" => {
+                let id = params["id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("claim requires 'id'".into()))?;
+                let claim_params = ClaimParams {
+                    by: params["by"].as_str().map(|s| s.to_string()),
+                    force: params["force"].as_bool().unwrap_or(true),
+                };
+                match mana_core::api::claim_unit(&mana_dir, id, claim_params) {
+                    Ok(result) => Ok(claim_output(&result)),
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
+            "release" => {
+                let id = params["id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("release requires 'id'".into()))?;
+                match mana_core::api::release_unit(&mana_dir, id) {
+                    Ok(result) => Ok(release_output(&result)),
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
             "close" => {
                 let id = params["id"]
                     .as_str()
@@ -249,6 +387,183 @@ impl Tool for ManaTool {
                     Ok(result) => Ok(json_output(&result)),
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
+            }
+            "logs" => {
+                let id = params["id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("logs requires 'id'".into()))?;
+                match find_all_logs(id) {
+                    Ok(paths) if paths.is_empty() => Ok(ToolOutput::text(format!(
+                        "No logs for unit {id}. Has it been dispatched with mana run?"
+                    ))),
+                    Ok(paths) => {
+                        let mut sections = Vec::new();
+                        for path in &paths {
+                            let filename = path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
+                            let body = std::fs::read_to_string(path)
+                                .unwrap_or_else(|e| format!("(error reading {}: {e})", path.display()));
+                            sections.push(format!("═══ {filename} ═══\n\n{body}"));
+                        }
+                        let text = truncate_with_note(&sections.join("\n\n"));
+                        Ok(text_output(text, json!({ "unit_id": id, "logs": paths })))
+                    }
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
+            "agents" => match load_agents() {
+                Ok(agents) => Ok(json_output(&agents)),
+                Err(e) => Ok(ToolOutput::error(e.to_string())),
+            },
+            "next" => {
+                let count = params["count"].as_u64().unwrap_or(1).max(1) as usize;
+                match mana_core::api::load_index(&mana_dir) {
+                    Ok(index) => {
+                        let ready: Vec<&mana_core::index::IndexEntry> = index
+                            .units
+                            .iter()
+                            .filter(|e| {
+                                e.status == mana_core::unit::Status::Open
+                                    && e.has_verify
+                                    && !e.feature
+                                    && mana_core::blocking::check_blocked(e, &index).is_none()
+                            })
+                            .collect();
+
+                        let mut reverse_deps: std::collections::HashMap<String, Vec<String>> =
+                            std::collections::HashMap::new();
+                        for entry in &index.units {
+                            for dep_id in &entry.dependencies {
+                                reverse_deps
+                                    .entry(dep_id.clone())
+                                    .or_default()
+                                    .push(entry.id.clone());
+                            }
+                        }
+
+                        fn count_transitive_unblocks(
+                            unit_id: &str,
+                            reverse_deps: &std::collections::HashMap<String, Vec<String>>,
+                        ) -> usize {
+                            let mut visited = std::collections::HashSet::new();
+                            let mut stack = vec![unit_id.to_string()];
+                            while let Some(current) = stack.pop() {
+                                if let Some(dependents) = reverse_deps.get(&current) {
+                                    for dep in dependents {
+                                        if visited.insert(dep.clone()) {
+                                            stack.push(dep.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            visited.len()
+                        }
+
+                        fn score_unit(entry: &mana_core::index::IndexEntry, unblock_count: usize) -> f64 {
+                            let priority_score =
+                                (5u8.saturating_sub(entry.priority)) as f64 * 10.0;
+                            let unblock_score = (unblock_count as f64 * 5.0).min(50.0);
+                            let age_days = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs()
+                                / 86_400;
+                            let created_days = entry.created_at.timestamp().max(0) as u64 / 86_400;
+                            let age_days = age_days.saturating_sub(created_days) as f64;
+                            let age_score = age_days.min(30.0);
+                            let attempt_penalty = (entry.attempts as f64 * 3.0).min(15.0);
+                            priority_score + unblock_score + age_score - attempt_penalty
+                        }
+
+                        let mut scored: Vec<ScoredUnit> = ready
+                            .iter()
+                            .map(|entry| {
+                                let transitive_count =
+                                    count_transitive_unblocks(&entry.id, &reverse_deps);
+                                let unblocks = reverse_deps
+                                    .get(&entry.id)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let score = score_unit(entry, transitive_count);
+                                let now_days = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs()
+                                    / 86_400;
+                                let created_days = entry.created_at.timestamp().max(0) as u64 / 86_400;
+                                let age_days = now_days.saturating_sub(created_days);
+                                ScoredUnit {
+                                    id: entry.id.clone(),
+                                    title: entry.title.clone(),
+                                    priority: entry.priority,
+                                    score,
+                                    unblocks,
+                                    age_days,
+                                    attempts: entry.attempts,
+                                }
+                            })
+                            .collect();
+
+                        scored.sort_by(|a, b| {
+                            b.score
+                                .partial_cmp(&a.score)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        scored.truncate(count);
+                        Ok(text_output(
+                            scored_units_to_text(&scored),
+                            serde_json::to_value(&scored)
+                                .unwrap_or(serde_json::Value::Null),
+                        ))
+                    }
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
+            "tree" => {
+                let id = params["id"].as_str();
+                let lines = if let Some(root_id) = id {
+                    match mana_core::api::get_tree(&mana_dir, root_id) {
+                        Ok(tree) => {
+                            let mut lines = Vec::new();
+                            tree_lines(&tree, 0, &mut lines);
+                            lines
+                        }
+                        Err(e) => return Ok(ToolOutput::error(e.to_string())),
+                    }
+                } else {
+                    match mana_core::api::load_index(&mana_dir) {
+                        Ok(index) => {
+                            let roots: Vec<_> = index
+                                .units
+                                .iter()
+                                .filter(|entry| entry.parent.is_none())
+                                .map(|entry| entry.id.clone())
+                                .collect();
+                            let mut lines = Vec::new();
+                            for (idx, root_id) in roots.iter().enumerate() {
+                                match mana_core::api::get_tree(&mana_dir, root_id) {
+                                    Ok(tree) => {
+                                        if idx > 0 {
+                                            lines.push(String::new());
+                                        }
+                                        tree_lines(&tree, 0, &mut lines);
+                                    }
+                                    Err(e) => return Ok(ToolOutput::error(e.to_string())),
+                                }
+                            }
+                            lines
+                        }
+                        Err(e) => return Ok(ToolOutput::error(e.to_string())),
+                    }
+                };
+                let text = if lines.is_empty() {
+                    "(no units)".to_string()
+                } else {
+                    truncate_with_note(&lines.join("\n"))
+                };
+                Ok(text_output(text, json!({ "root": id })))
             }
             "run" => {
                 let run_args = RunArgs {
@@ -338,7 +653,7 @@ impl Tool for ManaTool {
                 }
             }
             other => Ok(ToolOutput::error(format!(
-                "Unknown action: {other}. Use: status, list, show, create, close, update, run"
+                "Unknown action: {other}. Use: status, list, show, create, close, update, run, claim, release, logs, agents, next, tree"
             ))),
         }
     }
@@ -355,24 +670,11 @@ mod tests {
     use crate::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
     use crate::ui::NullInterface;
 
-    /// Outcome of a mana tool call in test context.
     enum ManaResult {
-        /// Mode guard fired — action blocked.
         ModeBlocked(String),
-        /// Mode guard passed — action was attempted (may fail for other reasons).
         Attempted(crate::tools::ToolOutput),
     }
 
-    /// Run the ManaTool with `IMP_MODE` set to `mode_name` for the duration of the call.
-    ///
-    /// Returns `ManaResult::ModeBlocked` if the mode guard fires, or
-    /// `ManaResult::Attempted` if the action was allowed and execution proceeded
-    /// (the inner ToolOutput may itself be an error from missing .mana/, etc.).
-    ///
-    /// The env var is reset afterwards so tests don't bleed into each other.
-    /// Tests in this module must run with `--test-threads=1` because env vars are
-    /// process-global (the verify gate enforces this).
-    // Serialize env-var-mutating tests to prevent IMP_MODE race conditions.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     async fn run_with_mode(mode_name: &str, action: &str) -> ManaResult {
@@ -381,10 +683,14 @@ mod tests {
         std::env::set_var("IMP_MODE", mode_name);
 
         let dir = tempfile::tempdir().unwrap();
-        // Create a minimal .mana/ so the tool doesn't bail with "No .mana/ directory"
         let mana_dir = dir.path().join(".mana");
         std::fs::create_dir_all(&mana_dir).unwrap();
-        std::fs::write(mana_dir.join("config.yaml"), "next_id: 1\n").unwrap();
+        std::fs::write(mana_dir.join("config.yaml"), "project: test\nnext_id: 2\n").unwrap();
+        std::fs::write(
+            mana_dir.join("1-test-unit.md"),
+            "---\nid: '1'\ntitle: Test unit\nstatus: open\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\n---\n\nbody\n",
+        )
+        .unwrap();
         let (tx, _rx) = mpsc::channel::<ToolUpdate>(1);
         let ctx = ToolContext {
             cwd: dir.path().to_path_buf(),
@@ -399,23 +705,20 @@ mod tests {
 
         let tool = ManaTool;
         let outcome = tool
-            .execute("call_1", json!({ "action": action }), ctx)
+            .execute("call_1", json!({ "action": action, "id": "1" }), ctx)
             .await;
 
-        // Restore previous state
         match prev {
             Some(v) => std::env::set_var("IMP_MODE", v),
             None => std::env::remove_var("IMP_MODE"),
         }
 
         match outcome {
-            // Infrastructure error (e.g. no .mana/ dir) — action was allowed, it just failed.
             Err(crate::error::Error::Tool(msg)) => {
                 ManaResult::Attempted(crate::tools::ToolOutput::error(msg))
             }
             Err(e) => ManaResult::Attempted(crate::tools::ToolOutput::error(e.to_string())),
             Ok(output) => {
-                // Distinguish mode guard errors from other ToolOutput errors.
                 if output.is_error {
                     if let Some(text) = output.text_content() {
                         if text.contains("mode") && text.contains(action) {
@@ -428,93 +731,18 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn agent_mode_mana_worker_blocks_create() {
-        match run_with_mode("worker", "create").await {
-            ManaResult::ModeBlocked(_) => {} // correct
-            ManaResult::Attempted(out) => {
-                panic!(
-                    "worker should block 'create', got: {:?}",
-                    out.text_content()
-                )
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn agent_mode_mana_planner_allows_create() {
-        // Planner can create — it reaches find_mana_dir which fails (no .mana),
-        // but the mode guard must NOT fire.
-        match run_with_mode("planner", "create").await {
-            ManaResult::Attempted(_) => {} // correct — mode guard passed
-            ManaResult::ModeBlocked(msg) => {
-                panic!("planner should allow 'create' but was blocked: {msg}")
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn agent_mode_mana_planner_blocks_close() {
-        match run_with_mode("planner", "close").await {
-            ManaResult::ModeBlocked(_) => {} // correct
-            ManaResult::Attempted(out) => {
-                panic!(
-                    "planner should block 'close', got: {:?}",
-                    out.text_content()
-                )
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn agent_mode_mana_auditor_allows_show() {
-        // Auditor can show — error will be from missing .mana/, not mode guard.
-        match run_with_mode("auditor", "show").await {
-            ManaResult::Attempted(_) => {} // correct — mode guard passed
-            ManaResult::ModeBlocked(msg) => {
-                panic!("auditor should allow 'show' but was blocked: {msg}")
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn agent_mode_mana_auditor_blocks_update() {
-        match run_with_mode("auditor", "update").await {
-            ManaResult::ModeBlocked(_) => {} // correct
-            ManaResult::Attempted(out) => {
-                panic!(
-                    "auditor should block 'update', got: {:?}",
-                    out.text_content()
-                )
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn agent_mode_mana_orchestrator_allows_all() {
-        // Orchestrator allows all standard actions — none should hit the mode guard.
-        for action in &["status", "list", "show", "create", "close", "update", "run"] {
-            match run_with_mode("orchestrator", action).await {
-                ManaResult::Attempted(_) => {} // correct
-                ManaResult::ModeBlocked(msg) => {
-                    panic!("orchestrator should allow '{action}' but was blocked: {msg}")
-                }
-            }
-        }
-    }
-
-    // --- ctx.mode tests (no env var) ---
-
-    /// Build a ToolContext with the given mode directly — no env var involved.
     fn ctx_with_mode(
         dir: &std::path::Path,
         mode: crate::config::AgentMode,
     ) -> (ToolContext, tempfile::TempDir) {
-        // We need the tempdir to outlive the context, so return it too.
-        // The mana dir is created inside `dir` (caller owns it).
         let mana_dir = dir.join(".mana");
         std::fs::create_dir_all(&mana_dir).unwrap();
-        std::fs::write(mana_dir.join("config.yaml"), "next_id: 1\n").unwrap();
+        std::fs::write(mana_dir.join("config.yaml"), "project: test\nnext_id: 2\n").unwrap();
+        std::fs::write(
+            mana_dir.join("1-test-unit.md"),
+            "---\nid: '1'\ntitle: Test unit\nstatus: open\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\n---\n\nbody\n",
+        )
+        .unwrap();
         let (tx, _rx) = mpsc::channel::<ToolUpdate>(1);
         let ctx = ToolContext {
             cwd: dir.to_path_buf(),
@@ -525,17 +753,15 @@ mod tests {
             file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
             mode,
         };
-        // Return a dummy TempDir we can ignore; the real dir is passed in.
         (ctx, tempfile::tempdir().unwrap())
     }
 
-    /// Execute an action using ctx.mode to determine mode — no env var.
     async fn run_with_ctx_mode(mode: crate::config::AgentMode, action: &str) -> ManaResult {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _keep) = ctx_with_mode(dir.path(), mode);
         let tool = ManaTool;
         let outcome = tool
-            .execute("call_ctx", json!({ "action": action }), ctx)
+            .execute("call_ctx", json!({ "action": action, "id": "1" }), ctx)
             .await;
         match outcome {
             Err(crate::error::Error::Tool(msg)) => {
@@ -556,13 +782,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_mode_mana_ctx_reads_from_context() {
-        // ManaTool reads mode from ctx.mode — not from any env var.
-        // Set IMP_MODE to something that *would* allow create, but ctx.mode is
-        // Worker which blocks it. The ctx wins.
+    async fn worker_blocks_create() {
+        match run_with_mode("worker", "create").await {
+            ManaResult::ModeBlocked(_) => {}
+            ManaResult::Attempted(out) => {
+                panic!("worker should block 'create', got: {:?}", out.text_content())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn planner_allows_create() {
+        match run_with_mode("planner", "create").await {
+            ManaResult::Attempted(_) => {}
+            ManaResult::ModeBlocked(msg) => {
+                panic!("planner should allow 'create' but was blocked: {msg}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn planner_blocks_close() {
+        match run_with_mode("planner", "close").await {
+            ManaResult::ModeBlocked(_) => {}
+            ManaResult::Attempted(out) => {
+                panic!("planner should block 'close', got: {:?}", out.text_content())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn auditor_allows_show() {
+        match run_with_mode("auditor", "show").await {
+            ManaResult::Attempted(_) => {}
+            ManaResult::ModeBlocked(msg) => {
+                panic!("auditor should allow 'show' but was blocked: {msg}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn auditor_blocks_update() {
+        match run_with_mode("auditor", "update").await {
+            ManaResult::ModeBlocked(_) => {}
+            ManaResult::Attempted(out) => {
+                panic!("auditor should block 'update', got: {:?}", out.text_content())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_allows_logs() {
+        match run_with_mode("worker", "logs").await {
+            ManaResult::Attempted(_) => {}
+            ManaResult::ModeBlocked(msg) => {
+                panic!("worker should allow 'logs' but was blocked: {msg}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn orchestrator_allows_extended_actions() {
+        for action in &[
+            "status", "list", "show", "create", "close", "update", "run", "claim",
+            "release", "logs", "agents", "next"
+        ] {
+            match run_with_mode("orchestrator", action).await {
+                ManaResult::Attempted(_) => {}
+                ManaResult::ModeBlocked(msg) => {
+                    panic!("orchestrator should allow '{action}' but was blocked: {msg}")
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ctx_mode_wins_over_env() {
         let _guard = ENV_LOCK.lock().unwrap();
         let prev = std::env::var("IMP_MODE").ok();
-        std::env::set_var("IMP_MODE", "full"); // env says full (allow)
+        std::env::set_var("IMP_MODE", "full");
 
         let result = run_with_ctx_mode(crate::config::AgentMode::Worker, "create").await;
 
@@ -572,7 +870,7 @@ mod tests {
         }
 
         match result {
-            ManaResult::ModeBlocked(_) => {} // ctx.mode (Worker) blocked it — correct
+            ManaResult::ModeBlocked(_) => {}
             ManaResult::Attempted(out) => {
                 panic!(
                     "ctx.mode=Worker should block 'create' even when IMP_MODE=full, got: {:?}",
@@ -583,29 +881,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_mode_mana_ctx_worker_blocks_create() {
-        // Worker mode via ctx blocks mana create (no env var involvement).
+    async fn ctx_worker_blocks_create() {
         match run_with_ctx_mode(crate::config::AgentMode::Worker, "create").await {
-            ManaResult::ModeBlocked(_) => {} // correct
+            ManaResult::ModeBlocked(_) => {}
             ManaResult::Attempted(out) => {
-                panic!(
-                    "ctx Worker mode should block 'create', got: {:?}",
-                    out.text_content()
-                )
+                panic!("ctx Worker mode should block 'create', got: {:?}", out.text_content())
             }
         }
     }
 
     #[tokio::test]
-    async fn agent_mode_mana_ctx_full_allows_all() {
-        // Full mode via ctx allows every action (none should hit the mode guard).
-        for action in &["status", "list", "show", "create", "close", "update", "run"] {
+    async fn ctx_full_allows_extended_actions() {
+        for action in &[
+            "status", "list", "show", "create", "close", "update", "run", "claim",
+            "release", "logs", "agents", "next", "tree"
+        ] {
             match run_with_ctx_mode(crate::config::AgentMode::Full, action).await {
-                ManaResult::Attempted(_) => {} // correct — mode guard passed
+                ManaResult::Attempted(_) => {}
                 ManaResult::ModeBlocked(msg) => {
                     panic!("ctx Full mode should allow '{action}' but was blocked: {msg}")
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn next_returns_ranked_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
+        let tool = ManaTool;
+        let result = tool
+            .execute("call_next", json!({ "action": "next", "count": 1 }), ctx)
+            .await
+            .unwrap();
+        let text = result.text_content().unwrap_or("");
+        assert!(text.contains("Test unit") || text.contains("No ready units"));
     }
 }

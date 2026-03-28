@@ -106,13 +106,14 @@ impl AgentMode {
     pub fn allowed_mana_actions(&self) -> &'static [&'static str] {
         match self {
             AgentMode::Full => &[],
-            AgentMode::Worker => &["show", "update", "status", "list"],
-            AgentMode::Orchestrator => {
-                &["status", "list", "show", "create", "close", "update", "run"]
-            }
-            AgentMode::Planner => &["status", "list", "show", "create"],
+            AgentMode::Worker => &["show", "update", "status", "list", "logs", "next"],
+            AgentMode::Orchestrator => &[
+                "status", "list", "show", "create", "close", "update", "run", "claim",
+                "release", "logs", "agents", "next"
+            ],
+            AgentMode::Planner => &["status", "list", "show", "create", "next"],
             AgentMode::Reviewer => &[],
-            AgentMode::Auditor => &["status", "list", "show"],
+            AgentMode::Auditor => &["status", "list", "show", "logs", "agents", "next"],
         }
     }
 
