@@ -348,7 +348,10 @@ impl App {
     }
 
     /// Run the prepared app against an already-open terminal.
-    pub async fn run(&mut self, terminal: &mut InteractiveTerminal) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run(
+        &mut self,
+        terminal: &mut InteractiveTerminal,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.prepare_for_interactive()?;
         self.event_loop(terminal).await
     }
@@ -388,6 +391,9 @@ impl App {
                 match event {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         self.handle_key(key)?;
+                    }
+                    Event::Paste(text) => {
+                        self.handle_paste(text);
                     }
                     Event::Mouse(mouse) => {
                         self.handle_mouse(mouse);
@@ -439,7 +445,9 @@ impl App {
             .is_some_and(tokio::task::JoinHandle::is_finished);
         if agent_task_finished {
             if let Some(task) = self.agent_task.take() {
-                match tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(task)) {
+                match tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(task)
+                }) {
                     Ok(Ok(())) | Ok(Err(ImpCoreError::Cancelled)) => {
                         signals.push(RuntimeSignal::AgentTaskCompleted);
                     }
@@ -459,7 +467,9 @@ impl App {
             .is_some_and(tokio::task::JoinHandle::is_finished);
         if login_task_finished {
             if let Some(task) = self.login_task.take() {
-                match tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(task)) {
+                match tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(task)
+                }) {
                     Ok(LoginTaskExit::Success(message)) => {
                         signals.push(RuntimeSignal::LoginTaskSucceeded(message));
                     }
@@ -946,8 +956,16 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
         self.needs_redraw = true;
 
+        if self.ask_state.is_some() && self.is_paste_shortcut(key) {
+            self.paste_from_clipboard();
+            return Ok(());
+        }
+
         // Reset ctrl+c counter on non-ctrl+c keypress
-        if !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
+        if !(key.code == KeyCode::Char('c')
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::SUPER)))
+        {
             self.ctrl_c_count = 0;
         }
 
@@ -974,6 +992,15 @@ impl App {
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
+        if self.is_copy_shortcut(key) {
+            let _ = self.copy_selection();
+            return Ok(());
+        }
+        if self.is_paste_shortcut(key) {
+            self.paste_from_clipboard();
+            return Ok(());
+        }
+
         if key.modifiers.contains(KeyModifiers::SHIFT) {
             match key.code {
                 KeyCode::Up => {
@@ -1001,9 +1028,6 @@ impl App {
             }
         }
 
-        if key.code == KeyCode::Char('y') && self.copy_selection() {
-            return Ok(());
-        }
         if key.code == KeyCode::Esc && self.selection.is_some() {
             self.clear_selection();
             return Ok(());
@@ -1467,31 +1491,42 @@ impl App {
     fn copy_to_clipboard(&self, text: &str) {
         #[cfg(target_os = "macos")]
         {
-            use std::io::Write;
-            if let Ok(mut child) = std::process::Command::new("pbcopy")
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-            {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                let _ = child.wait();
-            }
+            let _ = Self::write_to_clipboard_command("pbcopy", &[], text);
         }
         #[cfg(target_os = "linux")]
         {
-            use std::io::Write;
-            if let Ok(mut child) = std::process::Command::new("xclip")
-                .args(["-selection", "clipboard"])
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-            {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                let _ = child.wait();
+            let _ = Self::write_to_clipboard_linux(text);
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn write_to_clipboard_command(program: &str, args: &[&str], text: &str) -> bool {
+        use std::io::Write;
+
+        let Ok(mut child) = std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+
+        if let Some(mut stdin) = child.stdin.take() {
+            if stdin.write_all(text.as_bytes()).is_err() {
+                return false;
             }
         }
+
+        child.wait().is_ok_and(|status| status.success())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_to_clipboard_linux(text: &str) -> bool {
+        Self::write_to_clipboard_command("wl-copy", &[], text)
+            || Self::write_to_clipboard_command("xclip", &["-selection", "clipboard"], text)
+            || Self::write_to_clipboard_command("xsel", &["--clipboard", "--input"], text)
     }
 
     fn copy_selection(&mut self) -> bool {
@@ -1502,6 +1537,79 @@ impl App {
         } else {
             false
         }
+    }
+
+    fn is_copy_shortcut(&self, key: KeyEvent) -> bool {
+        key.code == KeyCode::Char('c')
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::SUPER))
+            && self.selection.is_some()
+    }
+
+    fn is_paste_shortcut(&self, key: KeyEvent) -> bool {
+        key.code == KeyCode::Char('v')
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::SUPER))
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn read_clipboard_command(program: &str, args: &[&str]) -> Option<String> {
+        let output = std::process::Command::new(program)
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8(output.stdout).ok()
+    }
+
+    fn read_clipboard_text(&self) -> Option<String> {
+        #[cfg(target_os = "macos")]
+        {
+            return Self::read_clipboard_command("pbpaste", &[]);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            return Self::read_clipboard_command("wl-paste", &["--no-newline"])
+                .or_else(|| {
+                    Self::read_clipboard_command("xclip", &["-selection", "clipboard", "-o"])
+                })
+                .or_else(|| Self::read_clipboard_command("xsel", &["--clipboard", "--output"]));
+        }
+        #[allow(unreachable_code)]
+        None
+    }
+
+    fn paste_from_clipboard(&mut self) -> bool {
+        let Some(text) = self.read_clipboard_text() else {
+            return false;
+        };
+
+        self.handle_paste(text);
+        true
+    }
+
+    fn handle_paste(&mut self, text: String) {
+        if let Some(state) = self.ask_state.as_mut() {
+            for ch in text.chars() {
+                match ch {
+                    '\r' => {}
+                    c => state.type_char(c),
+                }
+            }
+        } else {
+            for ch in text.chars() {
+                match ch {
+                    '\n' => self.editor.insert_newline(),
+                    '\r' => {}
+                    c => self.editor.insert_char(c),
+                }
+            }
+        }
+        self.needs_redraw = true;
     }
 
     fn extend_selection_lines(&mut self, delta: isize) -> bool {
@@ -1992,6 +2100,8 @@ impl App {
                         "  Enter         Send message",
                         "  Shift+Enter   New line",
                         "  Ctrl+C        Clear / Abort / Quit",
+                        "  Ctrl+C/Cmd+C  Copy selection",
+                        "  Ctrl+V/Cmd+V  Paste clipboard",
                         "  Ctrl+L        Model selector",
                         "  Ctrl+O        Toggle tool output",
                         "  Ctrl+T        Toggle thinking",
@@ -2604,6 +2714,11 @@ impl App {
     }
 
     fn handle_ask_key(&mut self, key: KeyEvent) {
+        if self.is_paste_shortcut(key) {
+            self.paste_from_clipboard();
+            return;
+        }
+
         let Some(ref mut state) = self.ask_state else {
             return;
         };
@@ -4147,7 +4262,7 @@ mod session_lifecycle {
     }
 
     #[test]
-    fn shift_down_extends_selection_and_y_copies_it() {
+    fn shift_down_extends_selection_and_copy_shortcut_copies_it() {
         let mut app = make_app();
         app.selection = Some(SelectionState::new(
             SelectablePane::Chat,
@@ -4166,7 +4281,7 @@ mod session_lifecycle {
         let selection = app.selection.clone().unwrap();
         assert_eq!(selection.focus.line, 1);
 
-        app.handle_normal_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()))
+        app.handle_normal_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
             .unwrap();
         assert!(app
             .messages
@@ -4174,6 +4289,33 @@ mod session_lifecycle {
             .unwrap()
             .content
             .contains("Copied selection"));
+    }
+
+    #[test]
+    fn cmd_c_shortcut_is_treated_as_copy_when_selection_exists() {
+        let mut app = make_app();
+        app.selection = Some(SelectionState::new(
+            SelectablePane::Chat,
+            crate::selection::SelectionPos { line: 0, col: 0 },
+            crate::selection::SelectionPos { line: 0, col: 0 },
+        ));
+        app.chat_surface = Some(TextSurface::new(
+            SelectablePane::Chat,
+            Rect::new(0, 0, 40, 5),
+            vec!["one".into(), "two".into()],
+            0,
+        ));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER))
+            .unwrap();
+
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Copied selection"));
+        assert_eq!(app.ctrl_c_count, 0);
     }
 
     #[test]
