@@ -2080,20 +2080,20 @@ async fn run_interactive(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         SessionManager::new(&cwd, &Config::session_dir())?
     };
 
-    let mut app = imp_tui::app::App::new(config, session, registry, cwd);
+    let mut runner = imp_tui::interactive::InteractiveRunner::new(config, session, registry, cwd)?;
 
     // Apply CLI overrides
     if let Some(ref model) = cli.model {
-        app.model_name = model.clone();
+        runner.app_mut().model_name = model.clone();
     }
     if let Some(ref thinking) = cli.thinking {
-        app.thinking_level = parse_thinking_level(thinking);
+        runner.app_mut().thinking_level = parse_thinking_level(thinking);
     }
     if cli.max_turns.is_some() {
-        app.max_turns_override = cli.max_turns;
+        runner.app_mut().max_turns_override = cli.max_turns;
     }
 
-    app.run().await
+    runner.run().await
 }
 
 /// Expand @file arguments into file content blocks.

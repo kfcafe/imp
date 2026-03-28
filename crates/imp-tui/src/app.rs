@@ -1,31 +1,25 @@
 use std::collections::HashMap;
-use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use imp_lua::LuaRuntime;
 
-use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    MouseEventKind,
-};
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use imp_core::agent::{AgentCommand, AgentEvent, AgentHandle};
 use imp_core::builder::AgentBuilder;
 use imp_core::config::Config;
 use imp_core::session::{SessionEntry, SessionManager};
+use imp_core::Error as ImpCoreError;
 use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelMeta, ModelRegistry};
 use imp_llm::providers::create_provider;
-use imp_llm::{truncate_chars_with_suffix, Cost, Message, Model, StreamEvent, ThinkingLevel, Usage};
-use ratatui::backend::CrosstermBackend;
+use imp_llm::{
+    truncate_chars_with_suffix, Cost, Message, Model, StreamEvent, ThinkingLevel, Usage,
+};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-
 use ratatui::widgets::Clear;
-use ratatui::{Frame, Terminal};
+use ratatui::Frame;
 
 use crate::animation::AnimationState;
 use crate::highlight::Highlighter;
@@ -33,6 +27,7 @@ use crate::keybindings::{self, Action};
 use crate::selection::{
     extract_selected_text, SelectablePane, SelectionOverlay, SelectionState, TextSurface,
 };
+use crate::terminal::InteractiveTerminal;
 use crate::theme::Theme;
 use crate::turn_tracker::TurnTracker;
 use crate::views::chat::{
@@ -52,9 +47,6 @@ use crate::views::top_bar::TopBar;
 use crate::views::tree::{flatten_tree, TreeView, TreeViewState};
 use crate::views::welcome::{needs_welcome, WelcomeState, WelcomeStep, WelcomeView};
 
-type Tui = Terminal<CrosstermBackend<io::Stdout>>;
-
-/// Which pane currently has focus (for mouse-wheel routing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     Chat,
@@ -62,7 +54,6 @@ pub enum Pane {
     SidebarDetail,
 }
 
-/// UI mode — determines what overlay is displayed.
 #[derive(Debug)]
 pub enum UiMode {
     Normal,
@@ -76,15 +67,12 @@ pub enum UiMode {
     Welcome(WelcomeState),
 }
 
-/// A queued message (steering or follow-up).
 #[derive(Debug, Clone)]
 pub enum QueuedMessage {
     Steer(String),
     FollowUp(String),
 }
 
-/// The TUI application state.
-/// Holds the oneshot sender to reply to an ask tool request.
 pub enum AskReply {
     Select(tokio::sync::oneshot::Sender<Option<usize>>),
     Input(tokio::sync::oneshot::Sender<Option<String>>),
@@ -94,6 +82,12 @@ pub enum AskReply {
 enum LoginStatusEvent {
     Success(String),
     Error(String),
+}
+
+#[derive(Debug)]
+enum AgentTaskExit {
+    Completed,
+    Failed(ImpCoreError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +114,7 @@ pub struct App {
 
     // Agent
     pub agent_handle: Option<AgentHandle>,
+    agent_task: Option<tokio::task::JoinHandle<AgentTaskExit>>,
     pub is_streaming: bool,
     pub message_queue: Vec<QueuedMessage>,
 
@@ -260,6 +255,7 @@ impl App {
             editor: EditorState::new(),
             cwd,
             agent_handle: None,
+            agent_task: None,
             is_streaming: false,
             message_queue: Vec::new(),
             session,
@@ -350,8 +346,13 @@ impl App {
         }
     }
 
-    /// Run the TUI event loop. Sets up terminal, runs the loop, restores terminal.
-    pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Run the prepared app against an already-open terminal.
+    pub async fn run(&mut self, terminal: &mut InteractiveTerminal) -> Result<(), Box<dyn std::error::Error>> {
+        self.prepare_for_interactive()?;
+        self.event_loop(terminal).await
+    }
+
+    fn prepare_for_interactive(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Load Lua extensions (for slash commands and tool registration)
         self.reload_lua_extensions();
 
@@ -363,28 +364,13 @@ impl App {
             self.mode = UiMode::Welcome(WelcomeState::new(&all_models));
         }
 
-        // Setup terminal
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-
-        let result = self.event_loop(&mut terminal).await;
-
-        // Restore terminal (always, even on error)
-        disable_raw_mode()?;
-        crossterm::execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
-        terminal.show_cursor()?;
-
-        result
+        Ok(())
     }
 
-    async fn event_loop(&mut self, terminal: &mut Tui) -> Result<(), Box<dyn std::error::Error>> {
+    async fn event_loop(
+        &mut self,
+        terminal: &mut InteractiveTerminal,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let tick_rate = Duration::from_millis(16); // ~60fps
 
         loop {
@@ -414,6 +400,7 @@ impl App {
 
             // Drain agent events and UI requests (non-blocking)
             self.drain_agent_events();
+            self.check_agent_task();
             self.drain_ui_requests();
             self.drain_login_status();
 
@@ -450,6 +437,51 @@ impl App {
             self.handle_agent_event(event);
             self.needs_redraw = true;
         }
+    }
+
+    fn check_agent_task(&mut self) {
+        let task_finished = self
+            .agent_task
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished);
+        if !task_finished {
+            return;
+        }
+
+        let Some(task) = self.agent_task.take() else {
+            return;
+        };
+
+        match tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(task)) {
+            Ok(AgentTaskExit::Completed) => {
+                self.agent_handle = None;
+            }
+            Ok(AgentTaskExit::Failed(error)) => {
+                self.agent_handle = None;
+                self.present_agent_failure(error.to_string());
+            }
+            Err(error) => {
+                self.agent_handle = None;
+                self.present_agent_failure(format!("Internal agent task failure: {error}"));
+            }
+        }
+    }
+
+    fn present_agent_failure(&mut self, error: String) {
+        self.is_streaming = false;
+        if let Some(last) = self.messages.last_mut() {
+            last.is_streaming = false;
+        }
+        self.messages.push(DisplayMessage {
+            role: MessageRole::Error,
+            content: parse_api_error(&error),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: false,
+            timestamp: imp_llm::now(),
+        });
+        self.needs_redraw = true;
     }
 
     fn drain_ui_requests(&mut self) {
@@ -1843,13 +1875,15 @@ impl App {
         agent.messages = messages;
 
         let prompt = prompt.to_string();
-        tokio::spawn(async move {
-            if let Err(e) = agent.run(prompt).await {
-                eprintln!("[imp] agent error: {e}");
+        let task = tokio::spawn(async move {
+            match agent.run(prompt).await {
+                Ok(()) | Err(ImpCoreError::Cancelled) => AgentTaskExit::Completed,
+                Err(error) => AgentTaskExit::Failed(error),
             }
         });
 
         self.agent_handle = Some(handle);
+        self.agent_task = Some(task);
         Ok(())
     }
 
