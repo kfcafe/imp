@@ -209,10 +209,7 @@ impl Tool for ManaTool {
                     force: true,
                 };
                 match mana_core::api::create_unit(&mana_dir, create_params) {
-                    Ok(result) => Ok(ToolOutput::text(format!(
-                        "Created unit {}: {}",
-                        result.unit.id, result.unit.title
-                    ))),
+                    Ok(result) => Ok(json_output(&result)),
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -226,37 +223,7 @@ impl Tool for ManaTool {
                     defer_verify: false,
                 };
                 match mana_core::api::close_unit(&mana_dir, id, opts) {
-                    Ok(outcome) => {
-                        use mana_core::ops::close::CloseOutcome;
-                        let msg = match &outcome {
-                            CloseOutcome::Closed(r) => format!("Closed unit {}", r.unit.id),
-                            CloseOutcome::VerifyFailed(_) => {
-                                "Verify failed — unit remains open".to_string()
-                            }
-                            CloseOutcome::RejectedByHook { unit_id } => {
-                                format!("Hook rejected {unit_id}")
-                            }
-                            CloseOutcome::FeatureRequiresHuman { unit_id, .. } => {
-                                format!("Feature {unit_id} requires human review")
-                            }
-                            CloseOutcome::CircuitBreakerTripped {
-                                unit_id,
-                                total_attempts,
-                                max,
-                                ..
-                            } => format!("Circuit breaker: {unit_id} ({total_attempts}/{max})"),
-                            CloseOutcome::MergeConflict { files, .. } => {
-                                format!("Merge conflict: {}", files.join(", "))
-                            }
-                            CloseOutcome::DeferredVerify { unit_id } => {
-                                format!("Deferred verify for {unit_id}")
-                            }
-                            CloseOutcome::VerifyFrozenViolation { unit_id, .. } => {
-                                format!("Verify command changed since claim for {unit_id} — judge integrity violated. Use force to override.")
-                            }
-                        };
-                        Ok(ToolOutput::text(msg))
-                    }
+                    Ok(outcome) => Ok(json_output(&outcome)),
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -279,10 +246,7 @@ impl Tool for ManaTool {
                     resolve_decisions: Vec::new(),
                 };
                 match mana_core::api::update_unit(&mana_dir, id, update_params) {
-                    Ok(result) => Ok(ToolOutput::text(format!(
-                        "Updated unit {}: {}",
-                        result.unit.id, result.unit.title
-                    ))),
+                    Ok(result) => Ok(json_output(&result)),
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
