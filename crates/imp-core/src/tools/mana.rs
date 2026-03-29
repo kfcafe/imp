@@ -10,6 +10,7 @@ use serde_json::json;
 
 use super::{truncate_head, Tool, ToolContext, ToolOutput, ToolUpdate};
 use crate::error::Result;
+use crate::ui::NotifyLevel;
 const MAX_OUTPUT_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 
@@ -75,6 +76,64 @@ fn run_summary_lines(view: &RunView) -> Vec<String> {
     }
 
     lines
+}
+
+fn background_run_started_output(scope: &str, run_args: &RunArgs) -> ToolOutput {
+    let text = format!(
+        "Started mana run in background for {scope}. Use mana(action=\"agents\") to inspect active workers, mana(action=\"logs\", id=...) for output, and mana(action=\"status\") or mana(action=\"next\") to inspect project state."
+    );
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "background": true,
+            "scope": scope,
+            "jobs": run_args.jobs,
+            "loop": run_args.loop_mode,
+            "dry_run": run_args.dry_run,
+            "review": run_args.review,
+        }),
+        is_error: false,
+    }
+}
+
+fn spawn_background_run(mana_dir: std::path::PathBuf, run_args: RunArgs, ctx: ToolContext) {
+    let ui = ctx.ui.clone();
+    let scope = run_args
+        .id
+        .as_deref()
+        .map(|id| format!("unit {id}"))
+        .unwrap_or_else(|| "all ready units".to_string());
+
+    tokio::spawn(async move {
+        ui.set_status("mana", Some(&format!("mana: running {scope}")))
+            .await;
+
+        let result = tokio::task::spawn_blocking(move || {
+            mana::commands::run::run_with_stream_capture_and_sink(&mana_dir, run_args, None)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(view)) => {
+                let summary = format!(
+                    "mana: {scope} finished · {} done · {} failed",
+                    view.summary.total_closed, view.summary.total_failed
+                );
+                ui.set_status("mana", Some(&summary)).await;
+                ui.notify(&summary, NotifyLevel::Info).await;
+            }
+            Ok(Err(err)) => {
+                let message = format!("mana: {scope} failed: {err}");
+                ui.set_status("mana", Some(&message)).await;
+                ui.notify(&message, NotifyLevel::Error).await;
+            }
+            Err(join_err) => {
+                let message = format!("mana: {scope} task failed: {join_err}");
+                ui.set_status("mana", Some(&message)).await;
+                ui.notify(&message, NotifyLevel::Error).await;
+            }
+        }
+    });
 }
 
 fn text_output(text: String, details: serde_json::Value) -> ToolOutput {
@@ -220,7 +279,8 @@ impl Tool for ManaTool {
                 "reason": { "type": "string" },
                 "all": { "type": "boolean" },
                 "by": { "type": "string", "description": "Who is claiming the unit" },
-                "count": { "type": "integer", "description": "Number of next recommendations to return" }
+                "count": { "type": "integer", "description": "Number of next recommendations to return" },
+                "background": { "type": "boolean", "description": "Run mana orchestration in the background and return immediately (default true unless dry_run=true)" }
             },
             "required": ["action"],
         })
@@ -577,6 +637,18 @@ impl Tool for ManaTool {
                     json_stream: true,
                     review: params["review"].as_bool().unwrap_or(false),
                 };
+                let background = params["background"].as_bool().unwrap_or(!run_args.dry_run);
+
+                if background {
+                    let scope = run_args
+                        .id
+                        .as_deref()
+                        .map(|id| format!("unit {id}"))
+                        .unwrap_or_else(|| "all ready units".to_string());
+                    let started = background_run_started_output(&scope, &run_args);
+                    spawn_background_run(mana_dir.clone(), run_args, ctx);
+                    return Ok(started);
+                }
 
                 send_update(
                     &ctx,
@@ -786,7 +858,10 @@ mod tests {
         match run_with_mode("worker", "create").await {
             ManaResult::ModeBlocked(_) => {}
             ManaResult::Attempted(out) => {
-                panic!("worker should block 'create', got: {:?}", out.text_content())
+                panic!(
+                    "worker should block 'create', got: {:?}",
+                    out.text_content()
+                )
             }
         }
     }
@@ -806,7 +881,10 @@ mod tests {
         match run_with_mode("planner", "close").await {
             ManaResult::ModeBlocked(_) => {}
             ManaResult::Attempted(out) => {
-                panic!("planner should block 'close', got: {:?}", out.text_content())
+                panic!(
+                    "planner should block 'close', got: {:?}",
+                    out.text_content()
+                )
             }
         }
     }
@@ -826,7 +904,10 @@ mod tests {
         match run_with_mode("auditor", "update").await {
             ManaResult::ModeBlocked(_) => {}
             ManaResult::Attempted(out) => {
-                panic!("auditor should block 'update', got: {:?}", out.text_content())
+                panic!(
+                    "auditor should block 'update', got: {:?}",
+                    out.text_content()
+                )
             }
         }
     }
@@ -844,8 +925,8 @@ mod tests {
     #[tokio::test]
     async fn orchestrator_allows_extended_actions() {
         for action in &[
-            "status", "list", "show", "create", "close", "update", "run", "claim",
-            "release", "logs", "agents", "next"
+            "status", "list", "show", "create", "close", "update", "run", "claim", "release",
+            "logs", "agents", "next",
         ] {
             match run_with_mode("orchestrator", action).await {
                 ManaResult::Attempted(_) => {}
@@ -885,7 +966,10 @@ mod tests {
         match run_with_ctx_mode(crate::config::AgentMode::Worker, "create").await {
             ManaResult::ModeBlocked(_) => {}
             ManaResult::Attempted(out) => {
-                panic!("ctx Worker mode should block 'create', got: {:?}", out.text_content())
+                panic!(
+                    "ctx Worker mode should block 'create', got: {:?}",
+                    out.text_content()
+                )
             }
         }
     }
@@ -893,8 +977,8 @@ mod tests {
     #[tokio::test]
     async fn ctx_full_allows_extended_actions() {
         for action in &[
-            "status", "list", "show", "create", "close", "update", "run", "claim",
-            "release", "logs", "agents", "next", "tree"
+            "status", "list", "show", "create", "close", "update", "run", "claim", "release",
+            "logs", "agents", "next", "tree",
         ] {
             match run_with_ctx_mode(crate::config::AgentMode::Full, action).await {
                 ManaResult::Attempted(_) => {}
@@ -916,5 +1000,23 @@ mod tests {
             .unwrap();
         let text = result.text_content().unwrap_or("");
         assert!(text.contains("Test unit") || text.contains("No ready units"));
+    }
+
+    #[tokio::test]
+    async fn background_run_returns_promptly() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
+        let tool = ManaTool;
+        let result = tool
+            .execute(
+                "call_bg",
+                json!({ "action": "run", "background": true, "dry_run": true }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let text = result.text_content().unwrap_or("");
+        assert!(text.contains("Started mana run in background"));
+        assert_eq!(result.details["background"], true);
     }
 }

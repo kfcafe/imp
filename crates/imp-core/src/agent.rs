@@ -201,6 +201,8 @@ impl Agent {
         let mut turn: u32 = 0;
         let mut total_usage = Usage::default();
         let mut cancelled = false;
+        let mut queued_follow_ups: std::collections::VecDeque<String> =
+            std::collections::VecDeque::new();
 
         loop {
             if turn >= self.max_turns {
@@ -227,7 +229,7 @@ impl Agent {
                     AgentCommand::Steer(msg) => {
                         self.messages.push(Message::user(&msg));
                     }
-                    AgentCommand::FollowUp(_) => { /* queue for after loop */ }
+                    AgentCommand::FollowUp(msg) => queued_follow_ups.push_back(msg),
                 }
             }
 
@@ -306,9 +308,17 @@ impl Agent {
 
             while let Some(event_result) = stream.next().await {
                 // Check for cancel during event processing
-                if let Ok(AgentCommand::Cancel) = self.command_rx.try_recv() {
-                    cancelled = true;
-                    break;
+                if let Ok(cmd) = self.command_rx.try_recv() {
+                    match cmd {
+                        AgentCommand::Cancel => {
+                            cancelled = true;
+                            break;
+                        }
+                        AgentCommand::Steer(msg) => {
+                            self.messages.push(Message::user(&msg));
+                        }
+                        AgentCommand::FollowUp(msg) => queued_follow_ups.push_back(msg),
+                    }
                 }
 
                 match event_result {
@@ -449,12 +459,17 @@ impl Agent {
             self.messages.push(Message::Assistant(msg.clone()));
 
             if tool_calls.is_empty() {
-                // No tool calls — the model is done
+                // No tool calls — the model is done unless a queued follow-up exists.
                 self.emit(AgentEvent::TurnEnd {
                     index: turn,
                     message: msg,
                 })
                 .await;
+                if let Some(follow_up) = queued_follow_ups.pop_front() {
+                    self.messages.push(Message::user(&follow_up));
+                    turn += 1;
+                    continue;
+                }
                 break;
             }
 
@@ -470,6 +485,10 @@ impl Agent {
                 message: msg,
             })
             .await;
+
+            if let Some(follow_up) = queued_follow_ups.pop_front() {
+                self.messages.push(Message::user(&follow_up));
+            }
 
             turn += 1;
         }
@@ -1621,6 +1640,119 @@ mod tests {
     }
 
     // ── Test 4: Cancel command mid-run ─────────────────────────────
+
+    #[tokio::test]
+    async fn agent_follow_up_runs_after_current_work_finishes() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_1",
+                "echo",
+                serde_json::json!({"text": "hello"}),
+                100,
+                20,
+            ),
+            text_response("Handled follow-up", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(EchoTool));
+
+        handle
+            .command_tx
+            .send(AgentCommand::FollowUp("What next?".into()))
+            .await
+            .unwrap();
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Do the first thing".to_string()).await.unwrap();
+        drop(agent);
+
+        let events = events_task.await.unwrap();
+        let turn_starts: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::TurnStart { .. }))
+            .collect();
+        assert_eq!(turn_starts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn agent_follow_up_preserves_order_with_multiple_messages() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_1",
+                "echo",
+                serde_json::json!({"text": "hello"}),
+                100,
+                20,
+            ),
+            text_response("First follow-up handled", 120, 25),
+            text_response("Second follow-up handled", 130, 30),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(EchoTool));
+
+        handle
+            .command_tx
+            .send(AgentCommand::FollowUp("follow up one".into()))
+            .await
+            .unwrap();
+        handle
+            .command_tx
+            .send(AgentCommand::FollowUp("follow up two".into()))
+            .await
+            .unwrap();
+
+        agent.run("Do the first thing".to_string()).await.unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            user_texts,
+            vec![
+                "Do the first thing".to_string(),
+                "follow up one".to_string(),
+                "follow up two".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_cancel_still_wins_over_follow_up_queue() {
+        let provider = Arc::new(MockProvider::new(vec![tool_call_response(
+            "call_1",
+            "echo",
+            serde_json::json!({"text": "hello"}),
+            100,
+            20,
+        )]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(EchoTool));
+
+        handle
+            .command_tx
+            .send(AgentCommand::FollowUp("queued later".into()))
+            .await
+            .unwrap();
+        handle.command_tx.send(AgentCommand::Cancel).await.unwrap();
+
+        let result = agent.run("Do something".to_string()).await;
+        assert!(matches!(result, Err(crate::error::Error::Cancelled)));
+    }
 
     #[tokio::test]
     async fn agent_cancel_mid_run() {

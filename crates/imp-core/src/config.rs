@@ -108,8 +108,8 @@ impl AgentMode {
             AgentMode::Full => &[],
             AgentMode::Worker => &["show", "update", "status", "list", "logs", "next"],
             AgentMode::Orchestrator => &[
-                "status", "list", "show", "create", "close", "update", "run", "claim",
-                "release", "logs", "agents", "next"
+                "status", "list", "show", "create", "close", "update", "run", "claim", "release",
+                "logs", "agents", "next",
             ],
             AgentMode::Planner => &["status", "list", "show", "create", "next"],
             AgentMode::Reviewer => &[],
