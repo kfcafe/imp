@@ -17,7 +17,7 @@ labels:
 - delegation
 - docs
 - imp-core
-kind: epic
+kind: job
 ---
 
 Write the contract imp should use when it creates mana jobs as delegated subwork. Treat mana jobs as the subagent substrate: the child job description is the child worker brief. Define a standard shape for child job descriptions, including goal, scope boundaries, expected output, done condition, and explicit patch or no-patch guidance. Document how this differs from ad hoc planning notes, and keep the design inside imp boundaries rather than inventing a separate planning system. Update the relevant imp-facing docs or design notes in repo scope.

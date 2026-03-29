@@ -20,7 +20,7 @@ labels:
 dependencies:
 - '38'
 verify: cd /Users/asher/tower && cargo check -p imp-core
-kind: epic
+kind: job
 paths:
 - crates/imp-core/src/agent.rs
 - crates/imp-core/src/system_prompt.rs

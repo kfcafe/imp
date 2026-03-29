@@ -2,10 +2,10 @@
 id: '31'
 title: Add configurable engineering guardrails to imp
 slug: add-configurable-engineering-guardrails-to-imp
-status: open
+status: closed
 priority: 1
 created_at: '2026-03-26T04:43:27.656392Z'
-updated_at: '2026-03-29T22:12:28.914937Z'
+updated_at: '2026-03-29T22:30:28.704227Z'
 notes: |-
   ---
   2026-03-29T22:12:17.252169+00:00
@@ -23,8 +23,11 @@ labels:
 - verification
 - guardrails
 - language-profiles
+closed_at: '2026-03-29T22:30:28.704227Z'
+close_reason: Umbrella already decomposed into 31.1 through 31.4. Dry-run showed the parent epic itself was being scheduled; close the umbrella so only the child jobs execute.
 verify: grep -q "^# Engineering Guardrails for imp" ENGINEERING_GUARDRAILS.md && grep -q "GuardrailConfig" crates/imp-core/src/guardrails.rs && grep -q "guardrails_layer" crates/imp-core/src/system_prompt.rs && cargo check -p imp-core
 fail_first: true
+is_archived: true
 kind: epic
 ---
 
