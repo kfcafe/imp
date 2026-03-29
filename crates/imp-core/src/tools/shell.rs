@@ -131,6 +131,9 @@ impl Tool for ShellTool {
         command
             .args(&args)
             .current_dir(&ctx.cwd)
+            // Shell tools are also non-interactive; avoid inheriting the TUI's
+            // stdin so terminal escape sequences cannot leak into child reads.
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 

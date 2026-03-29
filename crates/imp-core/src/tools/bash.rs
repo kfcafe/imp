@@ -186,6 +186,10 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
         cmd.arg("-c")
             .arg(command)
             .current_dir(&ctx.cwd)
+            // Tool commands are non-interactive. Keep stdin disconnected so
+            // subprocesses cannot consume raw terminal input (for example SGR
+            // mouse reporting sequences) from the interactive TUI.
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
