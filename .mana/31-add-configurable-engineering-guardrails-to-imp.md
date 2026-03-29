@@ -5,7 +5,19 @@ slug: add-configurable-engineering-guardrails-to-imp
 status: open
 priority: 1
 created_at: '2026-03-26T04:43:27.656392Z'
-updated_at: '2026-03-26T04:43:27.656392Z'
+updated_at: '2026-03-29T22:12:28.914937Z'
+notes: |-
+  ---
+  2026-03-29T22:12:17.252169+00:00
+  Backlog review note: core guardrail types and prompt wiring already exist in code. Prioritize verifying what remains and narrowing unfinished scope to profile polish, runtime checks, and docs rather than reopening the design wholesale.
+
+  ---
+  2026-03-29T22:12:28.767611+00:00
+  Backlog review note: core guardrail types and prompt wiring already exist in code. Prioritize verifying what remains and narrowing unfinished scope to profile polish, runtime checks, and docs rather than reopening the design wholesale.
+
+  ---
+  2026-03-29T22:12:28.914928+00:00
+  Backlog review note: core guardrail types and prompt wiring already exist in code. Prioritize verifying what remains and narrowing unfinished scope to profile polish, runtime checks, and docs rather than reopening the design wholesale.
 labels:
 - design
 - verification

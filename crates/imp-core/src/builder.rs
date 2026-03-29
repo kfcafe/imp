@@ -235,7 +235,7 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     tools.register(Arc::new(FindTool));
     tools.register(Arc::new(GrepTool));
     tools.register(Arc::new(LsTool));
-    tools.register(Arc::new(ManaTool));
+    tools.register(Arc::new(ManaTool::default()));
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ScanTool));

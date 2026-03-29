@@ -5,7 +5,19 @@ slug: add-first-class-usage-accounting-and-reporting-to
 status: open
 priority: 1
 created_at: '2026-03-28T10:29:18.479526Z'
-updated_at: '2026-03-28T10:29:18.479526Z'
+updated_at: '2026-03-29T22:12:28.929741Z'
+notes: |-
+  ---
+  2026-03-29T22:12:17.266767+00:00
+  Backlog review note: usage schema, persistence helpers, and reporting code are already present in the tree. Prioritize finishing verification, docs, and polish and close delivered subwork instead of treating this as a greenfield feature.
+
+  ---
+  2026-03-29T22:12:28.782362+00:00
+  Backlog review note: usage schema, persistence helpers, and reporting code are already present in the tree. Prioritize finishing verification, docs, and polish and close delivered subwork instead of treating this as a greenfield feature.
+
+  ---
+  2026-03-29T22:12:28.929733+00:00
+  Backlog review note: usage schema, persistence helpers, and reporting code are already present in the tree. Prioritize finishing verification, docs, and polish and close delivered subwork instead of treating this as a greenfield feature.
 labels:
 - feature
 - usage

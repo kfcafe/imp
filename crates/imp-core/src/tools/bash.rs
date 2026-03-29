@@ -96,7 +96,7 @@ impl Tool for BashTool {
         "Bash"
     }
     fn description(&self) -> &str {
-        "Execute a bash command in the current working directory."
+        "Execute a shell command in the current working directory. Prefer native tools when available; if a native `mana` action exists, use the `mana` tool instead of running `mana ...` via bash."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({

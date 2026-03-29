@@ -841,16 +841,19 @@ fn extract_file_path(cwd: &Path, args: &serde_json::Value) -> Option<PathBuf> {
 }
 
 fn mana_bash_equivalent_hint(command: &str) -> Option<&'static str> {
-    let trimmed = command.trim_start();
-    if !trimmed.starts_with("mana") {
+    let trimmed = command.trim();
+    let Some(rest) = trimmed.strip_prefix("mana") else {
+        return None;
+    };
+    if rest.chars().next().is_some_and(|c| !c.is_whitespace()) {
         return None;
     }
 
-    let rest = trimmed[4..].trim_start();
     let action = rest.split_whitespace().next().unwrap_or("");
     match action {
         "status" | "list" | "ls" | "show" | "read" | "create" | "close" | "update"
-        | "run" | "agents" | "logs" | "next" | "claim" => Some(
+        | "run" | "run_state" | "evaluate" | "agents" | "logs" | "next" | "claim"
+        | "release" | "tree" => Some(
             "Use the native mana tool instead of `bash` for this mana command.",
         ),
         _ => None,
@@ -1788,6 +1791,18 @@ mod tests {
 
         let result = agent.run("Do something".to_string()).await;
         assert!(matches!(result, Err(crate::error::Error::Cancelled)));
+    }
+
+    #[test]
+    fn mana_bash_equivalent_hint_handles_release_and_tree() {
+        assert!(mana_bash_equivalent_hint("mana release 1").is_some());
+        assert!(mana_bash_equivalent_hint("mana tree").is_some());
+    }
+
+    #[test]
+    fn mana_bash_equivalent_hint_ignores_non_mana_prefixes() {
+        assert!(mana_bash_equivalent_hint("manatee status").is_none());
+        assert!(mana_bash_equivalent_hint("./mana status").is_none());
     }
 
     #[tokio::test]

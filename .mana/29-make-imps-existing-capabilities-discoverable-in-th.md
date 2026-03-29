@@ -5,11 +5,13 @@ slug: make-imps-existing-capabilities-discoverable-in-th
 status: open
 priority: 1
 created_at: '2026-03-26T03:11:02.796218Z'
-updated_at: '2026-03-26T03:11:02.796218Z'
+updated_at: '2026-03-29T22:11:11.500456Z'
 labels:
 - feature
 - ux
 - imp-tui
+dependencies:
+- '28'
 verify: 'cd /Users/asher/tower/imp && rg ''name: "memory"|name: "recall"|name: "plan"'' crates/imp-tui/src/views/command_palette.rs && rg ''"/memory|"/recall|"/plan'' crates/imp-tui/src/app.rs && rg ''persistent memory|past sessions|mana-backed planning|resume|fork'' crates/imp-tui/src/views/welcome.rs && cargo check -p imp-tui'
 fail_first: true
 kind: epic

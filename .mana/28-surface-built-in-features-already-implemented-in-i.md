@@ -5,7 +5,19 @@ slug: surface-built-in-features-already-implemented-in-i
 status: open
 priority: 1
 created_at: '2026-03-26T02:57:24.094581Z'
-updated_at: '2026-03-26T02:57:24.094581Z'
+updated_at: '2026-03-29T22:12:28.944480Z'
+notes: |-
+  ---
+  2026-03-29T22:12:17.281699+00:00
+  Backlog review note: builder code already registers MemoryTool, SessionSearchTool, and MultiEditTool. This unit is likely close to done once docs and README wording are verified.
+
+  ---
+  2026-03-29T22:12:28.796441+00:00
+  Backlog review note: builder code already registers MemoryTool, SessionSearchTool, and MultiEditTool. This unit is likely close to done once docs and README wording are verified.
+
+  ---
+  2026-03-29T22:12:28.944473+00:00
+  Backlog review note: builder code already registers MemoryTool, SessionSearchTool, and MultiEditTool. This unit is likely close to done once docs and README wording are verified.
 labels:
 - feature
 - ux

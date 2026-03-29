@@ -157,7 +157,7 @@ fn identity_layer(
 
     if defs.iter().any(|def| def.name == "mana") && defs.iter().any(|def| def.name == "bash") {
         s.push_str(
-            "\nMana guidance:\n- Prefer the native `mana` tool for mana operations instead of `bash` commands like `mana ...`.\n- Use `bash` for mana only when there is no equivalent native mana action available.\n- For longer orchestration, prefer native mana background runs and inspect progress with native mana actions like `agents`, `logs`, `status`, and `next`.\n",
+            "\nMana guidance:\n- Prefer the native `mana` tool for mana operations instead of `bash` commands like `mana ...` whenever an equivalent native action exists.\n- If you need mana status, listing, show/read, create/update/close/claim/release, logs, agents, next, tree, or orchestration runs, use the native `mana` tool first.\n- Use `bash` for mana only when there is no equivalent native mana action available.\n- For longer orchestration, prefer native mana background runs and inspect progress with native mana actions like `agents`, `logs`, `status`, and `next`.\n",
         );
     }
 
@@ -439,6 +439,37 @@ mod tests {
         assert!(result
             .text
             .contains("- grep: Search file contents for a pattern"));
+    }
+
+    #[test]
+    fn system_prompt_mana_guidance_appears_when_mana_and_bash_available() {
+        let mut reg = make_registry();
+        reg.register(Arc::new(FakeTool {
+            name: "bash",
+            description: "Run shell commands",
+            readonly: false,
+        }));
+        reg.register(Arc::new(FakeTool {
+            name: "mana",
+            description: "Manage mana work",
+            readonly: false,
+        }));
+
+        let result = test_assemble(&reg, &[], &[], &[], None, None);
+        assert!(result.text.contains("Mana guidance:"));
+        assert!(result
+            .text
+            .contains("Prefer the native `mana` tool for mana operations"));
+        assert!(result
+            .text
+            .contains("use the native `mana` tool first"));
+    }
+
+    #[test]
+    fn system_prompt_mana_guidance_skipped_without_bash_and_mana_pair() {
+        let reg = make_registry();
+        let result = test_assemble(&reg, &[], &[], &[], None, None);
+        assert!(!result.text.contains("Mana guidance:"));
     }
 
     #[test]

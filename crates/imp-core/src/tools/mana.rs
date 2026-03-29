@@ -1,11 +1,14 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use mana::commands::agents::load_agents;
 use mana::commands::logs::find_all_logs;
 use mana::commands::next::ScoredUnit;
-use mana::commands::run::{RunArgs, RunView};
+use mana::commands::run::{RunArgs, RunSummary, RunUnitStatus, RunView};
+use mana::stream::StreamEvent;
 use mana_core::ops::claim::ClaimParams;
+use serde::Serialize;
 use serde_json::json;
 
 use super::{truncate_head, Tool, ToolContext, ToolOutput, ToolUpdate};
@@ -13,6 +16,7 @@ use crate::error::Result;
 use crate::ui::{NotifyLevel, WidgetContent};
 const MAX_OUTPUT_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
+const MAX_STORED_RUN_EVENTS: usize = 64;
 
 fn find_mana_dir(cwd: &Path) -> std::result::Result<std::path::PathBuf, String> {
     mana_core::discovery::find_mana_dir(cwd).map_err(|e| e.to_string())
@@ -34,6 +38,443 @@ fn send_update(ctx: &ToolContext, text: impl Into<String>, details: serde_json::
         content: vec![imp_llm::ContentBlock::Text { text: text.into() }],
         details,
     });
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NativeRunArgsView {
+    id: Option<String>,
+    jobs: u32,
+    dry_run: bool,
+    loop_mode: bool,
+    keep_going: bool,
+    timeout: u32,
+    idle_timeout: u32,
+    review: bool,
+}
+
+impl From<&RunArgs> for NativeRunArgsView {
+    fn from(args: &RunArgs) -> Self {
+        Self {
+            id: args.id.clone(),
+            jobs: args.jobs,
+            dry_run: args.dry_run,
+            loop_mode: args.loop_mode,
+            keep_going: args.keep_going,
+            timeout: args.timeout,
+            idle_timeout: args.idle_timeout,
+            review: args.review,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NativeRunState {
+    run_id: String,
+    scope: String,
+    background: bool,
+    status: String,
+    error: Option<String>,
+    started_at_ms: u128,
+    finished_at_ms: Option<u128>,
+    args: NativeRunArgsView,
+    summary: RunSummary,
+    units: Vec<RunUnitStatus>,
+    log_lines: Vec<String>,
+    event_count: usize,
+}
+
+impl NativeRunState {
+    fn new(run_id: String, scope: String, background: bool, args: &RunArgs) -> Self {
+        Self {
+            run_id,
+            scope,
+            background,
+            status: "starting".to_string(),
+            error: None,
+            started_at_ms: unix_time_ms(),
+            finished_at_ms: None,
+            args: NativeRunArgsView::from(args),
+            summary: RunSummary {
+                total_units: 0,
+                total_rounds: 0,
+                total_closed: 0,
+                total_failed: 0,
+                total_abandoned: 0,
+                total_awaiting_verify: 0,
+                total_skipped: 0,
+                duration_secs: 0,
+            },
+            units: Vec::new(),
+            log_lines: Vec::new(),
+            event_count: 0,
+        }
+    }
+
+    fn apply_event(&mut self, event: &StreamEvent) {
+        self.event_count += 1;
+        if let Some(line) = stream_event_line(event) {
+            self.log_lines.push(line);
+            if self.log_lines.len() > MAX_STORED_RUN_EVENTS {
+                let overflow = self.log_lines.len() - MAX_STORED_RUN_EVENTS;
+                self.log_lines.drain(0..overflow);
+            }
+        }
+
+        match event {
+            StreamEvent::RunStart {
+                total_units,
+                total_rounds,
+                units,
+                ..
+            } => {
+                self.status = "running".to_string();
+                self.summary.total_units = *total_units;
+                self.summary.total_rounds = *total_rounds;
+                self.units = units
+                    .iter()
+                    .map(|info| RunUnitStatus {
+                        id: info.id.clone(),
+                        title: info.title.clone(),
+                        status: "queued".to_string(),
+                        round: Some(info.round),
+                        agent: None,
+                        model: None,
+                        duration_secs: None,
+                        tool_count: None,
+                        turns: None,
+                        failure_summary: None,
+                        error: None,
+                    })
+                    .collect();
+                self.units.sort_by(|a, b| a.id.cmp(&b.id));
+            }
+            StreamEvent::RunPlan { total_units, .. } => {
+                self.status = "running".to_string();
+                self.summary.total_units = (*total_units).max(self.summary.total_units);
+            }
+            StreamEvent::RoundStart { total_rounds, .. } => {
+                self.status = "running".to_string();
+                self.summary.total_rounds = (*total_rounds).max(self.summary.total_rounds);
+            }
+            StreamEvent::UnitReady { id, title, .. } => {
+                let unit = ensure_unit_status(&mut self.units, id, title);
+                unit.status = "queued".to_string();
+            }
+            StreamEvent::UnitStart {
+                id, title, round, ..
+            } => {
+                self.status = "running".to_string();
+                let unit = ensure_unit_status(&mut self.units, id, title);
+                unit.title = title.clone();
+                unit.round = Some(*round);
+                unit.status = "running".to_string();
+            }
+            StreamEvent::UnitDone {
+                id,
+                success,
+                duration_secs,
+                error,
+                tool_count,
+                turns,
+                failure_summary,
+                ..
+            } => {
+                let unit = ensure_unit_status(&mut self.units, id, id);
+                unit.status = if *success { "done" } else { "failed" }.to_string();
+                unit.duration_secs = Some(*duration_secs);
+                unit.tool_count = *tool_count;
+                unit.turns = *turns;
+                unit.failure_summary = failure_summary.clone();
+                unit.error = error.clone();
+            }
+            StreamEvent::BatchVerify { passed, failed, .. } => {
+                for id in passed {
+                    let unit = ensure_unit_status(&mut self.units, id, id);
+                    unit.status = "done".to_string();
+                }
+                for id in failed {
+                    let unit = ensure_unit_status(&mut self.units, id, id);
+                    unit.status = "failed".to_string();
+                }
+            }
+            StreamEvent::RunEnd {
+                total_closed,
+                total_failed,
+                total_abandoned,
+                total_awaiting_verify,
+                total_skipped,
+                duration_secs,
+                ..
+            } => {
+                self.summary.total_closed = *total_closed;
+                self.summary.total_failed = *total_failed;
+                self.summary.total_abandoned = *total_abandoned;
+                self.summary.total_awaiting_verify = *total_awaiting_verify;
+                self.summary.total_skipped = *total_skipped;
+                self.summary.duration_secs = *duration_secs;
+                self.status = "finished".to_string();
+                self.finished_at_ms = Some(unix_time_ms());
+            }
+            StreamEvent::DryRun { .. } => {
+                self.status = "finished".to_string();
+                self.finished_at_ms = Some(unix_time_ms());
+            }
+            StreamEvent::Error { message } => {
+                self.status = "failed".to_string();
+                self.error = Some(message.clone());
+                self.finished_at_ms = Some(unix_time_ms());
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_with_view(&mut self, view: &RunView) {
+        self.summary = view.summary.clone();
+        self.units = view.units.clone();
+        self.status = "finished".to_string();
+        self.error = None;
+        self.finished_at_ms = Some(unix_time_ms());
+    }
+
+    fn fail(&mut self, error: String) {
+        self.status = "failed".to_string();
+        self.error = Some(error.clone());
+        self.finished_at_ms = Some(unix_time_ms());
+        self.log_lines.push(error);
+        if self.log_lines.len() > MAX_STORED_RUN_EVENTS {
+            let overflow = self.log_lines.len() - MAX_STORED_RUN_EVENTS;
+            self.log_lines.drain(0..overflow);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ManaRunStore {
+    next_id: u64,
+    runs: Vec<NativeRunState>,
+}
+
+impl ManaRunStore {
+    fn start_run(&mut self, scope: String, background: bool, args: &RunArgs) -> String {
+        self.next_id += 1;
+        let run_id = format!("run-{}", self.next_id);
+        self.runs
+            .push(NativeRunState::new(run_id.clone(), scope, background, args));
+        self.trim_history();
+        run_id
+    }
+
+    fn update_with_event(&mut self, run_id: &str, event: &StreamEvent) {
+        if let Some(run) = self.runs.iter_mut().find(|run| run.run_id == run_id) {
+            run.apply_event(event);
+        }
+    }
+
+    fn finish_run(&mut self, run_id: &str, view: &RunView) {
+        if let Some(run) = self.runs.iter_mut().find(|run| run.run_id == run_id) {
+            run.finish_with_view(view);
+        }
+        self.trim_history();
+    }
+
+    fn fail_run(&mut self, run_id: &str, error: String) {
+        if let Some(run) = self.runs.iter_mut().find(|run| run.run_id == run_id) {
+            run.fail(error);
+        }
+        self.trim_history();
+    }
+
+    fn snapshot(&self, run_id: Option<&str>) -> Option<NativeRunState> {
+        if let Some(run_id) = run_id {
+            return self.runs.iter().find(|run| run.run_id == run_id).cloned();
+        }
+
+        self.runs
+            .iter()
+            .rev()
+            .find(|run| run.status == "starting" || run.status == "running")
+            .cloned()
+            .or_else(|| self.runs.last().cloned())
+    }
+
+    fn trim_history(&mut self) {
+        while self.runs.len() > 8 {
+            if let Some(index) = self
+                .runs
+                .iter()
+                .position(|run| run.status != "starting" && run.status != "running")
+            {
+                self.runs.remove(index);
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+fn unix_time_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn ensure_unit_status<'a>(
+    units: &'a mut Vec<RunUnitStatus>,
+    id: &str,
+    title: &str,
+) -> &'a mut RunUnitStatus {
+    if let Some(index) = units.iter().position(|unit| unit.id == id) {
+        return &mut units[index];
+    }
+
+    units.push(RunUnitStatus {
+        id: id.to_string(),
+        title: title.to_string(),
+        status: "queued".to_string(),
+        round: None,
+        agent: None,
+        model: None,
+        duration_secs: None,
+        tool_count: None,
+        turns: None,
+        failure_summary: None,
+        error: None,
+    });
+    let index = units.len() - 1;
+    &mut units[index]
+}
+
+fn stream_event_line(event: &StreamEvent) -> Option<String> {
+    match event {
+        StreamEvent::RunStart {
+            total_units,
+            total_rounds,
+            ..
+        } => Some(format!(
+            "Mana run started: {total_units} jobs across {total_rounds} waves"
+        )),
+        StreamEvent::RunPlan {
+            waves,
+            file_overlaps,
+            ..
+        } => Some(format!(
+            "Plan ready: {} waves · {} overlapping file groups",
+            waves.len(),
+            file_overlaps.len()
+        )),
+        StreamEvent::RoundStart {
+            round,
+            total_rounds,
+            unit_count,
+        } => Some(format!(
+            "Round {round}/{total_rounds}: {unit_count} unit(s)"
+        )),
+        StreamEvent::UnitReady {
+            id,
+            title,
+            unblocked_by,
+        } => Some(format!("Ready: {id} {title} (unblocked by {unblocked_by})")),
+        StreamEvent::UnitStart { id, title, round, .. } => {
+            Some(format!("▶ {id}  {title}  wave {round}"))
+        }
+        StreamEvent::UnitThinking { id, text } => Some(format!("… {id}  {}", truncate_line_for_log(text))),
+        StreamEvent::UnitTool {
+            id,
+            tool_name,
+            tool_count,
+            file_path,
+        } => Some(match file_path {
+            Some(path) => format!("⚙ {id}  #{tool_count} {tool_name}  {path}"),
+            None => format!("⚙ {id}  #{tool_count} {tool_name}"),
+        }),
+        StreamEvent::UnitTokens {
+            id,
+            input_tokens,
+            output_tokens,
+            cost,
+            ..
+        } => Some(format!(
+            "$ {id}  in {input_tokens} · out {output_tokens} · ${cost:.4}"
+        )),
+        StreamEvent::UnitDone {
+            id,
+            success,
+            duration_secs,
+            error,
+            ..
+        } => Some(if *success {
+            format!("✓ {id}  done  {duration_secs}s")
+        } else {
+            format!(
+                "✗ {id}  failed  {}",
+                error.clone().unwrap_or_else(|| "error".to_string())
+            )
+        }),
+        StreamEvent::RoundEnd {
+            round,
+            success_count,
+            failed_count,
+        } => Some(format!(
+            "Round {round} complete: {success_count} done · {failed_count} failed"
+        )),
+        StreamEvent::RunEnd {
+            total_closed,
+            total_failed,
+            duration_secs,
+            ..
+        } => Some(format!(
+            "Mana run finished: {total_closed} done · {total_failed} failed · {duration_secs}s"
+        )),
+        StreamEvent::BatchVerify {
+            commands_run,
+            passed,
+            failed,
+        } => Some(format!(
+            "Batch verify: {commands_run} command(s) · {} passed · {} failed",
+            passed.len(),
+            failed.len()
+        )),
+        StreamEvent::DryRun { rounds, .. } => {
+            Some(format!("Dry run: {} planned wave(s)", rounds.len()))
+        }
+        StreamEvent::Error { message } => Some(format!("Run error: {message}")),
+    }
+}
+
+fn truncate_line_for_log(text: &str) -> String {
+    const MAX_CHARS: usize = 160;
+    let mut out = String::new();
+    let mut chars = text.chars();
+    for _ in 0..MAX_CHARS {
+        if let Some(ch) = chars.next() {
+            out.push(ch);
+        } else {
+            return out;
+        }
+    }
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
+}
+
+fn update_run_store_with_event(store: &std::sync::Mutex<ManaRunStore>, run_id: &str, event: &StreamEvent) {
+    if let Ok(mut store) = store.lock() {
+        store.update_with_event(run_id, event);
+    }
+}
+
+fn finish_run_in_store(store: &std::sync::Mutex<ManaRunStore>, run_id: &str, view: &RunView) {
+    if let Ok(mut store) = store.lock() {
+        store.finish_run(run_id, view);
+    }
+}
+
+fn fail_run_in_store(store: &std::sync::Mutex<ManaRunStore>, run_id: &str, error: String) {
+    if let Ok(mut store) = store.lock() {
+        store.fail_run(run_id, error);
+    }
 }
 
 fn run_summary_lines(view: &RunView) -> Vec<String> {
@@ -86,14 +527,15 @@ fn mana_widget_lines(summary: impl Into<String>, detail: Option<String>) -> Widg
     WidgetContent::Lines(lines)
 }
 
-fn background_run_started_output(scope: &str, run_args: &RunArgs) -> ToolOutput {
+fn background_run_started_output(scope: &str, run_id: &str, run_args: &RunArgs) -> ToolOutput {
     let text = format!(
-        "Started mana run in background for {scope}. Use mana(action=\"agents\") to inspect active workers, mana(action=\"logs\", id=...) for output, and mana(action=\"status\") or mana(action=\"next\") to inspect project state."
+        "Started mana run in background for {scope} as {run_id}. Use mana(action=\"run_state\", run_id=\"{run_id}\") for native status, mana(action=\"logs\", run_id=\"{run_id}\") for recent native events, and mana(action=\"agents\") / mana(action=\"logs\", id=...) for worker output."
     );
     ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text }],
         details: json!({
             "background": true,
+            "run_id": run_id,
             "scope": scope,
             "jobs": run_args.jobs,
             "loop": run_args.loop_mode,
@@ -104,7 +546,13 @@ fn background_run_started_output(scope: &str, run_args: &RunArgs) -> ToolOutput 
     }
 }
 
-fn spawn_background_run(mana_dir: std::path::PathBuf, run_args: RunArgs, ctx: ToolContext) {
+fn spawn_background_run(
+    mana_dir: std::path::PathBuf,
+    run_args: RunArgs,
+    ctx: ToolContext,
+    run_store: Arc<std::sync::Mutex<ManaRunStore>>,
+    run_id: String,
+) {
     let ui = ctx.ui.clone();
     let scope = run_args
         .id
@@ -119,18 +567,27 @@ fn spawn_background_run(mana_dir: std::path::PathBuf, run_args: RunArgs, ctx: To
             "mana",
             Some(mana_widget_lines(
                 format!("running {scope}"),
-                Some("inspect with mana agents / logs / status".to_string()),
+                Some(format!("inspect with mana run_state/logs (run_id={run_id})")),
             )),
         )
         .await;
 
+        let run_store_for_sink = run_store.clone();
+        let run_id_for_sink = run_id.clone();
         let result = tokio::task::spawn_blocking(move || {
-            mana::commands::run::run_with_stream_capture_and_sink(&mana_dir, run_args, None)
+            mana::commands::run::run_with_stream_capture_and_sink(
+                &mana_dir,
+                run_args,
+                Some(Arc::new(move |event| {
+                    update_run_store_with_event(&run_store_for_sink, &run_id_for_sink, &event);
+                })),
+            )
         })
         .await;
 
         match result {
             Ok(Ok(view)) => {
+                finish_run_in_store(&run_store, &run_id, &view);
                 let summary = format!(
                     "mana: {scope} finished · {} done · {} failed",
                     view.summary.total_closed, view.summary.total_failed
@@ -148,6 +605,7 @@ fn spawn_background_run(mana_dir: std::path::PathBuf, run_args: RunArgs, ctx: To
             }
             Ok(Err(err)) => {
                 let message = format!("mana: {scope} failed: {err}");
+                fail_run_in_store(&run_store, &run_id, message.clone());
                 ui.set_status("mana", Some(&message)).await;
                 ui.set_widget("mana", Some(mana_widget_lines(message.clone(), None)))
                     .await;
@@ -155,6 +613,7 @@ fn spawn_background_run(mana_dir: std::path::PathBuf, run_args: RunArgs, ctx: To
             }
             Err(join_err) => {
                 let message = format!("mana: {scope} task failed: {join_err}");
+                fail_run_in_store(&run_store, &run_id, message.clone());
                 ui.set_status("mana", Some(&message)).await;
                 ui.set_widget("mana", Some(mana_widget_lines(message.clone(), None)))
                     .await;
@@ -170,6 +629,71 @@ fn text_output(text: String, details: serde_json::Value) -> ToolOutput {
         details,
         is_error: false,
     }
+}
+
+fn run_state_snapshot(
+    run_store: &Arc<std::sync::Mutex<ManaRunStore>>,
+    run_id: Option<&str>,
+) -> Option<NativeRunState> {
+    run_store.lock().ok().and_then(|store| store.snapshot(run_id))
+}
+
+fn run_state_output(state: &NativeRunState) -> ToolOutput {
+    let mut lines = vec![format!(
+        "Mana run {}: {} · {}",
+        state.run_id, state.scope, state.status
+    )];
+    lines.push(format!(
+        "{} total · {} done · {} failed · {} awaiting verify · {} skipped",
+        state.summary.total_units,
+        state.summary.total_closed,
+        state.summary.total_failed,
+        state.summary.total_awaiting_verify,
+        state.summary.total_skipped
+    ));
+    if let Some(last) = state.log_lines.last() {
+        lines.push(format!("Latest: {last}"));
+    }
+    text_output(
+        lines.join("\n"),
+        serde_json::to_value(state).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+fn evaluate_run_output(state: &NativeRunState) -> ToolOutput {
+    let headline = match state.status.as_str() {
+        "starting" | "running" => format!(
+            "Run {} is still running for {}.",
+            state.run_id, state.scope
+        ),
+        "failed" => format!(
+            "Run {} failed for {}.",
+            state.run_id, state.scope
+        ),
+        _ if state.summary.total_failed > 0 => format!(
+            "Run {} finished with {} failed unit(s).",
+            state.run_id, state.summary.total_failed
+        ),
+        _ if state.summary.total_awaiting_verify > 0 => format!(
+            "Run {} finished with {} unit(s) awaiting verify.",
+            state.run_id, state.summary.total_awaiting_verify
+        ),
+        _ => format!(
+            "Run {} finished successfully: {} unit(s) done.",
+            state.run_id, state.summary.total_closed
+        ),
+    };
+
+    let latest = state
+        .log_lines
+        .last()
+        .map(|line| format!("Latest: {line}"))
+        .unwrap_or_else(|| "Latest: (no stream events captured yet)".to_string());
+
+    text_output(
+        format!("{headline}\n{latest}"),
+        serde_json::to_value(state).unwrap_or(serde_json::Value::Null),
+    )
 }
 
 fn claim_output(result: &mana_core::ops::claim::ClaimResult) -> ToolOutput {
@@ -275,7 +799,17 @@ fn tree_lines(node: &mana_core::api::TreeNode, indent: usize, out: &mut Vec<Stri
     }
 }
 
-pub struct ManaTool;
+pub struct ManaTool {
+    run_store: Arc<std::sync::Mutex<ManaRunStore>>,
+}
+
+impl Default for ManaTool {
+    fn default() -> Self {
+        Self {
+            run_store: Arc::new(std::sync::Mutex::new(ManaRunStore::default())),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for ManaTool {
@@ -286,14 +820,15 @@ impl Tool for ManaTool {
         "Mana"
     }
     fn description(&self) -> &str {
-        "Work coordination substrate. Prefer this over bash for mana operations: inspect units, create/update/claim/release/close work, inspect logs/agents, and run orchestration natively. Use for complex tasks or delegation."
+        "Work coordination substrate. Prefer this over bash for mana operations when an equivalent action exists: inspect units, create/update/claim/release work, inspect orchestration logs/agents, and run orchestration natively with in-session run state. Use for complex tasks or delegation."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "claim", "release", "logs", "agents", "next", "tree"] },
+                "action": { "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "run_state", "evaluate", "claim", "release", "logs", "agents", "next", "tree"] },
                 "id": { "type": "string" },
+                "run_id": { "type": "string", "description": "Native in-session mana run ID, returned by action=run" },
                 "title": { "type": "string" },
                 "verify": { "type": "string", "description": "Shell command, must exit 0" },
                 "description": { "type": "string" },
@@ -308,7 +843,14 @@ impl Tool for ManaTool {
                 "all": { "type": "boolean" },
                 "by": { "type": "string", "description": "Who is claiming the unit" },
                 "count": { "type": "integer", "description": "Number of next recommendations to return" },
-                "background": { "type": "boolean", "description": "Run mana orchestration in the background and return immediately (default true unless dry_run=true)" }
+                "background": { "type": "boolean", "description": "Run mana orchestration in the background and return immediately (default true unless dry_run=true)" },
+                "jobs": { "type": "integer" },
+                "dry_run": { "type": "boolean" },
+                "loop": { "type": "boolean" },
+                "keep_going": { "type": "boolean" },
+                "timeout": { "type": "integer" },
+                "idle_timeout": { "type": "integer" },
+                "review": { "type": "boolean" }
             },
             "required": ["action"],
         })
@@ -484,9 +1026,29 @@ impl Tool for ManaTool {
                 }
             }
             "logs" => {
+                if let Some(run_id) = params["run_id"].as_str() {
+                    if let Some(state) = run_state_snapshot(&self.run_store, Some(run_id)) {
+                        let text = if state.log_lines.is_empty() {
+                            format!(
+                                "No native stream events captured yet for run {}.",
+                                state.run_id
+                            )
+                        } else {
+                            truncate_with_note(&state.log_lines.join("\n"))
+                        };
+                        return Ok(text_output(
+                            text,
+                            serde_json::to_value(&state).unwrap_or(serde_json::Value::Null),
+                        ));
+                    }
+                    return Ok(ToolOutput::error(format!(
+                        "Unknown native mana run_id: {run_id}"
+                    )));
+                }
+
                 let id = params["id"]
                     .as_str()
-                    .ok_or_else(|| crate::error::Error::Tool("logs requires 'id'".into()))?;
+                    .ok_or_else(|| crate::error::Error::Tool("logs requires 'id' or 'run_id'".into()))?;
                 match find_all_logs(id) {
                     Ok(paths) if paths.is_empty() => Ok(ToolOutput::text(format!(
                         "No logs for unit {id}. Has it been dispatched with mana run?"
@@ -512,6 +1074,24 @@ impl Tool for ManaTool {
                 Ok(agents) => Ok(json_output(&agents)),
                 Err(e) => Ok(ToolOutput::error(e.to_string())),
             },
+            "run_state" | "evaluate" => {
+                let run_id = params["run_id"].as_str();
+                match run_state_snapshot(&self.run_store, run_id) {
+                    Some(state) => {
+                        if action == "evaluate" {
+                            Ok(evaluate_run_output(&state))
+                        } else {
+                            Ok(run_state_output(&state))
+                        }
+                    }
+                    None => {
+                        let which = run_id.unwrap_or("latest");
+                        Ok(ToolOutput::error(format!(
+                            "No native mana run state available for {which}. Start one with mana(action=\"run\")."
+                        )))
+                    }
+                }
+            }
             "next" => {
                 let count = params["count"].as_u64().unwrap_or(1).max(1) as usize;
                 match mana_core::api::load_index(&mana_dir) {
@@ -673,78 +1253,55 @@ impl Tool for ManaTool {
                     review: params["review"].as_bool().unwrap_or(false),
                 };
                 let background = params["background"].as_bool().unwrap_or(!run_args.dry_run);
+                let scope = run_args
+                    .id
+                    .as_deref()
+                    .map(|id| format!("unit {id}"))
+                    .unwrap_or_else(|| "all ready units".to_string());
+                let run_id = {
+                    let mut store = self.run_store.lock().map_err(|_| {
+                        crate::error::Error::Tool("mana run state lock poisoned".into())
+                    })?;
+                    store.start_run(scope.clone(), background, &run_args)
+                };
 
                 if background {
-                    let scope = run_args
-                        .id
-                        .as_deref()
-                        .map(|id| format!("unit {id}"))
-                        .unwrap_or_else(|| "all ready units".to_string());
-                    let started = background_run_started_output(&scope, &run_args);
-                    spawn_background_run(mana_dir.clone(), run_args, ctx);
+                    let started = background_run_started_output(&scope, &run_id, &run_args);
+                    spawn_background_run(
+                        mana_dir.clone(),
+                        run_args,
+                        ctx,
+                        self.run_store.clone(),
+                        run_id,
+                    );
                     return Ok(started);
                 }
 
                 send_update(
                     &ctx,
-                    "Starting mana run...",
-                    json!({"kind": "mana_run_status", "status": "starting"}),
+                    format!("Starting mana run {run_id}..."),
+                    json!({"kind": "mana_run_status", "status": "starting", "run_id": run_id}),
                 );
                 ctx.ui
                     .set_widget(
                         "mana",
                         Some(mana_widget_lines(
-                            "running mana".to_string(),
+                            format!("running mana ({run_id})"),
                             Some("native foreground orchestration".to_string()),
                         )),
                     )
                     .await;
                 ctx.ui.set_status("mana", Some("mana: running")).await;
 
+                let run_store = self.run_store.clone();
+                let run_id_for_sink = run_id.clone();
+                let update_tx = ctx.update_tx.clone();
                 match mana::commands::run::run_with_stream_capture_and_sink(
                     &mana_dir,
                     run_args,
-                    Some(std::sync::Arc::new({
-                        let update_tx = ctx.update_tx.clone();
-                        move |event| {
-                            let line = match &event {
-                                mana::stream::StreamEvent::RunStart {
-                                    total_units,
-                                    total_rounds,
-                                    ..
-                                } => format!(
-                                    "Mana run started: {total_units} jobs across {total_rounds} waves"
-                                ),
-                                mana::stream::StreamEvent::UnitStart { id, title, round, .. } => {
-                                    format!("▶ {id}  {title}  wave {round}")
-                                }
-                                mana::stream::StreamEvent::UnitDone {
-                                    id,
-                                    success,
-                                    duration_secs,
-                                    error,
-                                    ..
-                                } => {
-                                    if *success {
-                                        format!("✓ {id}  done  {}s", duration_secs)
-                                    } else {
-                                        format!(
-                                            "✗ {id}  failed  {}",
-                                            error.clone().unwrap_or_else(|| "error".to_string())
-                                        )
-                                    }
-                                }
-                                mana::stream::StreamEvent::RunEnd {
-                                    total_closed,
-                                    total_failed,
-                                    duration_secs,
-                                    ..
-                                } => format!(
-                                    "Mana run finished: {total_closed} done · {total_failed} failed · {}s",
-                                    duration_secs
-                                ),
-                                _ => return,
-                            };
+                    Some(Arc::new(move |event| {
+                        update_run_store_with_event(&run_store, &run_id_for_sink, &event);
+                        if let Some(line) = stream_event_line(&event) {
                             let _ = update_tx.try_send(ToolUpdate {
                                 content: vec![imp_llm::ContentBlock::Text { text: line }],
                                 details: serde_json::to_value(&event)
@@ -754,8 +1311,13 @@ impl Tool for ManaTool {
                     })),
                 ) {
                     Ok(view) => {
+                        finish_run_in_store(&self.run_store, &run_id, &view);
                         for line in run_summary_lines(&view) {
-                            send_update(&ctx, line, json!({"kind": "mana_run_view", "view": view}));
+                            send_update(
+                                &ctx,
+                                line,
+                                json!({"kind": "mana_run_view", "run_id": run_id, "view": view}),
+                            );
                         }
                         let summary = format!(
                             "mana finished · {} done · {} failed",
@@ -770,15 +1332,21 @@ impl Tool for ManaTool {
                                 .into_iter()
                                 .map(|text| imp_llm::ContentBlock::Text { text })
                                 .collect(),
-                            details: serde_json::to_value(&view).unwrap_or(serde_json::Value::Null),
+                            details: json!({
+                                "run_id": run_id,
+                                "view": serde_json::to_value(&view).unwrap_or(serde_json::Value::Null)
+                            }),
                             is_error: false,
                         })
                     }
-                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                    Err(e) => {
+                        fail_run_in_store(&self.run_store, &run_id, e.to_string());
+                        Ok(ToolOutput::error(e.to_string()))
+                    }
                 }
             }
             other => Ok(ToolOutput::error(format!(
-                "Unknown action: {other}. Use: status, list, show, create, close, update, run, claim, release, logs, agents, next, tree"
+                "Unknown action: {other}. Use: status, list, show, create, close, update, run, run_state, evaluate, claim, release, logs, agents, next, tree"
             ))),
         }
     }
@@ -791,7 +1359,9 @@ mod tests {
     use serde_json::json;
     use tokio::sync::mpsc;
 
-    use super::ManaTool;
+    use super::{
+        stream_event_line, evaluate_run_output, ManaRunStore, ManaTool, NativeRunState,
+    };
     use crate::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
     use crate::ui::NullInterface;
 
@@ -829,7 +1399,7 @@ mod tests {
             read_max_lines: 500,
         };
 
-        let tool = ManaTool;
+        let tool = ManaTool::default();
         let outcome = tool
             .execute("call_1", json!({ "action": action, "id": "1" }), ctx)
             .await;
@@ -886,7 +1456,7 @@ mod tests {
     async fn run_with_ctx_mode(mode: crate::config::AgentMode, action: &str) -> ManaResult {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _keep) = ctx_with_mode(dir.path(), mode);
-        let tool = ManaTool;
+        let tool = ManaTool::default();
         let outcome = tool
             .execute("call_ctx", json!({ "action": action, "id": "1" }), ctx)
             .await;
@@ -980,8 +1550,8 @@ mod tests {
     #[tokio::test]
     async fn orchestrator_allows_extended_actions() {
         for action in &[
-            "status", "list", "show", "create", "close", "update", "run", "claim", "release",
-            "logs", "agents", "next",
+            "status", "list", "show", "create", "close", "update", "run", "run_state",
+            "evaluate", "claim", "release", "logs", "agents", "next",
         ] {
             match run_with_mode("orchestrator", action).await {
                 ManaResult::Attempted(_) => {}
@@ -1032,8 +1602,8 @@ mod tests {
     #[tokio::test]
     async fn ctx_full_allows_extended_actions() {
         for action in &[
-            "status", "list", "show", "create", "close", "update", "run", "claim", "release",
-            "logs", "agents", "next", "tree",
+            "status", "list", "show", "create", "close", "update", "run", "run_state",
+            "evaluate", "claim", "release", "logs", "agents", "next", "tree",
         ] {
             match run_with_ctx_mode(crate::config::AgentMode::Full, action).await {
                 ManaResult::Attempted(_) => {}
@@ -1048,7 +1618,7 @@ mod tests {
     async fn next_returns_ranked_text() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
-        let tool = ManaTool;
+        let tool = ManaTool::default();
         let result = tool
             .execute("call_next", json!({ "action": "next", "count": 1 }), ctx)
             .await
@@ -1061,7 +1631,7 @@ mod tests {
     async fn background_run_returns_promptly() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
-        let tool = ManaTool;
+        let tool = ManaTool::default();
         let result = tool
             .execute(
                 "call_bg",
@@ -1073,5 +1643,132 @@ mod tests {
         let text = result.text_content().unwrap_or("");
         assert!(text.contains("Started mana run in background"));
         assert_eq!(result.details["background"], true);
+        assert!(result.details["run_id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn run_state_and_evaluate_report_native_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
+        let tool = ManaTool::default();
+
+        let run_result = tool
+            .execute(
+                "call_run",
+                json!({ "action": "run", "background": false, "dry_run": true }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let run_id = run_result.details["run_id"]
+            .as_str()
+            .expect("run_id")
+            .to_string();
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let (ctx2, _keep2) = ctx_with_mode(dir2.path(), crate::config::AgentMode::Full);
+        let state = tool
+            .execute(
+                "call_state",
+                json!({ "action": "run_state", "run_id": run_id }),
+                ctx2,
+            )
+            .await
+            .unwrap();
+        assert!(state.text_content().unwrap_or("").contains("Mana run run-"));
+
+        let dir3 = tempfile::tempdir().unwrap();
+        let (ctx3, _keep3) = ctx_with_mode(dir3.path(), crate::config::AgentMode::Full);
+        let evaluation = tool
+            .execute(
+                "call_eval",
+                json!({ "action": "evaluate", "run_id": run_result.details["run_id"] }),
+                ctx3,
+            )
+            .await
+            .unwrap();
+        let eval_text = evaluation.text_content().unwrap_or("");
+        assert!(eval_text.contains("Run run-") && eval_text.contains("finished"));
+    }
+
+    #[test]
+    fn run_store_prefers_active_run_snapshot() {
+        let mut store = ManaRunStore::default();
+        let active_id = store.start_run(
+            "all ready units".to_string(),
+            true,
+            &mana::commands::run::RunArgs {
+                id: None,
+                jobs: 2,
+                dry_run: false,
+                loop_mode: false,
+                keep_going: false,
+                timeout: 30,
+                idle_timeout: 5,
+                json_stream: true,
+                review: false,
+            },
+        );
+        let finished_id = store.start_run(
+            "unit 1".to_string(),
+            false,
+            &mana::commands::run::RunArgs {
+                id: Some("1".to_string()),
+                jobs: 1,
+                dry_run: true,
+                loop_mode: false,
+                keep_going: false,
+                timeout: 30,
+                idle_timeout: 5,
+                json_stream: true,
+                review: false,
+            },
+        );
+        store.fail_run(&finished_id, "done".to_string());
+
+        let latest = store.snapshot(None).expect("snapshot");
+        assert_eq!(latest.run_id, active_id);
+        assert_eq!(latest.status, "starting");
+    }
+
+    #[test]
+    fn stream_event_line_formats_tool_activity() {
+        let line = stream_event_line(&mana::stream::StreamEvent::UnitTool {
+            id: "1".to_string(),
+            tool_name: "read".to_string(),
+            tool_count: 3,
+            file_path: Some("src/lib.rs".to_string()),
+        })
+        .expect("line");
+        assert!(line.contains("#3 read"));
+        assert!(line.contains("src/lib.rs"));
+    }
+
+    #[test]
+    fn evaluate_output_reports_failures() {
+        let mut state = NativeRunState::new(
+            "run-7".to_string(),
+            "unit 7".to_string(),
+            false,
+            &mana::commands::run::RunArgs {
+                id: Some("7".to_string()),
+                jobs: 1,
+                dry_run: false,
+                loop_mode: false,
+                keep_going: false,
+                timeout: 30,
+                idle_timeout: 5,
+                json_stream: true,
+                review: false,
+            },
+        );
+        state.status = "finished".to_string();
+        state.summary.total_failed = 2;
+        state.log_lines.push("✗ 7 failed verify".to_string());
+
+        let output = evaluate_run_output(&state);
+        let text = output.text_content().unwrap_or("");
+        assert!(text.contains("2 failed unit"));
+        assert!(text.contains("Latest: ✗ 7 failed verify"));
     }
 }
