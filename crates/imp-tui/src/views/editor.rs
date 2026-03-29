@@ -1,5 +1,6 @@
 use imp_core::config::AnimationLevel;
 use imp_llm::ThinkingLevel;
+use crate::animation::{activity_label, ActivitySurface, AnimationState};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Style};
@@ -286,6 +287,7 @@ pub struct EditorView<'a> {
     has_queued: bool,
     tick: u64,
     animation_level: AnimationLevel,
+    activity_state: AnimationState,
 }
 
 impl<'a> EditorView<'a> {
@@ -299,6 +301,7 @@ impl<'a> EditorView<'a> {
             has_queued: false,
             tick: 0,
             animation_level: AnimationLevel::Minimal,
+            activity_state: AnimationState::Idle,
         }
     }
 
@@ -327,6 +330,11 @@ impl<'a> EditorView<'a> {
         self.animation_level = level;
         self
     }
+
+    pub fn activity_state(mut self, state: AnimationState) -> Self {
+        self.activity_state = state;
+        self
+    }
 }
 
 impl Widget for EditorView<'_> {
@@ -339,6 +347,12 @@ impl Widget for EditorView<'_> {
         let border_color = base_border_color;
 
         let top_title = String::new();
+        let activity = activity_label(
+            self.activity_state,
+            self.tick,
+            self.animation_level,
+            ActivitySurface::Editor,
+        );
 
         // Build bottom-right model + thinking indicator
         let thinking_label = match self.thinking_level {
@@ -349,16 +363,33 @@ impl Widget for EditorView<'_> {
             ThinkingLevel::High => "high",
             ThinkingLevel::XHigh => "xhigh",
         };
+        let model_label = if self.model_name.is_empty() {
+            None
+        } else {
+            Some(self.model_name.to_string())
+        };
         let queue_label = if self.has_queued {
             Some("queued".to_string())
         } else {
             None
         };
-        let bottom_title = match (queue_label, !thinking_label.is_empty()) {
-            (Some(queue), true) => format!(" {queue} · {thinking_label} "),
-            (Some(queue), false) => format!(" {queue} "),
-            (None, true) => format!(" {thinking_label} "),
-            (None, false) => String::new(),
+        let mut parts = Vec::new();
+        if let Some(model) = model_label {
+            parts.push(model);
+        }
+        if let Some(queue) = queue_label {
+            parts.push(queue);
+        }
+        if !thinking_label.is_empty() {
+            parts.push(thinking_label.to_string());
+        }
+        if !activity.is_empty() {
+            parts.push(activity);
+        }
+        let bottom_title = if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" {} ", parts.join(" · "))
         };
 
         let block = Block::default()

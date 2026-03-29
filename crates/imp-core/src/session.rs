@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use imp_llm::{AssistantMessage, Message, Model, ToolResultMessage};
+use imp_llm::{truncate_chars_with_suffix, AssistantMessage, Message, Model, ToolResultMessage};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentEvent;
@@ -88,6 +88,16 @@ pub struct SessionInfo {
     pub updated_at: u64,
     pub message_count: usize,
     pub first_message: Option<String>,
+}
+
+impl SessionInfo {
+    /// A short, single-line chat title derived from the first prompt.
+    pub fn title(&self, max_chars: usize) -> Option<String> {
+        self.first_message
+            .as_deref()
+            .map(|text| summarize_session_title(text, max_chars))
+            .filter(|title| !title.is_empty())
+    }
 }
 
 /// Manages a single session's entries and persistence.
@@ -223,6 +233,16 @@ impl SessionManager {
     /// Set the session name.
     pub fn set_name(&mut self, name: &str) {
         self.session_name = Some(name.to_string());
+    }
+
+    /// A short, single-line chat title derived from the first prompt.
+    pub fn title(&self, max_chars: usize) -> Option<String> {
+        self.entries.iter().find_map(|entry| match entry {
+            SessionEntry::Message { message, .. } => extract_text(message),
+            _ => None,
+        })
+        .map(|text| summarize_session_title(&text, max_chars))
+        .filter(|title| !title.is_empty())
     }
 
     /// Append an entry. Sets parent_id to current leaf_id, updates leaf_id,
@@ -860,6 +880,142 @@ fn extract_text(message: &Message) -> Option<String> {
     })
 }
 
+fn summarize_session_title(text: &str, max_chars: usize) -> String {
+    let collapsed = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut normalized = collapsed.to_ascii_lowercase();
+
+    for prefix in [
+        "can we ",
+        "could we ",
+        "can you ",
+        "could you ",
+        "would you ",
+        "please ",
+        "please can you ",
+        "please could you ",
+        "help me ",
+        "i want to ",
+        "i'd like to ",
+        "let's ",
+    ] {
+        if let Some(stripped) = normalized.strip_prefix(prefix) {
+            normalized = stripped.to_string();
+            break;
+        }
+    }
+
+    for (phrase, token) in [
+        ("top bar", "top_bar"),
+        ("prompt box", "prompt_box"),
+        ("thinking level", "thinking_level"),
+        ("model name", "model_name"),
+        ("session name", "session_name"),
+        ("chat title", "chat_title"),
+        ("chat name", "chat_name"),
+        ("session id", "session_id"),
+        ("context window", "context_window"),
+    ] {
+        normalized = normalized.replace(phrase, token);
+    }
+
+    let mentions_top_bar_layout = normalized.contains("top_bar")
+        && (normalized.contains("display")
+            || normalized.contains("displayed")
+            || normalized.contains("shown")
+            || normalized.contains("information"));
+
+    let verbs = [
+        "fix",
+        "adjust",
+        "update",
+        "change",
+        "move",
+        "rename",
+        "remove",
+        "add",
+        "show",
+        "hide",
+        "improve",
+        "refactor",
+        "debug",
+        "investigate",
+        "implement",
+        "summarize",
+    ];
+
+    let stopwords = [
+        "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "get",
+        "have", "how", "i", "if", "in", "instead", "into", "is", "it", "its", "me", "my",
+        "now", "of", "on", "or", "please", "right", "so", "string", "that", "the", "their",
+        "them", "then", "there", "these", "they", "this", "to", "up", "we", "what", "when",
+        "where", "which", "while", "with", "would", "listed", "resume", "prompt", "first",
+        "summarized", "summarize", "information", "display", "displayed", "shown", "currently",
+    ];
+
+    let mut verb: Option<String> = None;
+    let mut nouns: Vec<String> = Vec::new();
+
+    for raw in normalized.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+        if raw.is_empty() {
+            continue;
+        }
+        if verb.is_none() && verbs.contains(&raw) {
+            verb = Some(raw.to_string());
+            continue;
+        }
+        if stopwords.contains(&raw) {
+            continue;
+        }
+        if nouns.iter().any(|existing| existing == raw) {
+            continue;
+        }
+        nouns.push(raw.to_string());
+    }
+
+    let mut parts = Vec::new();
+    if let Some(verb) = verb {
+        parts.push(verb);
+    }
+
+    for noun in nouns {
+        if parts.len() >= 4 {
+            break;
+        }
+        parts.push(noun.clone());
+        if noun == "top_bar" && mentions_top_bar_layout && parts.len() < 4 {
+            parts.push("layout".to_string());
+        }
+    }
+
+    if parts.is_empty() {
+        parts.push(collapsed.trim().to_string());
+    }
+
+    let summary = parts
+        .into_iter()
+        .map(|part| match part.as_str() {
+            "top_bar" => "top bar".to_string(),
+            "prompt_box" => "prompt box".to_string(),
+            "thinking_level" => "thinking level".to_string(),
+            "model_name" => "model name".to_string(),
+            "session_name" => "session name".to_string(),
+            "chat_title" => "chat title".to_string(),
+            "chat_name" => "chat name".to_string(),
+            "session_id" => "session id".to_string(),
+            "context_window" => "context window".to_string(),
+            _ => part,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    truncate_chars_with_suffix(summary.trim(), max_chars, "…")
+}
+
 /// Read just the first non-empty line of a file.
 fn read_first_line(path: &Path) -> Result<String> {
     use std::io::BufRead;
@@ -923,6 +1079,15 @@ mod tests {
             parent_id: None, // append() will set this
             message: Message::user(text),
         }
+    }
+
+    #[test]
+    fn summarized_title_compacts_request_into_short_label() {
+        let title = summarize_session_title(
+            "can we adjust the information that is displayed in the top bar",
+            48,
+        );
+        assert_eq!(title, "adjust top bar layout");
     }
 
     #[test]

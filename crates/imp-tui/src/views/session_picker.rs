@@ -110,12 +110,14 @@ impl Widget for SessionPickerView<'_> {
             };
 
             let preview = session
-                .first_message
-                .as_deref()
-                .unwrap_or("(empty)")
-                .chars()
-                .take(40)
-                .collect::<String>();
+                .title(40)
+                .or_else(|| {
+                    session
+                        .first_message
+                        .as_deref()
+                        .map(|text| text.chars().take(40).collect())
+                })
+                .unwrap_or_else(|| "(empty)".to_string());
 
             let age = format_age(session.updated_at);
             let msgs = format!("{}msg", session.message_count);
