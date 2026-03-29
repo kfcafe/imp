@@ -10,7 +10,7 @@ use serde_json::json;
 
 use super::{truncate_head, Tool, ToolContext, ToolOutput, ToolUpdate};
 use crate::error::Result;
-use crate::ui::NotifyLevel;
+use crate::ui::{NotifyLevel, WidgetContent};
 const MAX_OUTPUT_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 
@@ -78,6 +78,14 @@ fn run_summary_lines(view: &RunView) -> Vec<String> {
     lines
 }
 
+fn mana_widget_lines(summary: impl Into<String>, detail: Option<String>) -> WidgetContent {
+    let mut lines = vec![summary.into()];
+    if let Some(detail) = detail {
+        lines.push(detail);
+    }
+    WidgetContent::Lines(lines)
+}
+
 fn background_run_started_output(scope: &str, run_args: &RunArgs) -> ToolOutput {
     let text = format!(
         "Started mana run in background for {scope}. Use mana(action=\"agents\") to inspect active workers, mana(action=\"logs\", id=...) for output, and mana(action=\"status\") or mana(action=\"next\") to inspect project state."
@@ -107,6 +115,14 @@ fn spawn_background_run(mana_dir: std::path::PathBuf, run_args: RunArgs, ctx: To
     tokio::spawn(async move {
         ui.set_status("mana", Some(&format!("mana: running {scope}")))
             .await;
+        ui.set_widget(
+            "mana",
+            Some(mana_widget_lines(
+                format!("running {scope}"),
+                Some("inspect with mana agents / logs / status".to_string()),
+            )),
+        )
+        .await;
 
         let result = tokio::task::spawn_blocking(move || {
             mana::commands::run::run_with_stream_capture_and_sink(&mana_dir, run_args, None)
@@ -120,16 +136,28 @@ fn spawn_background_run(mana_dir: std::path::PathBuf, run_args: RunArgs, ctx: To
                     view.summary.total_closed, view.summary.total_failed
                 );
                 ui.set_status("mana", Some(&summary)).await;
+                ui.set_widget("mana", Some(mana_widget_lines(summary.clone(), None)))
+                    .await;
                 ui.notify(&summary, NotifyLevel::Info).await;
+                let ui_clear = ui.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+                    ui_clear.set_widget("mana", None).await;
+                    ui_clear.set_status("mana", None).await;
+                });
             }
             Ok(Err(err)) => {
                 let message = format!("mana: {scope} failed: {err}");
                 ui.set_status("mana", Some(&message)).await;
+                ui.set_widget("mana", Some(mana_widget_lines(message.clone(), None)))
+                    .await;
                 ui.notify(&message, NotifyLevel::Error).await;
             }
             Err(join_err) => {
                 let message = format!("mana: {scope} task failed: {join_err}");
                 ui.set_status("mana", Some(&message)).await;
+                ui.set_widget("mana", Some(mana_widget_lines(message.clone(), None)))
+                    .await;
                 ui.notify(&message, NotifyLevel::Error).await;
             }
         }
@@ -327,7 +355,14 @@ impl Tool for ManaTool {
                 };
                 match mana_core::api::list_units(&mana_dir, &list_params) {
                     Ok(entries) => Ok(json_output(&entries)),
-                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                    Err(e) => {
+                        let message = format!("mana run failed: {e}");
+                        ctx.ui
+                            .set_widget("mana", Some(mana_widget_lines(message.clone(), None)))
+                            .await;
+                        ctx.ui.set_status("mana", Some(&message)).await;
+                        Ok(ToolOutput::error(e.to_string()))
+                    },
                 }
             }
             "show" => {
@@ -655,6 +690,16 @@ impl Tool for ManaTool {
                     "Starting mana run...",
                     json!({"kind": "mana_run_status", "status": "starting"}),
                 );
+                ctx.ui
+                    .set_widget(
+                        "mana",
+                        Some(mana_widget_lines(
+                            "running mana".to_string(),
+                            Some("native foreground orchestration".to_string()),
+                        )),
+                    )
+                    .await;
+                ctx.ui.set_status("mana", Some("mana: running")).await;
 
                 match mana::commands::run::run_with_stream_capture_and_sink(
                     &mana_dir,
@@ -712,6 +757,14 @@ impl Tool for ManaTool {
                         for line in run_summary_lines(&view) {
                             send_update(&ctx, line, json!({"kind": "mana_run_view", "view": view}));
                         }
+                        let summary = format!(
+                            "mana finished · {} done · {} failed",
+                            view.summary.total_closed, view.summary.total_failed
+                        );
+                        ctx.ui
+                            .set_widget("mana", Some(mana_widget_lines(summary.clone(), None)))
+                            .await;
+                        ctx.ui.set_status("mana", Some(&summary)).await;
                         Ok(ToolOutput {
                             content: run_summary_lines(&view)
                                 .into_iter()

@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use imp_core::ui::WidgetContent;
+
 use imp_lua::LuaRuntime;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -18,7 +20,7 @@ use imp_llm::{
     truncate_chars_with_suffix, Cost, Message, Model, StreamEvent, ThinkingLevel, Usage,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::widgets::Clear;
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::animation::AnimationState;
@@ -157,6 +159,7 @@ pub struct App {
 
     // Extension state
     pub status_items: HashMap<String, String>,
+    pub widgets: HashMap<String, WidgetContent>,
 
     /// Lua extension runtime (for command dispatch and hot-reload).
     pub lua_runtime: Option<Arc<Mutex<LuaRuntime>>>,
@@ -284,6 +287,7 @@ impl App {
             accumulated_cost: Cost::default(),
             current_context_tokens: 0,
             status_items: HashMap::new(),
+            widgets: HashMap::new(),
             lua_runtime: None,
             sidebar: Sidebar::default(),
             active_pane: Pane::Chat,
@@ -582,7 +586,16 @@ impl App {
                     self.status_items.remove(&key);
                 }
             }
-            _ => {}
+            UiRequest::SetWidget { key, content } => {
+                if let Some(content) = content {
+                    self.widgets.insert(key, content);
+                } else {
+                    self.widgets.remove(&key);
+                }
+            }
+            UiRequest::Custom { reply, .. } => {
+                let _ = reply.send(None);
+            }
         }
     }
 
@@ -613,11 +626,53 @@ impl App {
         )
     }
 
+    fn render_widget_tray(&self, frame: &mut Frame, area: Rect) {
+        if self.widgets.is_empty() || area.height == 0 {
+            return;
+        }
+
+        let mut keys: Vec<_> = self.widgets.keys().cloned().collect();
+        keys.sort();
+
+        let mut sections = Vec::new();
+        for key in keys {
+            if let Some(widget) = self.widgets.get(&key) {
+                match widget {
+                    WidgetContent::Lines(lines) => {
+                        if !lines.is_empty() {
+                            sections.push(format!("{key}\n{}", lines.join("\n")));
+                        }
+                    }
+                    WidgetContent::Component(component) => {
+                        sections.push(format!(
+                            "{key}\n[component: {}]",
+                            component.component_type
+                        ));
+                    }
+                }
+            }
+        }
+
+        if sections.is_empty() {
+            return;
+        }
+
+        let text = sections.join("\n\n");
+        let widget = Paragraph::new(text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("widgets"),
+        );
+        frame.render_widget(widget, area);
+    }
+
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
         frame.render_widget(Clear, area);
 
         let ask_height = self.ask_state.as_ref().map(|s| s.height()).unwrap_or(0);
+        let has_widgets = !self.widgets.is_empty();
+        let widget_height = if has_widgets { 5 } else { 0 };
 
         // Editor height: grow to fit wrapped prompt text while preserving at least
         // 3 lines for the chat area and 1 for the top bar.
@@ -628,16 +683,18 @@ impl App {
 
         let constraints = if ask_height > 0 {
             vec![
-                Constraint::Length(1),             // top bar
-                Constraint::Min(3),                // messages area
-                Constraint::Length(ask_height),    // ask overlay
-                Constraint::Length(editor_height), // editor (dimmed while ask active)
+                Constraint::Length(1),                  // top bar
+                Constraint::Length(widget_height),      // widget tray
+                Constraint::Min(3),                     // messages area
+                Constraint::Length(ask_height),         // ask overlay
+                Constraint::Length(editor_height),      // editor (dimmed while ask active)
             ]
         } else {
             vec![
-                Constraint::Length(1),             // top bar
-                Constraint::Min(3),                // messages area
-                Constraint::Length(editor_height), // editor
+                Constraint::Length(1),                  // top bar
+                Constraint::Length(widget_height),      // widget tray
+                Constraint::Min(3),                     // messages area
+                Constraint::Length(editor_height),      // editor
             ]
         };
 
@@ -646,10 +703,10 @@ impl App {
             .constraints(constraints)
             .split(area);
 
-        let (top_bar_area, chat_area, ask_area, editor_area) = if ask_height > 0 {
-            (chunks[0], chunks[1], Some(chunks[2]), chunks[3])
+        let (top_bar_area, widget_area, chat_area, ask_area, editor_area) = if ask_height > 0 {
+            (chunks[0], Some(chunks[1]), chunks[2], Some(chunks[3]), chunks[4])
         } else {
-            (chunks[0], chunks[1], None, chunks[2])
+            (chunks[0], Some(chunks[1]), chunks[2], None, chunks[3])
         };
 
         // Split chat area for sidebar when open
@@ -673,6 +730,15 @@ impl App {
         } else {
             (chat_area, None)
         };
+
+        // Top bar (header line)
+        let status_info = self.build_status_info();
+        let top_bar = TopBar::new(&status_info, &self.theme);
+        frame.render_widget(top_bar, top_bar_area);
+
+        if let Some(widget_area) = widget_area {
+            self.render_widget_tray(frame, widget_area);
+        }
 
         // Messages
         let chat_tool_display = self.config.ui.effective_chat_tool_display();
@@ -789,13 +855,10 @@ impl App {
             .streaming(self.is_streaming)
             .queued(!self.message_queue.is_empty())
             .tick(self.tick)
-            .animation_level(self.config.ui.animations);
+            .animation_level(self.config.ui.animations)
+            .activity_state(activity_state);
         frame.render_widget(editor, editor_area);
 
-        // Top bar (header line)
-        let status_info = self.build_status_info();
-        let top_bar = TopBar::new(&status_info, &self.theme);
-        frame.render_widget(top_bar, top_bar_area);
 
         frame.render_widget(
             SelectionOverlay::new(
@@ -870,12 +933,9 @@ impl App {
         let cwd = self.cwd.to_string_lossy().to_string();
         let session_name = self
             .session
-            .path()
-            .and_then(|p| p.file_stem())
-            .map(|s| {
-                let name = s.to_string_lossy();
-                truncate_chars_with_suffix(&name, 7, "…")
-            })
+            .name()
+            .map(str::to_string)
+            .or_else(|| self.session.title(48))
             .unwrap_or_default();
 
         let total_input = self.accumulated_usage.input_tokens;
@@ -4540,5 +4600,43 @@ mod session_lifecycle {
         assert_eq!(app.accumulated_usage.input_tokens, 500_000);
         assert_eq!(app.accumulated_usage.output_tokens, 25_000);
         assert_eq!(app.accumulated_cost.total, 3.0);
+    }
+
+    #[test]
+    fn handle_ui_request_stores_and_removes_widgets() {
+        let mut app = make_app();
+
+        app.handle_ui_request(crate::tui_interface::UiRequest::SetWidget {
+            key: "mana".into(),
+            content: Some(imp_core::ui::WidgetContent::Lines(vec![
+                "running unit 1".into(),
+                "inspect with mana agents".into(),
+            ])),
+        });
+
+        assert!(app.widgets.contains_key("mana"));
+
+        app.handle_ui_request(crate::tui_interface::UiRequest::SetWidget {
+            key: "mana".into(),
+            content: None,
+        });
+
+        assert!(!app.widgets.contains_key("mana"));
+    }
+
+    #[test]
+    fn custom_ui_request_returns_none_without_panicking() {
+        let mut app = make_app();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        app.handle_ui_request(crate::tui_interface::UiRequest::Custom {
+            component: imp_core::ui::ComponentSpec {
+                component_type: "mana-widget".into(),
+                props: serde_json::json!({"state": "running"}),
+                children: Vec::new(),
+            },
+            reply: tx,
+        });
+
+        assert_eq!(rx.try_recv().ok().flatten(), None);
     }
 }
