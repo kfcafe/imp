@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Write};
 
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -12,8 +12,16 @@ use ratatui::Terminal;
 
 pub type InteractiveTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 
+pub fn set_window_title(title: &str) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b]0;{title}\x07")?;
+    stdout.flush()?;
+    Ok(())
+}
+
 pub struct TerminalSession {
     terminal: InteractiveTerminal,
+    last_title: Option<String>,
 }
 
 impl TerminalSession {
@@ -32,11 +40,26 @@ impl TerminalSession {
         crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            last_title: None,
+        })
     }
 
     pub fn terminal_mut(&mut self) -> &mut InteractiveTerminal {
         &mut self.terminal
+    }
+
+    pub fn set_window_title(&mut self, title: &str) -> io::Result<()> {
+        if self.last_title.as_deref() == Some(title) {
+            return Ok(());
+        }
+
+        let mut stdout = io::stdout();
+        write!(stdout, "\x1b]0;{title}\x07")?;
+        stdout.flush()?;
+        self.last_title = Some(title.to_string());
+        Ok(())
     }
 }
 

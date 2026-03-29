@@ -29,6 +29,9 @@ impl InteractiveRunner {
     }
 
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let _ = self
+            .terminal
+            .set_window_title(&self.app.terminal_title());
         self.app.run(self.terminal.terminal_mut()).await
     }
 }

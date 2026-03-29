@@ -29,7 +29,7 @@ use crate::keybindings::{self, Action};
 use crate::selection::{
     extract_selected_text, SelectablePane, SelectionOverlay, SelectionState, TextSurface,
 };
-use crate::terminal::InteractiveTerminal;
+use crate::terminal::{set_window_title, InteractiveTerminal};
 use crate::theme::Theme;
 use crate::turn_tracker::TurnTracker;
 use crate::views::chat::{
@@ -360,6 +360,17 @@ impl App {
         self.event_loop(terminal).await
     }
 
+    pub fn terminal_title(&self) -> String {
+        let title = self
+            .session
+            .name()
+            .map(str::to_string)
+            .or_else(|| self.session.title(48))
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "chat".to_string());
+        format!("imp — {title}")
+    }
+
     fn prepare_for_interactive(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Load Lua extensions (for slash commands and tool registration)
         self.reload_lua_extensions();
@@ -382,6 +393,7 @@ impl App {
         let tick_rate = Duration::from_millis(16); // ~60fps
 
         loop {
+            let _ = set_window_title(&self.terminal_title());
             // Render
             if self.needs_redraw {
                 terminal.draw(|frame| self.render(frame))?;
@@ -3693,6 +3705,34 @@ mod session_lifecycle {
         };
         let registry = ModelRegistry::with_builtins();
         App::new(config, session, registry, cwd)
+    }
+
+    #[test]
+    fn terminal_title_uses_manual_session_name_when_present() {
+        let mut app = make_app();
+        app.session.set_name("my chat");
+        assert_eq!(app.terminal_title(), "imp — my chat");
+    }
+
+    #[test]
+    fn terminal_title_falls_back_to_summarized_first_prompt() {
+        let mut app = make_app();
+        app.session
+            .append(SessionEntry::Message {
+                id: "m1".into(),
+                parent_id: None,
+                message: Message::user(
+                    "can we adjust the information that is displayed in the top bar",
+                ),
+            })
+            .unwrap();
+        assert_eq!(app.terminal_title(), "imp — adjust top bar layout");
+    }
+
+    #[test]
+    fn terminal_title_defaults_to_chat_when_empty() {
+        let app = make_app();
+        assert_eq!(app.terminal_title(), "imp — chat");
     }
 
     // ── 1. App::new creates with config + session ───────────────
