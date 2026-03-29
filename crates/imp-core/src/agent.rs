@@ -632,6 +632,21 @@ impl Agent {
             return result;
         }
 
+        if tool_name == "bash" {
+            if let Some(command) = args.get("command").and_then(|v| v.as_str()) {
+                if let Some(hint) = mana_bash_equivalent_hint(command) {
+                    let result = crate::tools::ToolOutput::error(hint)
+                        .into_tool_result(call_id, tool_name);
+                    self.emit(AgentEvent::ToolExecutionEnd {
+                        tool_call_id: call_id.to_string(),
+                        result: result.clone(),
+                    })
+                    .await;
+                    return result;
+                }
+            }
+        }
+
         // Validate args against the tool's JSON schema before execution so the
         // model can self-correct on bad types or missing required fields.
         if let Some(tool) = self.tools.get(tool_name) {
@@ -818,6 +833,23 @@ fn extract_file_path(cwd: &Path, args: &serde_json::Value) -> Option<PathBuf> {
         Some(path)
     } else {
         Some(cwd.join(path))
+    }
+}
+
+fn mana_bash_equivalent_hint(command: &str) -> Option<&'static str> {
+    let trimmed = command.trim_start();
+    if !trimmed.starts_with("mana") {
+        return None;
+    }
+
+    let rest = trimmed[4..].trim_start();
+    let action = rest.split_whitespace().next().unwrap_or("");
+    match action {
+        "status" | "list" | "ls" | "show" | "read" | "create" | "close" | "update"
+        | "run" | "agents" | "logs" | "next" | "claim" => Some(
+            "Use the native mana tool instead of `bash` for this mana command.",
+        ),
+        _ => None,
     }
 }
 
@@ -1752,6 +1784,75 @@ mod tests {
 
         let result = agent.run("Do something".to_string()).await;
         assert!(matches!(result, Err(crate::error::Error::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn agent_blocks_bash_mana_when_native_action_exists() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_1",
+                "bash",
+                serde_json::json!({"command": "mana status", "timeout": 5}),
+                100,
+                20,
+            ),
+            text_response("Recovered after native-mana hint", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(crate::tools::bash::BashTool));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Check mana state".to_string()).await.unwrap();
+        drop(agent);
+
+        let events = events_task.await.unwrap();
+        let tool_end = events.iter().find_map(|e| match e {
+            AgentEvent::ToolExecutionEnd { result, .. } => Some(result),
+            _ => None,
+        });
+        let tool_end = tool_end.expect("expected ToolExecutionEnd");
+        assert!(tool_end.is_error);
+        let text = tool_end
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        assert!(text.contains("Use the native mana tool"));
+    }
+
+    #[tokio::test]
+    async fn agent_allows_non_mana_bash_commands() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_1",
+                "bash",
+                serde_json::json!({"command": "printf 'ok'", "timeout": 5}),
+                100,
+                20,
+            ),
+            text_response("done", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(crate::tools::bash::BashTool));
+
+        agent.run("Run a shell command".to_string()).await.unwrap();
+
+        let tool_result = agent
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                Message::ToolResult(result) => Some(result),
+                _ => None,
+            })
+            .expect("expected tool result");
+        assert!(!tool_result.is_error);
     }
 
     #[tokio::test]

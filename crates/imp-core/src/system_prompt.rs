@@ -155,6 +155,12 @@ fn identity_layer(
         s.push_str(&format!("- {}: {}\n", def.name, def.description));
     }
 
+    if defs.iter().any(|def| def.name == "mana") && defs.iter().any(|def| def.name == "bash") {
+        s.push_str(
+            "\nMana guidance:\n- Prefer the native `mana` tool for mana operations instead of `bash` commands like `mana ...`.\n- Use `bash` for mana only when there is no equivalent native mana action available.\n- For longer orchestration, prefer native mana background runs and inspect progress with native mana actions like `agents`, `logs`, `status`, and `next`.\n",
+        );
+    }
+
     // Append role instructions after identity layer
     if let Some(role) = role {
         if let Some(ref instructions) = role.instructions {
