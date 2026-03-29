@@ -85,7 +85,7 @@ impl Tool for WebTool {
 
 // ── search action ───────────────────────────────────────────────────
 
-async fn execute_search(params: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+async fn execute_search(params: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
     let query = match params["query"].as_str() {
         Some(q) if !q.is_empty() => q,
         _ => return Ok(ToolOutput::error("Missing 'query' parameter")),
@@ -97,7 +97,7 @@ async fn execute_search(params: serde_json::Value, _ctx: &ToolContext) -> Result
         .unwrap_or(5)
         .min(20);
 
-    let provider = resolve_provider(&params);
+    let provider = resolve_provider(&params, ctx);
 
     let response = match search::search(http_client(), provider, query, max_results).await {
         Ok(resp) => resp,
@@ -109,7 +109,7 @@ async fn execute_search(params: serde_json::Value, _ctx: &ToolContext) -> Result
     ))))
 }
 
-fn resolve_provider(params: &serde_json::Value) -> SearchProvider {
+fn resolve_provider(params: &serde_json::Value, ctx: &ToolContext) -> SearchProvider {
     // Explicit param override
     if let Some(name) = params["provider"].as_str() {
         match name {
@@ -121,7 +121,7 @@ fn resolve_provider(params: &serde_json::Value) -> SearchProvider {
         }
     }
 
-    // Env-driven default: IMP_WEB_PROVIDER=exa (or config later)
+    // Env-driven default: IMP_WEB_PROVIDER=exa
     if let Ok(env_provider) = std::env::var("IMP_WEB_PROVIDER") {
         match env_provider.to_lowercase().as_str() {
             "tavily" => return SearchProvider::Tavily,
@@ -129,6 +129,14 @@ fn resolve_provider(params: &serde_json::Value) -> SearchProvider {
             "linkup" => return SearchProvider::Linkup,
             "perplexity" => return SearchProvider::Perplexity,
             _ => {}
+        }
+    }
+
+    // Config-driven default: [web] search_provider = "exa"
+    let config_dir = crate::config::Config::user_config_dir();
+    if let Ok(config) = crate::config::Config::resolve(&config_dir, Some(&ctx.cwd)) {
+        if let Some(provider) = config.web.search_provider {
+            return provider;
         }
     }
 
@@ -245,6 +253,40 @@ fn truncate_output(text: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_provider_prefers_env_over_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".imp")).unwrap();
+        std::fs::write(
+            dir.path().join(".imp").join("config.toml"),
+            "[web]\nsearch_provider = \"exa\"\n",
+        )
+        .unwrap();
+
+        let old = std::env::var("IMP_WEB_PROVIDER").ok();
+        std::env::set_var("IMP_WEB_PROVIDER", "tavily");
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let ctx = ToolContext {
+            cwd: dir.path().to_path_buf(),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            ui: std::sync::Arc::new(crate::ui::NullInterface),
+            file_cache: std::sync::Arc::new(crate::tools::FileCache::new()),
+            file_tracker: std::sync::Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
+            mode: crate::config::AgentMode::Full,
+            read_max_lines: 500,
+        };
+
+        let provider = resolve_provider(&serde_json::json!({}), &ctx);
+        assert_eq!(provider, SearchProvider::Tavily);
+
+        match old {
+            Some(value) => std::env::set_var("IMP_WEB_PROVIDER", value),
+            None => std::env::remove_var("IMP_WEB_PROVIDER"),
+        }
+    }
 
     #[test]
     fn format_search_with_answer() {

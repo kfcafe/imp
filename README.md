@@ -31,7 +31,7 @@ Type `/` in the editor to open the command palette. Arrow keys, Tab, or Ctrl+N/P
 
 imp is an agent engine — not a wrapper around an LLM API. It runs a full ReAct loop (think → act → observe → repeat), manages context intelligently, and gives the model real tools to work with.
 
-**Tools** — File I/O, shell execution, code search (grep, find, AST scan), web search, diff preview/apply, user prompts, mana unit management, and persistent memory. Readonly tools run in parallel.
+**Tools** — File I/O, shell execution, code search (grep, find, AST scan), web search, diff preview/apply, user prompts, mana unit management, and persistent memory. Readonly tools run in parallel. Prefer native tools over shell wrappers when available; for mana operations, use the built-in `mana` tool instead of `bash` for equivalent actions.
 
 **Context management** — As conversations grow, imp masks old tool outputs and keeps a sliding window of recent turns so the model can continue working without dragging full historical tool output forward.
 
@@ -62,7 +62,7 @@ The interactive terminal UI gives you:
 | `write` | Create or overwrite files, auto-creates directories |
 | `edit` | Find-and-replace with exact text matching |
 | `multi_edit` | Multiple edits to one file in a single call |
-| `bash` | Shell execution with timeout and streaming output |
+| `bash` | Shell execution in the workspace; prefer more specific native tools when available |
 | `grep` | Regex search across files, respects .gitignore |
 | `find` | Glob-based file search |
 | `ls` | Directory listing |
@@ -70,7 +70,7 @@ The interactive terminal UI gives you:
 | `scan` | Tree-sitter AST extraction — types, functions, imports |
 | `web` | Web search (Tavily/Exa) and page content extraction |
 | `ask` | Prompt the user for input or multiple-choice |
-| `mana` | Unit management — status, list, show, create, update, close, run |
+| `mana` | Native mana work coordination — status, list/show, create/update/close/claim/release, logs/agents, next/tree, and run |
 | `memory` | Persistent key-value store across sessions |
 
 You can also define shell tools via TOML config, or register tools from Lua extensions.
@@ -94,6 +94,36 @@ imp works with 11 LLM providers out of the box. Native integrations for Anthropi
 | Fireworks | Llama 3.3 70B | `FIREWORKS_API_KEY` |
 
 Set an env var and it's auto-detected — no login step needed. Prompt caching is automatic on Anthropic (system prompt, tools, recent turns).
+
+### Web search provider keys
+
+The `web` tool supports Tavily, Exa, Linkup, and Perplexity.
+
+You can configure Tavily and Exa in either of three ways:
+
+```bash
+# Option 1: environment variables
+export TAVILY_API_KEY=tvly-...
+export EXA_API_KEY=exa-...
+
+# Option 2: save them in imp's auth store from the CLI
+imp web-login tavily
+imp web-login exa
+
+# Option 3: inside the TUI app
+# /login → choose Tavily or Exa
+# or /settings → Tavily API key / Exa API key fields
+```
+
+Saved keys live in `~/.config/imp/auth.json` with your other provider credentials. Once saved, the `web` tool will auto-detect them even if you have not exported the env vars in your shell.
+
+The first-run setup flow now also includes an optional web-search step where you can choose Tavily, Exa, or skip for now.
+
+Provider selection order for the `web` tool:
+1. explicit tool param (`provider = "exa"`)
+2. `IMP_WEB_PROVIDER`
+3. first available saved/env credential among Tavily, Exa, Linkup, Perplexity
+4. default fallback (`tavily`)
 
 ```bash
 # Login (stores credentials locally)
@@ -130,6 +160,15 @@ max_turns = 100
 [context]
 observation_mask_threshold = 0.6
 mask_window = 10
+
+[web]
+search_provider = "exa"
+```
+
+You can also choose a default web search provider with an environment variable override:
+
+```bash
+export IMP_WEB_PROVIDER=exa
 ```
 
 ## Modes

@@ -84,6 +84,7 @@ use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use imp_core::config::Config;
+use imp_core::tools::web::types::SearchProvider;
 
 use imp_core::imp_session::{ImpSession, SessionChoice, SessionOptions};
 use imp_core::session::SessionManager;
@@ -214,6 +215,11 @@ enum Commands {
         /// Skip the confirmation prompt
         #[arg(long, short = 'y')]
         yes: bool,
+    },
+    /// Save a web search provider API key into imp auth storage
+    WebLogin {
+        /// Search provider to configure (tavily, exa, linkup, perplexity)
+        provider: String,
     },
 }
 
@@ -542,6 +548,13 @@ async fn main() {
                 run_import(*dry_run, from.as_deref(), *yes);
                 return;
             }
+            Commands::WebLogin { provider } => {
+                if let Err(e) = run_web_login(provider).await {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
         }
     }
 
@@ -656,6 +669,65 @@ fn oauth_login_success_message(auth_store: &AuthStore, provider: &str) -> String
         .oauth_display_info(provider)
         .map(|info| info.login_message(provider))
         .unwrap_or_else(|| format!("Logged in to {provider} successfully."))
+}
+
+fn search_provider_from_name(name: &str) -> Option<SearchProvider> {
+    match name.trim().to_lowercase().as_str() {
+        "tavily" => Some(SearchProvider::Tavily),
+        "exa" => Some(SearchProvider::Exa),
+        "linkup" => Some(SearchProvider::Linkup),
+        "perplexity" => Some(SearchProvider::Perplexity),
+        _ => None,
+    }
+}
+
+fn search_provider_docs_url(provider: SearchProvider) -> &'static str {
+    match provider {
+        SearchProvider::Tavily => "https://app.tavily.com/home",
+        SearchProvider::Exa => "https://dashboard.exa.ai/api-keys",
+        SearchProvider::Linkup => "https://app.linkup.so/api-keys",
+        SearchProvider::Perplexity => "https://www.perplexity.ai/settings/api",
+    }
+}
+
+async fn run_web_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let provider = search_provider_from_name(provider_name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Unknown web provider: {provider_name}. Use one of: tavily, exa, linkup, perplexity"
+            ),
+        )
+    })?;
+
+    let auth_path = Config::user_config_dir().join("auth.json");
+    let mut auth_store =
+        AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+
+    let env_key = provider.env_key_name();
+    eprintln!("Enter API key for {}:", provider.name());
+    eprintln!("  Env var: {env_key}");
+    eprintln!("  Get a key at: {}", search_provider_docs_url(provider));
+    eprint!("> ");
+    io::stdout().flush().ok();
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let key = input.trim().to_string();
+
+    if key.is_empty() {
+        eprintln!("No key entered. Aborting.");
+        std::process::exit(1);
+    }
+
+    auth_store.store(
+        provider.name(),
+        imp_llm::auth::StoredCredential::ApiKey { key },
+    )?;
+    eprintln!("API key saved for {} in {}.", provider.name(), auth_path.display());
+    eprintln!("The web tool will now auto-detect {} without requiring an exported env var.", provider.name());
+
+    Ok(())
 }
 
 async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>> {

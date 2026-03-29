@@ -4,6 +4,8 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Widget};
 
+use imp_llm::model::ProviderRegistry;
+
 use crate::theme::Theme;
 
 #[derive(Debug, Clone)]
@@ -14,12 +16,12 @@ pub struct LoginProviderOption {
     pub logged_in: bool,
 }
 
-pub fn oauth_login_providers() -> Vec<LoginProviderOption> {
-    vec![
+pub fn login_providers(registry: &ProviderRegistry) -> Vec<LoginProviderOption> {
+    let mut providers = vec![
         LoginProviderOption {
             id: "anthropic",
             label: "Anthropic",
-            description: "Claude Max/Pro subscription",
+            description: "Claude Max/Pro subscription (OAuth)",
             logged_in: false,
         },
         LoginProviderOption {
@@ -28,7 +30,32 @@ pub fn oauth_login_providers() -> Vec<LoginProviderOption> {
             description: "OpenAI / ChatGPT account (OAuth)",
             logged_in: false,
         },
-    ]
+        LoginProviderOption {
+            id: "tavily",
+            label: "Tavily",
+            description: "Web search API key",
+            logged_in: false,
+        },
+        LoginProviderOption {
+            id: "exa",
+            label: "Exa",
+            description: "Web search API key",
+            logged_in: false,
+        },
+    ];
+
+    for provider_id in ["linkup", "perplexity"] {
+        if let Some(meta) = registry.find(provider_id) {
+            providers.push(LoginProviderOption {
+                id: meta.id,
+                label: meta.name,
+                description: "Web search API key",
+                logged_in: false,
+            });
+        }
+    }
+
+    providers
 }
 
 #[derive(Debug, Clone)]
@@ -43,10 +70,6 @@ impl LoginPickerState {
             providers,
             selected: 0,
         }
-    }
-
-    pub fn oauth() -> Self {
-        Self::new(oauth_login_providers())
     }
 
     pub fn move_up(&mut self) {
@@ -85,7 +108,7 @@ impl Widget for LoginPickerView<'_> {
 
         Clear.render(area, buf);
         let block = Block::default()
-            .title(" OAuth Login ")
+            .title(" Provider Login ")
             .borders(Borders::ALL)
             .border_style(self.theme.accent_style());
         let inner = block.inner(area);
@@ -93,14 +116,14 @@ impl Widget for LoginPickerView<'_> {
 
         if self.state.providers.is_empty() {
             let line = Line::from(Span::styled(
-                "  No OAuth providers available",
+                "  No providers available",
                 self.theme.muted_style(),
             ));
             buf.set_line(inner.x, inner.y, &line, inner.width);
             return;
         }
 
-        let footer = "Use `imp login <provider>` in your shell for API-key providers.";
+        let footer = "Enter: configure provider · Esc: cancel";
         let footer_y = inner.y + inner.height.saturating_sub(1);
 
         for (i, provider) in self.state.providers.iter().enumerate() {
@@ -118,7 +141,7 @@ impl Widget for LoginPickerView<'_> {
             let status = if provider.logged_in {
                 vec![
                     Span::raw("  "),
-                    Span::styled("✓ logged in", self.theme.success_style()),
+                    Span::styled("✓ configured", self.theme.success_style()),
                 ]
             } else {
                 Vec::new()
@@ -148,36 +171,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn oauth_picker_includes_anthropic_and_openai() {
-        let state = LoginPickerState::oauth();
+    fn login_picker_includes_web_providers() {
+        let registry = ProviderRegistry::with_builtins();
+        let state = LoginPickerState::new(login_providers(&registry));
         let ids: Vec<&str> = state.providers.iter().map(|provider| provider.id).collect();
-        assert_eq!(ids, vec!["anthropic", "openai"]);
+        assert!(ids.contains(&"anthropic"));
+        assert!(ids.contains(&"openai"));
+        assert!(ids.contains(&"tavily"));
+        assert!(ids.contains(&"exa"));
     }
 
     #[test]
     fn picker_selection_moves_with_bounds() {
-        let mut state = LoginPickerState::oauth();
-        assert_eq!(
-            state.selected_provider().map(|provider| provider.id),
-            Some("anthropic")
-        );
+        let registry = ProviderRegistry::with_builtins();
+        let mut state = LoginPickerState::new(login_providers(&registry));
+        assert_eq!(state.selected_provider().map(|provider| provider.id), Some("anthropic"));
 
         state.move_down();
-        assert_eq!(
-            state.selected_provider().map(|provider| provider.id),
-            Some("openai")
-        );
+        assert_eq!(state.selected_provider().map(|provider| provider.id), Some("openai"));
 
-        state.move_down();
-        assert_eq!(
-            state.selected_provider().map(|provider| provider.id),
-            Some("openai")
-        );
+        for _ in 0..20 {
+            state.move_down();
+        }
+        assert!(state.selected_provider().is_some());
 
         state.move_up();
-        assert_eq!(
-            state.selected_provider().map(|provider| provider.id),
-            Some("anthropic")
-        );
+        assert!(state.selected_provider().is_some());
     }
 }

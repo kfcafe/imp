@@ -14,7 +14,7 @@ use imp_core::config::Config;
 use imp_core::session::{SessionEntry, SessionManager};
 use imp_core::Error as ImpCoreError;
 use imp_llm::auth::AuthStore;
-use imp_llm::model::{ModelMeta, ModelRegistry};
+use imp_llm::model::{ModelMeta, ModelRegistry, ProviderRegistry};
 use imp_llm::providers::create_provider;
 use imp_llm::{
     truncate_chars_with_suffix, Cost, Message, Model, StreamEvent, ThinkingLevel, Usage,
@@ -38,7 +38,7 @@ use crate::views::chat::{
 use crate::views::command_palette::{builtin_commands, CommandPaletteState, CommandPaletteView};
 use crate::views::editor::{EditorState, EditorView};
 use crate::views::file_finder::{collect_project_files, FileFinderState, FileFinderView};
-use crate::views::login_picker::{oauth_login_providers, LoginPickerState, LoginPickerView};
+use crate::views::login_picker::{login_providers, LoginPickerState, LoginPickerView};
 use crate::views::model_selector::{ModelSelection, ModelSelectorState, ModelSelectorView};
 use crate::views::session_picker::{SessionPickerState, SessionPickerView};
 use crate::views::settings::{SettingsState, SettingsView};
@@ -84,6 +84,33 @@ pub enum AskReply {
 enum LoginTaskExit {
     Success(String),
     Failed(String),
+}
+
+fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", url])
+            .spawn();
+    }
+}
+
+fn search_provider_docs_url(provider: &str) -> &'static str {
+    match provider {
+        "tavily" => "https://app.tavily.com/home",
+        "exa" => "https://dashboard.exa.ai/api-keys",
+        "linkup" => "https://app.linkup.so/api-keys",
+        "perplexity" => "https://www.perplexity.ai/settings/api",
+        _ => "",
+    }
 }
 
 #[derive(Debug)]
@@ -235,7 +262,7 @@ fn provider_logged_in(auth_store: &AuthStore, provider: &str) -> bool {
             auth_store.get_oauth("openai").is_some()
                 || auth_store.get_oauth("openai-codex").is_some()
         }
-        _ => auth_store.get_oauth(provider).is_some(),
+        _ => auth_store.stored.contains_key(provider),
     }
 }
 
@@ -2288,7 +2315,7 @@ impl App {
                     "  /memory     — view/edit agent memory\n",
                     "  /reload     — reload config\n",
                     "  /settings   — edit settings\n",
-                    "  /login [provider] — OAuth login\n",
+                    "  /login [provider] — provider login / API key entry\n",
                     "  /help       — this message\n",
                     "  /quit       — exit",
                 ));
@@ -2600,6 +2627,56 @@ impl App {
         let status_message = match provider {
             "anthropic" => "Opening browser for Anthropic login...",
             "openai" | "openai-codex" => "Opening browser for OpenAI / ChatGPT login...",
+            "tavily" | "exa" | "linkup" | "perplexity" => {
+                self.mode = UiMode::Normal;
+                let auth_path = Config::user_config_dir().join("auth.json");
+                let provider_name = provider.to_string();
+                let docs_url = search_provider_docs_url(provider);
+                let prompt = format!(
+                    "Enter API key for {provider_name}\n\nGet a key at: {docs_url}\nSaved keys go to {}",
+                    auth_path.display()
+                );
+                self.ask_state = Some(crate::views::ask_bar::AskState::new(
+                    prompt,
+                    String::new(),
+                    vec![],
+                    false,
+                ));
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                self.ask_reply = Some(AskReply::Input(tx));
+                let task = tokio::spawn(async move {
+                    match rx.await {
+                        Ok(Some(key)) if !key.trim().is_empty() => {
+                            let mut store = AuthStore::load(&auth_path)
+                                .unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+                            match store.store(
+                                &provider_name,
+                                imp_llm::auth::StoredCredential::ApiKey {
+                                    key: key.trim().to_string(),
+                                },
+                            ) {
+                                Ok(()) => LoginTaskExit::Success(format!(
+                                    "Saved {} API key to {}",
+                                    provider_name,
+                                    auth_path.display()
+                                )),
+                                Err(e) => LoginTaskExit::Failed(format!(
+                                    "Failed to save {} API key: {e}",
+                                    provider_name
+                                )),
+                            }
+                        }
+                        Ok(_) => LoginTaskExit::Failed(format!(
+                            "No API key entered for {provider_name}."
+                        )),
+                        Err(_) => LoginTaskExit::Failed(format!(
+                            "Cancelled API key entry for {provider_name}."
+                        )),
+                    }
+                });
+                self.login_task = Some(task);
+                return;
+            }
             _ => {
                 self.messages.push(DisplayMessage {
                     role: MessageRole::Error,
@@ -2627,20 +2704,7 @@ impl App {
                     imp_llm::oauth::anthropic::AnthropicOAuth::new()
                         .login(
                             |url| {
-                                #[cfg(target_os = "macos")]
-                                {
-                                    let _ = std::process::Command::new("open").arg(url).spawn();
-                                }
-                                #[cfg(target_os = "linux")]
-                                {
-                                    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-                                }
-                                #[cfg(target_os = "windows")]
-                                {
-                                    let _ = std::process::Command::new("cmd")
-                                        .args(["/C", "start", url])
-                                        .spawn();
-                                }
+                                open_url(url);
                             },
                             || async { None },
                         )
@@ -2650,20 +2714,7 @@ impl App {
                     imp_llm::oauth::chatgpt::ChatGptOAuth::new()
                         .login(
                             |url| {
-                                #[cfg(target_os = "macos")]
-                                {
-                                    let _ = std::process::Command::new("open").arg(url).spawn();
-                                }
-                                #[cfg(target_os = "linux")]
-                                {
-                                    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-                                }
-                                #[cfg(target_os = "windows")]
-                                {
-                                    let _ = std::process::Command::new("cmd")
-                                        .args(["/C", "start", url])
-                                        .spawn();
-                                }
+                                open_url(url);
                             },
                             || async { None },
                         )
@@ -2714,7 +2765,7 @@ impl App {
         let auth_path = Config::user_config_dir().join("auth.json");
         let auth_store =
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
-        let providers = oauth_login_providers()
+        let providers = login_providers(&ProviderRegistry::with_builtins())
             .into_iter()
             .map(|mut provider| {
                 provider.logged_in = provider_logged_in(&auth_store, provider.id);
@@ -2726,7 +2777,10 @@ impl App {
 
     fn open_settings(&mut self) {
         let models = self.filtered_models();
-        let state = SettingsState::new(&self.config, &self.model_name, &models);
+        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_store =
+            AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+        let state = SettingsState::new(&self.config, &self.model_name, &models, &auth_store);
         self.mode = UiMode::Settings(state);
     }
 
@@ -3041,11 +3095,64 @@ impl App {
                     }
                 }
                 KeyCode::Enter => {
-                    self.finish_welcome();
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.advance();
+                    }
                 }
                 KeyCode::Esc => {
                     if let UiMode::Welcome(ref mut state) = self.mode {
                         state.go_back();
+                    }
+                }
+                _ => {}
+            },
+            WelcomeStep::WebSearch => match key.code {
+                KeyCode::Up => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.web_provider_up();
+                    }
+                }
+                KeyCode::Down => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.web_provider_down();
+                    }
+                }
+                KeyCode::Enter => {
+                    let web_result = if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.check_web_auth_resolved()
+                    } else {
+                        Ok(())
+                    };
+                    match web_result {
+                        Ok(()) => {
+                            self.finish_welcome();
+                        }
+                        Err(error) => {
+                            self.messages.push(DisplayMessage {
+                                role: MessageRole::Error,
+                                content: error,
+                                thinking: None,
+                                tool_calls: Vec::new(),
+                                assistant_blocks: Vec::new(),
+                                is_streaming: false,
+                                timestamp: imp_llm::now(),
+                            });
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.go_back();
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.pop_web_key_char();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let UiMode::Welcome(ref mut state) = self.mode {
+                        state.push_web_key_char(c);
                     }
                 }
                 _ => {}
@@ -3061,7 +3168,7 @@ impl App {
 
     /// Persist welcome flow choices to config and auth, then advance to Done step.
     fn finish_welcome(&mut self) {
-        let (model_id, thinking, provider_id, resolved_key) = match &self.mode {
+        let (model_id, thinking, provider_id, resolved_key, resolved_web_provider, resolved_web_key) = match &self.mode {
             UiMode::Welcome(state) => {
                 let model_id = state
                     .selected_model()
@@ -3070,7 +3177,9 @@ impl App {
                 let thinking = state.thinking_level;
                 let provider_id = state.selected_provider_id().to_string();
                 let resolved_key = state.resolved_key.clone();
-                (model_id, thinking, provider_id, resolved_key)
+                let resolved_web_provider = state.resolved_web_provider.clone();
+                let resolved_web_key = state.resolved_web_key.clone();
+                (model_id, thinking, provider_id, resolved_key, resolved_web_provider, resolved_web_key)
             }
             _ => return,
         };
@@ -3083,6 +3192,17 @@ impl App {
 
         if let Some(meta) = self.model_registry.resolve_meta(&self.model_name, None) {
             self.context_window = meta.context_window;
+        }
+
+        if let Some(web_provider) = resolved_web_provider.as_deref().filter(|provider| *provider != "none") {
+            self.config.web.search_provider = match web_provider {
+                "tavily" => Some(imp_core::tools::web::types::SearchProvider::Tavily),
+                "exa" => Some(imp_core::tools::web::types::SearchProvider::Exa),
+                "linkup" => Some(imp_core::tools::web::types::SearchProvider::Linkup),
+                "perplexity" => Some(imp_core::tools::web::types::SearchProvider::Perplexity),
+                _ => self.config.web.search_provider,
+            };
+            std::env::set_var("IMP_WEB_PROVIDER", web_provider);
         }
 
         // Save config.toml
@@ -3099,11 +3219,12 @@ impl App {
             });
         }
 
+        let auth_path = Config::user_config_dir().join("auth.json");
+        let mut auth_store =
+            AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+
         // Save API key if one was manually entered
         if let Some(key) = resolved_key {
-            let auth_path = Config::user_config_dir().join("auth.json");
-            let mut auth_store =
-                AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
             if let Err(e) = auth_store.store(
                 &provider_id,
                 imp_llm::auth::StoredCredential::ApiKey { key },
@@ -3111,6 +3232,26 @@ impl App {
                 self.messages.push(DisplayMessage {
                     role: MessageRole::Error,
                     content: format!("Failed to save API key: {e}"),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+            }
+        }
+
+        if let (Some(web_provider), Some(web_key)) = (
+            resolved_web_provider.as_deref().filter(|provider| *provider != "none"),
+            resolved_web_key,
+        ) {
+            if let Err(e) = auth_store.store(
+                web_provider,
+                imp_llm::auth::StoredCredential::ApiKey { key: web_key },
+            ) {
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::Error,
+                    content: format!("Failed to save web API key: {e}"),
                     thinking: None,
                     tool_calls: Vec::new(),
                     assistant_blocks: Vec::new(),
@@ -3144,16 +3285,58 @@ impl App {
             self.context_window = meta.context_window;
         }
 
+        let auth_path = Config::user_config_dir().join("auth.json");
+        let mut auth_store =
+            AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+        let mut auth_notes = Vec::new();
+
+        for (provider, value) in [
+            ("tavily", state.tavily_api_key.trim()),
+            ("exa", state.exa_api_key.trim()),
+        ] {
+            if value.is_empty() {
+                continue;
+            }
+
+            match auth_store.store(
+                provider,
+                imp_llm::auth::StoredCredential::ApiKey {
+                    key: value.to_string(),
+                },
+            ) {
+                Ok(()) => auth_notes.push(format!("saved {provider} key")),
+                Err(e) => {
+                    self.messages.push(DisplayMessage {
+                        role: MessageRole::Error,
+                        content: format!("Failed to save {provider} API key: {e}"),
+                        thinking: None,
+                        tool_calls: Vec::new(),
+                        assistant_blocks: Vec::new(),
+                        is_streaming: false,
+                        timestamp: imp_llm::now(),
+                    });
+                }
+            }
+        }
+
         // Persist to user config.toml
         let config_path = Config::user_config_path();
         match self.config.save(&config_path) {
             Ok(()) => {
                 if let UiMode::Settings(ref mut s) = self.mode {
                     s.dirty = false;
+                    s.tavily_api_key.clear();
+                    s.exa_api_key.clear();
+                    s.tavily_configured = provider_logged_in(&auth_store, "tavily");
+                    s.exa_configured = provider_logged_in(&auth_store, "exa");
+                }
+                let mut message = format!("Settings saved to {}", config_path.display());
+                if !auth_notes.is_empty() {
+                    message.push_str(&format!(" ({})", auth_notes.join(", ")));
                 }
                 self.messages.push(DisplayMessage {
                     role: MessageRole::System,
-                    content: format!("Settings saved to {}", config_path.display()),
+                    content: message,
                     thinking: None,
                     tool_calls: Vec::new(),
                     assistant_blocks: Vec::new(),

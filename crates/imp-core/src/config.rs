@@ -8,6 +8,7 @@ use crate::error::Result;
 use crate::guardrails::GuardrailConfig;
 use crate::hooks::HookDef;
 use crate::roles::RoleDef;
+use crate::tools::web::types::WebConfig;
 
 /// Agent mode — controls which tools and mana actions the agent may use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -108,8 +109,8 @@ impl AgentMode {
             AgentMode::Full => &[],
             AgentMode::Worker => &["show", "update", "status", "list", "logs", "next"],
             AgentMode::Orchestrator => &[
-                "status", "list", "show", "create", "close", "update", "run", "claim", "release",
-                "logs", "agents", "next",
+                "status", "list", "show", "create", "close", "update", "run", "run_state",
+                "evaluate", "claim", "release", "logs", "agents", "next",
             ],
             AgentMode::Planner => &["status", "list", "show", "create", "next"],
             AgentMode::Reviewer => &[],
@@ -259,6 +260,10 @@ pub struct Config {
     /// UI display settings.
     #[serde(default)]
     pub ui: UiConfig,
+
+    /// Web tool settings.
+    #[serde(default)]
+    pub web: WebConfig,
 }
 
 // ── UI configuration ────────────────────────────────────────────
@@ -563,6 +568,15 @@ impl Config {
                 config.mode = m;
             }
         }
+        if let Ok(provider) = std::env::var("IMP_WEB_PROVIDER") {
+            config.web.search_provider = match provider.to_lowercase().as_str() {
+                "tavily" => Some(crate::tools::web::types::SearchProvider::Tavily),
+                "exa" => Some(crate::tools::web::types::SearchProvider::Exa),
+                "linkup" => Some(crate::tools::web::types::SearchProvider::Linkup),
+                "perplexity" => Some(crate::tools::web::types::SearchProvider::Perplexity),
+                _ => config.web.search_provider,
+            };
+        }
 
         Ok(config)
     }
@@ -595,6 +609,9 @@ impl Config {
         }
         if other.ui != UiConfig::default() {
             self.ui = other.ui;
+        }
+        if other.web != WebConfig::default() {
+            self.web = other.web;
         }
         self.roles.extend(other.roles);
         self.hooks.extend(other.hooks);
@@ -689,6 +706,7 @@ mod tests {
         assert!(config.max_turns.is_none());
         assert!(config.tools.is_none());
         assert_eq!(config.ui.read_max_lines, 500);
+        assert_eq!(config.web, WebConfig::default());
         assert!(config.roles.is_empty());
         assert!(config.hooks.is_empty());
         assert!((config.context.observation_mask_threshold - 0.6).abs() < f64::EPSILON);
@@ -718,6 +736,9 @@ after_write = ["zig fmt --check ."]
 [context]
 observation_mask_threshold = 0.5
 mask_window = 5
+
+[web]
+search_provider = "exa"
 "#,
         )
         .unwrap();
@@ -736,6 +757,10 @@ mask_window = 5
         assert_eq!(
             config.guardrails.after_write,
             Some(vec!["zig fmt --check .".into()])
+        );
+        assert_eq!(
+            config.web.search_provider,
+            Some(crate::tools::web::types::SearchProvider::Exa)
         );
         assert!((config.context.observation_mask_threshold - 0.5).abs() < f64::EPSILON);
         assert_eq!(config.context.mask_window, 5);

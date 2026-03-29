@@ -1,3 +1,4 @@
+use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelMeta, ProviderMeta, ProviderRegistry};
 use imp_llm::ThinkingLevel;
 use ratatui::buffer::Buffer;
@@ -17,6 +18,8 @@ pub enum WelcomeStep {
     ProviderAuth,
     /// Pick default model and thinking level.
     ModelThinking,
+    /// Optional web search provider setup.
+    WebSearch,
     /// Summary and quick tips.
     Done,
 }
@@ -25,6 +28,7 @@ const STEPS: &[WelcomeStep] = &[
     WelcomeStep::Welcome,
     WelcomeStep::ProviderAuth,
     WelcomeStep::ModelThinking,
+    WelcomeStep::WebSearch,
     WelcomeStep::Done,
 ];
 
@@ -39,6 +43,22 @@ pub struct ProviderStatus {
 impl ProviderStatus {
     pub fn has_auth(&self) -> bool {
         self.env_detected || self.stored
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WebProviderStatus {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub env_key: &'static str,
+    pub docs_url: &'static str,
+    pub env_detected: bool,
+    pub stored: bool,
+}
+
+impl WebProviderStatus {
+    pub fn has_auth(&self) -> bool {
+        self.id == "none" || self.env_detected || self.stored
     }
 }
 
@@ -66,12 +86,29 @@ pub struct WelcomeState {
     pub auth_resolved: bool,
     /// The resolved API key (if entered manually).
     pub resolved_key: Option<String>,
+    /// Optional web search providers for the built-in `web` tool.
+    pub web_providers: Vec<WebProviderStatus>,
+    /// Selected web provider index.
+    pub web_provider_selected: usize,
+    /// Optional web provider key input.
+    pub web_key_input: String,
+    /// Resolved web provider id.
+    pub resolved_web_provider: Option<String>,
+    /// Resolved web provider key (if entered manually).
+    pub resolved_web_key: Option<String>,
 }
 
 impl WelcomeState {
     /// Create welcome state, detecting existing auth from env vars for all registered providers.
     pub fn new(all_models: &[ModelMeta]) -> Self {
         let registry = ProviderRegistry::with_builtins();
+        let auth_path = std::env::var("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|_| std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+            .unwrap_or_else(|_| std::path::PathBuf::from(".config"))
+            .join("imp")
+            .join("auth.json");
+        let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
         let providers: Vec<ProviderStatus> = registry
             .list()
             .iter()
@@ -80,7 +117,7 @@ impl WelcomeState {
                 ProviderStatus {
                     meta: meta.clone(),
                     env_detected,
-                    stored: false,
+                    stored: auth_store.stored.contains_key(meta.id),
                 }
             })
             .collect();
@@ -90,6 +127,34 @@ impl WelcomeState {
 
         let selected_id = providers[provider_selected].meta.id;
         let models = filter_models_for_provider(all_models, selected_id);
+
+        let web_providers = vec![
+            WebProviderStatus {
+                id: "none",
+                label: "Skip for now",
+                env_key: "",
+                docs_url: "",
+                env_detected: false,
+                stored: false,
+            },
+            WebProviderStatus {
+                id: "tavily",
+                label: "Tavily",
+                env_key: "TAVILY_API_KEY",
+                docs_url: "https://app.tavily.com/home",
+                env_detected: std::env::var("TAVILY_API_KEY").is_ok(),
+                stored: auth_store.stored.contains_key("tavily"),
+            },
+            WebProviderStatus {
+                id: "exa",
+                label: "Exa",
+                env_key: "EXA_API_KEY",
+                docs_url: "https://dashboard.exa.ai/api-keys",
+                env_detected: std::env::var("EXA_API_KEY").is_ok(),
+                stored: auth_store.stored.contains_key("exa"),
+            },
+        ];
+        let web_provider_selected = web_providers.iter().position(|p| p.has_auth()).unwrap_or(0);
 
         Self {
             step: 0,
@@ -103,6 +168,11 @@ impl WelcomeState {
             thinking_level: ThinkingLevel::Medium,
             auth_resolved: false,
             resolved_key: None,
+            web_providers,
+            web_provider_selected,
+            web_key_input: String::new(),
+            resolved_web_provider: None,
+            resolved_web_key: None,
         }
     }
 
@@ -222,11 +292,64 @@ impl WelcomeState {
         self.model_selected = 0;
     }
 
+    pub fn selected_web_provider(&self) -> &WebProviderStatus {
+        &self.web_providers[self.web_provider_selected]
+    }
+
+    pub fn web_provider_up(&mut self) {
+        if self.web_provider_selected > 0 {
+            self.web_provider_selected -= 1;
+            self.on_web_provider_changed();
+        }
+    }
+
+    pub fn web_provider_down(&mut self) {
+        if self.web_provider_selected + 1 < self.web_providers.len() {
+            self.web_provider_selected += 1;
+            self.on_web_provider_changed();
+        }
+    }
+
+    pub fn push_web_key_char(&mut self, c: char) {
+        self.web_key_input.push(c);
+    }
+
+    pub fn pop_web_key_char(&mut self) {
+        self.web_key_input.pop();
+    }
+
+    pub fn check_web_auth_resolved(&mut self) -> Result<(), String> {
+        let (provider_id, has_auth) = {
+            let status = self.selected_web_provider();
+            (status.id.to_string(), status.has_auth())
+        };
+        self.resolved_web_provider = Some(provider_id.clone());
+        if provider_id == "none" {
+            self.resolved_web_key = None;
+            return Ok(());
+        }
+        if has_auth {
+            self.resolved_web_key = None;
+            return Ok(());
+        }
+        if !self.web_key_input.trim().is_empty() {
+            self.resolved_web_key = Some(self.web_key_input.trim().to_string());
+            return Ok(());
+        }
+        Err("Enter a web search API key or choose Skip for now.".into())
+    }
+
     fn on_provider_changed(&mut self) {
         self.key_input.clear();
         self.key_editing = false;
         self.auth_resolved = false;
         self.resolved_key = None;
+    }
+
+    fn on_web_provider_changed(&mut self) {
+        self.web_key_input.clear();
+        self.resolved_web_key = None;
+        self.resolved_web_provider = None;
     }
 }
 
@@ -297,6 +420,7 @@ impl Widget for WelcomeView<'_> {
             WelcomeStep::Welcome => self.render_welcome(inner, buf),
             WelcomeStep::ProviderAuth => self.render_provider_auth(inner, buf),
             WelcomeStep::ModelThinking => self.render_model_thinking(inner, buf),
+            WelcomeStep::WebSearch => self.render_web_search(inner, buf),
             WelcomeStep::Done => self.render_done(inner, buf),
         }
     }
@@ -606,6 +730,120 @@ impl WelcomeView<'_> {
         }
     }
 
+    fn render_web_search(&self, area: Rect, buf: &mut Buffer) {
+        let mut row: u16 = 0;
+        let x = area.x;
+
+        let title = Line::from(Span::styled(
+            "  Optional web search setup",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        buf.set_line(x, area.y + row, &title, area.width);
+        row += 1;
+
+        let subtitle = Line::from(Span::styled(
+            "  Add Tavily or Exa now so the web tool can search immediately.",
+            self.theme.muted_style(),
+        ));
+        buf.set_line(x, area.y + row, &subtitle, area.width);
+        row += 2;
+
+        for (i, provider) in self.state.web_providers.iter().enumerate() {
+            if row >= area.height.saturating_sub(6) {
+                break;
+            }
+            let is_selected = i == self.state.web_provider_selected;
+            let marker = if is_selected { "▸ " } else { "  " };
+            let mut status = String::new();
+            if provider.id == "none" {
+                status = "  (skip)".to_string();
+            } else if provider.env_detected {
+                status = format!("  ({} detected ✓)", provider.env_key);
+            } else if provider.stored {
+                status = "  (saved ✓)".to_string();
+            }
+            let label_style = if is_selected {
+                Style::default()
+                    .fg(self.theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let line = Line::from(vec![
+                Span::styled(format!("  {marker}"), self.theme.accent_style()),
+                Span::styled(provider.label, label_style),
+                Span::styled(status, self.theme.success_style()),
+            ]);
+            buf.set_line(x, area.y + row, &line, area.width);
+            row += 1;
+        }
+
+        row += 1;
+        let selected = self.state.selected_web_provider();
+        if selected.id != "none" && !selected.has_auth() {
+            let prompt_line = Line::from(vec![Span::styled("  API Key: ", self.theme.muted_style())]);
+            buf.set_line(x, area.y + row, &prompt_line, area.width);
+            row += 1;
+
+            let display_key = if self.state.web_key_input.is_empty() {
+                "  ┌─ paste your key here ─────────────────┐".to_string()
+            } else {
+                let masked: String = self
+                    .state
+                    .web_key_input
+                    .chars()
+                    .enumerate()
+                    .map(|(i, c)| if i < 6 { c } else { '•' })
+                    .collect();
+                format!(
+                    "  ┌ {masked}▎{} ┐",
+                    " ".repeat(40usize.saturating_sub(masked.len() + 1))
+                )
+            };
+            let key_style = if self.state.web_key_input.is_empty() {
+                self.theme.muted_style()
+            } else {
+                Style::default()
+            };
+            let key_line = Line::from(Span::styled(display_key, key_style));
+            buf.set_line(x, area.y + row, &key_line, area.width);
+            row += 1;
+
+            let url_line = Line::from(vec![
+                Span::styled("  Get a key: ", self.theme.muted_style()),
+                Span::styled(selected.docs_url, Style::default().fg(self.theme.accent)),
+            ]);
+            buf.set_line(x, area.y + row, &url_line, area.width);
+        } else if selected.id == "none" {
+            let ready = Line::from(vec![
+                Span::styled("  ↷ ", self.theme.muted_style()),
+                Span::styled("Skipping web search setup for now.", self.theme.muted_style()),
+            ]);
+            buf.set_line(x, area.y + row, &ready, area.width);
+        } else {
+            let ready = Line::from(vec![
+                Span::styled("  ✓ ", self.theme.success_style()),
+                Span::styled("Web search provider is ready.", self.theme.muted_style()),
+            ]);
+            buf.set_line(x, area.y + row, &ready, area.width);
+        }
+
+        if area.height > 2 {
+            let footer_y = area.y + area.height - 1;
+            let footer = Line::from(vec![
+                Span::styled("  Enter ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("Continue", self.theme.muted_style()),
+                Span::raw("    "),
+                Span::styled("↑↓ ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("Select provider", self.theme.muted_style()),
+                Span::raw("    "),
+                Span::styled("Esc ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("Back", self.theme.muted_style()),
+            ]);
+            buf.set_line(x, footer_y, &footer, area.width);
+        }
+    }
+
     fn render_done(&self, area: Rect, buf: &mut Buffer) {
         let mut row: u16 = 0;
         let x = area.x;
@@ -622,6 +860,20 @@ impl WelcomeView<'_> {
 
         // Summary — use the provider's human-readable name from ProviderMeta
         let provider_name = self.state.providers[self.state.provider_selected].meta.name;
+        let web_provider_name = self
+            .state
+            .resolved_web_provider
+            .as_deref()
+            .filter(|id| *id != "none")
+            .map(|id| {
+                self.state
+                    .web_providers
+                    .iter()
+                    .find(|provider| provider.id == id)
+                    .map(|provider| provider.label)
+                    .unwrap_or(id)
+            })
+            .unwrap_or("not configured");
         let model_name = self
             .state
             .selected_model()
@@ -640,6 +892,7 @@ impl WelcomeView<'_> {
             format!("  Provider:  {provider_name}"),
             format!("  Model:     {model_name}"),
             format!("  Thinking:  {thinking_label}"),
+            format!("  Web:       {web_provider_name}"),
         ];
 
         for line_text in &summary_lines {

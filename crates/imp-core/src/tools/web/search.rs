@@ -1,8 +1,12 @@
 //! Search provider implementations — Tavily, Exa, Linkup, Perplexity.
 //!
 //! Each provider hits its own HTTP API and maps results to a common
-//! `SearchResponse` type. The web tool dispatches based on config.
+//! `SearchResponse` type. Credentials can come from environment variables
+//! or imp's persisted auth store (`~/.config/imp/auth.json`).
 
+use std::path::Path;
+
+use imp_llm::auth::AuthStore;
 use reqwest::Client;
 use serde_json::{json, Value};
 
@@ -15,8 +19,7 @@ pub async fn search(
     query: &str,
     max_results: usize,
 ) -> Result<SearchResponse, SearchError> {
-    let api_key =
-        std::env::var(provider.env_key_name()).map_err(|_| SearchError::MissingApiKey(provider))?;
+    let api_key = resolve_api_key(provider, std::env::var(provider.env_key_name()).ok(), None)?;
 
     let response = match provider {
         SearchProvider::Tavily => tavily_search(client, &api_key, query, max_results).await,
@@ -26,6 +29,27 @@ pub async fn search(
     }?;
 
     Ok(response)
+}
+
+// ── credential resolution ──────────────────────────────────────────
+
+fn resolve_api_key(
+    provider: SearchProvider,
+    env_value: Option<String>,
+    auth_path: Option<&Path>,
+) -> Result<String, SearchError> {
+    if let Some(key) = env_value.filter(|value| !value.trim().is_empty()) {
+        return Ok(key);
+    }
+
+    let auth_path = auth_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| crate::config::Config::user_config_dir().join("auth.json"));
+    let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
+
+    auth_store
+        .resolve_api_key_only(provider.name())
+        .map_err(|_| SearchError::MissingApiKey(provider))
 }
 
 // ── tavily ──────────────────────────────────────────────────────────
@@ -296,12 +320,63 @@ impl std::fmt::Display for SearchError {
         match self {
             Self::MissingApiKey(provider) => write!(
                 f,
-                "{} not set. Add it to your environment or secrets.",
+                "{} not set. Run `imp login {}` or set {} in your environment.",
+                provider.env_key_name(),
+                provider.name(),
                 provider.env_key_name()
             ),
             Self::Request(msg) => write!(f, "Request failed: {msg}"),
             Self::Api(msg) => write!(f, "API error: {msg}"),
             Self::Parse(msg) => write!(f, "Failed to parse response: {msg}"),
         }
+    }
+}
+
+impl std::error::Error for SearchError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use imp_llm::auth::StoredCredential;
+    use tempfile::tempdir;
+
+    #[test]
+    fn resolve_api_key_uses_explicit_env_value() {
+        let key = resolve_api_key(
+            SearchProvider::Exa,
+            Some("exa-env-key".to_string()),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(key, "exa-env-key");
+    }
+
+    #[test]
+    fn resolve_api_key_reads_imp_auth_store() {
+        let dir = tempdir().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let mut auth_store = AuthStore::new(auth_path.clone());
+        auth_store
+            .store(
+                "tavily",
+                StoredCredential::ApiKey {
+                    key: "tvly-saved-key".into(),
+                },
+            )
+            .unwrap();
+
+        let key = resolve_api_key(SearchProvider::Tavily, None, Some(&auth_path)).unwrap();
+        assert_eq!(key, "tvly-saved-key");
+    }
+
+    #[test]
+    fn resolve_api_key_missing_reports_provider() {
+        let dir = tempdir().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let err = resolve_api_key(SearchProvider::Exa, None, Some(&auth_path)).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("EXA_API_KEY"));
+        assert!(msg.contains("imp login exa"));
     }
 }

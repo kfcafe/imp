@@ -59,7 +59,7 @@ pub struct PageContent {
 }
 
 /// Web tool configuration, typically from `[web]` in config.toml.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WebConfig {
     /// Default search provider.
     pub search_provider: Option<SearchProvider>,

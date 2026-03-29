@@ -2,6 +2,8 @@ use imp_core::config::{
     AnimationLevel, ChatToolDisplay, Config, ContextConfig, ShellBackend, ShellConfig,
     SidebarStyle, ToolOutputDisplay,
 };
+use imp_core::tools::web::types::SearchProvider;
+use imp_llm::auth::AuthStore;
 use imp_llm::model::ModelMeta;
 use imp_llm::ThinkingLevel;
 use ratatui::buffer::Buffer;
@@ -38,6 +40,9 @@ pub enum SettingsField {
     ShowTimestamps,
     ShowCost,
     ShowContextUsage,
+    WebSearchProvider,
+    TavilyApiKey,
+    ExaApiKey,
     Save,
 }
 
@@ -65,6 +70,9 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::ShowTimestamps,
     SettingsField::ShowCost,
     SettingsField::ShowContextUsage,
+    SettingsField::WebSearchProvider,
+    SettingsField::TavilyApiKey,
+    SettingsField::ExaApiKey,
     SettingsField::Save,
 ];
 
@@ -97,13 +105,18 @@ pub struct SettingsState {
     pub show_timestamps: bool,
     pub show_cost: bool,
     pub show_context_usage: bool,
+    pub web_search_provider: Option<SearchProvider>,
+    pub tavily_api_key: String,
+    pub exa_api_key: String,
+    pub tavily_configured: bool,
+    pub exa_configured: bool,
     pub editing_number: bool,
     pub edit_buffer: String,
     pub dirty: bool,
 }
 
 impl SettingsState {
-    pub fn new(config: &Config, model_name: &str, models: &[ModelMeta]) -> Self {
+    pub fn new(config: &Config, model_name: &str, models: &[ModelMeta], auth_store: &AuthStore) -> Self {
         Self {
             selected: 0,
             model: model_name.to_string(),
@@ -131,6 +144,11 @@ impl SettingsState {
             show_timestamps: config.ui.show_timestamps,
             show_cost: config.ui.show_cost,
             show_context_usage: config.ui.show_context_usage,
+            web_search_provider: config.web.search_provider,
+            tavily_api_key: String::new(),
+            exa_api_key: String::new(),
+            tavily_configured: auth_store.stored.contains_key("tavily") || std::env::var("TAVILY_API_KEY").is_ok(),
+            exa_configured: auth_store.stored.contains_key("exa") || std::env::var("EXA_API_KEY").is_ok(),
             editing_number: false,
             edit_buffer: String::new(),
             dirty: false,
@@ -253,6 +271,17 @@ impl SettingsState {
             SettingsField::ShowContextUsage => {
                 self.show_context_usage = !self.show_context_usage;
             }
+            SettingsField::WebSearchProvider => {
+                self.web_search_provider = match self.web_search_provider {
+                    None => Some(SearchProvider::Tavily),
+                    Some(SearchProvider::Tavily) => Some(SearchProvider::Exa),
+                    Some(SearchProvider::Exa) => Some(SearchProvider::Linkup),
+                    Some(SearchProvider::Linkup) => Some(SearchProvider::Perplexity),
+                    Some(SearchProvider::Perplexity) => None,
+                };
+            }
+            SettingsField::TavilyApiKey => {}
+            SettingsField::ExaApiKey => {}
             SettingsField::Save => {}
         }
     }
@@ -364,6 +393,17 @@ impl SettingsState {
             SettingsField::ShowContextUsage => {
                 self.show_context_usage = !self.show_context_usage;
             }
+            SettingsField::WebSearchProvider => {
+                self.web_search_provider = match self.web_search_provider {
+                    None => Some(SearchProvider::Perplexity),
+                    Some(SearchProvider::Tavily) => None,
+                    Some(SearchProvider::Exa) => Some(SearchProvider::Tavily),
+                    Some(SearchProvider::Linkup) => Some(SearchProvider::Exa),
+                    Some(SearchProvider::Perplexity) => Some(SearchProvider::Linkup),
+                };
+            }
+            SettingsField::TavilyApiKey => {}
+            SettingsField::ExaApiKey => {}
             SettingsField::Save => {}
         }
     }
@@ -391,6 +431,14 @@ impl SettingsState {
                 self.editing_number = true;
                 self.edit_buffer = self.sidebar_width.to_string();
             }
+            SettingsField::TavilyApiKey => {
+                self.editing_number = false;
+                self.edit_buffer = self.tavily_api_key.clone();
+            }
+            SettingsField::ExaApiKey => {
+                self.editing_number = false;
+                self.edit_buffer = self.exa_api_key.clone();
+            }
             _ => {
                 // For enum/bool fields, Enter cycles forward
                 self.cycle_forward();
@@ -399,14 +447,42 @@ impl SettingsState {
     }
 
     pub fn push_char(&mut self, c: char) {
-        if self.editing_number && (c.is_ascii_digit() || c == '.') {
-            self.edit_buffer.push(c);
+        if self.editing_number {
+            if c.is_ascii_digit() || c == '.' {
+                self.edit_buffer.push(c);
+            }
+            return;
+        }
+
+        match self.current_field() {
+            SettingsField::TavilyApiKey => {
+                self.tavily_api_key.push(c);
+                self.dirty = true;
+            }
+            SettingsField::ExaApiKey => {
+                self.exa_api_key.push(c);
+                self.dirty = true;
+            }
+            _ => {}
         }
     }
 
     pub fn pop_char(&mut self) {
         if self.editing_number {
             self.edit_buffer.pop();
+            return;
+        }
+
+        match self.current_field() {
+            SettingsField::TavilyApiKey => {
+                self.tavily_api_key.pop();
+                self.dirty = true;
+            }
+            SettingsField::ExaApiKey => {
+                self.exa_api_key.pop();
+                self.dirty = true;
+            }
+            _ => {}
         }
     }
 
@@ -481,6 +557,9 @@ impl SettingsState {
             show_timestamps: self.show_timestamps,
             show_cost: self.show_cost,
             show_context_usage: self.show_context_usage,
+        };
+        config.web = imp_core::tools::web::types::WebConfig {
+            search_provider: self.web_search_provider,
         };
     }
 }
@@ -973,6 +1052,66 @@ impl Widget for SettingsView<'_> {
                 "off"
             },
             "← →",
+        );
+
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            23,
+            "Web provider",
+            match self.state.web_search_provider {
+                None => "auto",
+                Some(SearchProvider::Tavily) => "tavily",
+                Some(SearchProvider::Exa) => "exa",
+                Some(SearchProvider::Linkup) => "linkup",
+                Some(SearchProvider::Perplexity) => "perplexity",
+            },
+            "← →",
+        );
+
+        let tavily_val = if self.state.tavily_api_key.is_empty() {
+            if self.state.tavily_configured {
+                "configured (press Enter to replace)".to_string()
+            } else {
+                "not set".to_string()
+            }
+        } else {
+            format!("{}▎", "•".repeat(self.state.tavily_api_key.chars().count().max(1)))
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            24,
+            "Tavily API key",
+            &tavily_val,
+            "Enter to edit",
+        );
+
+        let exa_val = if self.state.exa_api_key.is_empty() {
+            if self.state.exa_configured {
+                "configured (press Enter to replace)".to_string()
+            } else {
+                "not set".to_string()
+            }
+        } else {
+            format!("{}▎", "•".repeat(self.state.exa_api_key.chars().count().max(1)))
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            25,
+            "Exa API key",
+            &exa_val,
+            "Enter to edit",
         );
         // Spacer before save
         row += 1;

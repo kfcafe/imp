@@ -74,7 +74,7 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
         },
         SlashCommand {
             name: "login".into(),
-            description: "Open OAuth provider picker (Anthropic, ChatGPT/OpenAI)".into(),
+            description: "Login or enter provider API keys (Anthropic, OpenAI, Tavily, Exa, etc.)".into(),
         },
         SlashCommand {
             name: "setup".into(),
