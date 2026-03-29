@@ -798,6 +798,7 @@ mod tests {
             file_cache: Arc::new(crate::tools::FileCache::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
             mode: crate::config::AgentMode::Full,
+            read_max_lines: 500,
         }
     }
 

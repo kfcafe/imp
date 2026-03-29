@@ -6,7 +6,6 @@ use serde_json::json;
 use super::{suggest_similar_files, truncate_head, Tool, ToolContext, ToolOutput};
 use crate::error::Result;
 
-const MAX_LINES: usize = 2000;
 const MAX_BYTES: usize = 50_000;
 
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
@@ -94,7 +93,20 @@ impl Tool for ReadTool {
         let sliced = apply_offset_limit(&content, offset, limit);
 
         // Apply truncation
-        let result = truncate_head(&sliced, MAX_LINES, MAX_BYTES);
+        let max_lines = ctx.read_max_lines;
+        let result = if max_lines == 0 {
+            super::TruncationResult {
+                content: sliced.clone(),
+                truncated: false,
+                output_lines: sliced.lines().count(),
+                total_lines: sliced.lines().count(),
+                output_bytes: sliced.len(),
+                total_bytes: sliced.len(),
+                temp_file: None,
+            }
+        } else {
+            truncate_head(&sliced, max_lines, MAX_BYTES)
+        };
 
         let mut output = result.content.clone();
         if result.truncated {
@@ -267,6 +279,7 @@ mod tests {
             file_cache: Arc::new(crate::tools::FileCache::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
             mode: crate::config::AgentMode::Full,
+            read_max_lines: 500,
         }
     }
 
@@ -398,6 +411,60 @@ mod tests {
         assert!(text.contains("line 0"));
         // Details should indicate truncation
         assert_eq!(result.details["truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn read_respects_configured_line_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("limited.txt");
+        let mut content = String::new();
+        for i in 0..800 {
+            content.push_str(&format!("line {i}\n"));
+        }
+        std::fs::write(&file, &content).unwrap();
+
+        let tool = ReadTool;
+        let mut ctx = test_ctx(dir.path());
+        ctx.read_max_lines = 500;
+        let result = tool
+            .execute("c7b", json!({"path": "limited.txt"}), ctx)
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let text = extract_text(&result);
+        assert!(text.contains("truncated"));
+        assert!(text.contains("showing 500/800 lines"));
+        assert_eq!(result.details["lines"], 500);
+        assert_eq!(result.details["total_lines"], 800);
+    }
+
+    #[tokio::test]
+    async fn read_zero_line_limit_disables_line_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("unlimited.txt");
+        let mut content = String::new();
+        for i in 0..800 {
+            content.push_str(&format!("line {i}\n"));
+        }
+        std::fs::write(&file, &content).unwrap();
+
+        let tool = ReadTool;
+        let mut ctx = test_ctx(dir.path());
+        ctx.read_max_lines = 0;
+        let result = tool
+            .execute("c7c", json!({"path": "unlimited.txt"}), ctx)
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let text = extract_text(&result);
+        assert!(!text.contains("truncated"));
+        assert!(text.contains("line 799"));
+        assert_eq!(result.details["truncated"], false);
+        assert_eq!(result.details["lines"], 800);
+        assert_eq!(result.details["total_lines"], 800);
+        assert!(result.details["path"].as_str().unwrap().contains("unlimited.txt"));
     }
 
     #[tokio::test]

@@ -130,6 +130,8 @@ pub struct Agent {
     pub file_cache: Arc<crate::tools::FileCache>,
     /// Tracks which files have been read; used for staleness and unread-edit warnings.
     pub file_tracker: Arc<std::sync::Mutex<crate::tools::FileTracker>>,
+    /// Max lines the read tool may return before truncating. 0 means unlimited.
+    pub read_max_lines: usize,
     /// Cache options for LLM requests.
     pub cache_options: imp_llm::CacheOptions,
 
@@ -167,6 +169,7 @@ impl Agent {
             guardrail_profile: None,
             file_cache: Arc::new(crate::tools::FileCache::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
+            read_max_lines: 500,
             cache_options: imp_llm::CacheOptions {
                 cache_system_prompt: true,
                 cache_tools: true,
@@ -674,6 +677,7 @@ impl Agent {
                     file_cache: self.file_cache.clone(),
                     file_tracker: self.file_tracker.clone(),
                     mode: self.mode,
+                    read_max_lines: self.read_max_lines,
                 };
 
                 // Forward tool output deltas to event stream

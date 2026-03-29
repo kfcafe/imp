@@ -870,6 +870,7 @@ mod tests {
                 imp_core::tools::FileTracker::default(),
             )),
             mode: imp_core::config::AgentMode::Full,
+            read_max_lines: 500,
         }
     }
 

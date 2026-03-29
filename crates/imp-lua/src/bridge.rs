@@ -67,6 +67,7 @@ impl Tool for LuaTool {
             file_cache: ctx.file_cache,
             file_tracker: ctx.file_tracker,
             mode: ctx.mode,
+            read_max_lines: ctx.read_max_lines,
         };
 
         tokio::task::spawn_blocking(move || {

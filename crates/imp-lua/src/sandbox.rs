@@ -55,6 +55,7 @@ pub struct LuaCallContext {
     pub file_cache: Arc<FileCache>,
     pub file_tracker: Arc<std::sync::Mutex<FileTracker>>,
     pub mode: AgentMode,
+    pub read_max_lines: usize,
 }
 
 impl LuaCallContext {
@@ -68,6 +69,7 @@ impl LuaCallContext {
             file_cache: Arc::clone(&self.file_cache),
             file_tracker: Arc::clone(&self.file_tracker),
             mode: self.mode,
+            read_max_lines: self.read_max_lines,
         }
     }
 }

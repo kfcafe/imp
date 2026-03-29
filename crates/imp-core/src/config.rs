@@ -329,6 +329,11 @@ pub struct UiConfig {
     #[serde(default = "default_tool_output_lines")]
     pub tool_output_lines: usize,
 
+    /// Max lines the read tool returns before truncating. 0 disables line
+    /// truncation for file reads. Default: 500.
+    #[serde(default = "default_read_max_lines")]
+    pub read_max_lines: usize,
+
     /// Sidebar width as percentage of screen (20-80). Default: 40.
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: u16,
@@ -395,6 +400,9 @@ pub struct UiConfig {
 fn default_tool_output_lines() -> usize {
     10
 }
+fn default_read_max_lines() -> usize {
+    500
+}
 fn default_sidebar_width() -> u16 {
     40
 }
@@ -420,6 +428,7 @@ impl Default for UiConfig {
             sidebar_style: SidebarStyle::default(),
             tool_output: ToolOutputDisplay::default(),
             tool_output_lines: 10,
+            read_max_lines: 500,
             sidebar_width: 40,
             word_wrap: true,
             animations: AnimationLevel::Minimal,
@@ -679,6 +688,7 @@ mod tests {
         assert!(config.thinking.is_none());
         assert!(config.max_turns.is_none());
         assert!(config.tools.is_none());
+        assert_eq!(config.ui.read_max_lines, 500);
         assert!(config.roles.is_empty());
         assert!(config.hooks.is_empty());
         assert!((config.context.observation_mask_threshold - 0.6).abs() < f64::EPSILON);
@@ -718,6 +728,7 @@ mask_window = 5
         assert_eq!(config.max_turns, Some(50));
         assert_eq!(config.tools.as_ref().unwrap().len(), 3);
         assert_eq!(config.guardrails.enabled, Some(true));
+        assert_eq!(config.ui.read_max_lines, 500);
         assert_eq!(
             config.guardrails.profile,
             Some(crate::guardrails::GuardrailProfile::Zig)

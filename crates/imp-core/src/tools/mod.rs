@@ -134,6 +134,8 @@ pub struct ToolContext {
     pub file_tracker: Arc<std::sync::Mutex<FileTracker>>,
     /// Active agent mode — determines which actions are permitted.
     pub mode: AgentMode,
+    /// Max lines the read tool may return before truncating. 0 means unlimited.
+    pub read_max_lines: usize,
 }
 
 /// In-session file content cache. Avoids re-reading files that haven't changed.

@@ -24,6 +24,7 @@ pub enum SettingsField {
     SidebarStyle,
     ToolOutput,
     ToolOutputLines,
+    ReadMaxLines,
     SidebarWidth,
     WordWrap,
     Animations,
@@ -50,6 +51,7 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::SidebarStyle,
     SettingsField::ToolOutput,
     SettingsField::ToolOutputLines,
+    SettingsField::ReadMaxLines,
     SettingsField::SidebarWidth,
     SettingsField::WordWrap,
     SettingsField::Animations,
@@ -81,6 +83,7 @@ pub struct SettingsState {
     pub sidebar_style: SidebarStyle,
     pub tool_output: ToolOutputDisplay,
     pub tool_output_lines: usize,
+    pub read_max_lines: usize,
     pub sidebar_width: u16,
     pub word_wrap: bool,
     pub animations: AnimationLevel,
@@ -114,6 +117,7 @@ impl SettingsState {
             sidebar_style: config.ui.sidebar_style,
             tool_output: config.ui.tool_output,
             tool_output_lines: config.ui.tool_output_lines,
+            read_max_lines: config.ui.read_max_lines,
             sidebar_width: config.ui.sidebar_width,
             word_wrap: config.ui.word_wrap,
             animations: config.ui.animations,
@@ -198,6 +202,9 @@ impl SettingsState {
             }
             SettingsField::ToolOutputLines => {
                 self.tool_output_lines = self.tool_output_lines.saturating_add(5).min(100);
+            }
+            SettingsField::ReadMaxLines => {
+                self.read_max_lines = self.read_max_lines.saturating_add(100);
             }
             SettingsField::SidebarWidth => {
                 self.sidebar_width = (self.sidebar_width + 5).min(80);
@@ -306,6 +313,9 @@ impl SettingsState {
             SettingsField::ToolOutputLines => {
                 self.tool_output_lines = self.tool_output_lines.saturating_sub(5).max(5);
             }
+            SettingsField::ReadMaxLines => {
+                self.read_max_lines = self.read_max_lines.saturating_sub(100);
+            }
             SettingsField::SidebarWidth => {
                 self.sidebar_width = self.sidebar_width.saturating_sub(5).max(20);
             }
@@ -373,6 +383,10 @@ impl SettingsState {
                 self.editing_number = true;
                 self.edit_buffer = self.tool_output_lines.to_string();
             }
+            SettingsField::ReadMaxLines => {
+                self.editing_number = true;
+                self.edit_buffer = self.read_max_lines.to_string();
+            }
             SettingsField::SidebarWidth => {
                 self.editing_number = true;
                 self.edit_buffer = self.sidebar_width.to_string();
@@ -419,6 +433,11 @@ impl SettingsState {
                     self.tool_output_lines = v.clamp(1, 100);
                 }
             }
+            SettingsField::ReadMaxLines => {
+                if let Ok(v) = self.edit_buffer.parse::<usize>() {
+                    self.read_max_lines = v;
+                }
+            }
             SettingsField::SidebarWidth => {
                 if let Ok(v) = self.edit_buffer.parse::<u16>() {
                     self.sidebar_width = v.clamp(20, 80);
@@ -446,6 +465,7 @@ impl SettingsState {
             sidebar_style: self.sidebar_style,
             tool_output: self.tool_output,
             tool_output_lines: self.tool_output_lines,
+            read_max_lines: self.read_max_lines,
             sidebar_width: self.sidebar_width,
             word_wrap: self.word_wrap,
             animations: self.animations,
@@ -723,6 +743,25 @@ impl Widget for SettingsView<'_> {
             "← → / type",
         );
 
+        let rml_val = if self.state.editing_number
+            && self.state.current_field() == SettingsField::ReadMaxLines
+        {
+            format!("{}▎", self.state.edit_buffer)
+        } else {
+            self.state.read_max_lines.to_string()
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            9,
+            "Read max lines",
+            &rml_val,
+            "← → / type (0 = no limit)",
+        );
+
         // Sidebar width
         let sw_val = if self.state.editing_number
             && self.state.current_field() == SettingsField::SidebarWidth
@@ -737,7 +776,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            9,
+            10,
             "Sidebar width",
             &sw_val,
             "← → / type",
@@ -750,7 +789,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            10,
+            11,
             "Word wrap",
             if self.state.word_wrap { "on" } else { "off" },
             "← →",
@@ -762,7 +801,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            11,
+            12,
             "Animations",
             animation_label(self.state.animations),
             "← →",
@@ -774,7 +813,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            12,
+            13,
             "Chat tool display",
             match self.state.chat_tool_display {
                 ChatToolDisplay::Interleaved => "interleaved",
@@ -789,7 +828,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            13,
+            14,
             "Auto-open sidebar",
             if self.state.auto_open_sidebar {
                 "on"
@@ -812,7 +851,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            14,
+            15,
             "Auto-open width",
             &sao_val,
             "← → / type",
@@ -831,7 +870,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            15,
+            16,
             "Thinking lines",
             &thinking_lines_val,
             "← → / type",
@@ -850,7 +889,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            16,
+            17,
             "Streaming lines",
             &streaming_lines_val,
             "← → / type",
@@ -869,7 +908,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            17,
+            18,
             "Mouse scroll",
             &mouse_scroll_val,
             "← → / type",
@@ -888,7 +927,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            18,
+            19,
             "Keyboard scroll",
             &keyboard_scroll_val,
             "← → / type",
@@ -900,7 +939,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            19,
+            20,
             "Show timestamps",
             if self.state.show_timestamps {
                 "on"
@@ -915,7 +954,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            20,
+            21,
             "Show cost",
             if self.state.show_cost { "on" } else { "off" },
             "← →",
@@ -926,7 +965,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            21,
+            22,
             "Show context",
             if self.state.show_context_usage {
                 "on"

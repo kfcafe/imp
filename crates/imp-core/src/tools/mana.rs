@@ -826,6 +826,7 @@ mod tests {
             file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
             mode: crate::config::AgentMode::from_name(mode_name)
                 .unwrap_or(crate::config::AgentMode::Full),
+            read_max_lines: 500,
         };
 
         let tool = ManaTool;
@@ -877,6 +878,7 @@ mod tests {
             file_cache: Arc::new(FileCache::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
             mode,
+            read_max_lines: 500,
         };
         (ctx, tempfile::tempdir().unwrap())
     }

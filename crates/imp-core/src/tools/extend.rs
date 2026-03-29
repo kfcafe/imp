@@ -291,6 +291,7 @@ mod tests {
                 crate::tools::FileTracker::new(),
             )),
             mode: crate::config::AgentMode::Full,
+            read_max_lines: 500,
         }
     }
 
