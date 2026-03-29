@@ -35,7 +35,13 @@ fn styled_read_output(
     theme: &Theme,
     with_line_numbers: bool,
 ) -> Vec<Line<'static>> {
-    let Some(output) = tc.output.as_deref() else {
+    let Some(output) = tc.output.as_deref().or_else(|| {
+        if tc.streaming_output.is_empty() {
+            None
+        } else {
+            Some(tc.streaming_output.as_str())
+        }
+    }) else {
         return vec![Line::from(Span::styled("Running…", theme.muted_style()))];
     };
 
@@ -162,7 +168,13 @@ fn styled_write_output(
 }
 
 fn styled_diff_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
-    let Some(output) = tc.output.as_deref() else {
+    let Some(output) = tc.output.as_deref().or_else(|| {
+        if tc.streaming_output.is_empty() {
+            None
+        } else {
+            Some(tc.streaming_output.as_str())
+        }
+    }) else {
         return vec![Line::from(Span::styled("Running…", theme.muted_style()))];
     };
 
@@ -179,7 +191,13 @@ fn styled_diff_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>>
 }
 
 fn styled_plain_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
-    let Some(output) = tc.output.as_deref() else {
+    let Some(output) = tc.output.as_deref().or_else(|| {
+        if tc.streaming_output.is_empty() {
+            None
+        } else {
+            Some(tc.streaming_output.as_str())
+        }
+    }) else {
         return vec![Line::from(Span::styled("Running…", theme.muted_style()))];
     };
 
@@ -369,7 +387,22 @@ mod tests {
             is_error: false,
             expanded: true,
             streaming_lines: Vec::new(),
+            streaming_output: String::new(),
         }
+    }
+
+    #[test]
+    fn read_output_prefers_live_streaming_transcript_while_running() {
+        let mut tc = make_tc("bash", None);
+        tc.streaming_output = "first\nsecond".into();
+
+        let lines = styled_tool_output_lines(&tc, &Highlighter::new(), &Theme::default(), false);
+        let plain: Vec<String> = lines
+            .into_iter()
+            .map(|line| line.spans.into_iter().map(|span| span.content).collect())
+            .collect();
+
+        assert_eq!(plain, vec!["first".to_string(), "second".to_string()]);
     }
 
     #[test]

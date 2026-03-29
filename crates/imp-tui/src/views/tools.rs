@@ -19,8 +19,10 @@ pub struct DisplayToolCall {
     pub details: serde_json::Value,
     pub is_error: bool,
     pub expanded: bool,
-    /// Rolling buffer of streaming output lines (last 5)
+    /// Rolling buffer of recent streaming output lines for inline chat display.
     pub streaming_lines: Vec<String>,
+    /// Full streaming output collected while the tool is still running.
+    pub streaming_output: String,
 }
 
 impl DisplayToolCall {
@@ -339,6 +341,7 @@ mod tests {
             is_error,
             expanded: false,
             streaming_lines: Vec::new(),
+            streaming_output: String::new(),
         }
     }
 

@@ -101,6 +101,7 @@ impl DisplayMessage {
                                 is_error: false,
                                 expanded: false,
                                 streaming_lines: Vec::new(),
+                                streaming_output: String::new(),
                             });
                         }
                         _ => {}
@@ -654,7 +655,7 @@ fn push_tool_call_chat_lines(
         }
     }
 
-    if tc.expanded && !is_running {
+    if tc.expanded {
         let output_lines =
             styled_tool_output_lines(tc, &Highlighter::new(), theme, tc.name == "read");
         for line in output_lines.into_iter().take(50) {
@@ -928,6 +929,7 @@ mod tests {
             is_error: false,
             expanded: false,
             streaming_lines: Vec::new(),
+            streaming_output: String::new(),
         }
     }
 

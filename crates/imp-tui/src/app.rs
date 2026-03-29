@@ -358,6 +358,9 @@ impl App {
                         for tc in &mut display_msg.tool_calls {
                             if tc.id == tr.tool_call_id {
                                 tc.output = Some(output_text.clone());
+                                if tc.streaming_output.is_empty() {
+                                    tc.streaming_output = output_text.clone();
+                                }
                                 tc.details = tr.details.clone();
                                 tc.is_error = tr.is_error;
                                 attached = true;
@@ -3541,6 +3544,7 @@ impl App {
                                 is_error: false,
                                 expanded: self.tools_expanded,
                                 streaming_lines: Vec::new(),
+                                streaming_output: String::new(),
                             });
                         }
                         _ => {}
@@ -3592,7 +3596,12 @@ impl App {
                 for msg in self.messages.iter_mut().rev() {
                     for tc in &mut msg.tool_calls {
                         if tc.id == tool_call_id && tc.output.is_none() {
-                            // Append text and keep configured rolling tail
+                            // Append text to the full live transcript.
+                            if !tc.streaming_output.is_empty() {
+                                tc.streaming_output.push('\n');
+                            }
+                            tc.streaming_output.push_str(&text);
+                            // Append text and keep configured rolling tail for chat.
                             for line in text.lines() {
                                 tc.streaming_lines.push(line.to_string());
                             }
@@ -3630,6 +3639,9 @@ impl App {
                     for tc in &mut msg.tool_calls {
                         if tc.id == tool_call_id {
                             tc.output = Some(output_text.clone());
+                            if tc.streaming_output.is_empty() {
+                                tc.streaming_output = output_text.clone();
+                            }
                             tc.details = result.details.clone();
                             tc.is_error = is_error;
                             // Auto-expand failed tool calls so the error is immediately visible
@@ -4318,6 +4330,7 @@ mod session_lifecycle {
                 is_error: false,
                 expanded: false,
                 streaming_lines: Vec::new(),
+                streaming_output: String::new(),
             }],
             assistant_blocks: Vec::new(),
             is_streaming: false,
@@ -4527,6 +4540,7 @@ mod session_lifecycle {
                 is_error: false,
                 expanded: false,
                 streaming_lines: Vec::new(),
+                streaming_output: String::new(),
             }],
             assistant_blocks: Vec::new(),
             is_streaming: false,
@@ -4673,6 +4687,7 @@ mod session_lifecycle {
                         is_error: false,
                         expanded: false,
                         streaming_lines: Vec::new(),
+                        streaming_output: String::new(),
                     },
                     crate::views::tools::DisplayToolCall {
                         id: "tc-2".into(),
@@ -4683,6 +4698,7 @@ mod session_lifecycle {
                         is_error: false,
                         expanded: false,
                         streaming_lines: Vec::new(),
+                        streaming_output: String::new(),
                     },
                 ],
                 assistant_blocks: Vec::new(),

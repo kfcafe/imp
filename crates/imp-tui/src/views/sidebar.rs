@@ -520,6 +520,16 @@ fn styled_output_lines(
         return wrap_plain_lines(limited, width, config, theme, tc.is_error);
     }
 
+    if tc.output.is_none() && !tc.streaming_output.is_empty() {
+        let live_lines = tc
+            .streaming_output
+            .lines()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let limited = apply_tool_output_limit(live_lines, config);
+        return wrap_plain_lines(limited, width, config, theme, tc.is_error);
+    }
+
     if tc.output.is_none() && !tc.streaming_lines.is_empty() {
         let limited = apply_tool_output_limit(tc.streaming_lines.clone(), config);
         return wrap_plain_lines(limited, width, config, theme, tc.is_error);
@@ -677,6 +687,8 @@ fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
                 lines.push(format!("{marker} {id}  {title}  {status}{suffix}"));
             }
         }
+    } else if !tc.streaming_output.is_empty() {
+        lines.extend(tc.streaming_output.lines().map(String::from));
     } else if !tc.streaming_lines.is_empty() {
         lines.extend(tc.streaming_lines.clone());
     } else if let Some(ref output) = tc.output {
@@ -861,6 +873,7 @@ mod tests {
             is_error: false,
             expanded: false,
             streaming_lines: Vec::new(),
+            streaming_output: String::new(),
         };
 
         let lines = format_mana_output(&tc);
@@ -916,6 +929,7 @@ mod tests {
             is_error,
             expanded: false,
             streaming_lines: Vec::new(),
+            streaming_output: String::new(),
         }
     }
 
@@ -941,6 +955,30 @@ mod tests {
             .collect();
         assert!(plain[0].starts_with("   1 │ "));
         assert!(plain[0].contains("fn main()"));
+    }
+
+    #[test]
+    fn styled_output_lines_use_live_streaming_output_in_sidebar() {
+        let mut tc = make_tc("bash", "$ echo hi", None, false);
+        tc.streaming_output = "line 1\nline 2".into();
+        let config = UiConfig {
+            tool_output: ToolOutputDisplay::Full,
+            word_wrap: false,
+            ..Default::default()
+        };
+
+        let lines = styled_output_lines(
+            &tc,
+            &config,
+            &crate::highlight::Highlighter::new(),
+            &Theme::default(),
+            80,
+        );
+        let plain: Vec<String> = lines
+            .into_iter()
+            .map(|line| line.spans.into_iter().map(|span| span.content).collect())
+            .collect();
+        assert_eq!(plain, vec!["line 1".to_string(), "line 2".to_string()]);
     }
 
     #[test]
