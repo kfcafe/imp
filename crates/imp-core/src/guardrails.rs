@@ -212,6 +212,7 @@ pub async fn run_after_write_checks(
             .arg("-c")
             .arg(cmd)
             .current_dir(cwd)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()

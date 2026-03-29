@@ -190,7 +190,12 @@ impl HookRunner {
                 if let HookAction::Shell { command } = &hook.action {
                     let cmd = interpolate_command(command, event);
                     tokio::spawn(async move {
-                        let _ = Command::new("sh").arg("-c").arg(&cmd).output().await;
+                        let _ = Command::new("sh")
+                            .arg("-c")
+                            .arg(&cmd)
+                            .stdin(std::process::Stdio::null())
+                            .output()
+                            .await;
                     });
                 }
                 // Non-blocking hooks don't contribute results
@@ -351,7 +356,13 @@ async fn execute_hook(hook: &HookDefinition, event: &HookEvent<'_>) -> HookResul
     match &hook.action {
         HookAction::Shell { command } => {
             let cmd = interpolate_command(command, event);
-            match Command::new("sh").arg("-c").arg(&cmd).output().await {
+            match Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .await
+            {
                 Ok(output) => {
                     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                     let stderr = String::from_utf8_lossy(&output.stderr).to_string();

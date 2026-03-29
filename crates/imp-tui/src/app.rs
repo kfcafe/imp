@@ -1658,6 +1658,7 @@ impl App {
     fn read_clipboard_command(program: &str, args: &[&str]) -> Option<String> {
         let output = std::process::Command::new(program)
             .args(args)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .output()

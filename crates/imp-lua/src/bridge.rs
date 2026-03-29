@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -234,7 +234,9 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
             } else {
                 cmd
             };
-            command.arg(&full_cmd);
+            command
+                .stdin(Stdio::null())
+                .arg(&full_cmd);
 
             // Apply opts
             if let Some(opts_table) = &opts {
