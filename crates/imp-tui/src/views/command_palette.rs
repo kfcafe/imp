@@ -42,11 +42,7 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
         },
         SlashCommand {
             name: "resume".into(),
-            description: "Resume last session".into(),
-        },
-        SlashCommand {
-            name: "session".into(),
-            description: "List sessions".into(),
+            description: "Resume/search sessions".into(),
         },
         SlashCommand {
             name: "name".into(),

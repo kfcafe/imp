@@ -28,4 +28,39 @@ fail_first: true
 kind: epic
 ---
 
-Align imp's default native tool surface with capabilities that already exist in code so runtime behavior, docs, and future UX work start from the same baseline. Limit scope to default registration and public surfaced contract for implemented built-ins, especially memory, session_search, and multi_edit. Do not add new UX flows, LSP, checkpoints, or planning UI in this unit. Files in scope: crates/imp-core/src/builder.rs and README.md.
+## Current State
+Several built-in imp capabilities already exist in code, but the default surfaced contract is not fully aligned with that reality. In particular, memory, session search, and multi-edit should be treated as part of the stock built-in experience so docs and future UX work match the actual runtime.
+
+## Task
+Align the default built-in tool surface and public docs with what imp already implements.
+
+Do the following:
+1. confirm the relevant built-in tools are registered in the default builder path
+2. make README/runtime-facing copy treat these as first-class built-ins, not hidden extras
+3. keep the scope tightly focused on the default surfaced contract for implemented built-ins
+
+## Files to Modify
+- `crates/imp-core/src/builder.rs`
+- `README.md`
+
+## Important Built-ins to Surface
+- `memory`
+- `session_search`
+- `multi_edit`
+
+## Scope Boundaries
+- Do **not** add new backend capability here
+- Do **not** add TUI-only discoverability work here; that belongs in `29`
+- Do **not** add checkpoint or planning UX here
+
+## Edge Cases
+- documentation should describe what is truly available by default
+- builder registration and README wording should not drift apart
+- avoid promising behavior that is project-local or extension-only
+
+## How to Verify
+Run: `cd /Users/asher/tower/imp && rg "tools\.register\(Arc::new\(MemoryTool\)\);" crates/imp-core/src/builder.rs && rg "tools\.register\(Arc::new\(SessionSearchTool\)\);" crates/imp-core/src/builder.rs && rg "tools\.register\(Arc::new\(MultiEditTool\)\);" crates/imp-core/src/builder.rs && rg "persistent memory" README.md && rg "session search|search past conversations" README.md && cargo check -p imp-core`
+
+## Done When
+- the default native tool surface matches implemented built-ins
+- docs and runtime expectations start from the same baseline

@@ -11,6 +11,8 @@ use crate::usage::{
     usage_records_from_session, SessionUsageRecord, UsageRecordV1, USAGE_CUSTOM_TYPE,
 };
 
+const SESSION_META_VERSION: u32 = 1;
+
 /// A single entry in the session JSONL file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -47,13 +49,21 @@ pub enum SessionEntry {
     },
     #[serde(rename = "label")]
     Label { entry_id: String, label: String },
+    #[serde(rename = "session-meta")]
+    SessionMeta {
+        version: u32,
+        name: Option<String>,
+        summary: Option<String>,
+    },
 }
 
 impl SessionEntry {
     /// Get the id of this entry, if it has one (Header and Label don't).
     pub fn id(&self) -> Option<&str> {
         match self {
-            SessionEntry::Header { .. } | SessionEntry::Label { .. } => None,
+            SessionEntry::Header { .. }
+            | SessionEntry::Label { .. }
+            | SessionEntry::SessionMeta { .. } => None,
             SessionEntry::Message { id, .. }
             | SessionEntry::Compaction { id, .. }
             | SessionEntry::Custom { id, .. } => Some(id),
@@ -63,7 +73,9 @@ impl SessionEntry {
     /// Get the parent_id of this entry, if it has one.
     pub fn parent_id(&self) -> Option<&str> {
         match self {
-            SessionEntry::Header { .. } | SessionEntry::Label { .. } => None,
+            SessionEntry::Header { .. }
+            | SessionEntry::Label { .. }
+            | SessionEntry::SessionMeta { .. } => None,
             SessionEntry::Message { parent_id, .. }
             | SessionEntry::Compaction { parent_id, .. }
             | SessionEntry::Custom { parent_id, .. } => parent_id.as_deref(),
@@ -88,15 +100,30 @@ pub struct SessionInfo {
     pub updated_at: u64,
     pub message_count: usize,
     pub first_message: Option<String>,
+    pub name: Option<String>,
+    pub summary: Option<String>,
 }
 
 impl SessionInfo {
-    /// A short, single-line chat title derived from the first prompt.
+    /// A short, single-line chat title derived from persisted session metadata or message history.
     pub fn title(&self, max_chars: usize) -> Option<String> {
-        self.first_message
+        self.name
             .as_deref()
-            .map(|text| summarize_session_title(text, max_chars))
-            .filter(|title| !title.is_empty())
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| truncate_chars_with_suffix(name.trim(), max_chars, "…"))
+            .or_else(|| {
+                self.summary
+                    .as_deref()
+                    .filter(|summary| !summary.trim().is_empty())
+                    .map(|summary| summarize_session_title(summary.trim(), max_chars))
+                    .filter(|title| !title.is_empty())
+            })
+            .or_else(|| {
+                self.first_message
+                    .as_deref()
+                    .map(|text| summarize_session_title(text, max_chars))
+                    .filter(|title| !title.is_empty())
+            })
     }
 }
 
@@ -106,6 +133,7 @@ pub struct SessionManager {
     path: Option<PathBuf>,
     leaf_id: Option<String>,
     session_name: Option<String>,
+    session_summary: Option<String>,
 }
 
 impl SessionManager {
@@ -135,6 +163,7 @@ impl SessionManager {
             path: Some(path),
             leaf_id: None,
             session_name: None,
+            session_summary: None,
         })
     }
 
@@ -144,6 +173,9 @@ impl SessionManager {
         let mut entries = Vec::new();
         let mut last_id = None;
 
+        let mut session_name = None;
+        let mut session_summary = None;
+
         for (line_num, line) in content.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
@@ -152,6 +184,10 @@ impl SessionManager {
                 Ok(entry) => {
                     if let Some(id) = entry.id() {
                         last_id = Some(id.to_string());
+                    }
+                    if let SessionEntry::SessionMeta { name, summary, .. } = &entry {
+                        session_name = name.clone();
+                        session_summary = summary.clone();
                     }
                     entries.push(entry);
                 }
@@ -169,7 +205,8 @@ impl SessionManager {
             entries,
             path: Some(path.to_path_buf()),
             leaf_id: last_id,
-            session_name: None,
+            session_name,
+            session_summary,
         })
     }
 
@@ -180,6 +217,7 @@ impl SessionManager {
             path: None,
             leaf_id: None,
             session_name: None,
+            session_summary: None,
         }
     }
 
@@ -230,19 +268,78 @@ impl SessionManager {
         self.session_name.as_deref()
     }
 
+    /// Get the session summary.
+    pub fn summary(&self) -> Option<&str> {
+        self.session_summary.as_deref()
+    }
+
     /// Set the session name.
     pub fn set_name(&mut self, name: &str) {
         self.session_name = Some(name.to_string());
+        let _ = self.persist_session_meta();
     }
 
-    /// A short, single-line chat title derived from the first prompt.
+    /// Set the session summary.
+    pub fn set_summary(&mut self, summary: impl Into<String>) {
+        let summary = summary.into();
+        self.session_summary = Some(summary);
+        let _ = self.persist_session_meta();
+    }
+
+    /// Clear the session summary.
+    pub fn clear_summary(&mut self) {
+        self.session_summary = None;
+        let _ = self.persist_session_meta();
+    }
+
+    /// A short, single-line chat title derived from persisted session metadata or message history.
     pub fn title(&self, max_chars: usize) -> Option<String> {
-        self.entries.iter().find_map(|entry| match entry {
-            SessionEntry::Message { message, .. } => extract_text(message),
-            _ => None,
+        if let Some(name) = self
+            .name()
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| truncate_chars_with_suffix(name.trim(), max_chars, "…"))
+        {
+            return Some(name);
+        }
+
+        if let Some(summary) = self
+            .summary()
+            .filter(|summary| !summary.trim().is_empty())
+            .map(|summary| summarize_session_title(summary.trim(), max_chars))
+            .filter(|summary| !summary.is_empty())
+            .or_else(|| {
+                derive_session_summary(&self.entries)
+                    .map(|summary| summarize_session_title(summary.trim(), max_chars))
+                    .filter(|summary| !summary.is_empty())
+            })
+        {
+            return Some(summary);
+        }
+
+        self.entries
+            .iter()
+            .find_map(|entry| match entry {
+                SessionEntry::Message { message, .. } => extract_text(message),
+                _ => None,
+            })
+            .map(|text| summarize_session_title(&text, max_chars))
+            .filter(|title| !title.is_empty())
+    }
+
+    fn persist_session_meta(&mut self) -> Result<()> {
+        self.append(SessionEntry::SessionMeta {
+            version: SESSION_META_VERSION,
+            name: self.session_name.clone(),
+            summary: self.session_summary.clone(),
         })
-        .map(|text| summarize_session_title(&text, max_chars))
-        .filter(|title| !title.is_empty())
+    }
+
+    fn refresh_derived_summary(&mut self) {
+        let derived = derive_session_summary(&self.entries);
+        if derived != self.session_summary {
+            self.session_summary = derived;
+            let _ = self.persist_session_meta();
+        }
     }
 
     /// Append an entry. Sets parent_id to current leaf_id, updates leaf_id,
@@ -255,7 +352,9 @@ impl SessionManager {
             | SessionEntry::Custom { parent_id, .. } => {
                 *parent_id = self.leaf_id.clone();
             }
-            SessionEntry::Header { .. } | SessionEntry::Label { .. } => {}
+            SessionEntry::Header { .. }
+            | SessionEntry::Label { .. }
+            | SessionEntry::SessionMeta { .. } => {}
         }
 
         // Update leaf_id
@@ -311,6 +410,8 @@ impl SessionManager {
             turn_index,
             &message,
         )?;
+
+        self.refresh_derived_summary();
 
         Ok((assistant_message_id, usage_entry_id))
     }
@@ -628,6 +729,15 @@ impl SessionManager {
             .collect();
         forked_entries.extend(labels);
 
+        // Also include session metadata so names/summaries survive forks.
+        let meta_entries: Vec<SessionEntry> = self
+            .entries
+            .iter()
+            .filter(|e| matches!(e, SessionEntry::SessionMeta { .. }))
+            .cloned()
+            .collect();
+        forked_entries.extend(meta_entries);
+
         // Write to new file
         if let Some(parent) = new_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -652,7 +762,8 @@ impl SessionManager {
             entries: forked_entries,
             path: Some(new_path.to_path_buf()),
             leaf_id,
-            session_name: None,
+            session_name: self.session_name.clone(),
+            session_summary: self.session_summary.clone(),
         })
     }
 
@@ -736,6 +847,12 @@ impl SessionManager {
                     continue;
                 }
 
+                let name = session.name().map(str::to_string);
+                let summary = session
+                    .summary()
+                    .map(str::to_string)
+                    .or_else(|| derive_session_summary(&session.entries));
+
                 sessions.push(SessionInfo {
                     id: path
                         .file_stem()
@@ -747,11 +864,17 @@ impl SessionManager {
                     updated_at,
                     message_count,
                     first_message,
+                    name,
+                    summary,
                 });
             }
         }
 
-        sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        sessions.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| b.created_at.cmp(&a.created_at))
+        });
         Ok(sessions)
     }
 }
@@ -878,6 +1001,79 @@ fn extract_text(message: &Message) -> Option<String> {
         imp_llm::ContentBlock::Text { text } => Some(text.clone()),
         _ => None,
     })
+}
+
+fn derive_session_summary(entries: &[SessionEntry]) -> Option<String> {
+    let mut parts = Vec::new();
+
+    for entry in entries.iter().rev() {
+        match entry {
+            SessionEntry::SessionMeta {
+                summary: Some(summary),
+                ..
+            } if !summary.trim().is_empty() => {
+                return Some(truncate_chars_with_suffix(summary.trim(), 120, "…"));
+            }
+            // Session summaries are stored in compact session-meta entries.
+            SessionEntry::Compaction { summary, .. } => {
+                let trimmed = cleanup_summary_text(summary);
+                if !trimmed.is_empty() {
+                    parts.push(trimmed);
+                }
+            }
+            SessionEntry::Message { message, .. } => {
+                if let Message::Assistant(_) = message {
+                    if let Some(text) = extract_text(message) {
+                        let trimmed = cleanup_summary_text(&text);
+                        if !trimmed.is_empty() {
+                            parts.push(trimmed);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        if parts.len() >= 3 {
+            break;
+        }
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    let joined = parts.into_iter().rev().collect::<Vec<_>>().join(" ");
+    let collapsed = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        None
+    } else {
+        Some(truncate_chars_with_suffix(&collapsed, 120, "…"))
+    }
+}
+
+fn cleanup_summary_text(text: &str) -> String {
+    let mut collapsed = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+
+    for prefix in [
+        "summary:",
+        "session summary:",
+        "assistant summary:",
+        "in summary,",
+        "to summarize,",
+    ] {
+        if collapsed.to_ascii_lowercase().starts_with(prefix) {
+            collapsed = collapsed[prefix.len()..].trim().to_string();
+            break;
+        }
+    }
+
+    collapsed
 }
 
 fn summarize_session_title(text: &str, max_chars: usize) -> String {
@@ -1091,6 +1287,25 @@ mod tests {
     }
 
     #[test]
+    fn session_titles_can_be_derived_from_summary_text() {
+        let info = SessionInfo {
+            id: "abc".into(),
+            path: PathBuf::from("/tmp/abc.jsonl"),
+            cwd: "/tmp/project".into(),
+            created_at: 0,
+            updated_at: 0,
+            message_count: 1,
+            first_message: Some("help me with oauth login issues".into()),
+            name: None,
+            summary: Some("Investigated OAuth login failures and refreshed provider auth flow".into()),
+        };
+
+        let title = info.title(48).unwrap();
+        assert!(!title.is_empty());
+        assert_ne!(title, "Investigated OAuth login failures and refres…");
+    }
+
+    #[test]
     fn session_create_append_reopen() {
         let tmp = TempDir::new().unwrap();
         let session_dir = tmp.path().join("sessions");
@@ -1197,10 +1412,12 @@ mod tests {
         // Create two sessions
         let mut s1 = SessionManager::new(&cwd, &session_dir).unwrap();
         s1.append(make_msg_entry("a1", "first session")).unwrap();
+        s1.set_name("First");
 
         let mut s2 = SessionManager::new(&cwd, &session_dir).unwrap();
         s2.append(make_msg_entry("b1", "second session")).unwrap();
         s2.append(make_msg_entry("b2", "more stuff")).unwrap();
+        s2.set_summary("Second session summary");
 
         let sessions = SessionManager::list(&session_dir).unwrap();
         assert_eq!(sessions.len(), 2);
@@ -1219,6 +1436,9 @@ mod tests {
         for s in &sessions {
             assert!(s.first_message.is_some());
         }
+
+        assert!(sessions.iter().any(|s| s.name.as_deref() == Some("First")));
+        assert!(sessions.iter().any(|s| s.summary.as_deref() == Some("Second session summary")));
     }
 
     #[test]
@@ -1246,6 +1466,23 @@ mod tests {
         let none =
             SessionManager::continue_recent(Path::new("/nonexistent"), &session_dir).unwrap();
         assert!(none.is_none());
+    }
+
+    #[test]
+    fn session_name_and_summary_persist_across_reopen() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join("sessions");
+        let cwd = tmp.path().join("project");
+
+        let mut mgr = SessionManager::new(&cwd, &session_dir).unwrap();
+        mgr.append(make_msg_entry("m1", "hello world")).unwrap();
+        mgr.set_name("Debug auth");
+        mgr.set_summary("Investigating OAuth login failures");
+
+        let path = mgr.path().unwrap().to_path_buf();
+        let reopened = SessionManager::open(&path).unwrap();
+        assert_eq!(reopened.name(), Some("Debug auth"));
+        assert_eq!(reopened.summary(), Some("Investigating OAuth login failures"));
     }
 
     #[test]

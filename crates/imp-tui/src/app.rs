@@ -914,9 +914,10 @@ impl App {
 
         // Pre-render: clamp session picker scroll so selected item is visible
         if let UiMode::SessionPicker(ref mut sp) = self.mode {
-            let overlay_area = centered_rect(60, 50, area);
+            let overlay_area = centered_rect(75, 70, area);
             let inner_h = overlay_area.height.saturating_sub(2) as usize;
-            sp.clamp_scroll(inner_h);
+            let visible_rows = (inner_h / 3).max(1);
+            sp.clamp_scroll(visible_rows);
         }
 
         // Render overlays
@@ -953,7 +954,7 @@ impl App {
                 frame.render_widget(view, overlay_area);
             }
             UiMode::SessionPicker(state) => {
-                let overlay_area = centered_rect(60, 50, area);
+                let overlay_area = centered_rect(75, 70, area);
                 let view = SessionPickerView::new(state, &self.theme);
                 frame.render_widget(view, overlay_area);
             }
@@ -2224,11 +2225,24 @@ impl App {
             "settings" => {
                 self.open_settings();
             }
-            "resume" | "session" => {
+            "resume" => {
                 let session_dir = Config::session_dir();
                 match SessionManager::list(&session_dir) {
                     Ok(sessions) if !sessions.is_empty() => {
-                        self.mode = UiMode::SessionPicker(SessionPickerState::new(sessions));
+                        let state = SessionPickerState::new(sessions, Some(&self.cwd));
+                        if state.filtered_indices.is_empty() {
+                            self.messages.push(DisplayMessage {
+                                role: MessageRole::System,
+                                content: "No saved sessions found.".into(),
+                                thinking: None,
+                                tool_calls: Vec::new(),
+                                assistant_blocks: Vec::new(),
+                                is_streaming: false,
+                                timestamp: imp_llm::now(),
+                            });
+                        } else {
+                            self.mode = UiMode::SessionPicker(state);
+                        }
                     }
                     Ok(_) => {
                         self.messages.push(DisplayMessage {
@@ -2253,6 +2267,9 @@ impl App {
                         });
                     }
                 }
+            }
+            "session" => {
+                self.push_system_msg("/session is defunct. Use /resume to browse/search sessions.");
             }
             "name" => {
                 let new_name = cmd.strip_prefix("name").unwrap_or("").trim();
@@ -2310,8 +2327,8 @@ impl App {
                     "  /new        — start fresh session\n",
                     "  /model      — switch model\n",
                     "  /compact    — compress context\n",
-                    "  /resume     — resume a session\n",
-                    "  /session    — browse sessions\n",
+                    "  /resume     — resume/search sessions\n",
+                    "  /session    — legacy alias (defunct)\n",
                     "  /fork       — branch conversation\n",
                     "  /name <n>   — rename session\n",
                     "  /export [f] — export to markdown\n",
@@ -2803,6 +2820,16 @@ impl App {
                     state.move_down();
                 }
             }
+            KeyCode::Backspace => {
+                if let UiMode::SessionPicker(ref mut state) = self.mode {
+                    state.pop_filter();
+                }
+            }
+            KeyCode::Char(c) if !c.is_control() => {
+                if let UiMode::SessionPicker(ref mut state) = self.mode {
+                    state.push_filter(c);
+                }
+            }
             KeyCode::Enter => {
                 let selected_path = if let UiMode::SessionPicker(ref state) = self.mode {
                     state.selected_session().map(|s| s.path.clone())
@@ -2815,15 +2842,27 @@ impl App {
                         Ok(session) => {
                             self.session = session;
                             self.load_session_messages();
-                            self.messages.push(DisplayMessage {
-                                role: MessageRole::System,
-                                content: "Session resumed.".into(),
-                                thinking: None,
-                                tool_calls: Vec::new(),
-                                assistant_blocks: Vec::new(),
-                                is_streaming: false,
-                                timestamp: imp_llm::now(),
-                            });
+                            if let Some(summary) = self.session.summary() {
+                                self.messages.push(DisplayMessage {
+                                    role: MessageRole::System,
+                                    content: format!("Session resumed — {}", summary),
+                                    thinking: None,
+                                    tool_calls: Vec::new(),
+                                    assistant_blocks: Vec::new(),
+                                    is_streaming: false,
+                                    timestamp: imp_llm::now(),
+                                });
+                            } else {
+                                self.messages.push(DisplayMessage {
+                                    role: MessageRole::System,
+                                    content: "Session resumed.".into(),
+                                    thinking: None,
+                                    tool_calls: Vec::new(),
+                                    assistant_blocks: Vec::new(),
+                                    is_streaming: false,
+                                    timestamp: imp_llm::now(),
+                                });
+                            }
                         }
                         Err(e) => {
                             self.messages.push(DisplayMessage {

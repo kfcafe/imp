@@ -27,4 +27,37 @@ paths:
 - crates/imp-core/src/session.rs
 ---
 
-Improve imp so it can consume completed mana child jobs cleanly and fold their outcomes back into the parent workflow. Focus on concise synthesis of child results: what the child found, what files or areas it touched, what remains unresolved, and what the parent should do next. Avoid treating child jobs as transcript spam; the parent should be able to make progress from structured child outcomes. Keep this work inside imp behavior and prompting rather than moving durable project memory into imp.
+## Current State
+If imp creates mana child jobs, the parent flow also needs a clean way to consume their results. Right now the risk is that child jobs become more transcript to reread instead of useful summarized outcomes the parent can act on.
+
+## Task
+Teach imp to synthesize completed child-job outcomes back into the parent flow.
+
+Implement a first pass that helps the parent agent extract from completed child jobs:
+1. what the child found
+2. what files or scope it touched
+3. what remains unresolved
+4. what the parent should do next
+
+## Files to Modify
+- `crates/imp-core/src/agent.rs`
+- `crates/imp-core/src/system_prompt.rs`
+- `crates/imp-core/src/session.rs`
+
+## Scope Boundaries
+- Do **not** move durable project memory into imp
+- Do **not** replace mana as the work graph or source of truth
+- Focus on concise parent-flow synthesis, not a big memory subsystem
+
+## Edge Cases
+- child jobs that fail or end inconclusively should still produce useful synthesis
+- synthesis should be easier to consume than replaying raw transcripts
+- parent flow should be able to distinguish findings from unresolved questions
+
+## How to Verify
+Run: `cd /Users/asher/tower && cargo check -p imp-core`
+
+## Done When
+- imp has an explicit parent-flow synthesis path for completed child jobs
+- the synthesis highlights findings, touched scope, unresolved issues, and next action
+- child job outcomes become easier to use than raw transcript replay

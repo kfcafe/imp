@@ -23,7 +23,47 @@ labels:
 - prompting
 dependencies:
 - '38'
+verify: cd /Users/asher/tower && cargo check -p imp-core
 kind: job
 ---
 
-Improve imp so it more deliberately decomposes broad or multi-stage work into scoped mana child jobs instead of continuing in one bloated thread. Focus on heuristics and prompt or runtime behavior that produce good child jobs: narrow scope, clear deliverable, explicit patch or no-patch expectations, and useful file or subsystem targeting when available. Keep this local to imp behavior and prompting; mana already provides the job substrate. Reuse the delegated child-job contract from the related design unit rather than inventing a new workflow model.
+## Current State
+Once the delegated child-job contract exists, imp should start using it when work becomes too broad or multi-stage for one coherent worker pass. Right now decomposition is not yet explicit enough: broad work can remain in one thread instead of being turned into sharply scoped mana child jobs.
+
+## Task
+Teach imp to decompose broad work into scoped mana child jobs.
+
+Implement a first pass that uses both:
+1. prompt guidance telling the model when to decompose into child jobs
+2. lightweight runtime heuristics where needed to keep that behavior narrow and testable
+
+## Files to Modify
+- `crates/imp-core/src/agent.rs`
+- `crates/imp-core/src/system_prompt.rs`
+- `crates/imp-core/src/tools/mana.rs`
+
+## Decomposition Rules to Prefer
+When work is broad or multi-stage, child jobs should be:
+- narrowly scoped
+- explicit about deliverable
+- explicit about patch or no-patch behavior
+- anchored to files, subsystems, or investigation targets when known
+- easier to complete than the original broad request
+
+## Scope Boundaries
+- Reuse the contract from unit `38`
+- Do **not** build a second planning system outside mana
+- Keep the first pass small enough to verify with focused tests or prompt-level checks
+
+## Edge Cases
+- avoid creating vague child jobs like "investigate bug"
+- avoid over-decomposing tiny tasks
+- decomposition should preserve parent clarity rather than creating transcript clutter
+
+## How to Verify
+Run: `cd /Users/asher/tower && cargo check -p imp-core`
+
+## Done When
+- imp has explicit decomposition guidance or behavior for broad work that should become child mana jobs
+- the implementation prefers sharply scoped child jobs over vague catch-all delegation
+- tests or prompt-level regression coverage exist where practical
