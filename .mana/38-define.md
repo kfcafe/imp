@@ -2,15 +2,19 @@
 id: '38'
 title: Define delegated child-job contract for imp-authored mana work
 slug: define
-status: open
+status: closed
 priority: 1
 created_at: '2026-03-29T22:13:00.593958Z'
-updated_at: '2026-03-29T22:13:40.613238Z'
+updated_at: '2026-03-30T09:39:04.987121Z'
 acceptance: |-
   A concise delegated-job contract exists in imp docs or design notes.
   The contract explains how imp should author child job descriptions for mana.
   It explicitly treats mana jobs as the delegated-worker substrate, not a second planning system.
   The writeup includes guidance for goal, scope, expected output, done condition, and patch boundaries.
+notes: |-
+  ---
+  2026-03-30T09:39:04.987098+00:00
+  Already implemented. ARCHITECTURE.md contains the full delegated child-job contract including standard description shape, authoring rules, template, and example. System prompt also has delegation guidance.
 labels:
 - design
 - mana

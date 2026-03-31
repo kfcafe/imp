@@ -2,10 +2,10 @@
 id: '39'
 title: Teach imp to decompose broad work into scoped mana child jobs
 slug: teach
-status: open
+status: closed
 priority: 1
 created_at: '2026-03-29T22:14:05.539077Z'
-updated_at: '2026-03-29T22:30:20.137605Z'
+updated_at: '2026-03-31T04:38:47.705290Z'
 acceptance: |-
   imp has explicit decomposition guidance or behavior for broad work that should become child mana jobs.
   The implementation prefers sharply scoped child jobs over vague catch-all delegation.
@@ -15,6 +15,10 @@ notes: |-
   ---
   2026-03-29T22:30:20.137590+00:00
   Backlog modeling decision: land this as both prompt guidance and lightweight runtime heuristics where needed. Keep the first pass narrow and testable; do not build a second planning system.
+
+  ---
+  2026-03-31T04:38:47.676830+00:00
+  Implemented as part of MANA_DELEGATION_GUIDANCE const in system_prompt.rs. The const includes: decomposition heuristics (when to create child jobs vs do it yourself), child job description quality rules (concrete steps, file paths, embedded context, scope boundaries, anti-patterns), verify command guidance (existence checks, avoid bare runners), and sizing rules (one outcome, 1-5 files, pick the approach). Guidance is injected for Full, Orchestrator, and Planner modes when the mana tool is present. 3 regression tests added: delegation appears in Full mode with mana, skipped for Worker, skipped without mana tool.
 labels:
 - imp-core
 - mana
@@ -23,7 +27,7 @@ labels:
 - prompting
 dependencies:
 - '38'
-verify: cd /Users/asher/tower && cargo check -p imp-core
+verify: cd /Users/asher/tower && rg -q 'decompos' imp/crates/imp-core/src/system_prompt.rs && rg -q 'child.job\|child_job' imp/crates/imp-core/src/system_prompt.rs && cargo test -p imp-core system_prompt && cargo check -p imp-core
 kind: job
 ---
 

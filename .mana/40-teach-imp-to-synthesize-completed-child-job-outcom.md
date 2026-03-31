@@ -2,15 +2,19 @@
 id: '40'
 title: Teach imp to synthesize completed child-job outcomes back into parent flow
 slug: teach-imp-to-synthesize-completed-child-job-outcom
-status: open
+status: closed
 priority: 1
 created_at: '2026-03-29T22:14:54.672562Z'
-updated_at: '2026-03-29T22:14:54.672562Z'
+updated_at: '2026-03-31T04:39:46.032843Z'
 acceptance: |-
   imp has an explicit parent-flow synthesis path for completed child jobs.
   The synthesis highlights findings, touched files or scope, unresolved issues, and next action.
   Child job outcomes become easier to use than raw transcript replay.
   The work remains imp-local and does not replace mana as the durable work graph.
+notes: |-
+  ---
+  2026-03-31T04:39:46.005862+00:00
+  Implemented as part of MANA_DELEGATION_GUIDANCE const. The 'After child jobs complete' section tells the model to: check completed children with mana show, synthesize what changed/touched/unresolved, summarize concisely for next step, and diagnose failures before retrying. This is prompt-only v1 — no runtime machinery. Regression tests cover the guidance appearing in Full mode and being skipped for Worker/no-mana.
 labels:
 - imp-core
 - mana
@@ -19,7 +23,7 @@ labels:
 - context
 dependencies:
 - '38'
-verify: cd /Users/asher/tower && cargo check -p imp-core
+verify: cd /Users/asher/tower && rg -qi 'synthesize' imp/crates/imp-core/src/system_prompt.rs && rg -q 'After child jobs complete' imp/crates/imp-core/src/system_prompt.rs && cargo test -p imp-core system_prompt_delegation && cargo check -p imp-core
 kind: job
 paths:
 - crates/imp-core/src/agent.rs

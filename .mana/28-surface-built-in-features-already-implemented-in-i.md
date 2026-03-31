@@ -10,14 +10,6 @@ notes: |-
   ---
   2026-03-29T22:12:17.281699+00:00
   Backlog review note: builder code already registers MemoryTool, SessionSearchTool, and MultiEditTool. This unit is likely close to done once docs and README wording are verified.
-
-  ---
-  2026-03-29T22:12:28.796441+00:00
-  Backlog review note: builder code already registers MemoryTool, SessionSearchTool, and MultiEditTool. This unit is likely close to done once docs and README wording are verified.
-
-  ---
-  2026-03-29T22:12:28.944473+00:00
-  Backlog review note: builder code already registers MemoryTool, SessionSearchTool, and MultiEditTool. This unit is likely close to done once docs and README wording are verified.
 labels:
 - feature
 - ux

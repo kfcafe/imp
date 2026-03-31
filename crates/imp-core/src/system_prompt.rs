@@ -3,6 +3,7 @@ use std::fmt;
 use crate::config::AgentMode;
 use crate::context::estimate_tokens;
 use crate::guardrails::{self, GuardrailProfile};
+use crate::personality::{PersonalityBand, PersonalityProfile};
 use crate::resources::{AgentsMd, Skill};
 use crate::roles::Role;
 use crate::tools::ToolRegistry;
@@ -59,6 +60,7 @@ pub struct AssembleParams<'a> {
     pub agents_md: &'a [AgentsMd],
     pub skills: &'a [Skill],
     pub facts: &'a [Fact],
+    pub personality: Option<&'a PersonalityProfile>,
     pub task: Option<&'a TaskContext>,
     pub role: Option<&'a Role>,
     pub mode: &'a AgentMode,
@@ -87,7 +89,13 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
     let mut parts = Vec::new();
 
     // Layer 1: Identity + tool descriptions
-    parts.push(identity_layer(p.tools, p.role, p.mode, p.learning_enabled));
+    parts.push(identity_layer(
+        p.tools,
+        p.role,
+        p.mode,
+        p.learning_enabled,
+        p.personality,
+    ));
 
     // Layer 1.5: Environment context
     parts.push(environment_layer(p.cwd));
@@ -138,13 +146,69 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
     }
 }
 
+/// Mana delegation guidance injected when the mana tool is available and the
+/// mode can create child jobs (Full, Orchestrator, Planner).
+const MANA_DELEGATION_GUIDANCE: &str = "\
+## Mana delegation
+
+Mana is the delegation substrate. When work is too broad for one pass, create child jobs. \
+Do not invent a separate todo or planning system.
+
+### When to decompose
+- Task touches >5 files or has >3 independent outcomes → child jobs
+- Task mixes investigation with implementation → separate them
+- Task has sequential phases → child jobs with dependencies
+- If you can finish it in <5 tool calls, just do it
+
+### Writing child job descriptions
+You are the orchestrator. Child jobs run on non-thinking workers who follow \
+instructions literally. Do the thinking yourself — put the solution in the \
+description, not the problem.
+
+Each description must include:
+1. Goal and current state — what exists now, what needs to change
+2. Concrete numbered steps — the worker follows these literally
+3. File paths with intent — e.g. `src/auth.rs (add validate_token fn)`
+4. Embedded context — paste types, signatures, patterns the worker needs; don't make it search
+5. Scope boundaries — what's in, what's explicitly out
+6. What NOT to do — anti-patterns or known pitfalls
+
+Bad: \"implement caching\" / \"investigate the bug\" / \"add validation\"
+Good: \"Add LRU cache in src/cache.rs: 1000 entries, keyed by RequestId, invalidate on write in update_record()\"
+
+### Verify commands
+The verify gate is the safety net. Weak verify = work completes without being correct.
+
+Good: `grep -rq \"fn validate_email\" src/ && cargo test auth::validation`
+Bad: `cargo check` (compilation ≠ correctness), `cargo test` (too broad), `echo done` (always passes)
+
+Always pair test filters with existence checks — `cargo test my_filter` exits 0 with 0 matching tests.
+
+### Rules
+- One outcome per child job. 1-5 files, 1-5 functions.
+- Pick the approach. If two could work, choose one — don't make the worker decide.
+- Size for one pass. If you can't fully specify the solution, split further.
+- Never retry identical instructions. Diagnose the failure, update the description.
+
+### After child jobs complete
+Check results with mana show. Synthesize: what changed, what files were touched, \
+what's unresolved, what to do next. Don't replay raw transcripts.
+If a child failed, diagnose the root cause before retrying or creating a new child.";
+
 fn identity_layer(
     tools: &ToolRegistry,
     role: Option<&Role>,
     mode: &AgentMode,
     learning_enabled: bool,
+    personality: Option<&PersonalityProfile>,
 ) -> String {
-    let mut s = String::from("You are imp, a coding agent.\n\nAvailable tools:\n");
+    let mut s = String::new();
+    if let Some(personality) = personality {
+        s.push_str(&personality.identity.render_sentence());
+    } else {
+        s.push_str("You are imp, a coding agent.");
+    }
+    s.push_str("\n\nAvailable tools:\n");
 
     let defs = match role {
         Some(r) if r.readonly => tools.readonly_definitions(),
@@ -153,6 +217,18 @@ fn identity_layer(
 
     for def in &defs {
         s.push_str(&format!("- {}: {}\n", def.name, def.description));
+    }
+
+    if let Some(personality) = personality {
+        let working_style = working_style_lines(&personality.sliders);
+        if !working_style.is_empty() {
+            s.push_str("\nWorking style:\n");
+            for line in working_style {
+                s.push_str("- ");
+                s.push_str(line);
+                s.push('\n');
+            }
+        }
     }
 
     if defs.iter().any(|def| def.name == "mana") && defs.iter().any(|def| def.name == "bash") {
@@ -177,6 +253,18 @@ fn identity_layer(
         s.push('\n');
     }
 
+    // Delegation guidance: only when mana tool is available and mode can create jobs
+    if defs.iter().any(|def| def.name == "mana")
+        && matches!(
+            mode,
+            AgentMode::Full | AgentMode::Orchestrator | AgentMode::Planner
+        )
+    {
+        s.push('\n');
+        s.push_str(MANA_DELEGATION_GUIDANCE);
+        s.push('\n');
+    }
+
     // Append learning instructions when enabled
     if learning_enabled {
         s.push('\n');
@@ -185,6 +273,92 @@ fn identity_layer(
     }
 
     s
+}
+
+fn working_style_lines(sliders: &crate::personality::PersonalitySliders) -> Vec<&'static str> {
+    vec![
+        autonomy_line(sliders.autonomy),
+        verbosity_line(sliders.verbosity),
+        caution_line(sliders.caution),
+        warmth_line(sliders.warmth),
+        planning_depth_line(sliders.planning_depth),
+    ]
+}
+
+fn autonomy_line(band: PersonalityBand) -> &'static str {
+    match band {
+        PersonalityBand::VeryLow => {
+            "Ask for confirmation before making consequential decisions or larger changes."
+        }
+        PersonalityBand::Low => {
+            "Prefer confirmation before acting when requirements or consequences are unclear."
+        }
+        PersonalityBand::Medium => {
+            "Act on clear next steps, but ask when requirements are ambiguous."
+        }
+        PersonalityBand::High => {
+            "Act independently by default and ask when blocked, uncertain, or facing a consequential decision."
+        }
+        PersonalityBand::VeryHigh => {
+            "Take initiative aggressively on clear work and only ask when blocked or genuinely uncertain."
+        }
+    }
+}
+
+fn verbosity_line(band: PersonalityBand) -> &'static str {
+    match band {
+        PersonalityBand::VeryLow => "Keep responses terse and strongly action-oriented.",
+        PersonalityBand::Low => "Keep responses brief and focused on progress.",
+        PersonalityBand::Medium => {
+            "Be concise by default, but explain important tradeoffs when useful."
+        }
+        PersonalityBand::High => {
+            "Explain reasoning and tradeoffs when they help the user follow the work."
+        }
+        PersonalityBand::VeryHigh => {
+            "Give fuller explanations of reasoning, tradeoffs, and next steps."
+        }
+    }
+}
+
+fn caution_line(band: PersonalityBand) -> &'static str {
+    match band {
+        PersonalityBand::VeryLow => {
+            "Move forward with reasonable assumptions when the path is clear."
+        }
+        PersonalityBand::Low => "Favor progress over caution when risks are limited and local.",
+        PersonalityBand::Medium => "Balance steady progress with avoiding avoidable risk.",
+        PersonalityBand::High => {
+            "Prefer small, reversible changes and verify assumptions before riskier actions."
+        }
+        PersonalityBand::VeryHigh => {
+            "Be highly conservative with risky changes: verify assumptions and avoid acting on weak evidence."
+        }
+    }
+}
+
+fn warmth_line(band: PersonalityBand) -> &'static str {
+    match band {
+        PersonalityBand::VeryLow => "Use a direct, neutral tone.",
+        PersonalityBand::Low => "Use a clear, matter-of-fact tone.",
+        PersonalityBand::Medium => "Use a clear and calm tone.",
+        PersonalityBand::High => "Use a warm, supportive tone without becoming verbose.",
+        PersonalityBand::VeryHigh => {
+            "Use a notably warm, encouraging tone while staying useful and grounded."
+        }
+    }
+}
+
+fn planning_depth_line(band: PersonalityBand) -> &'static str {
+    match band {
+        PersonalityBand::VeryLow => "Favor immediate execution on the most obvious next step.",
+        PersonalityBand::Low => "Plan lightly, then move quickly into execution.",
+        PersonalityBand::Medium => "Plan briefly, then execute.",
+        PersonalityBand::High => "Think through structure and likely consequences before acting.",
+        PersonalityBand::VeryHigh => {
+            "Be methodical: think through structure, dependencies, and consequences before acting."
+        }
+    }
 }
 
 fn environment_layer(cwd: Option<&std::path::Path>) -> String {
@@ -295,6 +469,10 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use crate::personality::{
+        PersonaFocus, PersonaRole, PersonalityBand, PersonalityIdentity, PersonalityProfile,
+        PersonalitySliders, VoiceWord, WorkStyleWord,
+    };
     use crate::tools::{Tool, ToolContext, ToolOutput};
     use async_trait::async_trait;
 
@@ -399,12 +577,32 @@ mod tests {
         }
     }
 
+    fn make_personality() -> PersonalityProfile {
+        PersonalityProfile {
+            identity: PersonalityIdentity {
+                name: "Nova".into(),
+                work_style: WorkStyleWord::Careful,
+                voice: VoiceWord::Direct,
+                focus: PersonaFocus::Research,
+                role: PersonaRole::Assistant,
+            },
+            sliders: PersonalitySliders {
+                autonomy: PersonalityBand::Low,
+                verbosity: PersonalityBand::Medium,
+                caution: PersonalityBand::VeryHigh,
+                warmth: PersonalityBand::High,
+                planning_depth: PersonalityBand::VeryLow,
+            },
+        }
+    }
+
     /// Test helper: shorthand for assemble() with no memory/user_profile.
     fn test_assemble(
         tools: &ToolRegistry,
         agents_md: &[AgentsMd],
         skills: &[Skill],
         facts: &[Fact],
+        personality: Option<&PersonalityProfile>,
         task: Option<&TaskContext>,
         role: Option<&Role>,
     ) -> AssembledPrompt {
@@ -413,6 +611,7 @@ mod tests {
             agents_md,
             skills,
             facts,
+            personality,
             task,
             role,
             mode: &AgentMode::Full,
@@ -429,7 +628,7 @@ mod tests {
     #[test]
     fn system_prompt_identity_includes_all_tools() {
         let reg = make_registry();
-        let result = test_assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(result.text.contains("You are imp, a coding agent."));
         assert!(result.text.contains("- read: Read file contents"));
         assert!(result.text.contains("- write: Write content to a file"));
@@ -455,27 +654,85 @@ mod tests {
             readonly: false,
         }));
 
-        let result = test_assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(result.text.contains("Mana guidance:"));
         assert!(result
             .text
             .contains("Prefer the native `mana` tool for mana operations"));
-        assert!(result
-            .text
-            .contains("use the native `mana` tool first"));
+        assert!(result.text.contains("use the native `mana` tool first"));
     }
 
     #[test]
     fn system_prompt_mana_guidance_skipped_without_bash_and_mana_pair() {
         let reg = make_registry();
-        let result = test_assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(!result.text.contains("Mana guidance:"));
+    }
+
+    #[test]
+    fn system_prompt_delegation_guidance_in_full_mode_with_mana_tool() {
+        let mut reg = make_registry();
+        reg.register(Arc::new(FakeTool {
+            name: "mana",
+            description: "Manage mana work",
+            readonly: false,
+        }));
+        // Full mode (default in test_assemble) + mana tool → delegation guidance
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
+        assert!(
+            result.text.contains("## Mana delegation"),
+            "delegation guidance should appear in Full mode with mana tool"
+        );
+        assert!(result.text.contains("When to decompose"));
+        assert!(result.text.contains("Writing child job descriptions"));
+        assert!(result.text.contains("Verify commands"));
+        assert!(result.text.contains("After child jobs complete"));
+    }
+
+    #[test]
+    fn system_prompt_delegation_guidance_skipped_for_worker_mode() {
+        let mut reg = make_registry();
+        reg.register(Arc::new(FakeTool {
+            name: "mana",
+            description: "Manage mana work",
+            readonly: false,
+        }));
+        let result = assemble(&AssembleParams {
+            tools: &reg,
+            agents_md: &[],
+            skills: &[],
+            facts: &[],
+            personality: None,
+            task: None,
+            role: None,
+            mode: &AgentMode::Worker,
+            memory: None,
+            user_profile: None,
+            cwd: None,
+            learning_enabled: false,
+            guardrail_profile: None,
+        });
+        assert!(
+            !result.text.contains("## Mana delegation"),
+            "delegation guidance should NOT appear for Worker mode"
+        );
+    }
+
+    #[test]
+    fn system_prompt_delegation_guidance_skipped_without_mana_tool() {
+        let reg = make_registry();
+        // Full mode but no mana tool → no delegation guidance
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
+        assert!(
+            !result.text.contains("## Mana delegation"),
+            "delegation guidance should NOT appear without mana tool"
+        );
     }
 
     #[test]
     fn system_prompt_identity_only_when_all_layers_empty() {
         let reg = make_registry();
-        let result = test_assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         // Should have identity but no section headers for missing layers
         assert!(result.text.contains("You are imp"));
         assert!(!result.text.contains("# Project Context"));
@@ -484,13 +741,46 @@ mod tests {
         assert!(!result.text.contains("## Task"));
     }
 
+    #[test]
+    fn system_prompt_uses_personality_identity_sentence() {
+        let reg = make_registry();
+        let personality = make_personality();
+        let result = test_assemble(&reg, &[], &[], &[], Some(&personality), None, None);
+        assert!(result
+            .text
+            .contains("You are Nova, a careful, direct, research assistant."));
+    }
+
+    #[test]
+    fn system_prompt_renders_personality_working_style_block() {
+        let reg = make_registry();
+        let personality = make_personality();
+        let result = test_assemble(&reg, &[], &[], &[], Some(&personality), None, None);
+        assert!(result.text.contains("Working style:"));
+        assert!(result.text.contains(
+            "Prefer confirmation before acting when requirements or consequences are unclear."
+        ));
+        assert!(result
+            .text
+            .contains("Be concise by default, but explain important tradeoffs when useful."));
+        assert!(result.text.contains(
+            "Be highly conservative with risky changes: verify assumptions and avoid acting on weak evidence."
+        ));
+        assert!(result
+            .text
+            .contains("Use a warm, supportive tone without becoming verbose."));
+        assert!(result
+            .text
+            .contains("Favor immediate execution on the most obvious next step."));
+    }
+
     // -- Layer 2: AGENTS.md --
 
     #[test]
     fn system_prompt_agents_md_included_verbatim() {
         let reg = make_registry();
         let agents = vec![make_agents_md("# Rules\n\nUse snake_case everywhere.")];
-        let result = test_assemble(&reg, &agents, &[], &[], None, None);
+        let result = test_assemble(&reg, &agents, &[], &[], None, None, None);
         assert!(result.text.contains("# Project Context"));
         assert!(result
             .text
@@ -504,7 +794,7 @@ mod tests {
             make_agents_md("Global rules here."),
             make_agents_md("Project rules here."),
         ];
-        let result = test_assemble(&reg, &agents, &[], &[], None, None);
+        let result = test_assemble(&reg, &agents, &[], &[], None, None, None);
         assert!(result.text.contains("Global rules here."));
         assert!(result.text.contains("Project rules here."));
     }
@@ -512,7 +802,7 @@ mod tests {
     #[test]
     fn system_prompt_empty_agents_md_skipped() {
         let reg = make_registry();
-        let result = test_assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(!result.text.contains("# Project Context"));
     }
 
@@ -533,7 +823,7 @@ mod tests {
                 "/home/.imp/skills/testing/SKILL.md",
             ),
         ];
-        let result = test_assemble(&reg, &[], &skills, &[], None, None);
+        let result = test_assemble(&reg, &[], &skills, &[], None, None, None);
         assert!(result
             .text
             .contains("Available skills (use read to load when relevant):"));
@@ -548,7 +838,7 @@ mod tests {
     #[test]
     fn system_prompt_empty_skills_skipped() {
         let reg = make_registry();
-        let result = test_assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(!result.text.contains("Available skills"));
     }
 
@@ -567,7 +857,7 @@ mod tests {
                 verified_ago: "1d ago".into(),
             },
         ];
-        let result = test_assemble(&reg, &[], &[], &facts, None, None);
+        let result = test_assemble(&reg, &[], &[], &facts, None, None, None);
         assert!(result.text.contains("Project facts:"));
         assert!(result
             .text
@@ -580,7 +870,7 @@ mod tests {
     #[test]
     fn system_prompt_empty_facts_skipped() {
         let reg = make_registry();
-        let result = test_assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(!result.text.contains("Project facts"));
     }
 
@@ -596,7 +886,7 @@ mod tests {
             attempts: vec![],
             dependencies: vec![],
         };
-        let result = test_assemble(&reg, &[], &[], &[], Some(&task), None);
+        let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Task"));
         assert!(result.text.contains("Title: Fix the failing auth test"));
         assert!(result
@@ -626,7 +916,7 @@ mod tests {
             ],
             dependencies: vec![],
         };
-        let result = test_assemble(&reg, &[], &[], &[], Some(&task), None);
+        let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Previous attempts"));
         assert!(result
             .text
@@ -650,7 +940,7 @@ mod tests {
                 detail: "defined in src/schema.rs".into(),
             }],
         };
-        let result = test_assemble(&reg, &[], &[], &[], Some(&task), None);
+        let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Dependencies"));
         assert!(result
             .text
@@ -660,7 +950,7 @@ mod tests {
     #[test]
     fn system_prompt_no_task_skips_layer5() {
         let reg = make_registry();
-        let result = test_assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(!result.text.contains("## Task"));
     }
 
@@ -674,7 +964,7 @@ mod tests {
             attempts: vec![],
             dependencies: vec![],
         };
-        let result = test_assemble(&reg, &[], &[], &[], Some(&task), None);
+        let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("Title: Do something"));
         assert!(!result.text.contains("Verify:"));
     }
@@ -685,7 +975,7 @@ mod tests {
     fn system_prompt_readonly_role_filters_tools() {
         let reg = make_registry();
         let role = make_readonly_role();
-        let result = test_assemble(&reg, &[], &[], &[], None, Some(&role));
+        let result = test_assemble(&reg, &[], &[], &[], None, None, Some(&role));
         // Should include readonly tools
         assert!(result.text.contains("- read:"));
         assert!(result.text.contains("- grep:"));
@@ -698,7 +988,7 @@ mod tests {
     fn system_prompt_role_instructions_appended() {
         let reg = make_registry();
         let role = make_readonly_role();
-        let result = test_assemble(&reg, &[], &[], &[], None, Some(&role));
+        let result = test_assemble(&reg, &[], &[], &[], None, None, Some(&role));
         assert!(result
             .text
             .contains("Review code carefully. Do not modify files."));
@@ -708,7 +998,7 @@ mod tests {
     fn system_prompt_worker_role_includes_all_tools() {
         let reg = make_registry();
         let role = make_worker_role();
-        let result = test_assemble(&reg, &[], &[], &[], None, Some(&role));
+        let result = test_assemble(&reg, &[], &[], &[], None, None, Some(&role));
         assert!(result.text.contains("- read:"));
         assert!(result.text.contains("- write:"));
         assert!(result.text.contains("- edit:"));
@@ -719,7 +1009,7 @@ mod tests {
     fn system_prompt_no_role_instructions_when_none() {
         let reg = make_registry();
         let role = make_worker_role();
-        let result = test_assemble(&reg, &[], &[], &[], None, Some(&role));
+        let result = test_assemble(&reg, &[], &[], &[], None, None, Some(&role));
         // Worker has no instructions, so the prompt shouldn't have extra instruction text
         let lines: Vec<&str> = result.text.lines().collect();
         let after_tools = lines.iter().position(|l| l.starts_with("- grep:")).unwrap();
@@ -735,7 +1025,7 @@ mod tests {
     #[test]
     fn system_prompt_tracks_estimated_tokens() {
         let reg = make_registry();
-        let result = test_assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(result.estimated_tokens > 0);
         // Rough check: the text is at least ~100 chars, so >= 25 tokens
         assert!(result.estimated_tokens >= 10);
@@ -745,7 +1035,7 @@ mod tests {
     fn system_prompt_more_layers_means_more_tokens() {
         let reg = make_registry();
 
-        let minimal = test_assemble(&reg, &[], &[], &[], None, None);
+        let minimal = test_assemble(&reg, &[], &[], &[], None, None, None);
 
         let agents = vec![make_agents_md(
             "Lots of project context here with many words.",
@@ -760,7 +1050,7 @@ mod tests {
             verified_ago: "1h ago".into(),
         }];
 
-        let full = test_assemble(&reg, &agents, &skills, &facts, None, None);
+        let full = test_assemble(&reg, &agents, &skills, &facts, None, None, None);
 
         assert!(
             full.estimated_tokens > minimal.estimated_tokens,
@@ -801,7 +1091,7 @@ mod tests {
             }],
         };
 
-        let result = test_assemble(&reg, &agents, &skills, &facts, Some(&task), None);
+        let result = test_assemble(&reg, &agents, &skills, &facts, None, Some(&task), None);
 
         // All layers present in order
         let identity_pos = result.text.find("You are imp").unwrap();
@@ -819,7 +1109,7 @@ mod tests {
     #[test]
     fn system_prompt_display_impl() {
         let reg = make_registry();
-        let result = test_assemble(&reg, &[], &[], &[], None, None);
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         let displayed = format!("{result}");
         assert_eq!(displayed, result.text);
     }
@@ -835,6 +1125,7 @@ mod tests {
             agents_md: &[],
             skills: &[],
             facts: &[],
+            personality: None,
             task: None,
             role: None,
             mode: &AgentMode::Full,
@@ -858,6 +1149,7 @@ mod tests {
             agents_md: &[],
             skills: &[],
             facts: &[],
+            personality: None,
             task: None,
             role: None,
             mode: &AgentMode::Full,
@@ -879,6 +1171,7 @@ mod tests {
             agents_md: &[],
             skills: &[],
             facts: &[],
+            personality: None,
             task: None,
             role: None,
             mode: &AgentMode::Full,
@@ -914,6 +1207,7 @@ mod tests {
             agents_md: &agents,
             skills: &skills,
             facts: &facts,
+            personality: None,
             task: Some(&task),
             role: None,
             mode: &AgentMode::Full,
