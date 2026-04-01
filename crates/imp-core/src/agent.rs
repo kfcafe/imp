@@ -115,6 +115,9 @@ pub struct Agent {
     pub role: Option<Role>,
     pub hooks: HookRunner,
     pub api_key: String,
+    /// Optional auth store for automatic OAuth token refresh before LLM calls.
+    /// Optional auth store for automatic OAuth token refresh before LLM calls.
+    pub auth_store: Option<std::sync::Arc<tokio::sync::Mutex<imp_llm::auth::AuthStore>>>,
     pub ui: Arc<dyn crate::ui::UserInterface>,
     /// Context management thresholds (wired from Config via AgentBuilder).
     pub context_config: ContextConfig,
@@ -170,6 +173,7 @@ impl Agent {
             file_cache: Arc::new(crate::tools::FileCache::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
             read_max_lines: 500,
+            auth_store: None,
             cache_options: imp_llm::CacheOptions {
                 cache_system_prompt: true,
                 cache_tools: true,
@@ -282,6 +286,23 @@ impl Agent {
             };
 
             self.hooks.fire(&HookEvent::BeforeLlmCall).await;
+
+            // Pre-flight OAuth token refresh: if we have an auth store and the
+            // token is expired, refresh it before making the API call. This
+            // avoids wasting a round-trip on a guaranteed 401.
+            if let Some(ref auth_store) = self.auth_store {
+                let mut store = auth_store.lock().await;
+                if store.is_oauth_expired("anthropic") {
+                    match store.resolve_with_refresh("anthropic").await {
+                        Ok(new_key) => {
+                            self.api_key = new_key;
+                        }
+                        Err(e) => {
+                            eprintln!("[imp] OAuth token refresh failed: {e}");
+                        }
+                    }
+                }
+            }
 
             // Stream the LLM response with retry on transient startup failures.
             let llm_request_started_at = Instant::now();
