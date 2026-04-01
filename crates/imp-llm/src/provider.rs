@@ -51,6 +51,8 @@ pub struct RequestOptions {
     pub system_prompt: String,
     pub tools: Vec<ToolDefinition>,
     pub cache_options: CacheOptions,
+    /// Effort level for the model (Anthropic-specific).
+    pub effort: Option<EffortLevel>,
 }
 
 impl Default for RequestOptions {
@@ -62,8 +64,20 @@ impl Default for RequestOptions {
             system_prompt: String::new(),
             tools: Vec::new(),
             cache_options: CacheOptions::default(),
+            effort: None,
         }
     }
+}
+
+/// How much effort the model should expend on the task.
+/// Separate from thinking — controls overall thoroughness.
+/// Only supported by Anthropic models with the effort beta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EffortLevel {
+    Low,
+    Medium,
+    High,
 }
 
 /// How much reasoning/thinking to request from the model.
@@ -94,6 +108,10 @@ pub struct CacheOptions {
     pub cache_tools: bool,
     /// Number of recent conversation turns to cache.
     pub cache_recent_turns: usize,
+    /// Use 1-hour TTL instead of default 5-minute.
+    pub extended_ttl: bool,
+    /// Use global scope (shared across users with identical prompts).
+    pub global_scope: bool,
 }
 
 /// A tool the model may call, defined by a JSON Schema for its parameters.

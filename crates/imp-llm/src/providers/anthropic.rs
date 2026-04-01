@@ -10,7 +10,8 @@ use crate::error::{Error, Result};
 use crate::message::{AssistantMessage, ContentBlock, Message, StopReason};
 use crate::model::{Capabilities, Model, ModelMeta, ModelPricing};
 use crate::provider::{
-    CacheOptions, Context, Provider, RequestOptions, RetryPolicy, ThinkingLevel, ToolDefinition,
+    CacheOptions, Context, EffortLevel, Provider, RequestOptions, RetryPolicy, ThinkingLevel,
+    ToolDefinition,
 };
 use crate::stream::StreamEvent;
 use crate::usage::Usage;
@@ -36,6 +37,14 @@ struct ApiRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ApiThinking>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<ApiOutputConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiOutputConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -84,11 +93,33 @@ struct ImageSource {
 struct CacheControl {
     #[serde(rename = "type")]
     cache_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
 }
 
 fn ephemeral_cache() -> Option<CacheControl> {
     Some(CacheControl {
         cache_type: "ephemeral".into(),
+        ttl: None,
+        scope: None,
+    })
+}
+
+fn make_cache_control(options: &CacheOptions) -> Option<CacheControl> {
+    Some(CacheControl {
+        cache_type: "ephemeral".into(),
+        ttl: if options.extended_ttl {
+            Some("1h".into())
+        } else {
+            None
+        },
+        scope: if options.global_scope {
+            Some("global".into())
+        } else {
+            None
+        },
     })
 }
 
@@ -102,10 +133,12 @@ struct ApiToolDef {
 }
 
 #[derive(Debug, Serialize)]
-struct ApiThinking {
-    #[serde(rename = "type")]
-    thinking_type: String,
-    budget_tokens: u32,
+#[serde(tag = "type")]
+enum ApiThinking {
+    #[serde(rename = "enabled")]
+    Enabled { budget_tokens: u32 },
+    #[serde(rename = "adaptive")]
+    Adaptive,
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +247,99 @@ struct SseError {
 }
 
 // ---------------------------------------------------------------------------
+// Non-streaming response types (for fallback when streaming fails mid-response)
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub(crate) struct ApiResponse {
+    model: String,
+    content: Vec<ApiResponseBlock>,
+    stop_reason: Option<String>,
+    usage: SseUsage,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum ApiResponseBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+}
+
+/// Convert a non-streaming API response into the sequence of StreamEvents
+/// that the caller would have received from a streaming response.
+#[allow(dead_code)]
+pub(crate) fn non_streaming_response_to_events(resp: ApiResponse) -> Vec<StreamEvent> {
+    let mut events = Vec::new();
+    events.push(StreamEvent::MessageStart { model: resp.model });
+
+    let mut content_blocks = Vec::new();
+    for block in &resp.content {
+        match block {
+            ApiResponseBlock::Text { text } => {
+                events.push(StreamEvent::TextDelta { text: text.clone() });
+                content_blocks.push(ContentBlock::Text { text: text.clone() });
+            }
+            ApiResponseBlock::Thinking { thinking } => {
+                events.push(StreamEvent::ThinkingDelta {
+                    text: thinking.clone(),
+                });
+                content_blocks.push(ContentBlock::Thinking {
+                    text: thinking.clone(),
+                });
+            }
+            ApiResponseBlock::ToolUse { id, name, input } => {
+                events.push(StreamEvent::ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    arguments: input.clone(),
+                });
+                content_blocks.push(ContentBlock::ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    arguments: input.clone(),
+                });
+            }
+        }
+    }
+
+    let stop_reason = match resp.stop_reason.as_deref() {
+        Some("end_turn") => StopReason::EndTurn,
+        Some("tool_use") => StopReason::ToolUse,
+        Some("max_tokens") => StopReason::MaxTokens,
+        Some(other) => StopReason::Error(other.to_string()),
+        None => StopReason::EndTurn,
+    };
+
+    let usage = Usage {
+        input_tokens: resp.usage.input_tokens,
+        output_tokens: resp.usage.output_tokens,
+        cache_read_tokens: resp.usage.cache_read_input_tokens,
+        cache_write_tokens: resp.usage.cache_creation_input_tokens,
+    };
+
+    events.push(StreamEvent::MessageEnd {
+        message: AssistantMessage {
+            content: content_blocks,
+            usage: Some(usage),
+            stop_reason,
+            timestamp: crate::now(),
+        },
+    });
+
+    events
+}
+
+// ---------------------------------------------------------------------------
 // SSE stream state
 // ---------------------------------------------------------------------------
 
@@ -303,7 +429,11 @@ fn thinking_budget(level: ThinkingLevel) -> Option<u32> {
     }
 }
 
-fn default_max_tokens(model: &Model, thinking_budget: Option<u32>) -> u32 {
+fn default_max_tokens(model: &Model, thinking_budget: Option<u32>, adaptive: bool) -> u32 {
+    if adaptive {
+        return model.meta.max_output_tokens;
+    }
+
     // Anthropic is much happier when we do not default every request to the
     // model's absolute max output size, especially on larger Opus models.
     // Use a moderate default and only scale up when explicit thinking budgets
@@ -315,16 +445,49 @@ fn default_max_tokens(model: &Model, thinking_budget: Option<u32>) -> u32 {
     }
 }
 
+fn model_supports_adaptive(model_id: &str) -> bool {
+    model_id.contains("4-6") || model_id.contains("4.6")
+}
+
+fn beta_headers(model: &ModelMeta, effort: Option<EffortLevel>) -> Vec<&'static str> {
+    let mut betas = vec![
+        "interleaved-thinking-2025-05-14",
+        "prompt-caching-scope-2026-01-05",
+    ];
+
+    if model.context_window > 200_000 {
+        betas.push("context-1m-2025-08-07");
+    }
+
+    if effort.is_some() {
+        betas.push("effort-2025-11-24");
+    }
+
+    betas
+}
+
 fn build_request(model: &Model, context: Context, options: RequestOptions) -> ApiRequest {
     let budget = thinking_budget(options.thinking_level);
+    let supports_adaptive = model_supports_adaptive(&model.meta.id);
+    let adaptive = supports_adaptive
+        && matches!(
+            options.thinking_level,
+            ThinkingLevel::Medium | ThinkingLevel::High | ThinkingLevel::XHigh
+        );
+
+    let thinking = match budget {
+        None => None,
+        Some(b) if adaptive => Some(ApiThinking::Adaptive),
+        Some(b) => Some(ApiThinking::Enabled { budget_tokens: b }),
+    };
 
     // max_tokens: use explicit value, or a provider-tuned default, ensuring it
     // exceeds the requested thinking budget.
     let mut max_tokens = options
         .max_tokens
-        .unwrap_or_else(|| default_max_tokens(model, budget));
+        .unwrap_or_else(|| default_max_tokens(model, budget, adaptive));
     if let Some(b) = budget {
-        if max_tokens <= b {
+        if !adaptive && max_tokens <= b {
             max_tokens = b + 1024;
         }
     }
@@ -333,17 +496,20 @@ fn build_request(model: &Model, context: Context, options: RequestOptions) -> Ap
     let tools = build_tool_defs(&options.tools, &options.cache_options);
     let messages = build_messages(&context.messages, &options.cache_options);
 
-    let thinking = budget.map(|b| ApiThinking {
-        thinking_type: "enabled".into(),
-        budget_tokens: b,
-    });
-
     // Temperature must not be set when thinking is enabled
     let temperature = if thinking.is_some() {
         None
     } else {
         options.temperature
     };
+
+    let output_config = options.effort.map(|e| ApiOutputConfig {
+        effort: Some(match e {
+            EffortLevel::Low => "low".into(),
+            EffortLevel::Medium => "medium".into(),
+            EffortLevel::High => "high".into(),
+        }),
+    });
 
     ApiRequest {
         model: model.meta.id.clone(),
@@ -354,6 +520,7 @@ fn build_request(model: &Model, context: Context, options: RequestOptions) -> Ap
         tools,
         temperature,
         thinking,
+        output_config,
     }
 }
 
@@ -372,14 +539,19 @@ fn build_system_blocks(prompt: &str, cache: &CacheOptions) -> Vec<ApiContentBloc
 }
 
 fn build_tool_defs(tools: &[ToolDefinition], cache: &CacheOptions) -> Vec<ApiToolDef> {
-    let len = tools.len();
-    tools
+    // Sort tools alphabetically for prompt cache stability — prevents cache
+    // busts when tools are registered in different orders between requests.
+    let mut sorted: Vec<&ToolDefinition> = tools.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let len = sorted.len();
+    sorted
         .iter()
         .enumerate()
         .map(|(i, t)| {
             // Place cache breakpoint on the last tool definition
             let cc = if cache.cache_tools && i == len - 1 {
-                ephemeral_cache()
+                make_cache_control(cache)
             } else {
                 None
             };
@@ -680,49 +852,90 @@ fn parse_sse_stream(raw: &str, state: &mut StreamState) -> Vec<Result<StreamEven
 /// Create a streaming response from the Anthropic API.
 /// Returns a Stream of StreamEvents.
 /// Maximum number of retries for transient errors.
-const MAX_RETRIES: u32 = 3;
+const MAX_RETRIES: u32 = 8;
+
+/// Maximum consecutive 529 (overloaded) errors before giving up.
+const MAX_CONSECUTIVE_529: u32 = 3;
+
+/// Floor for max_tokens when recovering from context overflow.
+pub const FLOOR_OUTPUT_TOKENS: u32 = 3_000;
+
+/// Default max_tokens cap (matches Claude Code's capped default).
+pub const DEFAULT_MAX_TOKENS: u32 = 8_192;
+
+/// Escalated max_tokens for retry after truncation.
+pub const ESCALATED_MAX_TOKENS: u32 = 64_000;
 
 /// Check if an HTTP status code is retryable.
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
-    matches!(status.as_u16(), 429 | 500 | 502 | 503 | 529)
+    matches!(status.as_u16(), 401 | 429 | 500 | 502 | 503 | 529)
 }
 
-/// Compute backoff delay for a retry attempt (exponential with jitter).
+/// Compute backoff delay, honoring retry-after header if present.
 fn retry_delay(attempt: u32) -> std::time::Duration {
-    let base_ms = 1000u64 * 2u64.pow(attempt); // 1s, 2s, 4s
+    let base_ms = 1000u64 * 2u64.pow(attempt.min(5)); // cap at 32s
     let jitter_ms = rand::random::<u64>() % 500;
     std::time::Duration::from_millis(base_ms + jitter_ms)
+}
+
+/// Parse retry-after header value (seconds) into a Duration.
+fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+    let val = headers.get("retry-after")?.to_str().ok()?;
+    let secs: u64 = val.parse().ok()?;
+    Some(std::time::Duration::from_secs(secs))
+}
+
+/// Parse context overflow error: "input length and `max_tokens` exceed context limit: X + Y > Z"
+pub fn parse_context_overflow(body: &str) -> Option<(u32, u32, u32)> {
+    let needle = "input length and `max_tokens` exceed context limit: ";
+    let rest = body.find(needle).map(|i| &body[i + needle.len()..])?;
+    let parts: Vec<&str> = rest
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.len() >= 3 {
+        let input: u32 = parts[0].parse().ok()?;
+        let max: u32 = parts[1].parse().ok()?;
+        let limit: u32 = parts[2].parse().ok()?;
+        Some((input, max, limit))
+    } else {
+        None
+    }
 }
 
 fn stream_response(
     client: reqwest::Client,
     api_key: String,
     request: ApiRequest,
+    betas: Vec<&'static str>,
 ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> {
     let (tx, rx) = futures::channel::mpsc::unbounded();
 
     tokio::spawn(async move {
         let is_oauth = api_key.starts_with("sk-ant-oat");
 
-        // Retry loop for transient failures (connection drops, 429, 5xx)
+        // Retry loop for transient failures (connection drops, 429, 5xx, 529)
         let mut attempt = 0u32;
+        let mut consecutive_529 = 0u32;
+        let mut had_401 = false;
         let resp = loop {
             let mut req = client
                 .post(API_URL)
                 .header("anthropic-version", API_VERSION)
                 .header("content-type", "application/json");
 
+            let mut request_betas = betas.clone();
+
             if is_oauth {
+                request_betas.insert(0, "oauth-2025-04-20");
                 req = req
                     .header("authorization", format!("Bearer {api_key}"))
-                    .header(
-                        "anthropic-beta",
-                        "oauth-2025-04-20,interleaved-thinking-2025-05-14",
-                    )
                     .header("anthropic-dangerous-direct-browser-access", "true");
             } else {
                 req = req.header("x-api-key", &api_key);
             }
+
+            req = req.header("anthropic-beta", request_betas.join(","));
 
             let result = req.json(&request).send().await;
 
@@ -732,9 +945,44 @@ fn stream_response(
                     if status.is_success() {
                         break r;
                     }
+
+                    // Track consecutive 529 (overloaded) errors
+                    if status.as_u16() == 529 {
+                        consecutive_529 += 1;
+                        if consecutive_529 >= MAX_CONSECUTIVE_529 {
+                            let body = r.text().await.unwrap_or_default();
+                            let _ = tx.unbounded_send(Err(Error::Provider(format!(
+                                "API overloaded after {} consecutive 529 errors: {body}",
+                                MAX_CONSECUTIVE_529
+                            ))));
+                            return;
+                        }
+                    } else {
+                        consecutive_529 = 0;
+                    }
+
+                    // 401: retry once (token may have expired)
+                    if status.as_u16() == 401 {
+                        if had_401 {
+                            let body = r.text().await.unwrap_or_default();
+                            let _ = tx.unbounded_send(Err(Error::Provider(format!(
+                                "HTTP 401 (authentication failed): {body}"
+                            ))));
+                            return;
+                        }
+                        had_401 = true;
+                        eprintln!(
+                            "[imp-llm] HTTP 401, retrying once (credentials may have expired)"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        continue;
+                    }
+
                     // Retryable HTTP error
                     if is_retryable_status(status) && attempt < MAX_RETRIES {
-                        let delay = retry_delay(attempt);
+                        // Honor retry-after header if present
+                        let delay =
+                            retry_after_delay(r.headers()).unwrap_or_else(|| retry_delay(attempt));
                         eprintln!(
                             "[imp-llm] HTTP {status}, retrying in {}s (attempt {}/{})",
                             delay.as_secs(),
@@ -860,10 +1108,12 @@ impl Provider for AnthropicProvider {
             }
             options.system_prompt = oauth_system;
         }
+        let effort = options.effort;
         let request = build_request(model, context, options);
         let client = self.client.clone();
         let api_key = api_key.to_string();
-        stream_response(client, api_key, request)
+        let betas = beta_headers(&model.meta, effort);
+        stream_response(client, api_key, request, betas)
     }
 
     async fn resolve_auth(&self, auth: &AuthStore) -> Result<ApiKey> {
@@ -1078,6 +1328,7 @@ mod tests {
             cache_system_prompt: true,
             cache_tools: false,
             cache_recent_turns: 0,
+            ..Default::default()
         };
         let blocks = build_system_blocks("You are helpful.", &cache);
         let json = serde_json::to_value(&blocks[0]).unwrap();
@@ -1110,6 +1361,7 @@ mod tests {
             cache_system_prompt: false,
             cache_tools: true,
             cache_recent_turns: 0,
+            ..Default::default()
         };
         let api_tools = build_tool_defs(&tools, &cache);
         assert!(api_tools[0].cache_control.is_none());
@@ -1143,6 +1395,7 @@ mod tests {
             cache_system_prompt: false,
             cache_tools: false,
             cache_recent_turns: 2,
+            ..Default::default()
         };
         let api_msgs = build_messages(&messages, &cache);
 
@@ -1188,6 +1441,67 @@ mod tests {
     #[test]
     fn thinking_budget_xhigh() {
         assert_eq!(thinking_budget(ThinkingLevel::XHigh), Some(100_000));
+    }
+
+    #[test]
+    fn test_beta_headers_large_context() {
+        let model_meta = ModelMeta {
+            id: "claude-sonnet-4-6".into(),
+            provider: "anthropic".into(),
+            name: "test".into(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+
+        let betas = beta_headers(&model_meta, None);
+        assert!(betas.contains(&"interleaved-thinking-2025-05-14"));
+        assert!(betas.contains(&"prompt-caching-scope-2026-01-05"));
+        assert!(betas.contains(&"context-1m-2025-08-07"));
+    }
+
+    #[test]
+    fn test_beta_headers_standard_context() {
+        let model_meta = ModelMeta {
+            id: "claude-haiku-3-5-20241022".into(),
+            provider: "anthropic".into(),
+            name: "test".into(),
+            context_window: 200_000,
+            max_output_tokens: 8_192,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+
+        let betas = beta_headers(&model_meta, None);
+        assert!(betas.contains(&"interleaved-thinking-2025-05-14"));
+        assert!(betas.contains(&"prompt-caching-scope-2026-01-05"));
+        assert!(!betas.contains(&"context-1m-2025-08-07"));
+    }
+
+    #[test]
+    fn test_beta_headers_always_includes_interleaved() {
+        let standard = ModelMeta {
+            id: "claude-haiku-3-5-20241022".into(),
+            provider: "anthropic".into(),
+            name: "standard".into(),
+            context_window: 200_000,
+            max_output_tokens: 8_192,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let large = ModelMeta {
+            id: "claude-opus-4-6".into(),
+            provider: "anthropic".into(),
+            name: "large".into(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+
+        assert!(beta_headers(&standard, None).contains(&"interleaved-thinking-2025-05-14"));
+        assert!(beta_headers(&large, None).contains(&"interleaved-thinking-2025-05-14"));
     }
 
     #[test]
@@ -1237,8 +1551,11 @@ mod tests {
         // Budget is 32000, max_output is 4096. Should be bumped to 33024.
         assert!(req.max_tokens > 32_000);
         assert!(req.thinking.is_some());
-        let t = req.thinking.unwrap();
-        assert_eq!(t.budget_tokens, 32_000);
+        let t = serde_json::to_value(req.thinking.unwrap()).unwrap();
+        assert_eq!(
+            t,
+            serde_json::json!({"type": "enabled", "budget_tokens": 32_000})
+        );
     }
 
     #[test]
@@ -1268,6 +1585,90 @@ mod tests {
     }
 
     #[test]
+    fn test_adaptive_thinking_sonnet_46() {
+        let model_meta = ModelMeta {
+            id: "claude-sonnet-4-6".into(),
+            provider: "anthropic".into(),
+            name: "test".into(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let provider = AnthropicProvider::new();
+        let model = Model {
+            meta: model_meta,
+            provider: Arc::new(provider),
+        };
+        let options = RequestOptions {
+            thinking_level: ThinkingLevel::Medium,
+            ..Default::default()
+        };
+
+        let req = build_request(&model, Context::default(), options);
+        let thinking_json = serde_json::to_value(req.thinking.unwrap()).unwrap();
+        assert_eq!(thinking_json, serde_json::json!({"type": "adaptive"}));
+    }
+
+    #[test]
+    fn test_budget_thinking_sonnet_40() {
+        let model_meta = ModelMeta {
+            id: "claude-sonnet-4-20250514".into(),
+            provider: "anthropic".into(),
+            name: "test".into(),
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let provider = AnthropicProvider::new();
+        let model = Model {
+            meta: model_meta,
+            provider: Arc::new(provider),
+        };
+        let options = RequestOptions {
+            thinking_level: ThinkingLevel::Medium,
+            ..Default::default()
+        };
+
+        let req = build_request(&model, Context::default(), options);
+        let thinking_json = serde_json::to_value(req.thinking.unwrap()).unwrap();
+        assert_eq!(
+            thinking_json,
+            serde_json::json!({"type": "enabled", "budget_tokens": 10_000})
+        );
+    }
+
+    #[test]
+    fn test_adaptive_still_caps_low_levels() {
+        let model_meta = ModelMeta {
+            id: "claude-sonnet-4-6".into(),
+            provider: "anthropic".into(),
+            name: "test".into(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let provider = AnthropicProvider::new();
+        let model = Model {
+            meta: model_meta,
+            provider: Arc::new(provider),
+        };
+        let options = RequestOptions {
+            thinking_level: ThinkingLevel::Minimal,
+            ..Default::default()
+        };
+
+        let req = build_request(&model, Context::default(), options);
+        let thinking_json = serde_json::to_value(req.thinking.unwrap()).unwrap();
+        assert_eq!(
+            thinking_json,
+            serde_json::json!({"type": "enabled", "budget_tokens": 1024})
+        );
+    }
+
+    #[test]
     fn thinking_enabled_strips_temperature() {
         let model_meta = ModelMeta {
             id: "claude-sonnet-4-20250514".into(),
@@ -1291,6 +1692,33 @@ mod tests {
         let req = build_request(&model, Context::default(), options);
         assert!(req.temperature.is_none());
         assert!(req.thinking.is_some());
+    }
+
+    #[test]
+    fn test_adaptive_max_tokens_not_capped() {
+        let model_meta = ModelMeta {
+            id: "claude-sonnet-4.6".into(),
+            provider: "anthropic".into(),
+            name: "test".into(),
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let provider = AnthropicProvider::new();
+        let model = Model {
+            meta: model_meta,
+            provider: Arc::new(provider),
+        };
+        let options = RequestOptions {
+            thinking_level: ThinkingLevel::Medium,
+            ..Default::default()
+        };
+
+        let req = build_request(&model, Context::default(), options);
+        assert_eq!(req.max_tokens, 128_000);
+        let thinking_json = serde_json::to_value(req.thinking.unwrap()).unwrap();
+        assert_eq!(thinking_json, serde_json::json!({"type": "adaptive"}));
     }
 
     // -- SSE parsing tests --
@@ -1528,6 +1956,7 @@ data: {\"type\":\"message_stop\"}\n\
                 cache_system_prompt: true,
                 cache_tools: true,
                 cache_recent_turns: 1,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -1746,6 +2175,7 @@ data: {\"type\":\"message_stop\"}\n";
             cache_system_prompt: false,
             cache_tools: false,
             cache_recent_turns: 0,
+            ..Default::default()
         };
         let api_msgs = build_messages(&messages, &cache);
         for msg in &api_msgs {
@@ -1754,5 +2184,268 @@ data: {\"type\":\"message_stop\"}\n";
                 assert!(json.get("cache_control").is_none());
             }
         }
+    }
+
+    // -- Effort level tests (41.3) --
+
+    #[test]
+    fn test_effort_level_serialization() {
+        let model_meta = ModelMeta {
+            id: "claude-sonnet-4-20250514".into(),
+            provider: "anthropic".into(),
+            name: "test".into(),
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let provider = AnthropicProvider::new();
+        let model = Model {
+            meta: model_meta,
+            provider: Arc::new(provider),
+        };
+        for (level, expected) in [
+            (EffortLevel::Low, "low"),
+            (EffortLevel::Medium, "medium"),
+            (EffortLevel::High, "high"),
+        ] {
+            let options = RequestOptions {
+                effort: Some(level),
+                ..Default::default()
+            };
+            let req = build_request(&model, Context::default(), options);
+            let json = serde_json::to_value(&req.output_config).unwrap();
+            assert_eq!(json["effort"], expected);
+        }
+    }
+
+    #[test]
+    fn test_effort_none_omits_field() {
+        let model_meta = ModelMeta {
+            id: "claude-sonnet-4-20250514".into(),
+            provider: "anthropic".into(),
+            name: "test".into(),
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let provider = AnthropicProvider::new();
+        let model = Model {
+            meta: model_meta,
+            provider: Arc::new(provider),
+        };
+        let req = build_request(&model, Context::default(), RequestOptions::default());
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("output_config").is_none());
+    }
+
+    #[test]
+    fn test_effort_adds_beta_header() {
+        let model_meta = ModelMeta {
+            id: "claude-sonnet-4-20250514".into(),
+            provider: "anthropic".into(),
+            name: "test".into(),
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let betas = beta_headers(&model_meta, Some(EffortLevel::Medium));
+        assert!(betas.contains(&"effort-2025-11-24"));
+
+        let betas_none = beta_headers(&model_meta, None);
+        assert!(!betas_none.contains(&"effort-2025-11-24"));
+    }
+
+    // -- Retry logic tests (41.4) --
+
+    #[test]
+    fn test_retry_after_header_parsing() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "5".parse().unwrap());
+        let delay = retry_after_delay(&headers).unwrap();
+        assert_eq!(delay, std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_retry_after_missing() {
+        let headers = reqwest::header::HeaderMap::new();
+        assert!(retry_after_delay(&headers).is_none());
+    }
+
+    #[test]
+    fn test_context_overflow_parsing() {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000"}}"#;
+        let result = parse_context_overflow(body).unwrap();
+        assert_eq!(result, (188059, 20000, 200000));
+    }
+
+    #[test]
+    fn test_context_overflow_no_match() {
+        assert!(parse_context_overflow("some other error").is_none());
+    }
+
+    // -- Tool sorting tests (41.7) --
+
+    #[test]
+    fn test_tool_defs_sorted_alphabetically() {
+        let tools = vec![
+            ToolDefinition {
+                name: "write".into(),
+                description: "Write".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "bash".into(),
+                description: "Bash".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "read".into(),
+                description: "Read".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ];
+        let cache = CacheOptions::default();
+        let api_tools = build_tool_defs(&tools, &cache);
+        assert_eq!(api_tools[0].name, "bash");
+        assert_eq!(api_tools[1].name, "read");
+        assert_eq!(api_tools[2].name, "write");
+    }
+
+    #[test]
+    fn test_tool_cache_breakpoint_on_last_sorted() {
+        let tools = vec![
+            ToolDefinition {
+                name: "write".into(),
+                description: "Write".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "bash".into(),
+                description: "Bash".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ];
+        let cache = CacheOptions {
+            cache_tools: true,
+            ..Default::default()
+        };
+        let api_tools = build_tool_defs(&tools, &cache);
+        // After sorting: bash, write. Cache on write (last).
+        assert_eq!(api_tools[0].name, "bash");
+        assert!(api_tools[0].cache_control.is_none());
+        assert_eq!(api_tools[1].name, "write");
+        assert!(api_tools[1].cache_control.is_some());
+    }
+
+    // -- Cache TTL/scope tests (41.9) --
+
+    #[test]
+    fn test_cache_ttl_default() {
+        let cache = CacheOptions::default();
+        let cc = make_cache_control(&cache).unwrap();
+        let json = serde_json::to_value(&cc).unwrap();
+        assert_eq!(json["type"], "ephemeral");
+        assert!(json.get("ttl").is_none());
+        assert!(json.get("scope").is_none());
+    }
+
+    #[test]
+    fn test_cache_ttl_extended() {
+        let cache = CacheOptions {
+            extended_ttl: true,
+            ..Default::default()
+        };
+        let cc = make_cache_control(&cache).unwrap();
+        let json = serde_json::to_value(&cc).unwrap();
+        assert_eq!(json["type"], "ephemeral");
+        assert_eq!(json["ttl"], "1h");
+    }
+
+    #[test]
+    fn test_cache_ttl_global_scope() {
+        let cache = CacheOptions {
+            global_scope: true,
+            ..Default::default()
+        };
+        let cc = make_cache_control(&cache).unwrap();
+        let json = serde_json::to_value(&cc).unwrap();
+        assert_eq!(json["scope"], "global");
+    }
+
+    #[test]
+    fn test_cache_ttl_both() {
+        let cache = CacheOptions {
+            extended_ttl: true,
+            global_scope: true,
+            ..Default::default()
+        };
+        let cc = make_cache_control(&cache).unwrap();
+        let json = serde_json::to_value(&cc).unwrap();
+        assert_eq!(json["ttl"], "1h");
+        assert_eq!(json["scope"], "global");
+    }
+
+    // -- max_tokens escalation constants (41.5) --
+
+    #[test]
+    fn test_max_tokens_escalation_constants() {
+        assert_eq!(DEFAULT_MAX_TOKENS, 8_192);
+        assert_eq!(ESCALATED_MAX_TOKENS, 64_000);
+        assert!(ESCALATED_MAX_TOKENS > DEFAULT_MAX_TOKENS);
+    }
+
+    // -- Non-streaming fallback tests (41.6) --
+
+    #[test]
+    fn test_non_streaming_response_parsing() {
+        let json = r#"{
+            "model": "claude-sonnet-4-20250514",
+            "content": [
+                {"type": "text", "text": "Hello world"},
+                {"type": "tool_use", "id": "t1", "name": "bash", "input": {"command": "ls"}}
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5}
+        }"#;
+        let resp: ApiResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.model, "claude-sonnet-4-20250514");
+        assert_eq!(resp.content.len(), 2);
+        assert_eq!(resp.stop_reason, Some("tool_use".to_string()));
+    }
+
+    #[test]
+    fn test_nonstreaming_response_to_events_conversion() {
+        let resp = ApiResponse {
+            model: "claude-sonnet-4-20250514".into(),
+            content: vec![
+                ApiResponseBlock::Text { text: "Hi".into() },
+                ApiResponseBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "foo.rs"}),
+                },
+            ],
+            stop_reason: Some("tool_use".into()),
+            usage: SseUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        };
+        let events = non_streaming_response_to_events(resp);
+        // MessageStart, TextDelta, ToolCall, MessageEnd
+        assert_eq!(events.len(), 4);
+        assert!(
+            matches!(&events[0], StreamEvent::MessageStart { model } if model == "claude-sonnet-4-20250514")
+        );
+        assert!(matches!(&events[1], StreamEvent::TextDelta { text } if text == "Hi"));
+        assert!(matches!(&events[2], StreamEvent::ToolCall { name, .. } if name == "read"));
+        assert!(
+            matches!(&events[3], StreamEvent::MessageEnd { message } if message.stop_reason == StopReason::ToolUse)
+        );
     }
 }

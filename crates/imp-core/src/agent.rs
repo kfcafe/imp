@@ -174,6 +174,8 @@ impl Agent {
                 cache_system_prompt: true,
                 cache_tools: true,
                 cache_recent_turns: 2,
+                extended_ttl: false,
+                global_scope: false,
             },
 
             event_tx,
@@ -276,6 +278,7 @@ impl Agent {
                 system_prompt: self.system_prompt.clone(),
                 tools: self.tools.definitions(),
                 cache_options: self.cache_options.clone(),
+                effort: None,
             };
 
             self.hooks.fire(&HookEvent::BeforeLlmCall).await;
@@ -638,8 +641,8 @@ impl Agent {
         if tool_name == "bash" {
             if let Some(command) = args.get("command").and_then(|v| v.as_str()) {
                 if let Some(hint) = mana_bash_equivalent_hint(command) {
-                    let result = crate::tools::ToolOutput::error(hint)
-                        .into_tool_result(call_id, tool_name);
+                    let result =
+                        crate::tools::ToolOutput::error(hint).into_tool_result(call_id, tool_name);
                     self.emit(AgentEvent::ToolExecutionEnd {
                         tool_call_id: call_id.to_string(),
                         result: result.clone(),
@@ -851,11 +854,10 @@ fn mana_bash_equivalent_hint(command: &str) -> Option<&'static str> {
 
     let action = rest.split_whitespace().next().unwrap_or("");
     match action {
-        "status" | "list" | "ls" | "show" | "read" | "create" | "close" | "update"
-        | "run" | "run_state" | "evaluate" | "agents" | "logs" | "next" | "claim"
-        | "release" | "tree" => Some(
-            "Use the native mana tool instead of `bash` for this mana command.",
-        ),
+        "status" | "list" | "ls" | "show" | "read" | "create" | "close" | "update" | "run"
+        | "run_state" | "evaluate" | "agents" | "logs" | "next" | "claim" | "release" | "tree" => {
+            Some("Use the native mana tool instead of `bash` for this mana command.")
+        }
         _ => None,
     }
 }
@@ -3442,6 +3444,7 @@ mod mode_tests {
             agents_md: &[],
             skills: &[],
             facts: &[],
+            personality: None,
             task: None,
             role: None,
             mode: &mode,
@@ -3488,6 +3491,7 @@ mod mode_tests {
             agents_md: &[],
             skills: &[],
             facts: &[],
+            personality: None,
             task: None,
             role: None,
             mode: &AgentMode::Full,
@@ -3513,6 +3517,7 @@ mod mode_tests {
             agents_md: &[],
             skills: &[],
             facts: &[],
+            personality: None,
             task: None,
             role: None,
             mode: &AgentMode::Orchestrator,
@@ -3534,6 +3539,7 @@ mod mode_tests {
             agents_md: &[],
             skills: &[],
             facts: &[],
+            personality: None,
             task: None,
             role: None,
             mode: &AgentMode::Worker,
@@ -3554,6 +3560,7 @@ mod mode_tests {
             agents_md: &[],
             skills: &[],
             facts: &[],
+            personality: None,
             task: None,
             role: None,
             mode: &AgentMode::Reviewer,
