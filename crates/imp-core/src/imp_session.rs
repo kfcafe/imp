@@ -112,6 +112,11 @@ pub struct SessionOptions {
 
     /// Path to auth.json. Defaults to `~/.config/imp/auth.json`.
     pub auth_path: Option<PathBuf>,
+
+    /// Pre-assembled context messages injected before the first prompt.
+    /// Built by `context_prefill::assemble_context()` at dispatch time.
+    /// The agent starts with these files already in its cached prefix.
+    pub context_prefill: Vec<imp_llm::Message>,
 }
 
 impl Default for SessionOptions {
@@ -131,6 +136,7 @@ impl Default for SessionOptions {
             lua_loader: None,
             ui: None,
             auth_path: None,
+            context_prefill: Vec::new(),
         }
     }
 }
@@ -154,6 +160,9 @@ pub struct ImpSession {
     agent_task: Option<JoinHandle<(Agent, Result<()>)>>,
     completed_run_result: Option<Result<()>>,
     pending_persistence_errors: VecDeque<String>,
+    /// Context prefill messages, injected once before the first prompt.
+    context_prefill: Vec<imp_llm::Message>,
+    context_prefill_injected: bool,
 }
 
 impl ImpSession {
@@ -291,6 +300,8 @@ impl ImpSession {
             auth_store,
             model_registry,
             cwd,
+            context_prefill: options.context_prefill,
+            context_prefill_injected: false,
             agent_task: None,
             completed_run_result: None,
             pending_persistence_errors: VecDeque::new(),
@@ -350,6 +361,26 @@ impl ImpSession {
                 )
         ) {
             history.pop();
+        }
+
+        // Inject context prefill (once, before the first prompt). These messages
+        // form the cached prefix: file contents the agent needs, assembled at
+        // dispatch time by context_prefill::assemble_context(). Subsequent turns
+        // get cache_read on this prefix instead of re-reading files.
+        if !self.context_prefill_injected && !self.context_prefill.is_empty() {
+            for msg in &self.context_prefill {
+                history.push(msg.clone());
+            }
+            // Assistant acknowledgment to maintain user/assistant alternation
+            history.push(imp_llm::Message::Assistant(imp_llm::AssistantMessage {
+                content: vec![imp_llm::ContentBlock::Text {
+                    text: "Context loaded. Ready to work.".into(),
+                }],
+                usage: None,
+                stop_reason: imp_llm::StopReason::EndTurn,
+                timestamp: imp_llm::now(),
+            }));
+            self.context_prefill_injected = true;
         }
 
         // Replace agent messages with session history. Agent::run() will append
@@ -855,6 +886,8 @@ mod tests {
             agent_task: None,
             completed_run_result: None,
             pending_persistence_errors: VecDeque::new(),
+            context_prefill: Vec::new(),
+            context_prefill_injected: false,
         };
 
         session.prompt("latest").await.unwrap();
@@ -916,6 +949,8 @@ mod tests {
             agent_task: None,
             completed_run_result: None,
             pending_persistence_errors: VecDeque::new(),
+            context_prefill: Vec::new(),
+            context_prefill_injected: false,
         };
 
         let message = test_assistant_message(
@@ -972,6 +1007,8 @@ mod tests {
             agent_task: None,
             completed_run_result: None,
             pending_persistence_errors: VecDeque::new(),
+            context_prefill: Vec::new(),
+            context_prefill_injected: false,
         };
 
         let persisted = session.persist_event_entries(&AgentEvent::TurnEnd {
@@ -1004,6 +1041,8 @@ mod tests {
             agent_task: None,
             completed_run_result: None,
             pending_persistence_errors: VecDeque::new(),
+            context_prefill: Vec::new(),
+            context_prefill_injected: false,
         };
 
         let persisted = session.persist_event_entries(&AgentEvent::ToolExecutionEnd {

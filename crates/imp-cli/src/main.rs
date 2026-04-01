@@ -283,6 +283,9 @@ struct UnitFrontmatter {
     notes: Option<String>,
     #[serde(default)]
     attempt_log: Vec<UnitAttempt>,
+    /// Files to preload into the agent's cached context prefix.
+    #[serde(default)]
+    files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -303,6 +306,8 @@ struct ManaUnit {
     notes: Option<String>,
     attempts: Vec<UnitAttempt>,
     workspace_root: PathBuf,
+    /// Explicit file references from frontmatter, or empty for auto-detect.
+    files: Vec<String>,
 }
 
 impl ManaUnit {
@@ -724,8 +729,15 @@ async fn run_web_login(provider_name: &str) -> Result<(), Box<dyn std::error::Er
         provider.name(),
         imp_llm::auth::StoredCredential::ApiKey { key },
     )?;
-    eprintln!("API key saved for {} in {}.", provider.name(), auth_path.display());
-    eprintln!("The web tool will now auto-detect {} without requiring an exported env var.", provider.name());
+    eprintln!(
+        "API key saved for {} in {}.",
+        provider.name(),
+        auth_path.display()
+    );
+    eprintln!(
+        "The web tool will now auto-detect {} without requiring an exported env var.",
+        provider.name()
+    );
 
     Ok(())
 }
@@ -949,6 +961,36 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
     emit_startup_timing(&mut startup_timer, StartupStage::ProviderReady);
     emit_startup_timing(&mut startup_timer, StartupStage::ApiKeyResolved);
 
+    // Assemble file context from unit references. If the unit declares
+    // explicit `files:` in frontmatter, use those; otherwise auto-detect
+    // file paths from the description text.
+    let file_specs = if !unit.files.is_empty() {
+        unit.files
+            .iter()
+            .filter_map(|s| parse_file_spec_str(s))
+            .collect()
+    } else {
+        imp_core::context_prefill::detect_file_paths(&unit.description)
+    };
+    let context_prefill = if file_specs.is_empty() {
+        Vec::new()
+    } else {
+        let prefill_config = imp_core::context_prefill::PrefillConfig::default();
+        let assembled =
+            imp_core::context_prefill::assemble_context(&file_specs, &cwd, &prefill_config);
+        for warning in &assembled.warnings {
+            eprintln!("[imp] context prefill: {warning}");
+        }
+        if !assembled.included_files.is_empty() {
+            eprintln!(
+                "[imp] prefilled {} files (~{} tokens)",
+                assembled.included_files.len(),
+                assembled.estimated_tokens
+            );
+        }
+        assembled.messages
+    };
+
     let mut options = SessionOptions {
         cwd: cwd.clone(),
         model: cli.model.clone(),
@@ -963,6 +1005,7 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
         no_tools: cli.no_tools,
         session: SessionChoice::InMemory,
         task: Some(unit.task_context()),
+        context_prefill,
         ..Default::default()
     };
 
@@ -1145,6 +1188,7 @@ fn parse_mana_unit(
         notes: frontmatter.notes,
         attempts: frontmatter.attempt_log,
         workspace_root,
+        files: frontmatter.files,
     })
 }
 
@@ -1165,6 +1209,52 @@ fn split_frontmatter(content: &str) -> Result<(String, String), Box<dyn std::err
     let yaml = lines[1..end].join("\n");
     let body = lines[end + 1..].join("\n");
     Ok((yaml, body))
+}
+
+/// Parse a file spec string like "src/foo.rs" or "src/foo.rs:tail:50" into a FileSpec.
+fn parse_file_spec_str(s: &str) -> Option<imp_core::context_prefill::FileSpec> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Split on first colon that follows the extension
+    // e.g., "src/foo.rs:tail:50" → path="src/foo.rs", suffix="tail:50"
+    let (path_str, suffix) = if let Some(dot_pos) = s.rfind('.') {
+        // Find the first colon after the extension
+        let after_ext = &s[dot_pos..];
+        if let Some(colon_pos) = after_ext.find(':') {
+            let split_at = dot_pos + colon_pos;
+            (&s[..split_at], Some(&s[split_at + 1..]))
+        } else {
+            (s, None)
+        }
+    } else {
+        (s, None)
+    };
+
+    let mode = match suffix {
+        Some(suf) if suf.starts_with("tail:") => suf[5..]
+            .parse::<usize>()
+            .ok()
+            .map(imp_core::context_prefill::FileMode::Tail)
+            .unwrap_or(imp_core::context_prefill::FileMode::Full),
+        Some(suf) if suf.contains('-') => {
+            let parts: Vec<&str> = suf.splitn(2, '-').collect();
+            match (
+                parts[0].parse::<usize>(),
+                parts.get(1).and_then(|s| s.parse::<usize>().ok()),
+            ) {
+                (Ok(start), Some(end)) => imp_core::context_prefill::FileMode::Range(start, end),
+                _ => imp_core::context_prefill::FileMode::Full,
+            }
+        }
+        _ => imp_core::context_prefill::FileMode::Full,
+    };
+
+    Some(imp_core::context_prefill::FileSpec {
+        path: std::path::PathBuf::from(path_str),
+        mode,
+    })
 }
 
 fn format_attempt(attempt: &UnitAttempt) -> String {
@@ -2060,9 +2150,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                     "bash" => args
                         .get("command")
                         .and_then(|v| v.as_str())
-                        .map(|c| {
-                            truncate_chars_with_suffix(c, 60, "…")
-                        })
+                        .map(|c| truncate_chars_with_suffix(c, 60, "…"))
                         .unwrap_or_default(),
                     "read" | "write" | "edit" => args
                         .get("path")
@@ -2094,10 +2182,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                         .collect::<Vec<_>>()
                         .join("");
                     if !text.is_empty() {
-                        eprintln!(
-                            "[error: {}]",
-                            truncate_chars_with_suffix(&text, 100, "")
-                        );
+                        eprintln!("[error: {}]", truncate_chars_with_suffix(&text, 100, ""));
                     }
                 }
             }
