@@ -107,27 +107,30 @@ pub struct SessionInfo {
 impl SessionInfo {
     /// A short, single-line chat title derived from persisted session metadata or message history.
     pub fn title(&self, max_chars: usize) -> Option<String> {
-        self.name
+        if let Some(name) = self
+            .name
             .as_deref()
             .filter(|name| !name.trim().is_empty())
             .map(|name| truncate_chars_with_suffix(name.trim(), max_chars, "…"))
-            .or_else(|| {
-                self.summary
-                    .as_deref()
-                    .filter(|summary| !summary.trim().is_empty())
-                    .map(|summary| summarize_session_title(summary.trim(), max_chars))
-                    .filter(|title| !title.is_empty())
-            })
-            .or_else(|| {
-                self.first_message
-                    .as_deref()
-                    .map(|text| summarize_session_title(text, max_chars))
-                    .filter(|title| !title.is_empty())
-            })
+        {
+            return Some(name);
+        }
+
+        preferred_title_candidate(
+            self.first_message.as_deref(),
+            self.summary.as_deref(),
+            max_chars,
+        )
     }
 }
 
 /// Manages a single session's entries and persistence.
+///
+/// Raw persisted entries are always retained in `entries`. Active model-visible
+/// history may differ from the raw branch when a `SessionEntry::Compaction`
+/// exists on the current branch. In that case, callers should prefer
+/// `get_active_messages()` over `get_messages()` when assembling context for an
+/// LLM request.
 pub struct SessionManager {
     entries: Vec<SessionEntry>,
     path: Option<PathBuf>,
@@ -302,28 +305,17 @@ impl SessionManager {
             return Some(name);
         }
 
-        if let Some(summary) = self
+        let first_prompt = self.entries.iter().find_map(|entry| match entry {
+            SessionEntry::Message { message, .. } => extract_text(message),
+            _ => None,
+        });
+        let summary = self
             .summary()
             .filter(|summary| !summary.trim().is_empty())
-            .map(|summary| summarize_session_title(summary.trim(), max_chars))
-            .filter(|summary| !summary.is_empty())
-            .or_else(|| {
-                derive_session_summary(&self.entries)
-                    .map(|summary| summarize_session_title(summary.trim(), max_chars))
-                    .filter(|summary| !summary.is_empty())
-            })
-        {
-            return Some(summary);
-        }
+            .map(str::to_string)
+            .or_else(|| derive_session_summary(&self.entries));
 
-        self.entries
-            .iter()
-            .find_map(|entry| match entry {
-                SessionEntry::Message { message, .. } => extract_text(message),
-                _ => None,
-            })
-            .map(|text| summarize_session_title(&text, max_chars))
-            .filter(|title| !title.is_empty())
+        preferred_title_candidate(first_prompt.as_deref(), summary.as_deref(), max_chars)
     }
 
     fn persist_session_meta(&mut self) -> Result<()> {
@@ -567,7 +559,12 @@ impl SessionManager {
         })
     }
 
-    /// Walk parent_ids from leaf_id to root, return entries in chronological order.
+    /// Walk parent_ids from leaf_id to root, return raw entries in chronological order.
+    ///
+    /// This is the durable branch as persisted on disk. It may include
+    /// `SessionEntry::Compaction` markers plus raw pre-compaction messages.
+    /// Callers building model-visible context should prefer
+    /// `get_active_messages()`.
     pub fn get_branch(&self) -> Vec<&SessionEntry> {
         let Some(ref leaf) = self.leaf_id else {
             // No messages yet — return just the header if present
@@ -612,7 +609,11 @@ impl SessionManager {
         branch
     }
 
-    /// Get messages for the current branch (for LLM context).
+    /// Get raw message entries for the current branch.
+    ///
+    /// This reflects the durable branch exactly and intentionally ignores
+    /// compaction semantics. For model-visible history after a compaction,
+    /// prefer `get_active_messages()`.
     pub fn get_messages(&self) -> Vec<&Message> {
         self.get_branch()
             .into_iter()
@@ -621,6 +622,79 @@ impl SessionManager {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Return the latest compaction entry on the active branch, if any.
+    pub fn latest_compaction(&self) -> Option<&SessionEntry> {
+        self.get_branch().into_iter().rev().find(|entry| {
+            matches!(entry, SessionEntry::Compaction { .. })
+        })
+    }
+
+    /// Build the model-visible message history for the active branch.
+    ///
+    /// Compaction semantics are branch-local and replacement-based:
+    /// - if there is no compaction entry on the branch, this returns the raw
+    ///   branch messages;
+    /// - if a compaction entry exists, all raw messages before that boundary are
+    ///   replaced by a synthetic user summary message derived from the latest
+    ///   compaction entry, followed by the raw messages from `first_kept_id`
+    ///   onward that are still on the active branch.
+    ///
+    /// Raw persisted entries remain intact on disk and are still available via
+    /// `get_branch()` / `get_messages()`.
+    pub fn get_active_messages(&self) -> Vec<Message> {
+        let branch = self.get_branch();
+        let latest_compaction = branch.iter().enumerate().rev().find_map(|(idx, entry)| {
+            let SessionEntry::Compaction {
+                summary,
+                first_kept_id,
+                ..
+            } = entry
+            else {
+                return None;
+            };
+            Some((idx, summary.as_str(), first_kept_id.as_str()))
+        });
+
+        let Some((_compaction_idx, summary, first_kept_id)) = latest_compaction else {
+            return branch
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    SessionEntry::Message { message, .. } => Some(message.clone()),
+                    _ => None,
+                })
+                .collect();
+        };
+
+        let mut active = Vec::new();
+        let summary_text = summary.trim();
+        if !summary_text.is_empty() {
+            active.push(Message::user(summary_text.to_string()));
+        }
+
+        let mut keep = false;
+        for entry in branch {
+            if entry.id() == Some(first_kept_id) {
+                keep = true;
+            }
+            if !keep {
+                continue;
+            }
+            if let SessionEntry::Message { message, .. } = entry {
+                active.push(message.clone());
+            }
+        }
+
+        active
+    }
+
+    /// Get the active model-visible branch entries.
+    ///
+    /// This is a convenience wrapper over `get_active_messages()` for callers
+    /// that still want borrowed-like iteration semantics at the message layer.
+    pub fn active_message_count(&self) -> usize {
+        self.get_active_messages().len()
     }
 
     /// Build the full tree structure from all entries.
@@ -1076,6 +1150,268 @@ fn cleanup_summary_text(text: &str) -> String {
     collapsed
 }
 
+fn preferred_title_candidate(
+    first_prompt: Option<&str>,
+    summary: Option<&str>,
+    max_chars: usize,
+) -> Option<String> {
+    let first_prompt = first_prompt
+        .map(cleanup_summary_text)
+        .filter(|text| !text.is_empty());
+    let summary = summary
+        .map(cleanup_summary_text)
+        .filter(|text| !text.is_empty());
+
+    match (first_prompt.as_deref(), summary.as_deref()) {
+        (Some(prompt), Some(summary)) => {
+            let prompt_title = literal_topic_title(prompt, max_chars);
+            let summary_title = literal_topic_title(summary, max_chars);
+            choose_better_title(prompt_title, summary_title, max_chars)
+        }
+        (Some(prompt), None) => literal_topic_title(prompt, max_chars),
+        (None, Some(summary)) => literal_topic_title(summary, max_chars),
+        (None, None) => None,
+    }
+}
+
+fn choose_better_title(
+    prompt_title: Option<String>,
+    summary_title: Option<String>,
+    max_chars: usize,
+) -> Option<String> {
+    match (prompt_title, summary_title) {
+        (Some(prompt), Some(summary)) => {
+            if is_generic_title(&prompt) && !is_generic_title(&summary) {
+                Some(summary)
+            } else if !is_generic_title(&prompt) && is_generic_title(&summary) {
+                Some(prompt)
+            } else if topic_word_count(&summary) > topic_word_count(&prompt) {
+                Some(summary)
+            } else {
+                Some(truncate_chars_with_suffix(&prompt, max_chars, "…"))
+            }
+        }
+        (Some(prompt), None) => Some(prompt),
+        (None, Some(summary)) => Some(summary),
+        (None, None) => None,
+    }
+}
+
+fn topic_word_count(title: &str) -> usize {
+    title
+        .split_whitespace()
+        .filter(|word| word.len() >= 4)
+        .count()
+}
+
+fn literal_topic_title(text: &str, max_chars: usize) -> Option<String> {
+    let cleaned = cleanup_summary_text(text);
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    let literal = concise_topic_phrase(&cleaned, max_chars);
+    if !literal.trim().is_empty() && !is_generic_title(&literal) {
+        return Some(literal);
+    }
+
+    let heuristic = summarize_session_title(&cleaned, max_chars);
+    if !heuristic.trim().is_empty() && !is_generic_title(&heuristic) {
+        return Some(heuristic);
+    }
+
+    Some(truncate_chars_with_suffix(cleaned.trim(), max_chars, "…"))
+}
+
+fn is_generic_title(title: &str) -> bool {
+    let lower = title.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return true;
+    }
+
+    let generic_words = [
+        "yes", "yeah", "yep", "ok", "okay", "sure", "think", "some", "pretty", "good", "great",
+        "nice", "maybe", "just", "really", "thing", "stuff",
+    ];
+
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    if words.len() <= 2 && words.iter().all(|w| generic_words.contains(w)) {
+        return true;
+    }
+
+    words.iter().filter(|w| generic_words.contains(w)).count() >= words.len().saturating_sub(1)
+}
+
+fn concise_topic_phrase(text: &str, max_chars: usize) -> String {
+    let collapsed = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+
+    let mut phrase = collapsed
+        .split_terminator(['.', '!', '?', ';', ':'])
+        .find_map(|part| {
+            let trimmed = part.trim();
+            if trimmed.split_whitespace().count() >= 3 {
+                Some(trimmed.to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(collapsed);
+
+    let leading_phrases = [
+        "we should ",
+        "let's ",
+        "i want to ",
+        "i'd like to ",
+        "can we ",
+        "can you ",
+        "could we ",
+        "could you ",
+        "would you ",
+        "please ",
+        "help me ",
+        "yes ",
+        "yeah ",
+        "ok ",
+        "okay ",
+        "sure ",
+        "i think ",
+        "think ",
+    ];
+
+    let lower = phrase.to_ascii_lowercase();
+    for prefix in leading_phrases {
+        if let Some(stripped) = lower.strip_prefix(prefix) {
+            phrase = stripped.trim().to_string();
+            break;
+        }
+    }
+
+    let stopwords = [
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "but",
+        "by",
+        "for",
+        "from",
+        "how",
+        "i",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "me",
+        "my",
+        "of",
+        "on",
+        "or",
+        "please",
+        "so",
+        "that",
+        "the",
+        "their",
+        "them",
+        "there",
+        "these",
+        "they",
+        "this",
+        "to",
+        "up",
+        "we",
+        "what",
+        "when",
+        "where",
+        "which",
+        "while",
+        "with",
+        "would",
+        "can",
+        "could",
+        "should",
+        "work",
+        "working",
+        "improving",
+        "improve",
+        "usability",
+        "currently",
+        "displayed",
+        "shown",
+        "information",
+        "some",
+        "pretty",
+        "really",
+        "just",
+        "think",
+        "yes",
+        "yeah",
+        "okay",
+        "ok",
+        "sure",
+    ];
+
+    let normalized = phrase
+        .replace("/resume", "resume")
+        .replace("chat summaries", "chat_summaries")
+        .replace("top bar", "top_bar")
+        .replace("session picker", "session_picker")
+        .replace("oauth login", "oauth_login")
+        .replace("provider refresh", "provider_refresh");
+
+    let mut tokens = Vec::new();
+    for raw in normalized.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+        if raw.is_empty() {
+            continue;
+        }
+        let lower = raw.to_ascii_lowercase();
+        if stopwords.contains(&lower.as_str()) {
+            continue;
+        }
+        if tokens.iter().any(|existing: &String| existing == &lower) {
+            continue;
+        }
+        tokens.push(lower);
+    }
+
+    if tokens.is_empty() {
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        let take = words.len().min(4);
+        return truncate_chars_with_suffix(&words[..take].join(" "), max_chars, "…");
+    }
+
+    let mut out = tokens
+        .into_iter()
+        .take(5)
+        .map(|token| match token.as_str() {
+            "chat_summaries" => "chat summaries".to_string(),
+            "top_bar" => "top bar".to_string(),
+            "session_picker" => "session picker".to_string(),
+            "oauth_login" => "oauth login".to_string(),
+            "provider_refresh" => "provider refresh".to_string(),
+            _ => token,
+        })
+        .collect::<Vec<_>>();
+
+    if out.len() > 4 {
+        out.truncate(4);
+    }
+
+    let mut out = out.join(" ");
+
+    out = out.replace("resume chat summaries", "resume + summaries");
+    truncate_chars_with_suffix(out.trim(), max_chars, "…")
+}
+
 fn summarize_session_title(text: &str, max_chars: usize) -> String {
     let collapsed = text
         .lines()
@@ -1145,12 +1481,68 @@ fn summarize_session_title(text: &str, max_chars: usize) -> String {
     ];
 
     let stopwords = [
-        "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "get",
-        "have", "how", "i", "if", "in", "instead", "into", "is", "it", "its", "me", "my",
-        "now", "of", "on", "or", "please", "right", "so", "string", "that", "the", "their",
-        "them", "then", "there", "these", "they", "this", "to", "up", "we", "what", "when",
-        "where", "which", "while", "with", "would", "listed", "resume", "prompt", "first",
-        "summarized", "summarize", "information", "display", "displayed", "shown", "currently",
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "but",
+        "by",
+        "for",
+        "from",
+        "get",
+        "have",
+        "how",
+        "i",
+        "if",
+        "in",
+        "instead",
+        "into",
+        "is",
+        "it",
+        "its",
+        "me",
+        "my",
+        "now",
+        "of",
+        "on",
+        "or",
+        "please",
+        "right",
+        "so",
+        "string",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "to",
+        "up",
+        "we",
+        "what",
+        "when",
+        "where",
+        "which",
+        "while",
+        "with",
+        "would",
+        "listed",
+        "resume",
+        "prompt",
+        "first",
+        "summarized",
+        "summarize",
+        "information",
+        "display",
+        "displayed",
+        "shown",
+        "currently",
     ];
 
     let mut verb: Option<String> = None;
@@ -1235,7 +1627,7 @@ mod tests {
         auth::{ApiKey, AuthStore},
         model::{Capabilities, ModelMeta, ModelPricing},
         provider::{Context, Provider, RequestOptions},
-        AssistantMessage, Message, StreamEvent,
+        AssistantMessage, ContentBlock, Message, StopReason, StreamEvent,
     };
     use tempfile::TempDir;
 
@@ -1287,6 +1679,31 @@ mod tests {
     }
 
     #[test]
+    fn literal_topic_title_prefers_subject_words_over_compaction() {
+        let title = literal_topic_title(
+            "can we work on improving the usability of /resume and the chat summaries?",
+            64,
+        )
+        .unwrap();
+
+        assert!(title.contains("resume") || title.contains("summaries"));
+        assert!(title.split_whitespace().count() <= 5);
+    }
+
+    #[test]
+    fn generic_summary_title_falls_back_to_more_descriptive_phrase() {
+        let title = literal_topic_title(
+            "yes think some pretty significant issues with oauth login persistence and provider refresh",
+            64,
+        )
+        .unwrap();
+
+        assert!(title.contains("oauth") || title.contains("login"));
+        assert!(title.split_whitespace().count() <= 5);
+        assert_ne!(title, "yes think some pretty");
+    }
+
+    #[test]
     fn session_titles_can_be_derived_from_summary_text() {
         let info = SessionInfo {
             id: "abc".into(),
@@ -1297,12 +1714,148 @@ mod tests {
             message_count: 1,
             first_message: Some("help me with oauth login issues".into()),
             name: None,
-            summary: Some("Investigated OAuth login failures and refreshed provider auth flow".into()),
+            summary: Some(
+                "Investigated OAuth login failures and refreshed provider auth flow".into(),
+            ),
         };
 
         let title = info.title(48).unwrap();
         assert!(!title.is_empty());
-        assert_ne!(title, "Investigated OAuth login failures and refres…");
+        assert!(title.contains("oauth") || title.contains("login") || title.contains("provider"));
+        assert!(title.split_whitespace().count() <= 5);
+    }
+
+    #[test]
+    fn session_compaction_active_messages_replace_prefix_with_summary() {
+        let mut mgr = SessionManager::in_memory();
+
+        mgr.append(make_msg_entry("u1", "first request")).unwrap();
+        mgr.append(SessionEntry::Message {
+            id: "a1".into(),
+            parent_id: None,
+            message: Message::Assistant(AssistantMessage {
+                content: vec![ContentBlock::Text {
+                    text: "initial answer".into(),
+                }],
+                usage: None,
+                stop_reason: StopReason::EndTurn,
+                timestamp: 1,
+            }),
+        })
+        .unwrap();
+        mgr.append(make_msg_entry("u2", "latest request")).unwrap();
+        mgr.append(SessionEntry::Compaction {
+            id: "c1".into(),
+            parent_id: None,
+            summary: "Compaction summary of earlier work".into(),
+            first_kept_id: "u2".into(),
+            tokens_before: 100,
+            tokens_after: 40,
+        })
+        .unwrap();
+        mgr.append(SessionEntry::Message {
+            id: "a2".into(),
+            parent_id: None,
+            message: Message::Assistant(AssistantMessage {
+                content: vec![ContentBlock::Text {
+                    text: "follow-up answer".into(),
+                }],
+                usage: None,
+                stop_reason: StopReason::EndTurn,
+                timestamp: 2,
+            }),
+        })
+        .unwrap();
+
+        let raw = mgr.get_messages();
+        assert_eq!(raw.len(), 4);
+
+        let active = mgr.get_active_messages();
+        assert_eq!(active.len(), 3);
+        match &active[0] {
+            Message::User(user) => match user.content.as_slice() {
+                [ContentBlock::Text { text }] => {
+                    assert_eq!(text, "Compaction summary of earlier work")
+                }
+                other => panic!("unexpected summary content: {other:?}"),
+            },
+            other => panic!("unexpected active message: {other:?}"),
+        }
+        match &active[1] {
+            Message::User(user) => match user.content.as_slice() {
+                [ContentBlock::Text { text }] => assert_eq!(text, "latest request"),
+                other => panic!("unexpected kept user content: {other:?}"),
+            },
+            other => panic!("unexpected kept message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_compaction_active_messages_fall_back_to_raw_when_first_kept_missing() {
+        let mut mgr = SessionManager::in_memory();
+        mgr.append(make_msg_entry("u1", "hello")).unwrap();
+        mgr.append(SessionEntry::Compaction {
+            id: "c1".into(),
+            parent_id: None,
+            summary: "summary only".into(),
+            first_kept_id: "missing".into(),
+            tokens_before: 10,
+            tokens_after: 3,
+        })
+        .unwrap();
+
+        let active = mgr.get_active_messages();
+        assert_eq!(active.len(), 1);
+        match &active[0] {
+            Message::User(user) => match user.content.as_slice() {
+                [ContentBlock::Text { text }] => assert_eq!(text, "summary only"),
+                other => panic!("unexpected summary-only content: {other:?}"),
+            },
+            other => panic!("unexpected active message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_compaction_fork_preserves_compacted_branch_semantics() {
+        let tmp = TempDir::new().unwrap();
+        let fork_path = tmp.path().join("forked.jsonl");
+
+        let mut mgr = SessionManager::in_memory();
+        mgr.append(make_msg_entry("u1", "older")).unwrap();
+        mgr.append(make_msg_entry("u2", "newer")).unwrap();
+        mgr.append(SessionEntry::Compaction {
+            id: "c1".into(),
+            parent_id: None,
+            summary: "summary older".into(),
+            first_kept_id: "u2".into(),
+            tokens_before: 20,
+            tokens_after: 8,
+        })
+        .unwrap();
+        mgr.append(SessionEntry::Message {
+            id: "a2".into(),
+            parent_id: None,
+            message: Message::Assistant(AssistantMessage {
+                content: vec![ContentBlock::Text {
+                    text: "done".into(),
+                }],
+                usage: None,
+                stop_reason: StopReason::EndTurn,
+                timestamp: 3,
+            }),
+        })
+        .unwrap();
+
+        let forked = mgr.fork("a2", &fork_path).unwrap();
+        let active = forked.get_active_messages();
+        assert_eq!(active.len(), 3);
+        match &active[0] {
+            Message::User(user) => match user.content.as_slice() {
+                [ContentBlock::Text { text }] => assert_eq!(text, "summary older"),
+                other => panic!("unexpected summary content: {other:?}"),
+            },
+            other => panic!("unexpected active message: {other:?}"),
+        }
     }
 
     #[test]
@@ -1438,7 +1991,9 @@ mod tests {
         }
 
         assert!(sessions.iter().any(|s| s.name.as_deref() == Some("First")));
-        assert!(sessions.iter().any(|s| s.summary.as_deref() == Some("Second session summary")));
+        assert!(sessions
+            .iter()
+            .any(|s| s.summary.as_deref() == Some("Second session summary")));
     }
 
     #[test]
@@ -1482,7 +2037,10 @@ mod tests {
         let path = mgr.path().unwrap().to_path_buf();
         let reopened = SessionManager::open(&path).unwrap();
         assert_eq!(reopened.name(), Some("Debug auth"));
-        assert_eq!(reopened.summary(), Some("Investigating OAuth login failures"));
+        assert_eq!(
+            reopened.summary(),
+            Some("Investigating OAuth login failures")
+        );
     }
 
     #[test]

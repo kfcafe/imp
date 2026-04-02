@@ -125,6 +125,12 @@ pub struct Agent {
     pub retry_policy: RetryPolicy,
     /// Active agent mode — controls which tools are permitted.
     pub mode: AgentMode,
+    /// Whether a mana skill is available in discovered resources.
+    pub has_mana_skill: bool,
+    /// Whether a mana-basics skill is available in discovered resources.
+    pub has_mana_basics_skill: bool,
+    /// Whether a mana-delegation skill is available in discovered resources.
+    pub has_mana_delegation_skill: bool,
     /// Engineering guardrails config.
     pub guardrail_config: GuardrailConfig,
     /// Resolved guardrail profile (None = disabled).
@@ -168,6 +174,9 @@ impl Agent {
             context_config: ContextConfig::default(),
             retry_policy: RetryPolicy::default(),
             mode: AgentMode::Full,
+            has_mana_skill: false,
+            has_mana_basics_skill: false,
+            has_mana_delegation_skill: false,
             guardrail_config: GuardrailConfig::default(),
             guardrail_profile: None,
             file_cache: Arc::new(crate::tools::FileCache::new()),
@@ -212,6 +221,16 @@ impl Agent {
         let mut cancelled = false;
         let mut queued_follow_ups: std::collections::VecDeque<String> =
             std::collections::VecDeque::new();
+
+        if let Some(nudge) = mana_skill_follow_up_hint(
+            &prompt,
+            self.mode,
+            self.has_mana_skill,
+            self.has_mana_basics_skill,
+            self.has_mana_delegation_skill,
+        ) {
+            queued_follow_ups.push_back(nudge.to_string());
+        }
 
         loop {
             if turn >= self.max_turns {
@@ -332,12 +351,14 @@ impl Agent {
             let mut saw_first_stream_event = false;
             let mut saw_first_text_delta = false;
             let mut saw_first_tool_call = false;
+            let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
             while let Some(event_result) = stream.next().await {
                 // Check for cancel during event processing
-                if let Ok(cmd) = self.command_rx.try_recv() {
+                while let Ok(cmd) = self.command_rx.try_recv() {
                     match cmd {
                         AgentCommand::Cancel => {
+                            cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
                             cancelled = true;
                             break;
                         }
@@ -346,6 +367,10 @@ impl Agent {
                         }
                         AgentCommand::FollowUp(msg) => queued_follow_ups.push_back(msg),
                     }
+                }
+
+                if cancelled {
+                    break;
                 }
 
                 match event_result {
@@ -501,7 +526,7 @@ impl Agent {
             }
 
             // Execute tool calls
-            let results = self.execute_tools(tool_calls).await;
+            let results = self.execute_tools(tool_calls, cancel_token).await;
 
             for result in &results {
                 self.messages.push(Message::ToolResult(result.clone()));
@@ -579,6 +604,7 @@ impl Agent {
     async fn execute_tools(
         &self,
         calls: Vec<(String, String, serde_json::Value)>,
+        cancel_token: Arc<std::sync::atomic::AtomicBool>,
     ) -> Vec<imp_llm::ToolResultMessage> {
         let mut readonly = Vec::new();
         let mut mutable = Vec::new();
@@ -592,15 +618,20 @@ impl Agent {
         }
 
         let mut results = join_all(readonly.into_iter().map(
-            |(index, id, name, args)| async move {
-                let result = self.execute_one_tool(&id, &name, args).await;
-                (index, result)
+            |(index, id, name, args)| {
+                let cancel_token = Arc::clone(&cancel_token);
+                async move {
+                    let result = self
+                        .execute_one_tool(&id, &name, args, cancel_token)
+                        .await;
+                    (index, result)
+                }
             },
         ))
         .await;
 
         for (index, id, name, args) in mutable {
-            let result = self.execute_one_tool(&id, &name, args).await;
+            let result = self.execute_one_tool(&id, &name, args, Arc::clone(&cancel_token)).await;
             results.push((index, result));
         }
 
@@ -613,6 +644,7 @@ impl Agent {
         call_id: &str,
         tool_name: &str,
         args: serde_json::Value,
+        cancel_token: Arc<std::sync::atomic::AtomicBool>,
     ) -> imp_llm::ToolResultMessage {
         self.emit(AgentEvent::ToolExecutionStart {
             tool_call_id: call_id.to_string(),
@@ -695,7 +727,7 @@ impl Agent {
                 let (update_tx, mut update_rx) = mpsc::channel(64);
                 let ctx = crate::tools::ToolContext {
                     cwd: self.cwd.clone(),
-                    cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    cancelled: Arc::clone(&cancel_token),
                     update_tx,
                     ui: self.ui.clone(),
                     file_cache: self.file_cache.clone(),
@@ -727,7 +759,7 @@ impl Agent {
                     Err(e) => crate::tools::ToolOutput::error(e.to_string())
                         .into_tool_result(call_id, tool_name),
                 };
-                forwarder.abort();
+                forwarder.await.ok();
                 exec_result
             }
             None => crate::tools::ToolOutput::error(format!("Unknown tool: {tool_name}"))
@@ -866,9 +898,7 @@ fn extract_file_path(cwd: &Path, args: &serde_json::Value) -> Option<PathBuf> {
 
 fn mana_bash_equivalent_hint(command: &str) -> Option<&'static str> {
     let trimmed = command.trim();
-    let Some(rest) = trimmed.strip_prefix("mana") else {
-        return None;
-    };
+    let rest = trimmed.strip_prefix("mana")?;
     if rest.chars().next().is_some_and(|c| !c.is_whitespace()) {
         return None;
     }
@@ -878,6 +908,74 @@ fn mana_bash_equivalent_hint(command: &str) -> Option<&'static str> {
         "status" | "list" | "ls" | "show" | "read" | "create" | "close" | "update" | "run"
         | "run_state" | "evaluate" | "agents" | "logs" | "next" | "claim" | "release" | "tree" => {
             Some("Use the native mana tool instead of `bash` for this mana command.")
+        }
+        _ => None,
+    }
+}
+
+fn mana_skill_follow_up_hint(
+    prompt: &str,
+    mode: AgentMode,
+    has_mana_skill: bool,
+    has_mana_basics_skill: bool,
+    has_mana_delegation_skill: bool,
+) -> Option<&'static str> {
+    let lower = prompt.to_ascii_lowercase();
+
+    let orchestration_signal = [
+        "delegate",
+        "delegation",
+        "decompose",
+        "decomposition",
+        "split this",
+        "break this up",
+        "break it up",
+        "parallel",
+        "worker",
+        "workers",
+        "orchestrate",
+        "orchestration",
+        "create a unit",
+        "create units",
+        "mana run",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+
+    let mana_signal = [
+        " mana ",
+        "mana status",
+        "mana list",
+        "mana show",
+        "mana update",
+        "mana create",
+        "mana run",
+        "unit",
+        "units",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+
+    match mode {
+        AgentMode::Full | AgentMode::Orchestrator | AgentMode::Planner
+            if orchestration_signal || mana_signal =>
+        {
+            if has_mana_delegation_skill {
+                Some("Before you continue: load `mana-delegation` with `read` and follow it for unit design, decomposition, and worker handoff.")
+            } else if has_mana_skill {
+                Some("Before you continue: load `mana` with `read` and follow it for unit design, decomposition, and worker handoff.")
+            } else {
+                None
+            }
+        }
+        AgentMode::Worker | AgentMode::Auditor if mana_signal => {
+            if has_mana_basics_skill {
+                Some("Before you continue: load `mana-basics` with `read` and follow the allowed native mana workflow for this mode.")
+            } else if has_mana_skill {
+                Some("Before you continue: load `mana` with `read` and follow the allowed native mana workflow for this mode.")
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -1343,6 +1441,103 @@ mod tests {
             events.push(event);
         }
         events
+    }
+
+    #[test]
+    fn agent_queues_mana_delegation_hint_for_planner_requests() {
+        let provider = Arc::new(MockProvider::new(vec![
+            text_response("Loaded delegation skill", 100, 20),
+            text_response("Done", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.has_mana_delegation_skill = true;
+        agent.mode = AgentMode::Planner;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            agent.run("Please split this into units for workers".to_string())
+                .await
+                .unwrap();
+        });
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts.len(), 2);
+        assert_eq!(user_texts[0], "Please split this into units for workers");
+        assert!(user_texts[1].contains("load `mana-delegation`"));
+    }
+
+    #[tokio::test]
+    async fn agent_queues_mana_basics_hint_for_worker_mana_requests() {
+        let provider = Arc::new(MockProvider::new(vec![
+            text_response("Loaded basics skill", 100, 20),
+            text_response("Done", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.has_mana_basics_skill = true;
+        agent.mode = AgentMode::Worker;
+
+        agent.run("Check mana status and logs for my unit".to_string())
+            .await
+            .unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts.len(), 2);
+        assert_eq!(user_texts[0], "Check mana status and logs for my unit");
+        assert!(user_texts[1].contains("load `mana-basics`"));
+    }
+
+    #[tokio::test]
+    async fn agent_does_not_queue_mana_hint_without_matching_signal() {
+        let provider = Arc::new(MockProvider::new(vec![text_response("No nudge", 100, 20)]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.has_mana_delegation_skill = true;
+        agent.mode = AgentMode::Planner;
+
+        agent.run("Explain how this parser works".to_string())
+            .await
+            .unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts, vec!["Explain how this parser works".to_string()]);
     }
 
     #[tokio::test]
@@ -2235,7 +2430,7 @@ mod tests {
             seeded_messages.push(make_tool_result(
                 &call_id,
                 "read",
-                &format!("{}", "x".repeat(400)),
+                &"x".repeat(400),
             ));
         }
 
@@ -2387,7 +2582,7 @@ mod tests {
             };
             match outcome {
                 Ok(events) => Box::pin(futures::stream::iter(
-                    events.into_iter().map(|ev| imp_llm::Result::Ok(ev)),
+                    events.into_iter().map(imp_llm::Result::Ok),
                 )),
                 Err(e) => Box::pin(futures::stream::once(async move {
                     imp_llm::Result::<StreamEvent>::Err(e)
@@ -3301,16 +3496,23 @@ mod mode_tests {
     fn agent_mode_enforcement_orchestrator_excludes_write_tools() {
         use crate::config::AgentMode;
         use crate::tools::ToolRegistry;
+        use crate::tools::diff::{DiffApplyTool, DiffShowTool};
 
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(EchoTool)); // "echo" — not in orchestrator allow-list
         registry.register(Arc::new(NamedWriteTool("write")));
         registry.register(Arc::new(NamedWriteTool("edit")));
         registry.register(Arc::new(NamedWriteTool("bash")));
+        registry.register(Arc::new(DiffShowTool));
+        registry.register(Arc::new(DiffApplyTool));
 
         // Apply the mode filter exactly as AgentBuilder would
         let mode = AgentMode::Orchestrator;
         registry.retain(|name| mode.allows_tool(name));
+
+        // Readonly diff tool should remain visible; mutating diff tool should not.
+        assert!(registry.get("diff_show").is_some(), "diff_show must remain available");
+        assert!(registry.get("diff_apply").is_none(), "diff_apply must be filtered out");
 
         // Write-category tools must be absent
         assert!(

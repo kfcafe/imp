@@ -485,7 +485,7 @@ mod tests {
 
     // --- Mock token server helper ---
 
-    async fn start_mock_token_server(response_json: &str) -> (TokioListener, u16) {
+    async fn start_mock_token_server(_response_json: &str) -> (TokioListener, u16) {
         let listener = TokioListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         (listener, port)

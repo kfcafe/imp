@@ -27,15 +27,20 @@ imp -c
 
 Type `/` in the editor to open the command palette. Arrow keys, Tab, or Ctrl+N/P to navigate. Enter to select.
 
+Notable slash commands:
+- `/new` — start a fresh in-memory session
+- `/compact` — summarize older branch history into a structured handoff while preserving recent turns verbatim for future model context
+- `/personality` — edit identity/behavior/profile settings
+
 ## What it does
 
 imp is an agent engine — not a wrapper around an LLM API. It runs a full ReAct loop (think → act → observe → repeat), manages context intelligently, and gives the model real tools to work with.
 
-**Tools** — File I/O, shell execution, code search (grep, find, AST scan), web search, diff preview/apply, user prompts, mana unit management, and persistent memory. Readonly tools run in parallel. Prefer native tools over shell wrappers when available; for mana operations, use the built-in `mana` tool instead of `bash` for equivalent actions.
+**Tools** — File I/O, shell execution, code search (grep, find, AST scan), web search, diff preview/apply, user prompts, mana unit management, session search, and persistent memory. Readonly tools run in parallel. Prefer native tools over shell wrappers when available; for mana operations, use the built-in `mana` tool instead of `bash` for equivalent actions.
 
-**Context management** — As conversations grow, imp masks old tool outputs and keeps a sliding window of recent turns so the model can continue working without dragging full historical tool output forward.
+**Context management** — As conversations grow, imp first masks old tool outputs and can now compact older history behind an explicit branch-local compaction boundary. `/compact` preserves recent working turns verbatim, summarizes older work into a structured handoff, and makes future turns use the compacted active history rather than the full raw transcript. Raw session entries remain on disk for replay/fork/export.
 
-**Modes** — Control what the agent can do. `full` for interactive use, `worker` for scoped tasks, `orchestrator` for planning and delegation, `reviewer` for read-only analysis. Enforced at both tool registration and execution time — disallowed tools never appear in the prompt.
+**Modes** — Control what the agent can do. `full` for interactive use, `worker` for scoped tasks, `orchestrator` for planning and delegation, `reviewer` for read-only analysis. Enforced at both tool registration and execution time — disallowed tools never appear in the prompt. When delegating, imp should use mana child jobs as the worker substrate rather than inventing a separate subtask model.
 
 **Sessions** — Every message, tool call, and result is persisted to append-only JSONL. Resume any session, fork from any point, navigate between branches.
 
@@ -47,9 +52,11 @@ The interactive terminal UI gives you:
 
 - Streaming responses with thinking indicators
 - Command palette (`/`) with fuzzy search
+- Personality editor (`/personality`) for identity, behavior, scope, and profiles
 - Model selector (Ctrl+L) with quick cycling
 - Thinking level control (Shift+Tab: off → minimal → low → medium → high → xhigh)
 - Session tree view for branching conversations
+- Manual `/compact` command for structured context compaction of long sessions
 - Sidebar for tool output inspection
 - Input history, multi-line editing, file finder (`@`)
 - Mouse support for scrolling and clicking tool calls
@@ -72,6 +79,7 @@ The interactive terminal UI gives you:
 | `ask` | Prompt the user for input or multiple-choice |
 | `mana` | Native mana work coordination — status, list/show, create/update/close/claim/release, logs/agents, next/tree, and run |
 | `memory` | Persistent key-value store across sessions |
+| `session_search` | Search past conversations from the local session index |
 
 You can also define shell tools via TOML config, or register tools from Lua extensions.
 
@@ -109,13 +117,18 @@ export EXA_API_KEY=exa-...
 # Option 2: save them in imp's auth store from the CLI
 imp web-login tavily
 imp web-login exa
+imp secrets list
+imp secrets show exa
+imp secrets exa
+imp secrets my-service
+imp secrets rm my-service
 
 # Option 3: inside the TUI app
-# /login → choose Tavily or Exa
+# /secrets → choose a provider/service
 # or /settings → Tavily API key / Exa API key fields
 ```
 
-Saved keys live in `~/.config/imp/auth.json` with your other provider credentials. Once saved, the `web` tool will auto-detect them even if you have not exported the env vars in your shell.
+Saved keys now live in **imp's secure auth storage**: secret values go to your OS keychain when available, while `~/.config/imp/auth.json` keeps only metadata. Once saved, the `web` tool will auto-detect them even if you have not exported the env vars in your shell.
 
 The first-run setup flow now also includes an optional web-search step where you can choose Tavily, Exa, or skip for now.
 
@@ -126,11 +139,20 @@ Provider selection order for the `web` tool:
 4. default fallback (`tavily`)
 
 ```bash
-# Login (stores credentials locally)
+# OAuth login
 imp login              # Anthropic OAuth
 imp login openai       # OpenAI / ChatGPT OAuth
-imp login deepseek     # Prompts for API key
-imp login cerebras     # Any provider works
+
+# API/service secrets
+imp secrets deepseek     # Prompts for api_key
+imp secrets exa          # Prompts for api_key
+imp secrets my-service   # Prompts for field names, then values
+imp secrets list         # List configured secret providers
+imp secrets show exa     # Inspect saved secret metadata (not values)
+imp secrets rm my-service # Remove saved credentials
+```
+
+For arbitrary services, `imp secrets <provider>` stores named secret fields in imp's secure auth store. The flow is generic: you enter field names first (default `api_key`), then imp prompts for each value. Lua extensions can then read them with `imp.secret("provider", "field")` or `imp.secret_fields("provider")` without relying on `.env` files.
 
 # Or just set the env var
 export DEEPSEEK_API_KEY=sk-...
@@ -142,8 +164,6 @@ imp -m grok            # Aliases work
 ```
 
 ## Configuration
-
-Layered — each level overrides the previous:
 
 1. Built-in defaults
 2. `~/.config/imp/config.toml` — personal
@@ -161,11 +181,66 @@ max_turns = 100
 observation_mask_threshold = 0.6
 mask_window = 10
 
+[personality.profile.identity]
+name = "imp"
+work_style = "practical"
+voice = "concise"
+focus = "coding"
+role = "agent"
+
+[personality.profile.sliders]
+autonomy = "high"
+verbosity = "low"
+caution = "high"
+warmth = "medium"
+planning_depth = "medium"
+
+[personality.profiles]
+active = "builder"
+
+[personality.profiles.saved.builder.identity]
+name = "imp"
+work_style = "practical"
+voice = "concise"
+focus = "coding"
+role = "agent"
+
+[personality.profiles.saved.builder.sliders]
+autonomy = "high"
+verbosity = "low"
+caution = "high"
+warmth = "medium"
+planning_depth = "medium"
+
+
 [web]
 search_provider = "exa"
 ```
 
-You can also choose a default web search provider with an environment variable override:
+Personality is layered through the same config stack as everything else:
+- global personality in `~/.config/imp/config.toml`
+- project personality in `<project>/.imp/config.toml`
+- project values override global values for that repository
+
+Use `/personality` in the TUI to edit:
+- the identity sentence (`You are imp, a practical, concise, coding agent.`)
+- 5-band behavior sliders
+- global vs project scope
+- named personality profiles
+
+The built-in picker lists are structured rather than freeform:
+- work style: practical, careful, disciplined, methodical, focused, thorough, precise, deliberate, skeptical, patient
+- voice: concise, clear, direct, calm, thoughtful, collaborative, structured, friendly, terse, warm
+- focus: coding, engineering, software, debugging, research, writing, planning, operations, analysis, general
+- role: agent, assistant, worker, collaborator, partner, reviewer, planner
+
+Slider bands use five stable labels:
+- very low
+- low
+- balanced
+- high
+- very high
+
 
 ```bash
 export IMP_WEB_PROVIDER=exa
@@ -185,6 +260,20 @@ export IMP_WEB_PROVIDER=exa
 ```bash
 IMP_MODE=worker imp run 5.1
 ```
+
+## Delegating work with mana child jobs
+
+When `imp` delegates work, it should create **mana child jobs** under the parent job instead of inventing a second todo or planning system.
+
+Use a concise child-job description with:
+- goal plus current-state framing
+- clear scope boundaries, including out-of-scope notes
+- one expected deliverable
+- explicit patch or no-patch guidance
+- important files or subsystem focus when known
+- a concrete done condition and verify expectation
+
+The full delegated child-job contract and reusable template live in `ARCHITECTURE.md`.
 
 ## Lua extensions
 
@@ -238,6 +327,8 @@ imp/
 ```
 
 **imp-llm** is standalone — you can use it as a Rust library for streaming LLM access without the agent engine.
+
+See `ARCHITECTURE.md` for design notes, including the delegated mana child-job contract for planner/orchestrator-authored work.
 
 ## Benchmarks
 

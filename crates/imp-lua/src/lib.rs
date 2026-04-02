@@ -91,6 +91,7 @@ mod tests {
                 imp_core::tools::FileTracker::default(),
             )),
             mode: imp_core::config::AgentMode::Full,
+            read_max_lines: 0,
         }
     }
 
@@ -342,6 +343,23 @@ mod tests {
         assert_eq!(output.details["call_id"], "call_123");
         assert_eq!(output.details["cwd"], "/tmp/lua-tools");
         assert_eq!(output.details["cancelled"], false);
+    }
+
+    #[test]
+    fn imp_secret_helpers_exist() {
+        let rt = make_runtime();
+        rt.exec(
+            r#"
+            _has_secret = type(imp.secret) == "function"
+            _has_secret_fields = type(imp.secret_fields) == "function"
+        "#,
+        )
+        .unwrap();
+
+        let has_secret: bool = rt.lua().globals().get("_has_secret").unwrap();
+        let has_secret_fields: bool = rt.lua().globals().get("_has_secret_fields").unwrap();
+        assert!(has_secret);
+        assert!(has_secret_fields);
     }
 
     // ── imp.exec() — Shell execution ────────────────────────────
@@ -972,6 +990,40 @@ mod tests {
         .unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn imp_tool_errors_when_disabled() {
+        let rt = make_runtime();
+
+        let mut native = std::collections::HashMap::new();
+        native.insert(
+            "echo".to_string(),
+            Arc::new(EchoTestTool) as Arc<dyn imp_core::tools::Tool>,
+        );
+        rt.set_native_tools(native);
+        rt.set_call_context(make_call_context());
+        rt.set_allow_native_tool_calls(false);
+
+        let rt = Arc::new(Mutex::new(rt));
+        let rt2 = Arc::clone(&rt);
+
+        tokio::task::spawn_blocking(move || {
+            let guard = rt2.lock().unwrap();
+            let result = guard.exec(
+                r#"
+                imp.tool("echo", { text = "hello from lua" })
+            "#,
+            );
+            assert!(result.is_err(), "disabled imp.tool() should error");
+            let err = format!("{}", result.unwrap_err());
+            assert!(
+                err.contains("disabled"),
+                "error should mention disabled state: {err}"
+            );
+        })
+        .await
+        .unwrap();
+    }
+
     // ── imp.env() — scoped env var access ───────────────────────
 
     #[test]
@@ -1020,18 +1072,19 @@ mod tests {
         let rt = make_runtime();
         std::env::set_var("IMP_LUA_TEST_OPEN", "open_value");
 
-        // Empty allowed set = no restrictions
+        // Empty allowed set should deny by default.
         rt.set_allowed_env(std::collections::HashSet::new());
 
         rt.exec(
             r#"
             _env_val = imp.env("IMP_LUA_TEST_OPEN")
+            _is_nil = (_env_val == nil)
         "#,
         )
         .unwrap();
 
-        let val: String = rt.lua().globals().get("_env_val").unwrap();
-        assert_eq!(val, "open_value");
+        let is_nil: bool = rt.lua().globals().get("_is_nil").unwrap();
+        assert!(is_nil, "empty allow-list should deny env access by default");
     }
 
     #[test]

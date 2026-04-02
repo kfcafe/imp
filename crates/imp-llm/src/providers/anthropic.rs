@@ -2394,7 +2394,7 @@ data: {\"type\":\"message_stop\"}\n";
     fn test_max_tokens_escalation_constants() {
         assert_eq!(DEFAULT_MAX_TOKENS, 8_192);
         assert_eq!(ESCALATED_MAX_TOKENS, 64_000);
-        assert!(ESCALATED_MAX_TOKENS > DEFAULT_MAX_TOKENS);
+        const _: () = assert!(ESCALATED_MAX_TOKENS > DEFAULT_MAX_TOKENS);
     }
 
     // -- Non-streaming fallback tests (41.6) --

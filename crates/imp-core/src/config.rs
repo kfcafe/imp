@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::guardrails::GuardrailConfig;
 use crate::hooks::HookDef;
+use crate::personality::PersonalityConfig;
 use crate::roles::RoleDef;
 use crate::tools::web::types::WebConfig;
 
@@ -41,6 +42,7 @@ impl AgentMode {
                 "ls",
                 "scan",
                 "web",
+                "session_search",
                 "diff_show",
                 "write",
                 "edit",
@@ -48,6 +50,7 @@ impl AgentMode {
                 "diff_apply",
                 "bash",
                 "mana",
+                "memory",
                 "ask",
             ],
             AgentMode::Orchestrator => &[
@@ -57,6 +60,7 @@ impl AgentMode {
                 "ls",
                 "scan",
                 "web",
+                "session_search",
                 "diff_show",
                 "mana",
                 "ask",
@@ -68,6 +72,7 @@ impl AgentMode {
                 "ls",
                 "scan",
                 "web",
+                "session_search",
                 "diff_show",
                 "mana",
                 "ask",
@@ -79,6 +84,7 @@ impl AgentMode {
                 "ls",
                 "scan",
                 "web",
+                "session_search",
                 "diff_show",
                 "ask",
             ],
@@ -89,6 +95,7 @@ impl AgentMode {
                 "ls",
                 "scan",
                 "web",
+                "session_search",
                 "diff_show",
                 "mana",
             ],
@@ -109,8 +116,20 @@ impl AgentMode {
             AgentMode::Full => &[],
             AgentMode::Worker => &["show", "update", "status", "list", "logs", "next"],
             AgentMode::Orchestrator => &[
-                "status", "list", "show", "create", "close", "update", "run", "run_state",
-                "evaluate", "claim", "release", "logs", "agents", "next",
+                "status",
+                "list",
+                "show",
+                "create",
+                "close",
+                "update",
+                "run",
+                "run_state",
+                "evaluate",
+                "claim",
+                "release",
+                "logs",
+                "agents",
+                "next",
             ],
             AgentMode::Planner => &["status", "list", "show", "create", "next"],
             AgentMode::Reviewer => &[],
@@ -264,6 +283,10 @@ pub struct Config {
     /// Web tool settings.
     #[serde(default)]
     pub web: WebConfig,
+
+    /// Personality settings, including identity sentence and saved profiles.
+    #[serde(default)]
+    pub personality: PersonalityConfig,
 }
 
 // ── UI configuration ────────────────────────────────────────────
@@ -613,6 +636,9 @@ impl Config {
         if other.web != WebConfig::default() {
             self.web = other.web;
         }
+        if other.personality != PersonalityConfig::default() {
+            self.personality.merge(other.personality);
+        }
         self.roles.extend(other.roles);
         self.hooks.extend(other.hooks);
     }
@@ -707,6 +733,7 @@ mod tests {
         assert!(config.tools.is_none());
         assert_eq!(config.ui.read_max_lines, 500);
         assert_eq!(config.web, WebConfig::default());
+        assert_eq!(config.personality, PersonalityConfig::default());
         assert!(config.roles.is_empty());
         assert!(config.hooks.is_empty());
         assert!((config.context.observation_mask_threshold - 0.6).abs() < f64::EPSILON);
@@ -775,10 +802,88 @@ search_provider = "exa"
     }
 
     #[test]
-    fn config_merge_project_overrides_user() {
+    fn config_loads_personality_section() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            r#"
+[personality.profile.identity]
+name = "Nova"
+work_style = "careful"
+voice = "clear"
+focus = "research"
+role = "assistant"
+
+[personality.profile.sliders]
+autonomy = "low"
+verbosity = "high"
+caution = "very-high"
+warmth = "high"
+planning_depth = "very-high"
+
+[personality.profiles]
+active = "researcher"
+
+[personality.profiles.saved.researcher.identity]
+name = "Nova"
+work_style = "careful"
+voice = "clear"
+focus = "research"
+role = "assistant"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(config.personality.profile.identity.name, "Nova");
+        assert_eq!(
+            config.personality.profile.identity.render_sentence(),
+            "You are Nova, a careful, clear, research assistant."
+        );
+        assert_eq!(
+            config.personality.profiles.active.as_deref(),
+            Some("researcher")
+        );
+        assert!(config.personality.profiles.saved.contains_key("researcher"));
+    }
+
+    #[test]
+    fn config_merge_personality_project_overrides_user_and_keeps_saved_profiles() {
         let mut user = Config::default();
-        user.model = Some("haiku".into());
-        user.max_turns = Some(20);
+        user.personality.profile.identity.name = "imp".into();
+        user.personality.profiles.active = Some("builder".into());
+        user.personality.profiles.saved.insert(
+            "builder".into(),
+            crate::personality::PersonalityProfile::default(),
+        );
+
+        let mut project = Config::default();
+        project.personality.profile.identity.name = "Patch".into();
+        project.personality.profiles.active = Some("reviewer".into());
+        project.personality.profiles.saved.insert(
+            "reviewer".into(),
+            crate::personality::PersonalityProfile::default(),
+        );
+
+        user.merge(project);
+
+        assert_eq!(user.personality.profile.identity.name, "Patch");
+        assert_eq!(
+            user.personality.profiles.active.as_deref(),
+            Some("reviewer")
+        );
+        assert!(user.personality.profiles.saved.contains_key("builder"));
+        assert!(user.personality.profiles.saved.contains_key("reviewer"));
+    }
+
+    #[test]
+    fn config_merge_project_overrides_user() {
+        let mut user = Config {
+            model: Some("haiku".into()),
+            max_turns: Some(20),
+            ..Default::default()
+        };
 
         let project = Config {
             model: Some("sonnet".into()),
@@ -952,9 +1057,11 @@ mask_window = 5
         // Test env override logic without relying on process-global state
         // (env vars are inherently racy in parallel tests).
         // We test that the override *mechanism* works by simulating it.
-        let mut config = Config::default();
-        config.model = Some("haiku".into());
-        config.thinking = Some(ThinkingLevel::Low);
+        let mut config = Config {
+            model: Some("haiku".into()),
+            thinking: Some(ThinkingLevel::Low),
+            ..Default::default()
+        };
 
         // Simulate IMP_MODEL override
         let env_model = "opus";

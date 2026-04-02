@@ -464,7 +464,10 @@ mod tests {
         assert_eq!(result.details["truncated"], false);
         assert_eq!(result.details["lines"], 800);
         assert_eq!(result.details["total_lines"], 800);
-        assert!(result.details["path"].as_str().unwrap().contains("unlimited.txt"));
+        assert!(result.details["path"]
+            .as_str()
+            .unwrap()
+            .contains("unlimited.txt"));
     }
 
     #[tokio::test]
@@ -479,9 +482,8 @@ mod tests {
             .await;
 
         // Reading a directory should either error or produce an error output
-        match result {
-            Ok(output) => assert!(output.is_error),
-            Err(_) => {} // Also acceptable
+        if let Ok(output) = result {
+            assert!(output.is_error)
         }
     }
 

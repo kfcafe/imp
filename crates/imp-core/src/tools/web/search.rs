@@ -4,8 +4,9 @@
 //! `SearchResponse` type. Credentials can come from environment variables
 //! or imp's persisted auth store (`~/.config/imp/auth.json`).
 
+#[cfg(test)]
+use imp_llm::auth::StoredCredential;
 use std::path::Path;
-
 use imp_llm::auth::AuthStore;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -337,17 +338,12 @@ impl std::error::Error for SearchError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imp_llm::auth::StoredCredential;
     use tempfile::tempdir;
 
     #[test]
     fn resolve_api_key_uses_explicit_env_value() {
-        let key = resolve_api_key(
-            SearchProvider::Exa,
-            Some("exa-env-key".to_string()),
-            None,
-        )
-        .unwrap();
+        let key =
+            resolve_api_key(SearchProvider::Exa, Some("exa-env-key".to_string()), None).unwrap();
 
         assert_eq!(key, "exa-env-key");
     }
@@ -359,9 +355,9 @@ mod tests {
         let mut auth_store = AuthStore::new(auth_path.clone());
         auth_store
             .store(
-                "tavily",
+                SearchProvider::Tavily.name(),
                 StoredCredential::ApiKey {
-                    key: "tvly-saved-key".into(),
+                    key: "tvly-saved-key".to_string(),
                 },
             )
             .unwrap();

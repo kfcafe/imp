@@ -546,7 +546,7 @@ pub fn start(config: &Config) -> Result<()> { todo!() }
         )
         .unwrap();
 
-        let result = extract_files(&[file.clone()], tmp.path());
+        let result = extract_files(std::slice::from_ref(&file), tmp.path());
         let output = format_result(&result, &[file], tmp.path(), "extract", None);
 
         assert!(output.contains("pub struct Config { host, port }"));

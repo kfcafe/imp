@@ -530,6 +530,7 @@ fn process_sse_event(event: SseEvent, state: &mut StreamState) -> Vec<StreamEven
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn parse_sse_stream(raw: &str, state: &mut StreamState) -> Vec<Result<StreamEvent>> {
     let mut events = Vec::new();
 

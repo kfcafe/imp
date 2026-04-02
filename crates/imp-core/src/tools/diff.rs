@@ -8,6 +8,8 @@ use crate::error::Result;
 // ── unified diff tool ───────────────────────────────────────────────
 
 pub struct DiffTool;
+pub struct DiffShowTool;
+pub struct DiffApplyTool;
 
 #[async_trait]
 impl Tool for DiffTool {
@@ -53,8 +55,6 @@ impl Tool for DiffTool {
 }
 
 // ── diff_show ───────────────────────────────────────────────────────
-
-pub struct DiffShowTool;
 
 #[async_trait]
 impl Tool for DiffShowTool {
@@ -119,8 +119,6 @@ impl Tool for DiffShowTool {
 }
 
 // ── diff_apply ──────────────────────────────────────────────────────
-
-pub struct DiffApplyTool;
 
 #[async_trait]
 impl Tool for DiffApplyTool {

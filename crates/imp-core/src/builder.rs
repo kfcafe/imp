@@ -174,6 +174,11 @@ impl AgentBuilder {
             let user_config_dir = Config::user_config_dir();
             let agents_md = resources::discover_agents_md(&self.cwd, &user_config_dir);
             let skills = resources::discover_skills(&self.cwd, &user_config_dir);
+            agent.has_mana_skill = skills.iter().any(|skill| skill.name == "mana");
+            agent.has_mana_basics_skill = skills.iter().any(|skill| skill.name == "mana-basics");
+            agent.has_mana_delegation_skill = skills
+                .iter()
+                .any(|skill| skill.name == "mana-delegation");
 
             // Layer 6: Load agent memory if learning is enabled
             let (memory_block, user_block) = if self.config.learning.enabled {
@@ -201,6 +206,7 @@ impl AgentBuilder {
                 agents_md: &agents_md,
                 skills: &skills,
                 facts: &[],
+                personality: Some(&self.config.personality.profile),
                 task: self.task.as_ref(),
                 role: self.role.as_ref(),
                 mode: &agent.mode,
@@ -222,23 +228,27 @@ impl AgentBuilder {
 /// This is the canonical list — update here when adding or removing tools.
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
-        ask::AskTool, bash::BashTool, diff::DiffTool, edit::EditTool, extend::ExtendTool,
-        find::FindTool, grep::GrepTool, ls::LsTool, mana::ManaTool, read::ReadTool, scan::ScanTool,
-        web::WebTool, write::WriteTool,
+        ask::AskTool, bash::BashTool, diff::{DiffApplyTool, DiffShowTool, DiffTool}, edit::EditTool, extend::ExtendTool,
+        find::FindTool, grep::GrepTool, ls::LsTool, mana::ManaTool, memory::MemoryTool, read::ReadTool, scan::ScanTool,
+        session_search::SessionSearchTool, web::WebTool, write::WriteTool,
     };
 
     tools.register(Arc::new(AskTool));
     tools.register(Arc::new(BashTool));
     tools.register(Arc::new(DiffTool));
+    tools.register(Arc::new(DiffShowTool));
+    tools.register(Arc::new(DiffApplyTool));
     tools.register(Arc::new(EditTool));
     tools.register(Arc::new(ExtendTool));
     tools.register(Arc::new(FindTool));
     tools.register(Arc::new(GrepTool));
     tools.register(Arc::new(LsTool));
     tools.register(Arc::new(ManaTool::default()));
+    tools.register(Arc::new(MemoryTool));
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ScanTool));
+    tools.register(Arc::new(SessionSearchTool));
     tools.register(Arc::new(WebTool));
 }
 
@@ -310,8 +320,10 @@ mod tests {
 
     #[test]
     fn builder_applies_config_max_turns() {
-        let mut config = Config::default();
-        config.max_turns = Some(42);
+        let config = Config {
+            max_turns: Some(42),
+            ..Default::default()
+        };
 
         let (agent, _handle) =
             AgentBuilder::new(config, PathBuf::from("/tmp"), test_model(), "key".into())
@@ -424,6 +436,21 @@ mod tests {
         .unwrap();
 
         assert!(agent.tools.get("dummy").is_some());
+    }
+
+    #[test]
+    fn builder_registers_memory_and_session_search_tools() {
+        let (agent, _handle) = AgentBuilder::new(
+            Config::default(),
+            PathBuf::from("/tmp"),
+            test_model(),
+            "key".into(),
+        )
+        .build()
+        .unwrap();
+
+        assert!(agent.tools.get("memory").is_some());
+        assert!(agent.tools.get("session_search").is_some());
     }
 
     #[test]

@@ -375,10 +375,12 @@ fn stream_event_line(event: &StreamEvent) -> Option<String> {
             title,
             unblocked_by,
         } => Some(format!("Ready: {id} {title} (unblocked by {unblocked_by})")),
-        StreamEvent::UnitStart { id, title, round, .. } => {
-            Some(format!("▶ {id}  {title}  wave {round}"))
+        StreamEvent::UnitStart {
+            id, title, round, ..
+        } => Some(format!("▶ {id}  {title}  wave {round}")),
+        StreamEvent::UnitThinking { id, text } => {
+            Some(format!("… {id}  {}", truncate_line_for_log(text)))
         }
-        StreamEvent::UnitThinking { id, text } => Some(format!("… {id}  {}", truncate_line_for_log(text))),
         StreamEvent::UnitTool {
             id,
             tool_name,
@@ -459,7 +461,11 @@ fn truncate_line_for_log(text: &str) -> String {
     out
 }
 
-fn update_run_store_with_event(store: &std::sync::Mutex<ManaRunStore>, run_id: &str, event: &StreamEvent) {
+fn update_run_store_with_event(
+    store: &std::sync::Mutex<ManaRunStore>,
+    run_id: &str,
+    event: &StreamEvent,
+) {
     if let Ok(mut store) = store.lock() {
         store.update_with_event(run_id, event);
     }
@@ -567,7 +573,9 @@ fn spawn_background_run(
             "mana",
             Some(mana_widget_lines(
                 format!("running {scope}"),
-                Some(format!("inspect with mana run_state/logs (run_id={run_id})")),
+                Some(format!(
+                    "inspect with mana run_state/logs (run_id={run_id})"
+                )),
             )),
         )
         .await;
@@ -635,7 +643,10 @@ fn run_state_snapshot(
     run_store: &Arc<std::sync::Mutex<ManaRunStore>>,
     run_id: Option<&str>,
 ) -> Option<NativeRunState> {
-    run_store.lock().ok().and_then(|store| store.snapshot(run_id))
+    run_store
+        .lock()
+        .ok()
+        .and_then(|store| store.snapshot(run_id))
 }
 
 fn run_state_output(state: &NativeRunState) -> ToolOutput {
@@ -662,14 +673,10 @@ fn run_state_output(state: &NativeRunState) -> ToolOutput {
 
 fn evaluate_run_output(state: &NativeRunState) -> ToolOutput {
     let headline = match state.status.as_str() {
-        "starting" | "running" => format!(
-            "Run {} is still running for {}.",
-            state.run_id, state.scope
-        ),
-        "failed" => format!(
-            "Run {} failed for {}.",
-            state.run_id, state.scope
-        ),
+        "starting" | "running" => {
+            format!("Run {} is still running for {}.", state.run_id, state.scope)
+        }
+        "failed" => format!("Run {} failed for {}.", state.run_id, state.scope),
         _ if state.summary.total_failed > 0 => format!(
             "Run {} finished with {} failed unit(s).",
             state.run_id, state.summary.total_failed
@@ -820,7 +827,7 @@ impl Tool for ManaTool {
         "Mana"
     }
     fn description(&self) -> &str {
-        "Work coordination substrate. Prefer this over bash for mana operations when an equivalent action exists: inspect units, create/update/claim/release work, inspect orchestration logs/agents, and run orchestration natively with in-session run state. Use for complex tasks or delegation."
+        "Work coordination substrate. Prefer this over bash for mana operations when an equivalent action exists: inspect units, create/update/claim/release work, inspect orchestration logs/agents, and run orchestration natively with in-session run state. Use for complex tasks or delegation. Load the `mana` skill when coordinating multi-step work or delegation to learn the workflow."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
@@ -1359,9 +1366,7 @@ mod tests {
     use serde_json::json;
     use tokio::sync::mpsc;
 
-    use super::{
-        stream_event_line, evaluate_run_output, ManaRunStore, ManaTool, NativeRunState,
-    };
+    use super::{evaluate_run_output, stream_event_line, ManaRunStore, ManaTool, NativeRunState};
     use crate::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
     use crate::ui::NullInterface;
 
@@ -1373,9 +1378,12 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     async fn run_with_mode(mode_name: &str, action: &str) -> ManaResult {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let prev = std::env::var("IMP_MODE").ok();
-        std::env::set_var("IMP_MODE", mode_name);
+        let prev = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            let prev = std::env::var("IMP_MODE").ok();
+            std::env::set_var("IMP_MODE", mode_name);
+            prev
+        };
 
         let dir = tempfile::tempdir().unwrap();
         let mana_dir = dir.path().join(".mana");
@@ -1405,8 +1413,14 @@ mod tests {
             .await;
 
         match prev {
-            Some(v) => std::env::set_var("IMP_MODE", v),
-            None => std::env::remove_var("IMP_MODE"),
+            Some(v) => {
+                let _guard = ENV_LOCK.lock().unwrap();
+                std::env::set_var("IMP_MODE", v)
+            }
+            None => {
+                let _guard = ENV_LOCK.lock().unwrap();
+                std::env::remove_var("IMP_MODE")
+            }
         }
 
         match outcome {
@@ -1550,8 +1564,20 @@ mod tests {
     #[tokio::test]
     async fn orchestrator_allows_extended_actions() {
         for action in &[
-            "status", "list", "show", "create", "close", "update", "run", "run_state",
-            "evaluate", "claim", "release", "logs", "agents", "next",
+            "status",
+            "list",
+            "show",
+            "create",
+            "close",
+            "update",
+            "run",
+            "run_state",
+            "evaluate",
+            "claim",
+            "release",
+            "logs",
+            "agents",
+            "next",
         ] {
             match run_with_mode("orchestrator", action).await {
                 ManaResult::Attempted(_) => {}
@@ -1564,15 +1590,24 @@ mod tests {
 
     #[tokio::test]
     async fn ctx_mode_wins_over_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let prev = std::env::var("IMP_MODE").ok();
-        std::env::set_var("IMP_MODE", "full");
+        let prev = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            let prev = std::env::var("IMP_MODE").ok();
+            std::env::set_var("IMP_MODE", "full");
+            prev
+        };
 
         let result = run_with_ctx_mode(crate::config::AgentMode::Worker, "create").await;
 
         match prev {
-            Some(v) => std::env::set_var("IMP_MODE", v),
-            None => std::env::remove_var("IMP_MODE"),
+            Some(v) => {
+                let _guard = ENV_LOCK.lock().unwrap();
+                std::env::set_var("IMP_MODE", v)
+            }
+            None => {
+                let _guard = ENV_LOCK.lock().unwrap();
+                std::env::remove_var("IMP_MODE")
+            }
         }
 
         match result {
@@ -1602,8 +1637,21 @@ mod tests {
     #[tokio::test]
     async fn ctx_full_allows_extended_actions() {
         for action in &[
-            "status", "list", "show", "create", "close", "update", "run", "run_state",
-            "evaluate", "claim", "release", "logs", "agents", "next", "tree",
+            "status",
+            "list",
+            "show",
+            "create",
+            "close",
+            "update",
+            "run",
+            "run_state",
+            "evaluate",
+            "claim",
+            "release",
+            "logs",
+            "agents",
+            "next",
+            "tree",
         ] {
             match run_with_ctx_mode(crate::config::AgentMode::Full, action).await {
                 ManaResult::Attempted(_) => {}

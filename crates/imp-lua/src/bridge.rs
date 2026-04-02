@@ -1,12 +1,15 @@
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
 
 use async_trait::async_trait;
+use imp_core::config::Config;
 use imp_core::tools::lua::{parameter_schema_from_lua, tool_output_from_lua_result};
 use imp_core::tools::{Tool, ToolContext, ToolOutput, ToolRegistry};
 use imp_core::Error as CoreError;
+use imp_llm::auth::AuthStore;
 use mlua::{Function, Lua, MultiValue, Table, Value};
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 
 use crate::sandbox::{
     LuaCallContext, LuaCommandHandle, LuaError, LuaHookHandle, LuaRuntime, LuaToolHandle,
@@ -166,6 +169,8 @@ fn extract_header_pairs(headers: Option<Table>) -> mlua::Result<Vec<(String, Str
 /// - imp.register_command(name, def)  — register a slash command
 /// - imp.events.on() / imp.events.emit() — inter-extension event bus
 /// - imp.tool(name, params)           — call a native imp tool
+/// - imp.secret(provider, field?)     — read a saved imp secret field
+/// - imp.secret_fields(provider)      — read all saved fields for a provider
 /// - imp.env(name)                    — read an env var (scoped by allowed list)
 /// - imp.http.get(url, headers?)      — HTTP GET
 /// - imp.http.post(url, body, headers?) — HTTP POST
@@ -234,9 +239,7 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
             } else {
                 cmd
             };
-            command
-                .stdin(Stdio::null())
-                .arg(&full_cmd);
+            command.stdin(Stdio::null()).arg(&full_cmd);
 
             // Apply opts
             if let Some(opts_table) = &opts {
@@ -326,8 +329,15 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
     // ── imp.tool(name, params) — call a native imp tool ──────────
     let native_tools = runtime.native_tools();
     let tool_call_ctx = runtime.call_context();
+    let allow_native_tool_calls = runtime.allow_native_tool_calls();
     let imp_tool_fn = lua.create_function(
         move |lua_inner, (name, params): (String, Value)| -> mlua::Result<MultiValue> {
+            if !allow_native_tool_calls.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(mlua::Error::external(
+                    "imp.tool() is disabled for this runtime",
+                ));
+            }
+
             // Look up the tool.
             let tool = {
                 let tools_guard = native_tools
@@ -397,14 +407,48 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
     })?;
     imp.set("update", imp_update_fn)?;
 
+    // ── imp.secret(provider, field?) — read a saved secret field ──────────
+    let secret_fn = lua.create_function(
+        |lua_inner, (provider, field): (String, Option<String>)| -> mlua::Result<Value> {
+            let auth_path: PathBuf = Config::user_config_dir().join("auth.json");
+            let auth_store =
+                AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+            let field = field.unwrap_or_else(|| "api_key".to_string());
+            match auth_store.resolve_secret_field(&provider, &field) {
+                Ok(value) => Ok(Value::String(lua_inner.create_string(&value)?)),
+                Err(_) => Ok(Value::Nil),
+            }
+        },
+    )?;
+    imp.set("secret", secret_fn)?;
+
+    // ── imp.secret_fields(provider) — read all saved secret fields ─────────
+    let secret_fields_fn =
+        lua.create_function(|lua_inner, provider: String| -> mlua::Result<Value> {
+            let auth_path: PathBuf = Config::user_config_dir().join("auth.json");
+            let auth_store =
+                AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+            match auth_store.resolve_secret_fields(&provider) {
+                Ok(fields) => {
+                    let table = lua_inner.create_table()?;
+                    for (field, value) in fields {
+                        table.set(field, value)?;
+                    }
+                    Ok(Value::Table(table))
+                }
+                Err(_) => Ok(Value::Nil),
+            }
+        })?;
+    imp.set("secret_fields", secret_fields_fn)?;
+
     // ── imp.env(name) — read a scoped env var ────────────────────
     let allowed_env = runtime.allowed_env();
     let env_fn = lua.create_function(move |lua_inner, name: String| {
         let allowed = allowed_env
             .lock()
             .map_err(|_| mlua::Error::external("allowed_env lock poisoned"))?;
-        // If the allow-list is non-empty, reject unlisted vars.
-        if !allowed.is_empty() && !allowed.contains(&name) {
+        // If the allow-list is empty or the var is not listed, deny access.
+        if !allowed.contains(&name) {
             return Ok(Value::Nil);
         }
         match std::env::var(&name) {

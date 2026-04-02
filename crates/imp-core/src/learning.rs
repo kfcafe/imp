@@ -32,25 +32,13 @@ Before we finish — this was a complex session. Consider:
 
 /// Learning instructions injected into Layer 1 of the system prompt.
 pub const LEARNING_INSTRUCTIONS: &str = "\
-## Memory & Learning
-
-You have persistent memory across sessions. Use the memory tool to save:
-- Environment facts (OS, tools, project setup) → target: memory
-- User preferences and corrections → target: user
-- Lessons learned and tool quirks → target: memory
-
-When you complete a complex task (5+ tool calls, error recovery, or user
-correction), consider saving the approach as a skill via skill_manage.
-
-When you load a skill and find it incomplete or wrong, patch it.
-
-Do NOT save: trivial facts, easily re-discovered info, raw data dumps, or
-anything already in AGENTS.md.";
+You have persistent memory and can author skills. \
+Use them to save durable knowledge and reduce repeat work.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use imp_llm::{AssistantMessage, StopReason, Usage, UserMessage};
+    use imp_llm::{AssistantMessage, StopReason, UserMessage};
 
     fn user_msg(text: &str) -> Message {
         Message::User(UserMessage {

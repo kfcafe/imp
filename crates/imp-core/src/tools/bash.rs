@@ -230,6 +230,11 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
                 break;
             }
 
+            _ = wait_for_cancellation(&ctx.cancelled), if !ctx.is_cancelled() => {
+                kill_process_group(&child).await;
+                break;
+            }
+
             line = stdout_reader.next_line(), if !stdout_done => {
                 match line {
                     Ok(Some(line)) => {
@@ -288,10 +293,11 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
         result_text.push_str(&format!("\n[Command timed out after {timeout_secs}s]"));
     }
 
+    let cancelled = ctx.is_cancelled();
     let details = json!({
         "exit_code": exit_code,
         "timed_out": timed_out,
-        "cancelled": false,
+        "cancelled": cancelled,
         "truncated": truncated,
         "command": command,
     });
@@ -299,8 +305,14 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
     Ok(ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text: result_text }],
         details,
-        is_error: exit_code != 0,
+        is_error: cancelled || exit_code != 0,
     })
+}
+
+async fn wait_for_cancellation(cancelled: &std::sync::atomic::AtomicBool) {
+    while !cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 async fn append_line(
@@ -440,6 +452,20 @@ mod tests {
             _ => panic!("expected text"),
         };
         assert!(text.contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn bash_cancellation_during_execution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let cancelled = Arc::clone(&ctx.cancelled);
+
+        let task = tokio::spawn(async move { run_command("sleep 60", DEFAULT_TIMEOUT_SECS, &ctx).await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let result = task.await.unwrap().unwrap();
+        assert!(result.details["cancelled"].as_bool().unwrap());
     }
 
     #[tokio::test]

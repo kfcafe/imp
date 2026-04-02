@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 use imp_core::config::AgentMode;
 use imp_core::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
@@ -86,6 +89,8 @@ pub struct LuaRuntime {
     call_context: Arc<Mutex<Option<LuaCallContext>>>,
     /// Env vars this extension is allowed to read via `imp.env()`.
     allowed_env: Arc<Mutex<HashSet<String>>>,
+    /// Whether Lua host-side native tool calls are permitted for the current execution.
+    allow_native_tool_calls: Arc<AtomicBool>,
 }
 
 impl LuaRuntime {
@@ -100,6 +105,7 @@ impl LuaRuntime {
             native_tools: Arc::new(Mutex::new(HashMap::new())),
             call_context: Arc::new(Mutex::new(None)),
             allowed_env: Arc::new(Mutex::new(HashSet::new())),
+            allow_native_tool_calls: Arc::new(AtomicBool::new(true)),
         })
     }
 
@@ -138,6 +144,11 @@ impl LuaRuntime {
         Arc::clone(&self.allowed_env)
     }
 
+    /// Get whether `imp.tool()` calls are currently permitted.
+    pub fn allow_native_tool_calls(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.allow_native_tool_calls)
+    }
+
     /// Populate the native tool registry (called once after tools are registered).
     pub fn set_native_tools(&self, tools: HashMap<String, Arc<dyn Tool>>) {
         *self.native_tools.lock().unwrap() = tools;
@@ -156,6 +167,11 @@ impl LuaRuntime {
     /// Set the allowed env vars for this extension.
     pub fn set_allowed_env(&self, vars: HashSet<String>) {
         *self.allowed_env.lock().unwrap() = vars;
+    }
+
+    /// Set whether `imp.tool()` calls are permitted for the current runtime.
+    pub fn set_allow_native_tool_calls(&self, allowed: bool) {
+        self.allow_native_tool_calls.store(allowed, Ordering::Relaxed);
     }
 
     /// Register a tool handle (called from bridge).

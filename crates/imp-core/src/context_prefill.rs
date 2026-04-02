@@ -545,7 +545,7 @@ mod tests {
         let specs = detect_file_paths(text);
         let foo_count = specs
             .iter()
-            .filter(|s| s.path == PathBuf::from("src/foo.rs"))
+            .filter(|s| s.path == std::path::Path::new("src/foo.rs"))
             .count();
         assert_eq!(foo_count, 1);
     }

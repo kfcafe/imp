@@ -168,6 +168,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn seed_index(dir: &std::path::Path) -> std::path::PathBuf {
         let db_path = dir.join("index.db");
         let index = SessionIndex::open(&db_path).unwrap();
