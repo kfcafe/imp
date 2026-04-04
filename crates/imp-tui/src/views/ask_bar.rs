@@ -1,8 +1,10 @@
+use crate::theme::Theme;
+use crate::views::editor::{cursor_visual_position_for_text, wrapped_lines_for_width};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Widget;
+use ratatui::widgets::{Block, Borders, Widget};
 
 /// Selection state for a single option in the ask overlay.
 #[derive(Debug, Clone)]
@@ -31,10 +33,22 @@ pub struct AskState {
     pub input: String,       // user's typed text
     pub input_cursor: usize, // cursor position in input
     pub input_active: bool,  // true when user is typing (options dimmed)
+    pub placeholder: String,
+    pub editor_cursor: usize,
 }
 
 impl AskState {
     pub fn new(question: String, context: String, options: Vec<AskOption>, multi: bool) -> Self {
+        Self::with_placeholder(question, context, options, multi, String::new())
+    }
+
+    pub fn with_placeholder(
+        question: String,
+        context: String,
+        options: Vec<AskOption>,
+        multi: bool,
+        placeholder: String,
+    ) -> Self {
         let input_active = options.is_empty();
         let mode = if options.is_empty() {
             AskMode::FreeText
@@ -52,22 +66,66 @@ impl AskState {
             input: String::new(),
             input_cursor: 0,
             input_active,
+            placeholder,
+            editor_cursor: 0,
         }
     }
 
-    /// Height needed to render this overlay.
+    pub fn sync_from_editor(&mut self, text: &str, cursor: usize) {
+        self.input = text.to_string();
+        self.input_cursor = cursor.min(self.input.len());
+        self.editor_cursor = self.input_cursor;
+        if self.input.is_empty() && !self.options.is_empty() {
+            self.input_active = false;
+        } else {
+            self.input_active = true;
+        }
+    }
+
     pub fn height(&self) -> u16 {
-        let mut h: u16 = 1; // question line
+        let mut h: u16 = line_count(&self.question); // question line(s)
         if !self.context.is_empty() {
-            h += 1; // context line
+            h += line_count(&self.context); // context line(s)
         }
         if !self.options.is_empty() {
             h += self.options.len() as u16; // one per option
             h += 1; // blank line between options and input
         }
         h += 1; // input line
-        h += 1; // bottom border/hint line
+        h += 1; // hint line
         h
+    }
+
+    /// Height needed to render this prompt, including its border.
+    pub fn prompt_height(&self) -> u16 {
+        self.height().saturating_add(2)
+    }
+
+    /// Cursor position inside the ask prompt area.
+    pub fn cursor_screen_position(&self, area: Rect) -> (u16, u16) {
+        let inner_x = area.x.saturating_add(1);
+        let inner_y = area.y.saturating_add(1);
+        let inner_width = area.width.saturating_sub(2).max(1);
+
+        let mut input_row = inner_y.saturating_add(line_count(&self.question));
+        if !self.context.is_empty() {
+            input_row = input_row.saturating_add(line_count(&self.context));
+        }
+        if !self.options.is_empty() {
+            input_row = input_row
+                .saturating_add(self.options.len() as u16)
+                .saturating_add(1);
+        }
+
+        let (visual_row, visual_col) =
+            cursor_visual_position_for_text(&self.input, self.editor_cursor, inner_width.saturating_sub(2));
+
+        let max_x = area.x + area.width.saturating_sub(2);
+        let max_y = area.y + area.height.saturating_sub(2);
+        (
+            (inner_x + 2 + visual_col as u16).min(max_x),
+            (input_row + visual_row as u16).min(max_y),
+        )
     }
 
     /// Move cursor up.
@@ -191,50 +249,73 @@ pub enum AskResult {
 /// Widget that renders the ask overlay bar.
 pub struct AskBar<'a> {
     state: &'a AskState,
+    theme: &'a Theme,
 }
 
 impl<'a> AskBar<'a> {
-    pub fn new(state: &'a AskState) -> Self {
-        Self { state }
+    pub fn new(state: &'a AskState, theme: &'a Theme) -> Self {
+        Self { state, theme }
     }
 }
 
 impl Widget for AskBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let s = self.state;
-        let dim = Style::default().fg(Color::DarkGray);
-        let highlight = Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD);
-        let normal = Style::default().fg(Color::White);
-        let question_style = Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD);
+        if area.height < 3 || area.width < 4 {
+            return;
+        }
 
-        let mut y = area.y;
-        let w = area.width as usize;
+        let s = self.state;
+        let theme = self.theme;
+        let dim = theme.muted_style();
+        let highlight = theme.accent_style().add_modifier(Modifier::BOLD);
+        let normal = theme.style();
+        let question_style = theme.header_style().add_modifier(Modifier::BOLD);
+
+        let block = Block::default()
+            .title(" ask ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.accent));
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        if inner.height == 0 || inner.width == 0 {
+            return;
+        }
+
+        let mut y = inner.y;
+        let w = inner.width as usize;
 
         // Question
-        let q = truncate(&s.question, w);
-        buf.set_line(
-            area.x,
-            y,
-            &Line::from(Span::styled(q, question_style)),
-            area.width,
-        );
-        y += 1;
+        for line in s.question.lines() {
+            if y >= inner.y + inner.height {
+                return;
+            }
+            let q = truncate(line, w);
+            buf.set_line(
+                inner.x,
+                y,
+                &Line::from(Span::styled(q, question_style)),
+                inner.width,
+            );
+            y += 1;
+        }
 
         // Context (if any)
         if !s.context.is_empty() {
-            let c = truncate(&s.context, w);
-            buf.set_line(area.x, y, &Line::from(Span::styled(c, dim)), area.width);
-            y += 1;
+            for line in s.context.lines() {
+                if y >= inner.y + inner.height {
+                    return;
+                }
+                let c = truncate(line, w);
+                buf.set_line(inner.x, y, &Line::from(Span::styled(c, dim)), inner.width);
+                y += 1;
+            }
         }
 
         // Options
         if !s.options.is_empty() {
             for (i, opt) in s.options.iter().enumerate() {
-                if y >= area.y + area.height {
+                if y >= inner.y + inner.height {
                     break;
                 }
 
@@ -279,18 +360,14 @@ impl Widget for AskBar<'_> {
                 }
                 // Right-align the number hint
                 let content_len: usize = spans.iter().map(|s| s.content.len()).sum();
-                let num_hint_style = if s.input_active {
-                    dim
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
+                let num_hint_style = if s.input_active { dim } else { theme.muted_style() };
                 if content_len + num.len() + 1 < w {
                     let padding = w - content_len - num.len();
                     spans.push(Span::raw(" ".repeat(padding)));
                     spans.push(Span::styled(num, num_hint_style));
                 }
 
-                buf.set_line(area.x, y, &Line::from(spans), area.width);
+                buf.set_line(inner.x, y, &Line::from(spans), inner.width);
                 y += 1;
             }
 
@@ -299,31 +376,66 @@ impl Widget for AskBar<'_> {
         }
 
         // Input line
-        if y < area.y + area.height {
+        if y < inner.y + inner.height {
             let cursor_char = if s.input_active { "│" } else { " " };
-            let input_display = if s.input.is_empty() && !s.input_active {
-                "type to answer freely…".to_string()
-            } else {
-                s.input.clone()
-            };
+            let available_width = inner.width.saturating_sub(2);
+            let mut rendered_any = false;
 
-            let input_style = if s.input_active || s.mode == AskMode::FreeText {
-                normal
+            if s.input.is_empty() {
+                let placeholder = if !s.placeholder.is_empty() {
+                    s.placeholder.clone()
+                } else {
+                    "type to answer freely…".to_string()
+                };
+                let line = Line::from(vec![
+                    Span::styled("❯ ", Style::default().fg(theme.accent)),
+                    Span::styled(placeholder, dim),
+                    Span::styled(cursor_char, Style::default().fg(theme.accent)),
+                ]);
+                buf.set_line(inner.x, y, &line, inner.width);
+                y += 1;
+                rendered_any = true;
             } else {
-                dim
-            };
+                let lines = wrapped_lines_for_width(&s.input, available_width);
+                let (visual_row, visual_col) = cursor_visual_position_for_text(
+                    &s.input,
+                    s.editor_cursor,
+                    available_width,
+                );
+                for (idx, input_line) in lines.iter().enumerate() {
+                    if y >= inner.y + inner.height {
+                        break;
+                    }
+                    let is_cursor_row = idx == visual_row;
+                    let mut line_text = input_line.clone();
+                    if is_cursor_row {
+                        let insert_at = visual_col.min(line_text.chars().count());
+                        let byte_idx = char_to_byte_idx(&line_text, insert_at);
+                        line_text.insert_str(byte_idx, cursor_char);
+                    }
+                    let prefix = if idx == 0 { "❯ " } else { "  " };
+                    let line = Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(theme.accent)),
+                        Span::styled(line_text, normal),
+                    ]);
+                    buf.set_line(inner.x, y, &line, inner.width);
+                    y += 1;
+                    rendered_any = true;
+                }
+            }
 
-            let line = Line::from(vec![
-                Span::styled("❯ ", Style::default().fg(Color::Cyan)),
-                Span::styled(input_display, input_style),
-                Span::styled(cursor_char, Style::default().fg(Color::Cyan)),
-            ]);
-            buf.set_line(area.x, y, &line, area.width);
-            y += 1;
+            if !rendered_any {
+                let line = Line::from(vec![
+                    Span::styled("❯ ", Style::default().fg(theme.accent)),
+                    Span::styled(cursor_char, Style::default().fg(theme.accent)),
+                ]);
+                buf.set_line(inner.x, y, &line, inner.width);
+                y += 1;
+            }
         }
 
         // Hint line
-        if y < area.y + area.height {
+        if y < inner.y + inner.height {
             let hints = match s.mode {
                 AskMode::FreeText => "Enter: send  Esc: skip",
                 AskMode::SingleSelect => "↑↓: navigate  Tab: edit  Enter: pick  Esc: skip",
@@ -331,9 +443,20 @@ impl Widget for AskBar<'_> {
                     "↑↓: navigate  Space: toggle  Tab: edit  Enter: confirm  Esc: skip"
                 }
             };
-            buf.set_line(area.x, y, &Line::from(Span::styled(hints, dim)), area.width);
+            buf.set_line(inner.x, y, &Line::from(Span::styled(hints, dim)), inner.width);
         }
     }
+}
+
+fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(idx, _)| idx)
+        .unwrap_or(s.len())
+}
+
+fn line_count(s: &str) -> u16 {
+    s.lines().count().max(1) as u16
 }
 
 fn truncate(s: &str, max: usize) -> &str {

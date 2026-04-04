@@ -10,6 +10,11 @@ use imp_lua::LuaRuntime;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use imp_core::agent::{AgentCommand, AgentEvent, AgentHandle};
 use imp_core::builder::AgentBuilder;
+use imp_core::compaction::{
+    execute_compaction_with_retry, prepare_messages_for_compaction, select_compaction_strategy,
+    CompactionCapabilities, CompactionStrategy, COMPACTION_SUMMARY_PREFIX,
+    DEFAULT_KEEP_RECENT_GROUPS,
+};
 use imp_core::config::Config;
 use imp_core::session::{SessionEntry, SessionManager};
 use imp_core::Error as ImpCoreError;
@@ -32,6 +37,7 @@ use crate::selection::{
 use crate::terminal::{set_window_title, InteractiveTerminal};
 use crate::theme::Theme;
 use crate::turn_tracker::TurnTracker;
+use crate::views::ask_bar::AskState;
 use crate::views::chat::{
     build_text_surface, clamped_scroll_offset, ChatView, DisplayMessage, MessageRole,
 };
@@ -40,6 +46,8 @@ use crate::views::editor::{EditorState, EditorView};
 use crate::views::file_finder::{collect_project_files, FileFinderState, FileFinderView};
 use crate::views::login_picker::{login_providers, LoginPickerState, LoginPickerView};
 use crate::views::model_selector::{ModelSelection, ModelSelectorState, ModelSelectorView};
+use crate::views::personality::{PersonalityScope, PersonalityState, PersonalityView};
+use crate::views::secrets_picker::{secret_providers, SecretsPickerState, SecretsPickerView};
 use crate::views::session_picker::{SessionPickerState, SessionPickerView};
 use crate::views::settings::{SettingsState, SettingsView};
 use crate::views::sidebar::{build_detail_text_surface, sidebar_sub_areas, Sidebar, SidebarView};
@@ -63,8 +71,10 @@ pub enum UiMode {
     CommandPalette(CommandPaletteState),
     FileFinder(FileFinderState),
     LoginPicker(LoginPickerState),
+    SecretsPicker(SecretsPickerState),
     TreeView(TreeViewState),
     Settings(SettingsState),
+    Personality(PersonalityState),
     SessionPicker(SessionPickerState),
     Welcome(WelcomeState),
 }
@@ -113,6 +123,32 @@ fn search_provider_docs_url(provider: &str) -> &'static str {
     }
 }
 
+fn prompt_text_for_secret_provider(provider: &str) -> String {
+    let docs = search_provider_docs_url(provider);
+    let mut lines = vec![format!("Configure secure credentials for {provider}")];
+    if !docs.is_empty() {
+        lines.push(String::new());
+        lines.push(format!("Get credentials at: {docs}"));
+    }
+    lines.push(String::new());
+    lines.push("First enter a comma-separated field list (default: api_key).".into());
+    lines.push("Then imp will prompt for each field value.".into());
+    lines.join("\n")
+}
+
+#[derive(Debug)]
+enum SecretsFlowState {
+    AwaitingFieldNames {
+        provider: String,
+    },
+    AwaitingFieldValues {
+        provider: String,
+        fields: Vec<String>,
+        current: usize,
+        values: HashMap<String, String>,
+    },
+}
+
 #[derive(Debug)]
 enum RuntimeSignal {
     AgentEvent(AgentEvent),
@@ -143,6 +179,7 @@ pub struct App {
     pub running: bool,
     pub messages: Vec<DisplayMessage>,
     pub editor: EditorState,
+    ask_editor_backup: Option<EditorState>,
     pub cwd: PathBuf,
 
     // Agent
@@ -176,6 +213,7 @@ pub struct App {
     pub ui_rx: Option<tokio::sync::mpsc::Receiver<crate::tui_interface::UiRequest>>,
     pub ask_state: Option<crate::views::ask_bar::AskState>,
     pub ask_reply: Option<AskReply>,
+    secrets_flow: Option<SecretsFlowState>,
     login_task: Option<tokio::task::JoinHandle<LoginTaskExit>>,
 
     // Accumulated stats
@@ -266,6 +304,24 @@ fn provider_logged_in(auth_store: &AuthStore, provider: &str) -> bool {
     }
 }
 
+fn oauth_provider(provider: &str) -> bool {
+    matches!(provider, "anthropic" | "openai" | "openai-codex")
+}
+
+fn parse_secret_field_names(input: &str) -> Vec<String> {
+    let names: Vec<String> = input
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string())
+        .collect();
+    if names.is_empty() {
+        vec!["api_key".to_string()]
+    } else {
+        names
+    }
+}
+
 impl App {
     pub fn new(
         config: Config,
@@ -285,6 +341,7 @@ impl App {
             running: true,
             messages: Vec::new(),
             editor: EditorState::new(),
+            ask_editor_backup: None,
             cwd,
             agent_handle: None,
             agent_task: None,
@@ -309,6 +366,7 @@ impl App {
             ui_rx: None,
             ask_state: None,
             ask_reply: None,
+            secrets_flow: None,
             login_task: None,
             accumulated_usage: Usage::default(),
             accumulated_cost: Cost::default(),
@@ -336,8 +394,7 @@ impl App {
     pub fn load_session_messages(&mut self) {
         self.messages.clear();
 
-        let mut branch_messages: Vec<Message> =
-            self.session.get_messages().into_iter().cloned().collect();
+        let mut branch_messages: Vec<Message> = self.session.get_active_messages();
         imp_core::session::sanitize_messages(&mut branch_messages);
 
         for msg in &branch_messages {
@@ -376,12 +433,18 @@ impl App {
                         self.messages.push(DisplayMessage::from_message(msg));
                     }
                 }
-                _ => self.messages.push(DisplayMessage::from_message(msg)),
+                _ => {
+                    let mut display = DisplayMessage::from_message(msg);
+                    if matches!(msg, imp_llm::Message::User(_))
+                        && display.content.starts_with(COMPACTION_SUMMARY_PREFIX)
+                    {
+                        display.role = MessageRole::Compaction;
+                    }
+                    self.messages.push(display);
+                }
             }
         }
     }
-
-    /// Run the prepared app against an already-open terminal.
     pub async fn run(
         &mut self,
         terminal: &mut InteractiveTerminal,
@@ -491,18 +554,26 @@ impl App {
             .is_some_and(tokio::task::JoinHandle::is_finished);
         if agent_task_finished {
             if let Some(task) = self.agent_task.take() {
-                match tokio::task::block_in_place(|| {
+                let outcome = match tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(task)
                 }) {
-                    Ok(Ok(())) | Ok(Err(ImpCoreError::Cancelled)) => {
-                        signals.push(RuntimeSignal::AgentTaskCompleted);
+                    Ok(Ok(())) | Ok(Err(ImpCoreError::Cancelled)) => Ok(()),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(error) => Err(format!("Internal agent task failure: {error}")),
+                };
+
+                // Drain one more time after join. The agent can finish with final
+                // events already queued in event_rx; if we clear the handle first,
+                // those late ToolExecutionEnd / TurnEnd / AgentEnd events are lost.
+                if let Some(handle) = self.agent_handle.as_mut() {
+                    while let Ok(event) = handle.event_rx.try_recv() {
+                        signals.push(RuntimeSignal::AgentEvent(event));
                     }
-                    Ok(Err(error)) => {
-                        signals.push(RuntimeSignal::AgentTaskFailed(error.to_string()));
-                    }
-                    Err(error) => signals.push(RuntimeSignal::AgentTaskFailed(format!(
-                        "Internal agent task failure: {error}"
-                    ))),
+                }
+
+                match outcome {
+                    Ok(()) => signals.push(RuntimeSignal::AgentTaskCompleted),
+                    Err(error) => signals.push(RuntimeSignal::AgentTaskFailed(error)),
                 }
             }
         }
@@ -542,10 +613,25 @@ impl App {
         match signal {
             RuntimeSignal::AgentEvent(event) => self.handle_agent_event(event),
             RuntimeSignal::AgentTaskCompleted => {
-                self.agent_handle = None;
+                // AgentEnd handling can synchronously spawn a replacement run via a
+                // queued follow-up. Only clear the handle if no active task has
+                // taken over by the time we process completion.
+                let has_active_replacement = self
+                    .agent_task
+                    .as_ref()
+                    .is_some_and(|task| !task.is_finished());
+                if !has_active_replacement {
+                    self.agent_handle = None;
+                }
             }
             RuntimeSignal::AgentTaskFailed(error) => {
-                self.agent_handle = None;
+                let has_active_replacement = self
+                    .agent_task
+                    .as_ref()
+                    .is_some_and(|task| !task.is_finished());
+                if !has_active_replacement {
+                    self.agent_handle = None;
+                }
                 self.present_agent_failure(error);
             }
             RuntimeSignal::LoginTaskSucceeded(message) => self.push_system_msg(&message),
@@ -581,16 +667,32 @@ impl App {
                         checked: false,
                     })
                     .collect();
-                self.ask_state = Some(AskState::new(title, String::new(), ask_options, false));
-                self.ask_reply = Some(AskReply::Select(reply));
+                self.begin_ask(
+                    AskState::with_placeholder(
+                        title,
+                        String::new(),
+                        ask_options,
+                        false,
+                        "type to filter or answer freely…".into(),
+                    ),
+                    AskReply::Select(reply),
+                );
             }
             UiRequest::Input {
                 title,
-                placeholder: _,
+                placeholder,
                 reply,
             } => {
-                self.ask_state = Some(AskState::new(title, String::new(), vec![], false));
-                self.ask_reply = Some(AskReply::Input(reply));
+                self.begin_ask(
+                    AskState::with_placeholder(
+                        title,
+                        String::new(),
+                        vec![],
+                        false,
+                        placeholder,
+                    ),
+                    AskReply::Input(reply),
+                );
             }
             UiRequest::Confirm {
                 title,
@@ -609,9 +711,17 @@ impl App {
                         checked: false,
                     },
                 ];
-                self.ask_state = Some(AskState::new(title, message, options, false));
                 let (bool_tx, bool_rx) = tokio::sync::oneshot::channel();
-                self.ask_reply = Some(AskReply::Select(bool_tx));
+                self.begin_ask(
+                    AskState::with_placeholder(
+                        title,
+                        message,
+                        options,
+                        false,
+                        String::new(),
+                    ),
+                    AskReply::Select(bool_tx),
+                );
                 let confirm_reply = reply;
                 tokio::spawn(async move {
                     let result = bool_rx.await.ok().flatten();
@@ -638,6 +748,30 @@ impl App {
             UiRequest::Custom { reply, .. } => {
                 let _ = reply.send(None);
             }
+        }
+    }
+
+    fn begin_ask(&mut self, mut state: AskState, reply: AskReply) {
+        if self.ask_state.is_none() {
+            self.ask_editor_backup = Some(self.editor.clone());
+            self.editor.clear();
+        }
+        state.sync_from_editor(self.editor.content(), self.editor.cursor);
+        self.ask_state = Some(state);
+        self.ask_reply = Some(reply);
+    }
+
+    fn sync_ask_from_editor(&mut self) {
+        if let Some(state) = self.ask_state.as_mut() {
+            state.sync_from_editor(self.editor.content(), self.editor.cursor);
+        }
+    }
+
+    fn restore_editor_after_ask(&mut self) {
+        if let Some(saved) = self.ask_editor_backup.take() {
+            self.editor = saved;
+        } else {
+            self.editor.clear();
         }
     }
 
@@ -686,10 +820,7 @@ impl App {
                         }
                     }
                     WidgetContent::Component(component) => {
-                        sections.push(format!(
-                            "{key}\n[component: {}]",
-                            component.component_type
-                        ));
+                        sections.push(format!("{key}\n[component: {}]", component.component_type));
                     }
                 }
             }
@@ -700,11 +831,8 @@ impl App {
         }
 
         let text = sections.join("\n\n");
-        let widget = Paragraph::new(text).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("widgets"),
-        );
+        let widget =
+            Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("widgets"));
         frame.render_widget(widget, area);
     }
 
@@ -712,44 +840,39 @@ impl App {
         let area = frame.area();
         frame.render_widget(Clear, area);
 
-        let ask_height = self.ask_state.as_ref().map(|s| s.height()).unwrap_or(0);
         let has_widgets = !self.widgets.is_empty();
         let widget_height = if has_widgets { 5 } else { 0 };
 
-        // Editor height: grow to fit wrapped prompt text while preserving at least
+        // Editor/prompt height: while asking, the prompt box becomes the ask box.
+        // Otherwise it grows to fit wrapped prompt text while preserving at least
         // 3 lines for the chat area and 1 for the top bar.
         let editor_inner_width = area.width.saturating_sub(2).max(1);
-        let desired_editor_height = self.editor.visual_line_count(editor_inner_width) as u16 + 2;
-        let max_editor_height = area.height.saturating_sub(1 + ask_height + 3).max(3);
+        let desired_editor_height = if let Some(state) = self.ask_state.as_ref() {
+            state.prompt_height()
+        } else {
+            self.editor.visual_line_count(editor_inner_width) as u16 + 2
+        };
+        let max_editor_height = area.height.saturating_sub(1 + 3).max(3);
         let editor_height = desired_editor_height.clamp(3, max_editor_height);
 
-        let constraints = if ask_height > 0 {
-            vec![
-                Constraint::Length(1),                  // top bar
-                Constraint::Length(widget_height),      // widget tray
-                Constraint::Min(3),                     // messages area
-                Constraint::Length(ask_height),         // ask overlay
-                Constraint::Length(editor_height),      // editor (dimmed while ask active)
-            ]
-        } else {
-            vec![
-                Constraint::Length(1),                  // top bar
-                Constraint::Length(widget_height),      // widget tray
-                Constraint::Min(3),                     // messages area
-                Constraint::Length(editor_height),      // editor
-            ]
-        };
+        let constraints = vec![
+            Constraint::Length(1),             // top bar
+            Constraint::Length(widget_height), // widget tray
+            Constraint::Min(3),                // messages area
+            Constraint::Length(editor_height), // editor / ask prompt
+        ];
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints(constraints)
             .split(area);
 
-        let (top_bar_area, widget_area, chat_area, ask_area, editor_area) = if ask_height > 0 {
-            (chunks[0], Some(chunks[1]), chunks[2], Some(chunks[3]), chunks[4])
-        } else {
-            (chunks[0], Some(chunks[1]), chunks[2], None, chunks[3])
-        };
+        let (top_bar_area, widget_area, chat_area, editor_area) = (
+            chunks[0],
+            Some(chunks[1]),
+            chunks[2],
+            chunks[3],
+        );
 
         // Split chat area for sidebar when open
         let (chat_area, sidebar_area) = if self.sidebar.open && chat_area.width >= 60 {
@@ -885,22 +1008,25 @@ impl App {
             self.sidebar_detail_surface = None;
         }
 
-        // Ask overlay (between chat and editor)
-        if let (Some(ask_area), Some(ref state)) = (ask_area, &self.ask_state) {
+        // Prompt area: reuse the normal editor box for asks.
+        if let Some(ref state) = self.ask_state {
             use crate::views::ask_bar::AskBar;
-            frame.render_widget(AskBar::new(state), ask_area);
+            frame.render_widget(AskBar::new(state, &self.theme), editor_area);
+        } else {
+            let editor = EditorView::new(&self.editor, &self.theme, self.thinking_level)
+                .model(&self.model_name)
+                .streaming(self.is_streaming)
+                .queued(!self.message_queue.is_empty())
+                .context_usage(
+                    self.current_context_tokens,
+                    self.context_window,
+                    self.config.ui.show_context_usage,
+                )
+                .tick(self.tick)
+                .animation_level(self.config.ui.animations)
+                .activity_state(activity_state);
+            frame.render_widget(editor, editor_area);
         }
-
-        // Editor
-        let editor = EditorView::new(&self.editor, &self.theme, self.thinking_level)
-            .model(&self.model_name)
-            .streaming(self.is_streaming)
-            .queued(!self.message_queue.is_empty())
-            .tick(self.tick)
-            .animation_level(self.config.ui.animations)
-            .activity_state(activity_state);
-        frame.render_widget(editor, editor_area);
-
 
         frame.render_widget(
             SelectionOverlay::new(
@@ -943,6 +1069,11 @@ impl App {
                 let view = LoginPickerView::new(state, &self.theme);
                 frame.render_widget(view, overlay_area);
             }
+            UiMode::SecretsPicker(state) => {
+                let overlay_area = centered_rect(70, 50, area);
+                let view = SecretsPickerView::new(state, &self.theme);
+                frame.render_widget(view, overlay_area);
+            }
             UiMode::TreeView(state) => {
                 let tree_area = centered_rect(80, 80, area);
                 let view = TreeView::new(state, &self.theme);
@@ -951,6 +1082,11 @@ impl App {
             UiMode::Settings(state) => {
                 let overlay_area = centered_rect(80, 90, area);
                 let view = SettingsView::new(state, &self.theme);
+                frame.render_widget(view, overlay_area);
+            }
+            UiMode::Personality(state) => {
+                let overlay_area = centered_rect(80, 80, area);
+                let view = PersonalityView::new(state, &self.theme);
                 frame.render_widget(view, overlay_area);
             }
             UiMode::SessionPicker(state) => {
@@ -967,7 +1103,11 @@ impl App {
 
         // Set cursor position (only in normal mode)
         if matches!(self.mode, UiMode::Normal) {
-            let (cx, cy) = self.editor.cursor_screen_position(editor_area);
+            let (cx, cy) = if let Some(state) = self.ask_state.as_ref() {
+                state.cursor_screen_position(editor_area)
+            } else {
+                self.editor.cursor_screen_position(editor_area)
+            };
             frame.set_cursor_position((cx, cy));
         }
     }
@@ -1084,7 +1224,9 @@ impl App {
             UiMode::ModelSelector(_)
             | UiMode::CommandPalette(_)
             | UiMode::FileFinder(_)
-            | UiMode::LoginPicker(_) => self.handle_overlay_key(key),
+            | UiMode::LoginPicker(_)
+            | UiMode::SecretsPicker(_) => self.handle_overlay_key(key),
+            UiMode::Personality(_) => self.handle_personality_key(key),
             UiMode::TreeView(_) => self.handle_tree_key(key),
             UiMode::Settings(_) => self.handle_settings_key(key),
             UiMode::SessionPicker(_) => self.handle_session_picker_key(key),
@@ -1351,6 +1493,7 @@ impl App {
                 UiMode::CommandPalette(s) => s.move_up(),
                 UiMode::FileFinder(s) => s.move_up(),
                 UiMode::LoginPicker(s) => s.move_up(),
+                UiMode::SecretsPicker(s) => s.move_up(),
                 _ => {}
             },
             Some(Action::OverlayDown) => match &mut self.mode {
@@ -1358,6 +1501,7 @@ impl App {
                 UiMode::CommandPalette(s) => s.move_down(),
                 UiMode::FileFinder(s) => s.move_down(),
                 UiMode::LoginPicker(s) => s.move_down(),
+                UiMode::SecretsPicker(s) => s.move_down(),
                 _ => {}
             },
             Some(Action::OverlayFilter(c)) => match &mut self.mode {
@@ -1428,6 +1572,11 @@ impl App {
             UiMode::LoginPicker(state) => {
                 if let Some(provider) = state.selected_provider() {
                     self.start_login(provider.id);
+                }
+            }
+            UiMode::SecretsPicker(state) => {
+                if let Some(provider) = state.selected_provider() {
+                    self.start_secrets_flow(&provider.id);
                 }
             }
             _ => {
@@ -1697,21 +1846,15 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: String) {
-        if let Some(state) = self.ask_state.as_mut() {
-            for ch in text.chars() {
-                match ch {
-                    '\r' => {}
-                    c => state.type_char(c),
-                }
+        for ch in text.chars() {
+            match ch {
+                '\n' => self.editor.insert_newline(),
+                '\r' => {}
+                c => self.editor.insert_char(c),
             }
-        } else {
-            for ch in text.chars() {
-                match ch {
-                    '\n' => self.editor.insert_newline(),
-                    '\r' => {}
-                    c => self.editor.insert_char(c),
-                }
-            }
+        }
+        if self.ask_state.is_some() {
+            self.sync_ask_from_editor();
         }
         self.needs_redraw = true;
     }
@@ -2063,7 +2206,7 @@ impl App {
             agent.max_turns = max_turns;
         }
 
-        let mut messages: Vec<Message> = self.session.get_messages().into_iter().cloned().collect();
+        let mut messages: Vec<Message> = self.session.get_active_messages();
         if matches!(
             messages.last(),
             Some(Message::User(user))
@@ -2186,44 +2329,34 @@ impl App {
                 self.session = SessionManager::in_memory();
             }
             "compact" => {
-                self.messages.push(DisplayMessage {
-                    role: MessageRole::Compaction,
-                    content: "Context compaction is disabled in imp.".into(),
-                    thinking: None,
-                    tool_calls: Vec::new(),
-                    assistant_blocks: Vec::new(),
-                    is_streaming: false,
-                    timestamp: imp_llm::now(),
-                });
+                self.run_manual_compaction();
             }
             "hotkeys" => {
-                self.messages.push(DisplayMessage {
-                    role: MessageRole::System,
-                    content: [
-                        "Keyboard shortcuts:",
-                        "  Enter         Send message",
-                        "  Shift+Enter   New line",
-                        "  Ctrl+C        Clear / Abort / Quit",
-                        "  Ctrl+C/Cmd+C  Copy selection",
-                        "  Ctrl+V/Cmd+V  Paste clipboard",
-                        "  Ctrl+L        Model selector",
-                        "  Ctrl+O        Toggle tool output",
-                        "  Ctrl+T        Toggle thinking",
-                        "  Shift+Tab     Cycle thinking level",
-                        "  @             File finder",
-                        "  /command      Slash commands",
-                        "  PageUp/Down   Scroll",
-                    ]
-                    .join("\n"),
-                    thinking: None,
-                    tool_calls: Vec::new(),
-                    assistant_blocks: Vec::new(),
-                    is_streaming: false,
-                    timestamp: imp_llm::now(),
-                });
+                self.push_system_msg(
+                    "Keyboard shortcuts:\n\
+  Enter         Send message\n\
+  Shift+Enter   New line\n\
+  Alt+Enter     Queue follow-up while streaming\n\
+  Ctrl+C        Clear / Abort / Quit\n\
+  Ctrl+C/Cmd+C  Copy selection\n\
+  Ctrl+V/Cmd+V  Paste clipboard\n\
+  Ctrl+L        Model selector\n\
+  Ctrl+P        Next chosen model\n\
+  Ctrl+Shift+P  Previous chosen model\n\
+  Tab           Show/hide sidebar\n\
+  Ctrl+O        Toggle tool output\n\
+  Ctrl+Up/Down  Focus previous/next tool\n\
+  Shift+Tab     Cycle thinking level\n\
+  @             File finder\n\
+  /command      Slash commands\n\
+  PageUp/Down   Scroll",
+                );
             }
             "settings" => {
                 self.open_settings();
+            }
+            "personality" => {
+                self.open_personality();
             }
             "resume" => {
                 let session_dir = Config::session_dir();
@@ -2336,7 +2469,9 @@ impl App {
                     "  /memory     — view/edit agent memory\n",
                     "  /reload     — reload config\n",
                     "  /settings   — edit settings\n",
-                    "  /login [provider] — provider login / API key entry\n",
+                    "  /personality — customize imp personality\n",
+                    "  /login [provider]   — OAuth login (Anthropic/OpenAI)\n",
+                    "  /secrets [provider] — save/list API keys & service secrets\n",
                     "  /help       — this message\n",
                     "  /quit       — exit",
                 ));
@@ -2346,6 +2481,13 @@ impl App {
                     self.start_login(provider);
                 } else {
                     self.open_login_picker();
+                }
+            }
+            "secrets" => {
+                if let Some(provider) = cmd.split_whitespace().nth(1) {
+                    self.start_secrets_flow(provider);
+                } else {
+                    self.open_secrets_picker();
                 }
             }
             "welcome" | "setup" => {
@@ -2644,65 +2786,42 @@ impl App {
         true
     }
 
+    fn start_secrets_flow(&mut self, provider: &str) {
+        self.mode = UiMode::Normal;
+        self.secrets_flow = Some(SecretsFlowState::AwaitingFieldNames {
+            provider: provider.to_string(),
+        });
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        self.begin_ask(
+            crate::views::ask_bar::AskState::new(
+                format!(
+                    "{}\n\nField names (comma-separated) [api_key]:",
+                    prompt_text_for_secret_provider(provider)
+                ),
+                String::new(),
+                vec![],
+                false,
+            ),
+            AskReply::Input(tx),
+        );
+    }
+
     fn start_login(&mut self, provider: &str) {
+        if !oauth_provider(provider) {
+            self.push_error_msg(&format!(
+                "/login {provider} is OAuth-only. Use /secrets {provider} for API keys/secrets."
+            ));
+            return;
+        }
+
         let status_message = match provider {
             "anthropic" => "Opening browser for Anthropic login...",
             "openai" | "openai-codex" => "Opening browser for OpenAI / ChatGPT login...",
-            "tavily" | "exa" | "linkup" | "perplexity" => {
-                self.mode = UiMode::Normal;
-                let auth_path = Config::user_config_dir().join("auth.json");
-                let provider_name = provider.to_string();
-                let docs_url = search_provider_docs_url(provider);
-                let prompt = format!(
-                    "Enter API key for {provider_name}\n\nGet a key at: {docs_url}\nSaved keys go to {}",
-                    auth_path.display()
-                );
-                self.ask_state = Some(crate::views::ask_bar::AskState::new(
-                    prompt,
-                    String::new(),
-                    vec![],
-                    false,
-                ));
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                self.ask_reply = Some(AskReply::Input(tx));
-                let task = tokio::spawn(async move {
-                    match rx.await {
-                        Ok(Some(key)) if !key.trim().is_empty() => {
-                            let mut store = AuthStore::load(&auth_path)
-                                .unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
-                            match store.store(
-                                &provider_name,
-                                imp_llm::auth::StoredCredential::ApiKey {
-                                    key: key.trim().to_string(),
-                                },
-                            ) {
-                                Ok(()) => LoginTaskExit::Success(format!(
-                                    "Saved {} API key to {}",
-                                    provider_name,
-                                    auth_path.display()
-                                )),
-                                Err(e) => LoginTaskExit::Failed(format!(
-                                    "Failed to save {} API key: {e}",
-                                    provider_name
-                                )),
-                            }
-                        }
-                        Ok(_) => LoginTaskExit::Failed(format!(
-                            "No API key entered for {provider_name}."
-                        )),
-                        Err(_) => LoginTaskExit::Failed(format!(
-                            "Cancelled API key entry for {provider_name}."
-                        )),
-                    }
-                });
-                self.login_task = Some(task);
-                return;
-            }
             _ => {
                 self.messages.push(DisplayMessage {
                     role: MessageRole::Error,
                     content: format!(
-                        "Login for '{provider}' not supported. Set API key via env var."
+                        "OAuth login for '{provider}' not supported. Use /secrets {provider} for API keys."
                     ),
                     thinking: None,
                     tool_calls: Vec::new(),
@@ -2782,12 +2901,27 @@ impl App {
         self.login_task = Some(task);
     }
 
+    fn open_secrets_picker(&mut self) {
+        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_store =
+            AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+        let providers = secret_providers(&ProviderRegistry::with_builtins())
+            .into_iter()
+            .map(|mut provider| {
+                provider.configured = provider_logged_in(&auth_store, &provider.id);
+                provider
+            })
+            .collect();
+        self.mode = UiMode::SecretsPicker(SecretsPickerState::new(providers));
+    }
+
     fn open_login_picker(&mut self) {
         let auth_path = Config::user_config_dir().join("auth.json");
         let auth_store =
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
         let providers = login_providers(&ProviderRegistry::with_builtins())
             .into_iter()
+            .filter(|provider| oauth_provider(provider.id))
             .map(|mut provider| {
                 provider.logged_in = provider_logged_in(&auth_store, provider.id);
                 provider
@@ -2803,6 +2937,21 @@ impl App {
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
         let state = SettingsState::new(&self.config, &self.model_name, &models, &auth_store);
         self.mode = UiMode::Settings(state);
+    }
+
+    fn open_personality(&mut self) {
+        let project_config = Config::load(&self.cwd.join(".imp").join("config.toml")).ok();
+        let scope = if project_config.is_some() {
+            PersonalityScope::Project
+        } else {
+            PersonalityScope::Global
+        };
+        let state = PersonalityState::new(
+            &self.config.personality,
+            project_config.as_ref().map(|c| &c.personality),
+            scope,
+        );
+        self.mode = UiMode::Personality(state);
     }
 
     fn handle_session_picker_key(&mut self, key: KeyEvent) {
@@ -2888,42 +3037,103 @@ impl App {
             return;
         }
 
-        let Some(ref mut state) = self.ask_state else {
+        let Some(state) = self.ask_state.as_ref() else {
             return;
         };
 
         match key.code {
-            KeyCode::Up => state.cursor_up(),
-            KeyCode::Down => state.cursor_down(),
-            KeyCode::Tab => state.tab_to_edit(),
-            KeyCode::Char(' ') if !state.input_active => state.toggle_current(),
-            KeyCode::Char(c) if !state.input_active && c.is_ascii_digit() => {
-                let n = c.to_digit(10).unwrap_or(0) as usize;
-                if state.quick_select(n) {
-                    // Quick-select + auto-confirm
-                    self.finish_ask();
-                }
-            }
-            KeyCode::Char(c) => state.type_char(c),
-            KeyCode::Backspace => state.backspace(),
-            KeyCode::Enter => {
-                self.finish_ask();
-            }
             KeyCode::Esc => {
                 self.cancel_ask();
             }
-            _ => {}
+            KeyCode::Enter => {
+                self.sync_ask_from_editor();
+                self.finish_ask();
+            }
+            KeyCode::Tab => {
+                let replacement = if !state.options.is_empty() && !state.input_active {
+                    Some(state.options[state.cursor].label.clone())
+                } else {
+                    None
+                };
+                if let Some(text) = replacement {
+                    self.editor.set_content(&text);
+                    self.sync_ask_from_editor();
+                }
+            }
+            KeyCode::Char(' ') if !state.input_active => {
+                if let Some(state) = self.ask_state.as_mut() {
+                    state.toggle_current();
+                }
+            }
+            KeyCode::Char(c) if !state.input_active && c.is_ascii_digit() => {
+                let n = c.to_digit(10).unwrap_or(0) as usize;
+                let quick_selected = if let Some(state) = self.ask_state.as_mut() {
+                    state.quick_select(n)
+                } else {
+                    false
+                };
+                if quick_selected {
+                    self.finish_ask();
+                }
+            }
+            KeyCode::Up => {
+                if let Some(state) = self.ask_state.as_mut() {
+                    if state.input_active {
+                        if !self.editor.move_up() {
+                            self.editor.move_home();
+                        }
+                        self.sync_ask_from_editor();
+                    } else {
+                        state.cursor_up();
+                    }
+                }
+            }
+            KeyCode::Down => {
+                if let Some(state) = self.ask_state.as_mut() {
+                    if state.input_active {
+                        if !self.editor.move_down() {
+                            self.editor.move_end();
+                        }
+                        self.sync_ask_from_editor();
+                    } else {
+                        state.cursor_down();
+                    }
+                }
+            }
+            _ => {
+                if let Some(action) = keybindings::resolve_normal(key) {
+                    match action {
+                        Action::InsertChar(c) => self.editor.insert_char(c),
+                        Action::Backspace => self.editor.delete_back(),
+                        Action::Delete => self.editor.delete_forward(),
+                        Action::CursorLeft => self.editor.move_left(),
+                        Action::CursorRight => self.editor.move_right(),
+                        Action::CursorHome => self.editor.move_home(),
+                        Action::CursorEnd => self.editor.move_end(),
+                        Action::WordLeft => self.editor.move_word_left(),
+                        Action::WordRight => self.editor.move_word_right(),
+                        Action::DeleteWordBack => self.editor.delete_word_back(),
+                        Action::DeleteToStart => self.editor.delete_to_start(),
+                        Action::DeleteToEnd => self.editor.delete_to_end(),
+                        Action::NewLine => self.editor.insert_newline(),
+                        _ => {}
+                    }
+                    self.sync_ask_from_editor();
+                }
+            }
         }
     }
 
     fn finish_ask(&mut self) {
         use crate::views::ask_bar::AskResult;
 
+        self.sync_ask_from_editor();
         let state = self.ask_state.take();
         let reply = self.ask_reply.take();
 
         let Some(state) = state else { return };
         let result = state.confirm();
+        self.restore_editor_after_ask();
 
         // Show Q&A in chat
         self.push_system_msg(&format!("❯ {}", state.question));
@@ -2932,6 +3142,7 @@ impl App {
             (AskResult::Text(text), Some(AskReply::Input(tx))) => {
                 self.push_system_msg(&format!("  {text}"));
                 let _ = tx.send(Some(text.clone()));
+                self.advance_secrets_flow(Some(text.clone()));
             }
             (AskResult::Selected(indices), Some(AskReply::Select(tx))) => {
                 let labels: Vec<String> = indices
@@ -2963,8 +3174,85 @@ impl App {
         }
     }
 
+    fn advance_secrets_flow(&mut self, input: Option<String>) {
+        let Some(flow) = self.secrets_flow.take() else {
+            return;
+        };
+
+        match flow {
+            SecretsFlowState::AwaitingFieldNames { provider } => {
+                let field_names = parse_secret_field_names(input.as_deref().unwrap_or(""));
+                let first_field = field_names
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "api_key".into());
+                self.secrets_flow = Some(SecretsFlowState::AwaitingFieldValues {
+                    provider,
+                    fields: field_names,
+                    current: 0,
+                    values: HashMap::new(),
+                });
+                let (tx, _rx) = tokio::sync::oneshot::channel();
+                self.begin_ask(
+                    crate::views::ask_bar::AskState::new(
+                        format!("Enter {first_field}:"),
+                        String::new(),
+                        vec![],
+                        false,
+                    ),
+                    AskReply::Input(tx),
+                );
+            }
+            SecretsFlowState::AwaitingFieldValues {
+                provider,
+                fields,
+                current,
+                mut values,
+            } => {
+                let Some(value) = input.filter(|value| !value.trim().is_empty()) else {
+                    self.push_error_msg("Secret entry cancelled.");
+                    return;
+                };
+
+                let field = fields.get(current).cloned().unwrap_or_else(|| "api_key".into());
+                values.insert(field, value.trim().to_string());
+
+                if current + 1 < fields.len() {
+                    let next_field = fields[current + 1].clone();
+                    self.secrets_flow = Some(SecretsFlowState::AwaitingFieldValues {
+                        provider: provider.clone(),
+                        fields: fields.clone(),
+                        current: current + 1,
+                        values,
+                    });
+                    let (tx, _rx) = tokio::sync::oneshot::channel();
+                    self.begin_ask(
+                        crate::views::ask_bar::AskState::new(
+                            format!("Enter {next_field}:"),
+                            String::new(),
+                            vec![],
+                            false,
+                        ),
+                        AskReply::Input(tx),
+                    );
+                    return;
+                }
+
+                let auth_path = Config::user_config_dir().join("auth.json");
+                let mut auth_store =
+                    AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+                match auth_store.store_secret_fields(&provider, values) {
+                    Ok(()) => self.push_system_msg(&format!("Saved secure secrets for {provider}.")),
+                    Err(e) => self.push_error_msg(&format!("Failed to save secrets for {provider}: {e}")),
+                }
+            }
+        }
+    }
+
     fn cancel_ask(&mut self) {
+        self.secrets_flow = None;
         self.ask_state = None;
+        self.restore_editor_after_ask();
         if let Some(reply) = self.ask_reply.take() {
             match reply {
                 AskReply::Select(tx) => {
@@ -3032,9 +3320,64 @@ impl App {
             }
             KeyCode::Char(c) => {
                 if let UiMode::Settings(ref mut state) = self.mode {
-                    if state.editing_number {
-                        state.push_char(c);
-                    }
+                    state.push_char(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_personality_key(&mut self, key: KeyEvent) {
+        use crate::views::personality::PersonalityField;
+
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = UiMode::Normal;
+            }
+            KeyCode::Up => {
+                if let UiMode::Personality(ref mut state) = self.mode {
+                    state.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let UiMode::Personality(ref mut state) = self.mode {
+                    state.move_down();
+                }
+            }
+            KeyCode::Left => {
+                if let UiMode::Personality(ref mut state) = self.mode {
+                    state.cycle_backward();
+                }
+            }
+            KeyCode::Right => {
+                if let UiMode::Personality(ref mut state) = self.mode {
+                    state.cycle_forward();
+                }
+            }
+            KeyCode::Enter => {
+                let (is_save, is_delete) = match &self.mode {
+                    UiMode::Personality(s) => (
+                        s.current_field() == PersonalityField::Save,
+                        s.current_field() == PersonalityField::DeleteProfile,
+                    ),
+                    _ => (false, false),
+                };
+                if is_save {
+                    self.save_personality();
+                } else if is_delete {
+                    self.delete_personality_profile();
+                } else if let UiMode::Personality(ref mut state) = self.mode {
+                    state.cycle_forward();
+                }
+            }
+            KeyCode::Backspace => {
+                if let UiMode::Personality(ref mut state) = self.mode {
+                    state.pop_char();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let UiMode::Personality(ref mut state) = self.mode {
+                    state.push_char(c);
                 }
             }
             _ => {}
@@ -3211,7 +3554,14 @@ impl App {
 
     /// Persist welcome flow choices to config and auth, then advance to Done step.
     fn finish_welcome(&mut self) {
-        let (model_id, thinking, provider_id, resolved_key, resolved_web_provider, resolved_web_key) = match &self.mode {
+        let (
+            model_id,
+            thinking,
+            provider_id,
+            resolved_key,
+            resolved_web_provider,
+            resolved_web_key,
+        ) = match &self.mode {
             UiMode::Welcome(state) => {
                 let model_id = state
                     .selected_model()
@@ -3222,7 +3572,14 @@ impl App {
                 let resolved_key = state.resolved_key.clone();
                 let resolved_web_provider = state.resolved_web_provider.clone();
                 let resolved_web_key = state.resolved_web_key.clone();
-                (model_id, thinking, provider_id, resolved_key, resolved_web_provider, resolved_web_key)
+                (
+                    model_id,
+                    thinking,
+                    provider_id,
+                    resolved_key,
+                    resolved_web_provider,
+                    resolved_web_key,
+                )
             }
             _ => return,
         };
@@ -3237,7 +3594,10 @@ impl App {
             self.context_window = meta.context_window;
         }
 
-        if let Some(web_provider) = resolved_web_provider.as_deref().filter(|provider| *provider != "none") {
+        if let Some(web_provider) = resolved_web_provider
+            .as_deref()
+            .filter(|provider| *provider != "none")
+        {
             self.config.web.search_provider = match web_provider {
                 "tavily" => Some(imp_core::tools::web::types::SearchProvider::Tavily),
                 "exa" => Some(imp_core::tools::web::types::SearchProvider::Exa),
@@ -3285,7 +3645,9 @@ impl App {
         }
 
         if let (Some(web_provider), Some(web_key)) = (
-            resolved_web_provider.as_deref().filter(|provider| *provider != "none"),
+            resolved_web_provider
+                .as_deref()
+                .filter(|provider| *provider != "none"),
             resolved_web_key,
         ) {
             if let Err(e) = auth_store.store(
@@ -3307,6 +3669,108 @@ impl App {
         // Advance to Done screen
         if let UiMode::Welcome(ref mut state) = self.mode {
             state.advance();
+        }
+    }
+
+    fn save_personality(&mut self) {
+        let state = match &self.mode {
+            UiMode::Personality(state) => state.clone(),
+            _ => return,
+        };
+
+        match state.scope {
+            PersonalityScope::Global => {
+                state.save_to_config(&mut self.config.personality);
+                let config_path = Config::user_config_path();
+                match self.config.save(&config_path) {
+                    Ok(()) => {
+                        if let UiMode::Personality(ref mut current) = self.mode {
+                            current.dirty = false;
+                            current.saved_profiles =
+                                self.config.personality.profiles.profile_names();
+                            current.active_profile =
+                                self.config.personality.profiles.active.clone();
+                            current.profile_name = current
+                                .active_profile
+                                .clone()
+                                .unwrap_or_else(|| "default".to_string());
+                        }
+                        self.push_system_msg(&format!(
+                            "Personality saved to {}",
+                            config_path.display()
+                        ));
+                    }
+                    Err(e) => self.push_error_msg(&format!("Failed to save personality: {e}")),
+                }
+            }
+            PersonalityScope::Project => {
+                let path = self.cwd.join(".imp").join("config.toml");
+                let mut project_config = Config::load(&path).unwrap_or_default();
+                state.save_to_config(&mut project_config.personality);
+                match project_config.save(&path) {
+                    Ok(()) => {
+                        if let UiMode::Personality(ref mut current) = self.mode {
+                            current.dirty = false;
+                            current.saved_profiles =
+                                project_config.personality.profiles.profile_names();
+                            current.active_profile =
+                                project_config.personality.profiles.active.clone();
+                            current.profile_name = current
+                                .active_profile
+                                .clone()
+                                .unwrap_or_else(|| "default".to_string());
+                        }
+                        self.push_system_msg(&format!(
+                            "Project personality saved to {}",
+                            path.display()
+                        ));
+                    }
+                    Err(e) => {
+                        self.push_error_msg(&format!("Failed to save project personality: {e}"))
+                    }
+                }
+            }
+        }
+    }
+
+    fn delete_personality_profile(&mut self) {
+        let state = match &self.mode {
+            UiMode::Personality(state) => state.clone(),
+            _ => return,
+        };
+
+        match state.scope {
+            PersonalityScope::Global => {
+                let deleted = if let UiMode::Personality(ref mut current) = self.mode {
+                    current.delete_active_profile(&mut self.config.personality)
+                } else {
+                    false
+                };
+                if deleted {
+                    let config_path = Config::user_config_path();
+                    match self.config.save(&config_path) {
+                        Ok(()) => self.push_system_msg("Deleted global personality profile."),
+                        Err(e) => self.push_error_msg(&format!("Failed to save personality: {e}")),
+                    }
+                }
+            }
+            PersonalityScope::Project => {
+                let path = self.cwd.join(".imp").join("config.toml");
+                let mut project_config = Config::load(&path).unwrap_or_default();
+                let deleted = if let UiMode::Personality(ref mut current) = self.mode {
+                    current.delete_active_profile(&mut project_config.personality)
+                } else {
+                    false
+                };
+                if deleted {
+                    match project_config.save(&path) {
+                        Ok(()) => self.push_system_msg("Deleted project personality profile."),
+                        Err(e) => {
+                            self.push_error_msg(&format!("Failed to save project personality: {e}"))
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -3401,11 +3865,17 @@ impl App {
         }
     }
 
-    /// Return models filtered by `config.enabled_models` (if set).
-    /// Entries in the enabled list can be canonical IDs or short aliases —
-    /// each is resolved through the registry before matching.
+    /// Return models filtered by `config.enabled_models` (if set) and by
+    /// available credentials. Models whose provider has no auth configured
+    /// are hidden unless explicitly listed in `enabled_models`.
     fn filtered_models(&self) -> Vec<ModelMeta> {
         let all = self.model_registry.list();
+
+        // Load auth store to check which providers have credentials
+        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_store =
+            AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
+
         match &self.config.enabled_models {
             Some(enabled) if !enabled.is_empty() => {
                 let enabled_ids: Vec<&str> = enabled
@@ -3421,7 +3891,13 @@ impl App {
                     .cloned()
                     .collect()
             }
-            _ => all.to_vec(),
+            _ => {
+                // Auto-filter: only show models whose provider has credentials
+                all.iter()
+                    .filter(|m| auth_store.has_credentials(&m.provider))
+                    .cloned()
+                    .collect()
+            }
         }
     }
 
@@ -3464,6 +3940,7 @@ impl App {
         };
         self.model_name = models[next_idx].id.clone();
         self.context_window = models[next_idx].context_window;
+        self.push_system_msg(&format!("Model: {}", self.model_name));
     }
 
     fn cycle_thinking_level(&mut self) {
@@ -3501,6 +3978,207 @@ impl App {
             is_streaming: false,
             timestamp: imp_llm::now(),
         });
+    }
+
+    fn run_manual_compaction(&mut self) {
+        if self.is_streaming {
+            self.push_error_msg("Cannot compact while the agent is actively streaming.");
+            return;
+        }
+
+        let active_messages = self.session.get_active_messages();
+        let prepared =
+            prepare_messages_for_compaction(&active_messages, DEFAULT_KEEP_RECENT_GROUPS);
+        if !prepared.should_compact() {
+            self.push_system_msg("Not enough history to compact yet.");
+            return;
+        }
+
+        let auth_path = Config::user_config_dir().join("auth.json");
+        let mut auth_store =
+            AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+
+        let mut meta = match self.model_registry.resolve_meta(&self.model_name, None) {
+            Some(meta) => meta,
+            None => {
+                self.push_error_msg(&format!("Unknown model: {}", self.model_name));
+                return;
+            }
+        };
+
+        let mut provider_name = meta.provider.clone();
+        if should_use_chatgpt_provider(&auth_store, &self.model_registry, &meta) {
+            provider_name = "openai-codex".to_string();
+            if let Some(resolved) = self
+                .model_registry
+                .resolve_meta(&self.model_name, Some(&provider_name))
+            {
+                meta = resolved;
+            }
+        }
+
+        let provider = match create_provider(&provider_name) {
+            Some(provider) => provider,
+            None => {
+                self.push_error_msg(&format!("Unknown provider: {provider_name}"));
+                return;
+            }
+        };
+
+        let api_key = match tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(resolve_provider_api_key(&mut auth_store, &provider_name))
+        }) {
+            Ok(key) => key,
+            Err(e) => {
+                self.push_error_msg(&format!("Failed to resolve auth for compaction: {e}"));
+                return;
+            }
+        };
+
+        let model = Model {
+            meta,
+            provider: Arc::from(provider),
+        };
+        let model_id = model.meta.id.clone();
+        let model_meta = model.meta.clone();
+        let model_provider = Arc::clone(&model.provider);
+
+        let mut config = self.config.clone();
+        config.thinking = Some(self.thinking_level);
+
+        let lua_cwd = self.cwd.clone();
+        let user_config_dir = imp_core::config::Config::user_config_dir();
+        let (agent, _handle) = match AgentBuilder::new(config, self.cwd.clone(), model, api_key)
+            .lua_tool_loader(move |tools| {
+                imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
+            })
+            .build()
+        {
+            Ok(built) => built,
+            Err(e) => {
+                self.push_error_msg(&format!("Failed to build compaction agent: {e}"));
+                return;
+            }
+        };
+
+        let system_prompt = agent.system_prompt.clone();
+
+        let strategy = select_compaction_strategy(&CompactionCapabilities {
+            provider_id: &provider_name,
+            model_id: &model_id,
+            allow_provider_native: false,
+        });
+        if matches!(strategy, CompactionStrategy::ProviderNative) {
+            self.push_system_msg(
+                "Provider-native compaction is not enabled yet; falling back to local compaction.",
+            );
+        }
+
+        let result = execute_compaction_with_retry(
+            &mut self.session,
+            DEFAULT_KEEP_RECENT_GROUPS,
+            2,
+            |prompt| {
+                use futures::StreamExt;
+                use imp_llm::provider::{CacheOptions, Context as LlmContext, RequestOptions};
+                use imp_llm::StreamEvent;
+
+                let model_meta = model_meta.clone();
+                let model_provider = Arc::clone(&model_provider);
+                let api_key = agent.api_key.clone();
+                let system_prompt = system_prompt.clone();
+                let prompt = prompt.to_string();
+                let thinking_level = self.thinking_level;
+                let retry_policy = agent.retry_policy.clone();
+
+                tokio::task::block_in_place(|| {
+                    let runtime = tokio::runtime::Handle::current();
+                    runtime.block_on(async move {
+                        let mut summary = String::new();
+                        let mut message_end_text: Option<String> = None;
+
+                        let model = Model {
+                            meta: model_meta,
+                            provider: model_provider,
+                        };
+                        let context = LlmContext {
+                            messages: vec![Message::user(prompt)],
+                        };
+                        let options = RequestOptions {
+                            thinking_level,
+                            max_tokens: Some(2048),
+                            temperature: Some(0.2),
+                            system_prompt,
+                            tools: Vec::new(),
+                            cache_options: CacheOptions::default(),
+                            effort: None,
+                        };
+
+                        let mut stream = imp_core::retry::stream_with_retry(
+                            move || model.provider.stream(&model, context.clone(), options.clone(), &api_key),
+                            retry_policy,
+                        );
+
+                        while let Some(item) = stream.next().await {
+                            match item {
+                                Ok(StreamEvent::TextDelta { text }) => summary.push_str(&text),
+                                Ok(StreamEvent::MessageEnd { message }) => {
+                                    let body = message
+                                        .content
+                                        .iter()
+                                        .filter_map(|block| match block {
+                                            imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                                            _ => None,
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("");
+                                    if !body.is_empty() {
+                                        message_end_text = Some(body);
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(_) => return None,
+                            }
+                        }
+
+                        let final_text = if !summary.trim().is_empty() {
+                            summary
+                        } else {
+                            message_end_text.unwrap_or_default()
+                        };
+                        (!final_text.trim().is_empty()).then_some(final_text)
+                    })
+                })
+            },
+        );
+
+        match result {
+            Ok(Some(compaction)) => {
+                self.load_session_messages();
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::Compaction,
+                    content: format!(
+                        "Context compacted. Saved ~{} tokens. Preserved recent working context.",
+                        compaction.tokens_before.saturating_sub(compaction.tokens_after)
+                    ),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+                self.push_system_msg(&format!(
+                    "Compaction summary stored. Active context now uses the compacted branch view."
+                ));
+            }
+            Ok(None) => {
+                self.push_system_msg("Not enough history to compact yet.");
+            }
+            Err(e) => {
+                self.push_error_msg(&format!("Compaction failed: {e}"));
+            }
+        }
     }
 
     fn export_conversation(&self, path: &std::path::Path) -> std::io::Result<()> {
@@ -3917,6 +4595,7 @@ mod session_lifecycle {
     use super::*;
     use imp_core::config::Config;
     use imp_core::session::{SessionEntry, SessionManager};
+    use imp_llm::{AssistantMessage, ContentBlock, StopReason};
     use imp_llm::model::ModelRegistry;
     use imp_llm::ThinkingLevel;
     use tempfile::TempDir;
@@ -4091,17 +4770,65 @@ mod session_lifecycle {
     }
 
     #[test]
-    fn tui_integration_slash_compact_adds_marker() {
+    fn tui_integration_slash_compact_noops_with_short_history() {
         let mut app = make_app();
 
         app.execute_command("compact");
 
         assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].role, MessageRole::System);
+        assert_eq!(app.messages[0].content, "Not enough history to compact yet.");
+    }
+
+    #[test]
+    fn load_session_messages_uses_compacted_active_history() {
+        let mut app = make_app();
+        app.session
+            .append(SessionEntry::Message {
+                id: "u1".into(),
+                parent_id: None,
+                message: Message::user("older request"),
+            })
+            .unwrap();
+        app.session
+            .append(SessionEntry::Message {
+                id: "a1".into(),
+                parent_id: None,
+                message: Message::Assistant(AssistantMessage {
+                    content: vec![ContentBlock::Text {
+                        text: "older answer".into(),
+                    }],
+                    usage: None,
+                    stop_reason: StopReason::EndTurn,
+                    timestamp: 0,
+                }),
+            })
+            .unwrap();
+        app.session
+            .append(SessionEntry::Message {
+                id: "u2".into(),
+                parent_id: None,
+                message: Message::user("recent request"),
+            })
+            .unwrap();
+        app.session
+            .append(SessionEntry::Compaction {
+                id: "c1".into(),
+                parent_id: None,
+                summary: format!("{}summary body", COMPACTION_SUMMARY_PREFIX),
+                first_kept_id: "u2".into(),
+                tokens_before: 100,
+                tokens_after: 40,
+            })
+            .unwrap();
+
+        app.load_session_messages();
+
+        assert_eq!(app.messages.len(), 2);
         assert_eq!(app.messages[0].role, MessageRole::Compaction);
-        assert_eq!(
-            app.messages[0].content,
-            "Context compaction is disabled in imp."
-        );
+        assert!(app.messages[0].content.contains("summary body"));
+        assert_eq!(app.messages[1].role, MessageRole::User);
+        assert_eq!(app.messages[1].content, "recent request");
     }
 
     #[test]
@@ -4135,6 +4862,94 @@ mod session_lifecycle {
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].role, MessageRole::Error);
         assert!(app.messages[0].content.contains("nonexistent"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_task_completion_preserves_active_replacement_handle() {
+        let mut app = make_app();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(4);
+        let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
+        drop(event_tx);
+
+        app.agent_handle = Some(AgentHandle {
+            event_rx,
+            command_tx,
+        });
+        app.agent_task = Some(tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(())
+        }));
+
+        app.handle_runtime_signal(RuntimeSignal::AgentTaskCompleted);
+
+        assert!(
+            app.agent_handle.is_some(),
+            "active replacement handle should survive stale completion"
+        );
+
+        if let Some(task) = app.agent_task.take() {
+            task.abort();
+        }
+    }
+
+    #[test]
+    fn agent_task_completion_clears_handle_when_no_replacement_is_active() {
+        let mut app = make_app();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(4);
+        let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
+        drop(event_tx);
+
+        app.agent_handle = Some(AgentHandle {
+            event_rx,
+            command_tx,
+        });
+        app.agent_task = None;
+
+        app.handle_runtime_signal(RuntimeSignal::AgentTaskCompleted);
+
+        assert!(
+            app.agent_handle.is_none(),
+            "completed task should release handle when no replacement exists"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_task_failure_preserves_active_replacement_handle() {
+        let mut app = make_app();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(4);
+        let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
+        drop(event_tx);
+
+        app.agent_handle = Some(AgentHandle {
+            event_rx,
+            command_tx,
+        });
+        app.agent_task = Some(tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(())
+        }));
+
+        app.handle_runtime_signal(RuntimeSignal::AgentTaskFailed("boom".into()));
+
+        assert!(
+            app.agent_handle.is_some(),
+            "active replacement handle should survive stale failure"
+        );
+        assert_eq!(
+            app.messages.last().map(|m| m.role.clone()),
+            Some(MessageRole::Error)
+        );
+
+        if let Some(task) = app.agent_task.take() {
+            task.abort();
+        }
+    }
+
+    #[test]
+    fn tui_integration_slash_personality_opens_overlay() {
+        let mut app = make_app();
+        app.execute_command("personality");
+        assert!(matches!(app.mode, UiMode::Personality(_)));
     }
 
     #[test]
@@ -4190,6 +5005,20 @@ mod session_lifecycle {
         let content = &app.messages.last().unwrap().content;
         assert!(content.contains("Unknown memory subcommand"));
         assert!(content.contains("frobnicate"));
+    }
+
+    #[test]
+    fn personality_state_default_sentence_is_visible() {
+        let global = imp_core::personality::PersonalityConfig::default();
+        let state = crate::views::personality::PersonalityState::new(
+            &global,
+            None,
+            crate::views::personality::PersonalityScope::Global,
+        );
+        assert_eq!(
+            state.sentence(),
+            "You are imp, a practical, concise, coding agent."
+        );
     }
 
     #[test]

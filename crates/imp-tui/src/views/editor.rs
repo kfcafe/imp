@@ -1,10 +1,10 @@
+use crate::animation::{activity_label, ActivitySurface, AnimationState};
 use imp_core::config::AnimationLevel;
 use imp_llm::ThinkingLevel;
-use crate::animation::{activity_label, ActivitySurface, AnimationState};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Widget};
 use unicode_width::UnicodeWidthChar;
 
@@ -202,7 +202,7 @@ impl EditorState {
     }
 
     pub fn visual_line_count(&self, inner_width: u16) -> usize {
-        wrapped_lines(&self.content, inner_width).len().max(1)
+        wrapped_lines_for_width(&self.content, inner_width).len().max(1)
     }
 
     pub fn push_history(&mut self) {
@@ -252,7 +252,7 @@ impl EditorState {
         let inner_y = area.y + 1;
         let inner_width = area.width.saturating_sub(2).max(1);
         let (visual_line, visual_col) =
-            cursor_visual_position(&self.content, self.cursor, inner_width);
+            cursor_visual_position_for_text(&self.content, self.cursor, inner_width);
         let x = inner_x + visual_col as u16;
         let y = inner_y + (visual_line as u16).saturating_sub(self.scroll_offset as u16);
         (
@@ -285,6 +285,9 @@ pub struct EditorView<'a> {
     model_name: &'a str,
     is_streaming: bool,
     has_queued: bool,
+    current_context_tokens: u32,
+    context_window: u32,
+    show_context_usage: bool,
     tick: u64,
     animation_level: AnimationLevel,
     activity_state: AnimationState,
@@ -299,6 +302,9 @@ impl<'a> EditorView<'a> {
             model_name: "",
             is_streaming: false,
             has_queued: false,
+            current_context_tokens: 0,
+            context_window: 0,
+            show_context_usage: true,
             tick: 0,
             animation_level: AnimationLevel::Minimal,
             activity_state: AnimationState::Idle,
@@ -318,6 +324,13 @@ impl<'a> EditorView<'a> {
 
     pub fn queued(mut self, has_queued: bool) -> Self {
         self.has_queued = has_queued;
+        self
+    }
+
+    pub fn context_usage(mut self, current_tokens: u32, context_window: u32, show: bool) -> Self {
+        self.current_context_tokens = current_tokens;
+        self.context_window = context_window;
+        self.show_context_usage = show;
         self
     }
 
@@ -373,28 +386,50 @@ impl Widget for EditorView<'_> {
         } else {
             None
         };
-        let mut parts = Vec::new();
+        let context_ratio = if self.context_window > 0 {
+            self.current_context_tokens as f64 / self.context_window as f64
+        } else {
+            0.0
+        };
+        let context_style = if context_ratio >= 0.75 {
+            self.theme.error_style()
+        } else if context_ratio >= 0.50 {
+            self.theme.warning_style()
+        } else {
+            self.theme.muted_style()
+        };
+        let mut bottom_spans = Vec::new();
+        let mut push_part = |text: String, style: Style| {
+            if !bottom_spans.is_empty() {
+                bottom_spans.push(Span::styled(" • ".to_string(), self.theme.muted_style()));
+            }
+            bottom_spans.push(Span::styled(text, style));
+        };
         if let Some(model) = model_label {
-            parts.push(model);
-        }
-        if let Some(queue) = queue_label {
-            parts.push(queue);
+            push_part(model, self.theme.accent_style());
         }
         if !thinking_label.is_empty() {
-            parts.push(thinking_label.to_string());
+            push_part(
+                thinking_label.to_string(),
+                Style::default().fg(self.theme.thinking_border_color(self.thinking_level)),
+            );
+        }
+        if self.show_context_usage && self.context_window > 0 {
+            push_part(
+                format_context_usage(self.current_context_tokens, self.context_window),
+                context_style,
+            );
+        }
+        if let Some(queue) = queue_label {
+            push_part(queue, self.theme.warning_style());
         }
         if !activity.is_empty() {
-            parts.push(activity);
+            push_part(activity, self.theme.muted_style());
         }
-        let bottom_title = if parts.is_empty() {
-            String::new()
-        } else {
-            format!(" {} ", parts.join(" · "))
-        };
 
         let block = Block::default()
             .title(top_title)
-            .title_bottom(Line::from(bottom_title).alignment(Alignment::Right))
+            .title_bottom(Line::from(bottom_spans).alignment(Alignment::Right))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color));
 
@@ -402,7 +437,7 @@ impl Widget for EditorView<'_> {
         block.render(area, buf);
 
         // Render editor content using wrapped visual lines so auto-grow and cursor math stay aligned.
-        let lines = wrapped_lines(&self.state.content, inner.width)
+        let lines = wrapped_lines_for_width(&self.state.content, inner.width)
             .into_iter()
             .skip(self.state.scroll_offset)
             .take(inner.height as usize)
@@ -434,6 +469,31 @@ impl Widget for EditorView<'_> {
 }
 
 // --- Helpers ---
+
+fn format_context_usage(current_tokens: u32, context_window: u32) -> String {
+    if context_window == 0 {
+        return format_compact_tokens(current_tokens);
+    }
+    let percent = ((current_tokens as f64 / context_window as f64) * 100.0).round();
+    format!("{percent:.0}%/{}", format_compact_tokens(context_window))
+}
+
+fn format_compact_tokens(tokens: u32) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        let value = tokens as f64 / 1_000.0;
+        if value >= 100.0 {
+            format!("{:.0}k", value)
+        } else if value >= 10.0 {
+            format!("{:.1}k", value)
+        } else {
+            format!("{:.2}k", value)
+        }
+    } else {
+        tokens.to_string()
+    }
+}
 
 fn prev_char_boundary(s: &str, pos: usize) -> usize {
     let mut p = pos;
@@ -468,7 +528,7 @@ fn line_col_to_byte(lines: &[&str], line: usize, col: usize) -> usize {
     byte
 }
 
-fn wrapped_lines(text: &str, inner_width: u16) -> Vec<String> {
+pub fn wrapped_lines_for_width(text: &str, inner_width: u16) -> Vec<String> {
     let width = inner_width.max(1) as usize;
     let mut out = Vec::new();
 
@@ -517,7 +577,11 @@ fn wrapped_lines(text: &str, inner_width: u16) -> Vec<String> {
     out
 }
 
-fn cursor_visual_position(text: &str, cursor: usize, inner_width: u16) -> (usize, usize) {
+pub fn cursor_visual_position_for_text(
+    text: &str,
+    cursor: usize,
+    inner_width: u16,
+) -> (usize, usize) {
     let width = inner_width.max(1) as usize;
     let mut row = 0usize;
     let mut col = 0usize;
@@ -572,6 +636,25 @@ fn char_display_width(ch: char) -> usize {
 mod tests {
     use super::*;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn format_context_usage_prefers_percent_over_current_tokens() {
+        assert_eq!(format_context_usage(82_400, 1_000_000), "8%/1.0M");
+        assert_eq!(format_context_usage(500_000, 1_000_000), "50%/1.0M");
+    }
+
+    #[test]
+    fn format_compact_tokens_handles_millions() {
+        assert_eq!(format_compact_tokens(1_000_000), "1.0M");
+        assert_eq!(format_compact_tokens(1_250_000), "1.2M");
+    }
+
+    #[test]
+    fn format_compact_tokens_handles_thousands() {
+        assert_eq!(format_compact_tokens(9_500), "9.50k");
+        assert_eq!(format_compact_tokens(12_300), "12.3k");
+        assert_eq!(format_compact_tokens(234_000), "234k");
+    }
 
     #[test]
     fn visual_line_count_includes_soft_wraps() {
