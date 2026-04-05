@@ -291,11 +291,13 @@ pub fn format_check_results(results: &[CheckResult], level: GuardrailLevel) -> S
 // -- Prompt guidance text per profile ----------------------------------------
 
 const GUIDANCE_GENERIC: &str = "\
+- Prefer the smallest, local fix over a cross-file refactor.
+- Search for existing patterns first; mirror naming, error handling, and conventions.
 - Keep control flow straightforward and easy to follow.
 - Keep loops, retries, and timeouts bounded.
 - Make error handling explicit — don't silently ignore failures.
-- Prefer small, focused changes over broad rewrites.
 - Leave code warning-free and easy to verify.
+- Don't add new dependencies without explicit user approval.
 ";
 
 const GUIDANCE_ZIG: &str = "\
