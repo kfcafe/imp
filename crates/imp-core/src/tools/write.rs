@@ -15,14 +15,14 @@ impl Tool for WriteTool {
         "Write File"
     }
     fn description(&self) -> &str {
-        "Write content to a file. Creates parent directories automatically."
+        "Write full content to a file, creating parent directories automatically. Best for creating new files or intentionally replacing an entire file."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Path to the file to write" },
-                "content": { "type": "string", "description": "Content to write" }
+                "content": { "type": "string", "description": "Full file content to write" }
             },
             "required": ["path", "content"]
         })

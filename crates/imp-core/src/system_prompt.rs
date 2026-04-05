@@ -182,6 +182,13 @@ fn identity_layer(
         }
     }
 
+    s.push_str("\nTool usage guide:\n");
+    s.push_str("- Use `bash` for search, file discovery, directory listing, builds, tests, git, scripts, package managers, and other shell-native tasks.\n");
+    s.push_str("- Use `read` to inspect a specific file with stable line-oriented output.\n");
+    s.push_str("- Use `scan` for structural code understanding and for extracting code at file:line, file:start-end, or file#symbol.\n");
+    s.push_str("- Use `edit` and `write` for file changes.\n");
+    s.push_str("- Use specialized tools like `mana`, `ask`, `web`, `extend`, `memory`, and `session_search` when the task calls for them.\n");
+
     // Append role instructions after identity layer
     if let Some(role) = role {
         if let Some(ref instructions) = role.instructions {

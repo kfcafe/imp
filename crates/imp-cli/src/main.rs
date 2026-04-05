@@ -1606,8 +1606,8 @@ fn print_headless_human_event(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
-                "grep" => args
-                    .get("pattern")
+                "scan" => args
+                    .get("action")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
@@ -2497,8 +2497,8 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string(),
-                    "grep" => args
-                        .get("pattern")
+                    "scan" => args
+                        .get("action")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string(),

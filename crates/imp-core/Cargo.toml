@@ -52,10 +52,6 @@ libc = "0.2"
 rush-backend = []
 
 [[bench]]
-name = "grep_vs_probe"
-harness = false
-
-[[bench]]
 name = "core_hot_paths"
 harness = false
 

@@ -1,11 +1,15 @@
 use std::process::Stdio;
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
+use regex::Regex;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use super::{truncate_tail, Tool, ToolContext, ToolOutput, ToolUpdate, TruncationResult};
+use super::{
+    truncate_head, truncate_tail, Tool, ToolContext, ToolOutput, ToolUpdate, TruncationResult,
+};
 use crate::error::Result;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -34,12 +38,14 @@ fn run_via_rush(
     command: &str,
     timeout_secs: u64,
     cwd: &std::path::Path,
+    json_output: bool,
 ) -> Option<(String, i32, bool, bool)> {
     let result = rush::run(
         command,
         &rush::RunOptions {
             cwd: Some(cwd.to_path_buf()),
             timeout: Some(timeout_secs),
+            json_output,
             max_output_bytes: Some(MAX_OUTPUT_BYTES),
             ..Default::default()
         },
@@ -85,6 +91,92 @@ fn detect_shell() -> String {
     "sh".to_string()
 }
 
+fn sanitize_output_text(text: &str) -> String {
+    static ANSI_RE: OnceLock<Regex> = OnceLock::new();
+    let re = ANSI_RE.get_or_init(|| {
+        Regex::new(r"\x1B\[[0-9;?]*[ -/]*[@-~]").expect("valid ansi regex")
+    });
+    re.replace_all(text, "").replace('\r', "")
+}
+
+fn looks_like_search_command(command: &str) -> bool {
+    let trimmed = command.trim_start();
+    trimmed.starts_with("grep ")
+        || trimmed.starts_with("grep\n")
+        || trimmed.starts_with("find ")
+        || trimmed == "find"
+        || trimmed.starts_with("ls ")
+        || trimmed == "ls"
+}
+
+#[cfg(feature = "rush-backend")]
+fn should_try_rush_json(command: &str) -> bool {
+    if command.contains("|")
+        || command.contains("&&")
+        || command.contains("||")
+        || command.contains(';')
+        || command.contains('>')
+        || command.contains('<')
+    {
+        return false;
+    }
+
+    looks_like_search_command(command)
+}
+
+#[cfg(feature = "rush-backend")]
+fn parse_json_lines_to_text(command: &str, output: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(output).ok()?;
+    let items = value.as_array()?;
+
+    let mut lines = Vec::new();
+    let is_grep = command.trim_start().starts_with("grep");
+    let is_find = command.trim_start().starts_with("find");
+    let is_ls = command.trim_start().starts_with("ls");
+
+    for item in items {
+        if is_grep {
+            let file = item.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            let line = item.get("line_number").and_then(|v| v.as_u64()).unwrap_or(0);
+            let full_line = item
+                .get("full_line")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim_end_matches('\n');
+            if !file.is_empty() && line > 0 {
+                lines.push(format!("{file}:{line}:{full_line}"));
+            }
+        } else if is_find {
+            if let Some(path) = item.get("path").and_then(|v| v.as_str()) {
+                lines.push(path.to_string());
+            }
+        } else if is_ls {
+            if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                let suffix = match item.get("type").and_then(|v| v.as_str()) {
+                    Some("directory") => "/",
+                    Some("symlink") => "@",
+                    _ => "",
+                };
+                lines.push(format!("{name}{suffix}"));
+            }
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn truncate_command_output(command: &str, output: &str) -> TruncationResult {
+    if looks_like_search_command(command) {
+        truncate_head(output, MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES)
+    } else {
+        truncate_tail(output, MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES)
+    }
+}
+
 pub struct BashTool;
 
 #[async_trait]
@@ -96,14 +188,15 @@ impl Tool for BashTool {
         "Bash"
     }
     fn description(&self) -> &str {
-        "Execute a shell command in the current working directory. Prefer native tools when available; if a native `mana` action exists, use the `mana` tool instead of running `mana ...` via bash."
+        "Execute a shell command in the workspace or an optional working directory. Use it for search, file discovery, builds, tests, git, scripts, and other shell-native tasks."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "Bash command to execute" },
-                "timeout": { "type": "number", "description": "Timeout in seconds (optional)" }
+                "command": { "type": "string", "description": "Shell command to execute, such as grep, find, ls, git, cargo, python, or project scripts" },
+                "timeout": { "type": "number", "description": "Optional timeout in seconds" },
+                "workdir": { "type": "string", "description": "Optional working directory for this command; defaults to the session cwd" }
             },
             "required": ["command"]
         })
@@ -124,6 +217,20 @@ impl Tool for BashTool {
 
         let timeout_secs = params["timeout"].as_u64().unwrap_or(DEFAULT_TIMEOUT_SECS);
 
+        // Support per-command workdir override
+        let ctx = if let Some(workdir) = params["workdir"].as_str() {
+            let wd = super::resolve_path(&ctx.cwd, workdir);
+            if !wd.is_dir() {
+                return Ok(ToolOutput::error(format!(
+                    "workdir not found or not a directory: {}",
+                    wd.display()
+                )));
+            }
+            ToolContext { cwd: wd, ..ctx }
+        } else {
+            ctx
+        };
+
         run_command(command, timeout_secs, &ctx).await
     }
 }
@@ -143,11 +250,18 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
     // Try the rush in-process backend when available.
     #[cfg(feature = "rush-backend")]
     if use_rush_backend() {
+        let rush_json = should_try_rush_json(command);
         if let Some((output, exit_code, timed_out, truncated)) =
-            run_via_rush(command, timeout_secs, &ctx.cwd)
+            run_via_rush(command, timeout_secs, &ctx.cwd, rush_json)
         {
+            let transformed = if rush_json {
+                parse_json_lines_to_text(command, &output).unwrap_or(output)
+            } else {
+                output
+            };
+            let sanitized = sanitize_output_text(&transformed);
             // Stream the output lines so callers see incremental progress.
-            for line in output.lines() {
+            for line in sanitized.lines() {
                 let _ = ctx
                     .update_tx
                     .send(ToolUpdate {
@@ -159,7 +273,7 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
                     .await;
             }
 
-            let mut result_text = output;
+            let mut result_text = sanitized;
             if timed_out {
                 result_text.push_str(&format!("\n[Command timed out after {timeout_secs}s]"));
             }
@@ -239,7 +353,10 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
                 match line {
                     Ok(Some(line)) => {
                         if !line.bytes().any(|b| b == 0) {
-                            append_line(&mut output, &line, &ctx.update_tx).await;
+                            let clean = sanitize_output_text(&line);
+                            if !clean.is_empty() {
+                                append_line(&mut output, &clean, &ctx.update_tx).await;
+                            }
                         }
                     }
                     _ => { stdout_done = true; }
@@ -250,7 +367,10 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
                 match line {
                     Ok(Some(line)) => {
                         if !line.bytes().any(|b| b == 0) {
-                            append_line(&mut output, &line, &ctx.update_tx).await;
+                            let clean = sanitize_output_text(&line);
+                            if !clean.is_empty() {
+                                append_line(&mut output, &clean, &ctx.update_tx).await;
+                            }
                         }
                     }
                     _ => { stderr_done = true; }
@@ -274,18 +394,28 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
         total_lines,
         temp_file,
         ..
-    } = truncate_tail(&output, MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES);
+    } = truncate_command_output(command, &output);
 
     let mut result_text = truncated_output;
 
     if truncated {
-        let note = format!(
-            "\n[Output truncated: showing last {output_lines} of {total_lines} lines{}]",
-            temp_file
-                .as_ref()
-                .map(|p| format!(". Full output saved to {}", p.display()))
-                .unwrap_or_default()
-        );
+        let note = if looks_like_search_command(command) {
+            format!(
+                "\n[Output truncated: showing first {output_lines} of {total_lines} lines{}]",
+                temp_file
+                    .as_ref()
+                    .map(|p| format!(". Full output saved to {}", p.display()))
+                    .unwrap_or_default()
+            )
+        } else {
+            format!(
+                "\n[Output truncated: showing last {output_lines} of {total_lines} lines{}]",
+                temp_file
+                    .as_ref()
+                    .map(|p| format!(". Full output saved to {}", p.display()))
+                    .unwrap_or_default()
+            )
+        };
         result_text.push_str(&note);
     }
 
@@ -555,6 +685,75 @@ mod tests {
         assert!(text.contains("testfile.txt"));
     }
 
+    #[tokio::test]
+    async fn bash_strips_ansi_sequences() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = test_ctx(tmp.path());
+
+        let result = run_command("printf '\\033[1;31mred\\033[0m\\n'", DEFAULT_TIMEOUT_SECS, &ctx)
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let text = match &result.content[0] {
+            imp_llm::ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("red"));
+        assert!(!text.contains("\u{1b}[1;31m"));
+        assert!(!text.contains("\u{1b}[0m"));
+    }
+
+    #[tokio::test]
+    async fn bash_workdir_override_executes_in_target_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let subdir = root.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+        std::fs::write(subdir.join("inside.txt"), "ok").unwrap();
+        let tool = BashTool;
+        let (ctx, _rx) = test_ctx(root.path());
+
+        let result = tool
+            .execute(
+                "c-workdir",
+                serde_json::json!({"command": "ls inside.txt", "workdir": "subdir"}),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let text = match &result.content[0] {
+            imp_llm::ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("inside.txt"));
+    }
+
+    #[tokio::test]
+    async fn bash_invalid_workdir_returns_error() {
+        let root = tempfile::tempdir().unwrap();
+        let tool = BashTool;
+        let (ctx, _rx) = test_ctx(root.path());
+
+        let result = tool
+            .execute(
+                "c-bad-workdir",
+                serde_json::json!({"command": "pwd", "workdir": "missing-dir"}),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        let text = match &result.content[0] {
+            imp_llm::ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("workdir not found"));
+    }
+
+
     // ── rush backend tests ──────────────────────────────────────────
     //
     // Call run_via_rush directly to avoid env-var races between
@@ -565,7 +764,7 @@ mod tests {
     fn test_rush_backend_echo() {
         let tmp = tempfile::tempdir().unwrap();
         let (output, exit_code, timed_out, _truncated) =
-            run_via_rush("echo hello world", DEFAULT_TIMEOUT_SECS, tmp.path())
+            run_via_rush("echo hello world", DEFAULT_TIMEOUT_SECS, tmp.path(), false)
                 .expect("rush should succeed");
 
         assert_eq!(exit_code, 0);
@@ -580,7 +779,7 @@ mod tests {
         std::fs::write(tmp.path().join("afile.txt"), "content").unwrap();
 
         let (output, exit_code, _, _) =
-            run_via_rush("ls", DEFAULT_TIMEOUT_SECS, tmp.path()).expect("rush should succeed");
+            run_via_rush("ls", DEFAULT_TIMEOUT_SECS, tmp.path(), false).expect("rush should succeed");
 
         assert_eq!(exit_code, 0);
         assert!(
@@ -591,11 +790,64 @@ mod tests {
 
     #[test]
     #[cfg(feature = "rush-backend")]
+    fn test_rush_backend_ls_json_text_transform() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("afile.txt"), "content").unwrap();
+
+        let (output, exit_code, _, _) =
+            run_via_rush("ls", DEFAULT_TIMEOUT_SECS, tmp.path(), true).expect("rush should succeed");
+        let text = parse_json_lines_to_text("ls", &output).expect("json should transform");
+
+        assert_eq!(exit_code, 0);
+        assert!(text.contains("afile.txt"));
+    }
+
+    #[test]
+    #[cfg(feature = "rush-backend")]
+    fn test_rush_backend_grep_json_text_transform() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("afile.txt"), "hello needle world\n").unwrap();
+
+        let (output, exit_code, _, _) = run_via_rush(
+            "grep -r needle .",
+            DEFAULT_TIMEOUT_SECS,
+            tmp.path(),
+            true,
+        )
+        .expect("rush should succeed");
+        let text = parse_json_lines_to_text("grep -r needle .", &output).expect("json should transform");
+
+        assert_eq!(exit_code, 0);
+        assert!(text.contains("needle"));
+        assert!(text.contains("afile.txt") || text.contains(":1:"), "unexpected grep text: {text}");
+    }
+
+    #[test]
+    #[cfg(feature = "rush-backend")]
+    fn test_rush_backend_find_json_text_transform() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("afile.txt"), "content").unwrap();
+
+        let (output, exit_code, _, _) = run_via_rush(
+            "find . -name afile.txt",
+            DEFAULT_TIMEOUT_SECS,
+            tmp.path(),
+            true,
+        )
+        .expect("rush should succeed");
+        let text = parse_json_lines_to_text("find . -name afile.txt", &output).expect("json should transform");
+
+        assert_eq!(exit_code, 0);
+        assert!(text.contains("afile.txt"));
+    }
+
+    #[test]
+    #[cfg(feature = "rush-backend")]
     fn test_rush_backend_pipeline() {
         let tmp = tempfile::tempdir().unwrap();
 
         let (output, exit_code, _, _) =
-            run_via_rush("echo foo | cat", DEFAULT_TIMEOUT_SECS, tmp.path())
+            run_via_rush("echo foo | cat", DEFAULT_TIMEOUT_SECS, tmp.path(), false)
                 .expect("rush should succeed");
 
         assert_eq!(exit_code, 0);
@@ -607,7 +859,7 @@ mod tests {
     fn test_rush_backend_exit_code() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let (_, exit_code, _, _) = run_via_rush("exit 42", DEFAULT_TIMEOUT_SECS, tmp.path())
+        let (_, exit_code, _, _) = run_via_rush("exit 42", DEFAULT_TIMEOUT_SECS, tmp.path(), false)
             .expect("rush should return result even on non-zero exit");
 
         assert_eq!(exit_code, 42);

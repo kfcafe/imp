@@ -21,15 +21,15 @@ impl Tool for ReadTool {
         "Read File"
     }
     fn description(&self) -> &str {
-        "Read the contents of a file. Supports text files and images."
+        "Read a specific file with stable, line-oriented output. Supports offsets and limits for focused inspection, and supports images."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Path to the file to read" },
-                "offset": { "type": "number", "description": "Line number to start reading from (1-indexed)" },
-                "limit": { "type": "number", "description": "Maximum number of lines to read" }
+                "offset": { "type": "number", "description": "Optional 1-indexed line number to start reading from" },
+                "limit": { "type": "number", "description": "Optional maximum number of lines to read" }
             },
             "required": ["path"]
         })
