@@ -7,6 +7,7 @@ description = "Lua extension runtime (mlua bridge)"
 
 [dependencies]
 imp-core.workspace = true
+imp-llm.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true

@@ -3173,65 +3173,6 @@ mod integration {
         );
     }
 
-    // ── Test 3: Grep finds a pattern ───────────────────────────────
-
-    #[tokio::test]
-    async fn agent_grep_finds_pattern() {
-        let tmp = tempfile::tempdir().unwrap();
-        let provider = Arc::new(MockProvider::new(vec![
-            tool_call_response(
-                "call_write",
-                "write",
-                serde_json::json!({
-                    "path": "search_me.txt",
-                    "content": "line one\nunique_pattern_xyz here\nline three"
-                }),
-                100,
-                20,
-            ),
-            tool_call_response(
-                "call_grep",
-                "grep",
-                serde_json::json!({"pattern": "unique_pattern_xyz", "path": "."}),
-                100,
-                20,
-            ),
-            text_response("Found it!", 100, 20),
-        ]));
-
-        let (mut agent, handle) = create_agent_with_tools(provider, tmp.path().to_path_buf());
-        drop(handle);
-
-        agent.run("Search for a pattern".to_string()).await.unwrap();
-
-        // Grep result should contain the file path and matching line
-        let grep_result = agent
-            .messages
-            .iter()
-            .find_map(|m| match m {
-                Message::ToolResult(r) if r.tool_call_id == "call_grep" => Some(r),
-                _ => None,
-            })
-            .expect("should have a grep tool result");
-        let grep_text = grep_result
-            .content
-            .iter()
-            .find_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .unwrap();
-        assert!(
-            grep_text.contains("search_me.txt"),
-            "grep should show file path, got: {grep_text}"
-        );
-        assert!(
-            grep_text.contains("unique_pattern_xyz"),
-            "grep should show matching text, got: {grep_text}"
-        );
-    }
-
-
     // ── Test 3: Bash search finds a pattern (synthetic A/B baseline) ──────
 
     #[tokio::test]
