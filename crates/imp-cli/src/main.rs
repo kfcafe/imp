@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -48,6 +48,12 @@ pub struct StartupTiming {
     pub since_previous_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadlessOutputMode {
+    Json,
+    Human,
+}
+
 #[derive(Debug)]
 struct StartupTimer {
     started_at: std::time::Instant,
@@ -92,7 +98,7 @@ use imp_core::system_prompt::{Attempt as TaskAttempt, TaskContext};
 use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
 use imp_core::usage::{UsageCostBreakdown, UsageRecordSource, UsageTokens};
 use imp_core::TimingEvent;
-use imp_llm::auth::AuthStore;
+use imp_llm::auth::{AuthStore, StoredCredential};
 use imp_llm::model::{ModelRegistry, ProviderRegistry};
 use imp_llm::oauth::anthropic::AnthropicOAuth;
 use imp_llm::oauth::chatgpt::ChatGptOAuth;
@@ -187,9 +193,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Log in to an LLM provider. Uses OAuth for Anthropic and OpenAI/ChatGPT; prompts for an API key for other providers.
+    /// Log in to an OAuth provider (Anthropic or OpenAI/ChatGPT)
     Login {
-        /// Provider to log in to (e.g. anthropic, openai, deepseek, groq). Defaults to anthropic.
+        /// OAuth provider to log in to (anthropic or openai). Defaults to anthropic.
+        provider: Option<String>,
+    },
+    /// Save, list, or remove API credentials in secure imp auth storage
+    Secrets {
+        #[command(subcommand)]
+        command: Option<SecretsCommand>,
+        /// Provider/service to configure (e.g. tavily, exa, resend, my-service)
         provider: Option<String>,
     },
     /// Edit configuration
@@ -219,6 +232,39 @@ enum Commands {
     /// Save a web search provider API key into imp auth storage
     WebLogin {
         /// Search provider to configure (tavily, exa, linkup, perplexity)
+        provider: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretsCommand {
+    /// List configured secret providers/services
+    List,
+    /// Alias for list
+    Ls,
+    /// Show metadata for one configured provider/service
+    Show {
+        /// Provider/service to inspect
+        provider: String,
+    },
+    /// Alias for show
+    Inspect {
+        /// Provider/service to inspect
+        provider: String,
+    },
+    /// Remove a configured provider/service from secure storage
+    Remove {
+        /// Provider/service to remove
+        provider: String,
+    },
+    /// Alias for remove
+    Rm {
+        /// Provider/service to remove
+        provider: String,
+    },
+    /// Configure or update a provider/service's secret fields
+    Set {
+        /// Provider/service to configure (e.g. tavily, exa, resend, my-service)
         provider: String,
     },
 }
@@ -528,6 +574,13 @@ async fn main() {
                 }
                 return;
             }
+            Commands::Secrets { command, provider } => {
+                if let Err(e) = run_secrets_command(command.as_ref(), provider.as_deref()).await {
+                    eprintln!("Secrets command failed: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
             Commands::Config => {
                 let config_dir = Config::user_config_dir();
                 let config_path = config_dir.join("config.toml");
@@ -574,7 +627,6 @@ async fn main() {
 
     // Read from stdin if piped
     let stdin_content = {
-        use std::io::IsTerminal;
         if !std::io::stdin().is_terminal() {
             use std::io::Read;
             let mut buf = String::new();
@@ -695,6 +747,60 @@ fn search_provider_docs_url(provider: SearchProvider) -> &'static str {
     }
 }
 
+fn parse_secret_field_names(input: &str) -> Vec<String> {
+    let names: Vec<String> = input
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string())
+        .collect();
+    if names.is_empty() {
+        vec!["api_key".to_string()]
+    } else {
+        names
+    }
+}
+
+fn prompt_for_secret_fields(
+    _provider_name: &str,
+    display_name: &str,
+    docs_hint: &str,
+) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+    if docs_hint.is_empty() {
+        eprintln!("Saving credentials for {display_name}.");
+    } else {
+        eprintln!("Saving credentials for {display_name}. Get them at: {docs_hint}");
+    }
+
+    eprintln!("Field names (comma-separated) [api_key]:");
+    eprint!("> ");
+    io::stdout().flush().ok();
+    let mut field_input = String::new();
+    std::io::stdin().read_line(&mut field_input)?;
+    let field_names = parse_secret_field_names(&field_input);
+
+    let mut fields = HashMap::new();
+    for field in field_names {
+        eprintln!("Enter {field}:");
+        eprint!("> ");
+        io::stdout().flush().ok();
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let value = input.trim().to_string();
+        if value.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("No value entered for {field}. Aborting."),
+            )
+            .into());
+        }
+        fields.insert(field, value);
+    }
+
+    Ok(fields)
+}
+
 async fn run_web_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let provider = search_provider_from_name(provider_name).ok_or_else(|| {
         io::Error::new(
@@ -709,28 +815,12 @@ async fn run_web_login(provider_name: &str) -> Result<(), Box<dyn std::error::Er
     let mut auth_store =
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
 
-    let env_key = provider.env_key_name();
-    eprintln!("Enter API key for {}:", provider.name());
-    eprintln!("  Env var: {env_key}");
-    eprintln!("  Get a key at: {}", search_provider_docs_url(provider));
-    eprint!("> ");
-    io::stdout().flush().ok();
+    let _env_key = provider.env_key_name();
+    let fields = prompt_for_secret_fields(provider.name(), provider.name(), search_provider_docs_url(provider))?;
 
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    let key = input.trim().to_string();
-
-    if key.is_empty() {
-        eprintln!("No key entered. Aborting.");
-        std::process::exit(1);
-    }
-
-    auth_store.store(
-        provider.name(),
-        imp_llm::auth::StoredCredential::ApiKey { key },
-    )?;
+    auth_store.store_secret_fields(provider.name(), fields)?;
     eprintln!(
-        "API key saved for {} in {}.",
+        "Credentials saved for {} in secure imp auth storage (metadata: {}).",
         provider.name(),
         auth_path.display()
     );
@@ -739,6 +829,172 @@ async fn run_web_login(provider_name: &str) -> Result<(), Box<dyn std::error::Er
         provider.name()
     );
 
+    Ok(())
+}
+
+async fn run_secrets_command(
+    command: Option<&SecretsCommand>,
+    provider: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        Some(SecretsCommand::List) | Some(SecretsCommand::Ls) => run_secrets_list(),
+        Some(SecretsCommand::Show { provider }) | Some(SecretsCommand::Inspect { provider }) => {
+            run_secrets_show(provider)
+        }
+        Some(SecretsCommand::Remove { provider }) | Some(SecretsCommand::Rm { provider }) => {
+            run_secrets_remove(provider)
+        }
+        Some(SecretsCommand::Set { provider }) => run_secrets_login(provider).await,
+        None => {
+            let provider = provider.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Usage: imp secrets <provider> | imp secrets list | imp secrets show <provider> | imp secrets rm <provider>",
+                )
+            })?;
+            run_secrets_login(provider).await
+        }
+    }
+}
+
+fn run_secrets_list() -> Result<(), Box<dyn std::error::Error>> {
+    let auth_path = Config::user_config_dir().join("auth.json");
+    let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
+
+    if auth_store.stored.is_empty() {
+        println!("No saved credentials.");
+        return Ok(());
+    }
+
+    let registry = ProviderRegistry::with_builtins();
+    let mut rows: Vec<(String, String, String)> = auth_store
+        .stored
+        .iter()
+        .map(|(name, entry)| {
+            let display_name = registry
+                .find(name)
+                .map(|meta| meta.name.to_string())
+                .unwrap_or_else(|| name.clone());
+            let kind = match entry {
+                StoredCredential::OAuth(_) => "oauth".to_string(),
+                StoredCredential::ApiKey { .. } => "api_key".to_string(),
+                StoredCredential::SecretFields { fields } => {
+                    if fields.len() == 1 && fields.first().map(String::as_str) == Some("api_key") {
+                        "api_key".to_string()
+                    } else {
+                        format!("{} fields", fields.len())
+                    }
+                }
+            };
+            let fields = match entry {
+                StoredCredential::OAuth(_) => "access_token".to_string(),
+                StoredCredential::ApiKey { .. } => "api_key".to_string(),
+                StoredCredential::SecretFields { fields } => fields.join(", "),
+            };
+            (name.clone(), display_name, kind + "|" + &fields)
+        })
+        .collect();
+
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let provider_w = rows
+        .iter()
+        .map(|(id, display, _)| format!("{} ({})", display, id).len())
+        .max()
+        .unwrap_or(8)
+        .max("Provider".len());
+    let kind_w = rows
+        .iter()
+        .filter_map(|(_, _, payload)| payload.split_once('|').map(|(kind, _)| kind.len()))
+        .max()
+        .unwrap_or(4)
+        .max("Kind".len());
+
+    println!(
+        "{:<provider_w$}  {:<kind_w$}  {}",
+        "Provider",
+        "Kind",
+        "Fields",
+        provider_w = provider_w,
+        kind_w = kind_w
+    );
+    println!(
+        "{:-<provider_w$}  {:-<kind_w$}  {:-<6}",
+        "",
+        "",
+        "",
+        provider_w = provider_w,
+        kind_w = kind_w
+    );
+
+    for (id, display_name, payload) in rows {
+        let (kind, fields) = payload.split_once('|').unwrap_or(("", ""));
+        println!(
+            "{:<provider_w$}  {:<kind_w$}  {}",
+            format!("{} ({})", display_name, id),
+            kind,
+            fields,
+            provider_w = provider_w,
+            kind_w = kind_w
+        );
+    }
+
+    Ok(())
+}
+
+fn run_secrets_show(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let auth_path = Config::user_config_dir().join("auth.json");
+    let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
+    let registry = ProviderRegistry::with_builtins();
+
+    let entry = auth_store.stored.get(provider).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("No saved credentials for {provider}."),
+        )
+    })?;
+
+    let display_name = registry
+        .find(provider)
+        .map(|meta| meta.name.to_string())
+        .unwrap_or_else(|| provider.to_string());
+
+    let (kind, fields): (&str, Vec<String>) = match entry {
+        StoredCredential::OAuth(_) => ("oauth", vec!["access_token".into()]),
+        StoredCredential::ApiKey { .. } => ("api_key", vec!["api_key".into()]),
+        StoredCredential::SecretFields { fields } => ("secret_fields", fields.clone()),
+    };
+
+    println!("Provider : {} ({})", display_name, provider);
+    println!("Kind     : {}", kind);
+    println!("Fields   : {}", fields.join(", "));
+    println!("Storage  : secure keychain + auth metadata");
+    println!("Values   : hidden");
+    Ok(())
+}
+
+fn run_secrets_remove(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let auth_path = Config::user_config_dir().join("auth.json");
+    let mut auth_store =
+        AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+    auth_store.remove(provider)?;
+    eprintln!("Removed saved credentials for {provider}.");
+    Ok(())
+}
+
+async fn run_secrets_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let auth_path = Config::user_config_dir().join("auth.json");
+    let mut auth_store =
+        AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+
+    let registry = ProviderRegistry::with_builtins();
+    let provider_meta = registry.find(provider_name);
+    let display_name = provider_meta.map(|p| p.name).unwrap_or(provider_name);
+    let docs_hint = provider_meta.map(|p| p.docs_url).unwrap_or("");
+
+    let fields = prompt_for_secret_fields(provider_name, display_name, docs_hint)?;
+    auth_store.store_secret_fields(provider_name, fields)?;
+    eprintln!("Credentials saved for {display_name}.");
     Ok(())
 }
 
@@ -817,33 +1073,13 @@ async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>
             oauth_login_success_message(&auth_store, "openai-codex")
         );
     } else {
-        // For all other providers: prompt for an API key.
-        let registry = ProviderRegistry::with_builtins();
-        let provider_meta = registry.find(provider_name);
-        let display_name = provider_meta.map(|p| p.name).unwrap_or(provider_name);
-        let docs_hint = provider_meta.map(|p| p.docs_url).unwrap_or("");
-
-        eprintln!("Enter API key for {display_name}:");
-        if !docs_hint.is_empty() {
-            eprintln!("  Get a key at: {docs_hint}");
-        }
-        eprint!("> ");
-        io::stdout().flush().ok();
-
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        let key = input.trim().to_string();
-
-        if key.is_empty() {
-            eprintln!("No key entered. Aborting.");
-            std::process::exit(1);
-        }
-
-        auth_store.store(
-            provider_name,
-            imp_llm::auth::StoredCredential::ApiKey { key },
-        )?;
-        eprintln!("API key saved for {display_name}.");
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "`imp login {provider_name}` is only for OAuth providers. Use `imp secrets {provider_name}` for API keys/secrets."
+            ),
+        )
+        .into());
     }
 
     Ok(())
@@ -1030,8 +1266,19 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
     emit_startup_timing(&mut startup_timer, StartupStage::RunLoopStarted);
 
+    let output_mode = determine_headless_output_mode(&cli.mode, io::stdout().is_terminal());
+    let mut printed_trailing_newline = false;
+
     while let Some(event) = session.recv_event().await {
-        print_json_event(&event)?;
+        match output_mode {
+            HeadlessOutputMode::Json => print_json_event(&event)?,
+            HeadlessOutputMode::Human => print_headless_human_event(
+                &event,
+                !cli.no_tools,
+                cli.verbose,
+                &mut printed_trailing_newline,
+            )?,
+        }
     }
 
     session
@@ -1319,6 +1566,99 @@ fn format_timing_event(timing: &TimingEvent) -> String {
         timing.since_turn_start_ms,
         timing.since_llm_request_start_ms,
     )
+}
+
+fn determine_headless_output_mode(cli_mode: &str, stdout_is_terminal: bool) -> HeadlessOutputMode {
+    match cli_mode {
+        "json" | "rpc" => HeadlessOutputMode::Json,
+        _ if stdout_is_terminal => HeadlessOutputMode::Human,
+        _ => HeadlessOutputMode::Json,
+    }
+}
+
+fn print_headless_human_event(
+    event: &AgentEvent,
+    show_tools: bool,
+    verbose: bool,
+    printed_trailing_newline: &mut bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match event {
+        AgentEvent::MessageDelta { delta } => match delta {
+            StreamEvent::TextDelta { text } => {
+                print!("{text}");
+                io::stdout().flush()?;
+                *printed_trailing_newline = false;
+            }
+            StreamEvent::ThinkingDelta { text } => eprint!("{text}"),
+            _ => {}
+        },
+        AgentEvent::ToolExecutionStart {
+            tool_name, args, ..
+        } if show_tools => {
+            let summary = match tool_name.as_str() {
+                "bash" => args
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .map(|c| truncate_chars_with_suffix(c, 60, "…"))
+                    .unwrap_or_default(),
+                "read" | "write" | "edit" => args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                "grep" => args
+                    .get("pattern")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                _ => String::new(),
+            };
+            if summary.is_empty() {
+                eprintln!("[tool: {tool_name}]");
+            } else {
+                eprintln!("[tool: {tool_name} {summary}]");
+            }
+        }
+        AgentEvent::ToolExecutionEnd { result, .. } if show_tools => {
+            if result.is_error {
+                let text: String = result
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !text.is_empty() {
+                    eprintln!("[error: {}]", truncate_chars_with_suffix(&text, 100, ""));
+                }
+            }
+        }
+        AgentEvent::TurnEnd { .. } => {
+            if !*printed_trailing_newline {
+                println!();
+                *printed_trailing_newline = true;
+            }
+        }
+        AgentEvent::Error { error } => {
+            eprintln!("Error: {error}");
+        }
+        AgentEvent::Timing { timing } => {
+            if verbose {
+                eprintln!("{}", format_timing_event(timing));
+            }
+        }
+        AgentEvent::AgentEnd { usage, cost } => {
+            eprintln!(
+                "\n[tokens: ↑{} ↓{} | cost: ${:.4}]",
+                usage.input_tokens, usage.output_tokens, cost.total
+            );
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
 
 fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>> {
@@ -2337,6 +2677,34 @@ mod tests {
         AuthStore::new(std::path::PathBuf::from("auth.json"))
     }
 
+    #[test]
+    fn determine_headless_output_mode_prefers_human_for_terminal_run() {
+        assert_eq!(
+            determine_headless_output_mode("interactive", true),
+            HeadlessOutputMode::Human
+        );
+        assert_eq!(
+            determine_headless_output_mode("anything-else", true),
+            HeadlessOutputMode::Human
+        );
+    }
+
+    #[test]
+    fn determine_headless_output_mode_keeps_json_for_piped_or_explicit_protocol_modes() {
+        assert_eq!(
+            determine_headless_output_mode("interactive", false),
+            HeadlessOutputMode::Json
+        );
+        assert_eq!(
+            determine_headless_output_mode("json", true),
+            HeadlessOutputMode::Json
+        );
+        assert_eq!(
+            determine_headless_output_mode("rpc", true),
+            HeadlessOutputMode::Json
+        );
+    }
+
     // ── parse_thinking_level ───────────────────────────────────────
 
     #[test]
@@ -2672,6 +3040,7 @@ mod tests {
                 started_at: None,
                 summary: Some("timed out".to_string()),
             }],
+            files: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
         };
         let prompt = unit.task_prompt();
@@ -2692,6 +3061,7 @@ mod tests {
             verify: None,
             notes: None,
             attempts: Vec::new(),
+            files: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
         };
         let prompt = unit.task_prompt();
