@@ -143,6 +143,8 @@ pub struct Agent {
     pub read_max_lines: usize,
     /// Cache options for LLM requests.
     pub cache_options: imp_llm::CacheOptions,
+    /// Tracks identical consecutive tool calls to detect loops.
+    last_tool_call: std::sync::Arc<std::sync::Mutex<Option<RepeatedToolCallState>>>,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_rx: mpsc::Receiver<AgentCommand>,
@@ -152,6 +154,20 @@ pub struct Agent {
 pub struct AgentHandle {
     pub event_rx: mpsc::Receiver<AgentEvent>,
     pub command_tx: mpsc::Sender<AgentCommand>,
+}
+
+#[derive(Debug, Clone)]
+struct RepeatedToolCallState {
+    tool_name: String,
+    args_json: String,
+    consecutive: usize,
+}
+
+#[derive(Debug, Clone)]
+enum RepeatedToolCallCheck {
+    Ok,
+    Warn(String),
+    Block(imp_llm::ToolResultMessage),
 }
 
 impl Agent {
@@ -190,6 +206,7 @@ impl Agent {
                 extended_ttl: false,
                 global_scope: false,
             },
+            last_tool_call: Arc::new(std::sync::Mutex::new(None)),
 
             event_tx,
             command_rx,
@@ -639,6 +656,51 @@ impl Agent {
         results.into_iter().map(|(_, result)| result).collect()
     }
 
+    fn repeated_tool_call_check(
+        &self,
+        call_id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> RepeatedToolCallCheck {
+        let args_json = serde_json::to_string(args).unwrap_or_else(|_| "<unserializable>".into());
+        let mut state = match self.last_tool_call.lock() {
+            Ok(s) => s,
+            Err(_) => return RepeatedToolCallCheck::Ok,
+        };
+
+        let consecutive = match state.as_mut() {
+            Some(prev) if prev.tool_name == tool_name && prev.args_json == args_json => {
+                prev.consecutive += 1;
+                prev.consecutive
+            }
+            _ => {
+                *state = Some(RepeatedToolCallState {
+                    tool_name: tool_name.to_string(),
+                    args_json,
+                    consecutive: 1,
+                });
+                1
+            }
+        };
+
+        if consecutive == 3 {
+            return RepeatedToolCallCheck::Warn(format!(
+                "Warning: identical tool call repeated 3 times in a row for '{tool_name}'. The result may not have changed. Consider using the information you already have or trying a different action."
+            ));
+        }
+
+        if consecutive >= 4 {
+            return RepeatedToolCallCheck::Block(
+                crate::tools::ToolOutput::error(format!(
+                    "Blocked: identical tool call repeated {consecutive} times in a row for '{tool_name}'. The result likely has not changed. Use the information you already have or try a different action."
+                ))
+                .into_tool_result(call_id, tool_name),
+            );
+        }
+
+        RepeatedToolCallCheck::Ok
+    }
+
     async fn execute_one_tool(
         &self,
         call_id: &str,
@@ -646,6 +708,22 @@ impl Agent {
         args: serde_json::Value,
         cancel_token: Arc<std::sync::atomic::AtomicBool>,
     ) -> imp_llm::ToolResultMessage {
+        let repeat_check = self.repeated_tool_call_check(call_id, tool_name, &args);
+        if let RepeatedToolCallCheck::Block(loop_result) = repeat_check {
+            self.emit(AgentEvent::ToolExecutionStart {
+                tool_call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                args: args.clone(),
+            })
+            .await;
+            self.emit(AgentEvent::ToolExecutionEnd {
+                tool_call_id: call_id.to_string(),
+                result: loop_result.clone(),
+            })
+            .await;
+            return loop_result;
+        }
+
         self.emit(AgentEvent::ToolExecutionStart {
             tool_call_id: call_id.to_string(),
             tool_name: tool_name.to_string(),
@@ -825,6 +903,12 @@ impl Agent {
             result: result.clone(),
         })
         .await;
+
+        if let RepeatedToolCallCheck::Warn(warning) = repeat_check {
+            result.content.push(imp_llm::ContentBlock::Text {
+                text: format!("\n\n{warning}"),
+            });
+        }
 
         result
     }
@@ -2793,9 +2877,7 @@ mod integration {
     use imp_llm::provider::Provider;
     use tokio::sync::Mutex;
 
-    use crate::tools::{
-        bash::BashTool, edit::EditTool, grep::GrepTool, read::ReadTool, write::WriteTool,
-    };
+    use crate::tools::{bash::BashTool, edit::EditTool, read::ReadTool, write::WriteTool};
 
     // ── Shared test helpers (duplicated from unit tests to keep modules independent) ──
 
@@ -2930,14 +3012,27 @@ mod integration {
         ]
     }
 
-    /// Create an agent pre-loaded with all native filesystem and shell tools.
+    /// Create an agent pre-loaded with the reduced default tool set used by tests.
     fn create_agent_with_tools(provider: Arc<dyn Provider>, cwd: PathBuf) -> (Agent, AgentHandle) {
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, cwd);
         agent.tools.register(Arc::new(WriteTool));
         agent.tools.register(Arc::new(ReadTool));
         agent.tools.register(Arc::new(EditTool));
-        agent.tools.register(Arc::new(GrepTool));
+        agent.tools.register(Arc::new(BashTool));
+        (agent, handle)
+    }
+
+    /// Create an agent with reduced tools only (used for synthetic A/B tests).
+    fn create_agent_with_reduced_tools(
+        provider: Arc<dyn Provider>,
+        cwd: PathBuf,
+    ) -> (Agent, AgentHandle) {
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, cwd);
+        agent.tools.register(Arc::new(WriteTool));
+        agent.tools.register(Arc::new(ReadTool));
+        agent.tools.register(Arc::new(EditTool));
         agent.tools.register(Arc::new(BashTool));
         (agent, handle)
     }
@@ -3134,6 +3229,137 @@ mod integration {
             grep_text.contains("unique_pattern_xyz"),
             "grep should show matching text, got: {grep_text}"
         );
+    }
+
+
+    // ── Test 3: Bash search finds a pattern (synthetic A/B baseline) ──────
+
+    #[tokio::test]
+    async fn agent_bash_search_finds_pattern() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("search_me.txt"),
+            "line one\nunique_pattern_xyz here\nline three\n",
+        )
+        .unwrap();
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_bash",
+                "bash",
+                serde_json::json!({"command": "grep --no-color -rn 'unique_pattern_xyz' ."}),
+                100,
+                20,
+            ),
+            text_response("Found it!", 100, 20),
+        ]));
+
+        let (mut agent, handle) = create_agent_with_reduced_tools(provider, tmp.path().to_path_buf());
+        drop(handle);
+
+        agent.run("Search for a pattern".to_string()).await.unwrap();
+
+        let bash_result = agent
+            .messages
+            .iter()
+            .find_map(|m| match m {
+                Message::ToolResult(r) if r.tool_call_id == "call_bash" => Some(r),
+                _ => None,
+            })
+            .expect("should have a bash tool result");
+        let bash_text = bash_result
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!bash_text.trim().is_empty(), "bash grep output should not be empty");
+    }
+
+    // ── Test 3b: repeated identical tool calls warn and then block ────────
+
+    #[tokio::test]
+    async fn agent_repeated_tool_calls_warn_then_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("repeat.txt"), "same content\n").unwrap();
+
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_1",
+                "read",
+                serde_json::json!({"path": "repeat.txt"}),
+                100,
+                20,
+            ),
+            tool_call_response(
+                "call_2",
+                "read",
+                serde_json::json!({"path": "repeat.txt"}),
+                100,
+                20,
+            ),
+            tool_call_response(
+                "call_3",
+                "read",
+                serde_json::json!({"path": "repeat.txt"}),
+                100,
+                20,
+            ),
+            tool_call_response(
+                "call_4",
+                "read",
+                serde_json::json!({"path": "repeat.txt"}),
+                100,
+                20,
+            ),
+            text_response("Done", 100, 20),
+        ]));
+
+        let (mut agent, handle) = create_agent_with_reduced_tools(provider, tmp.path().to_path_buf());
+        drop(handle);
+
+        agent.run("Read the same file repeatedly".to_string()).await.unwrap();
+
+        let third = agent
+            .messages
+            .iter()
+            .find_map(|m| match m {
+                Message::ToolResult(r) if r.tool_call_id == "call_3" => Some(r),
+                _ => None,
+            })
+            .expect("third tool result");
+        let fourth = agent
+            .messages
+            .iter()
+            .find_map(|m| match m {
+                Message::ToolResult(r) if r.tool_call_id == "call_4" => Some(r),
+                _ => None,
+            })
+            .expect("fourth tool result");
+
+        let third_text = third
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let fourth_text = fourth
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(third_text.contains("Warning: identical tool call repeated 3 times"));
+        assert!(fourth.is_error);
+        assert!(fourth_text.contains("Blocked: identical tool call repeated 4 times"));
     }
 
     // ── Test 4: Bash runs a command ────────────────────────────────
@@ -3496,23 +3722,16 @@ mod mode_tests {
     fn agent_mode_enforcement_orchestrator_excludes_write_tools() {
         use crate::config::AgentMode;
         use crate::tools::ToolRegistry;
-        use crate::tools::diff::{DiffApplyTool, DiffShowTool};
 
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(EchoTool)); // "echo" — not in orchestrator allow-list
         registry.register(Arc::new(NamedWriteTool("write")));
         registry.register(Arc::new(NamedWriteTool("edit")));
         registry.register(Arc::new(NamedWriteTool("bash")));
-        registry.register(Arc::new(DiffShowTool));
-        registry.register(Arc::new(DiffApplyTool));
 
         // Apply the mode filter exactly as AgentBuilder would
         let mode = AgentMode::Orchestrator;
         registry.retain(|name| mode.allows_tool(name));
-
-        // Readonly diff tool should remain visible; mutating diff tool should not.
-        assert!(registry.get("diff_show").is_some(), "diff_show must remain available");
-        assert!(registry.get("diff_apply").is_none(), "diff_apply must be filtered out");
 
         // Write-category tools must be absent
         assert!(
@@ -3597,8 +3816,7 @@ mod mode_tests {
 
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
-        // Orchestrator allows "read", "grep", "find", "ls", "scan", "web", "diff_show", "mana", "ask"
-        // We use Full mode but register "echo" and let the mode allow it via Full
+        // Full mode keeps custom tools available
         agent.mode = AgentMode::Full;
         agent.tools.register(Arc::new(EchoTool));
 
