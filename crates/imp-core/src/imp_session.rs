@@ -340,13 +340,8 @@ impl ImpSession {
             .take()
             .ok_or_else(|| Error::Config("Agent already consumed".into()))?;
 
-        let mut history: Vec<imp_llm::Message> = self
-            .session_mgr
-            .get_messages()
-            .iter()
-            .cloned()
-            .cloned()
-            .collect();
+        let mut history: Vec<imp_llm::Message> =
+            self.session_mgr.get_active_messages();
 
         // The prompt was already appended to session history so resume/tree state
         // is correct, but Agent::run() will push the active prompt itself. Remove
@@ -898,12 +893,7 @@ mod tests {
         }
         session.wait().await.unwrap();
 
-        let messages: Vec<_> = session
-            .session_mgr
-            .get_messages()
-            .into_iter()
-            .cloned()
-            .collect();
+        let messages: Vec<_> = session.session_mgr.get_active_messages();
         assert_eq!(messages.len(), 3);
         match &messages[0] {
             imp_llm::Message::User(user) => match user.content.as_slice() {
@@ -923,6 +913,111 @@ mod tests {
             imp_llm::Message::Assistant(assistant) => match assistant.content.as_slice() {
                 [ContentBlock::Text { text }] => assert_eq!(text, "done"),
                 other => panic!("unexpected assistant content: {other:?}"),
+            },
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_uses_compacted_active_history_for_follow_up_turns() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let session_dir = tmp.path().join("sessions");
+        let model = test_model_with_events(vec![Ok(StreamEvent::MessageEnd {
+            message: AssistantMessage {
+                content: vec![ContentBlock::Text {
+                    text: "follow-up done".into(),
+                }],
+                usage: None,
+                stop_reason: StopReason::EndTurn,
+                timestamp: 99,
+            },
+        })]);
+        let mut session_mgr = SessionManager::new(&cwd, &session_dir).unwrap();
+        session_mgr
+            .append(SessionEntry::Message {
+                id: "u1".into(),
+                parent_id: None,
+                message: imp_llm::Message::user("older request"),
+            })
+            .unwrap();
+        session_mgr
+            .append(SessionEntry::Message {
+                id: "a1".into(),
+                parent_id: None,
+                message: imp_llm::Message::Assistant(AssistantMessage {
+                    content: vec![ContentBlock::Text {
+                        text: "older answer".into(),
+                    }],
+                    usage: None,
+                    stop_reason: StopReason::EndTurn,
+                    timestamp: 1,
+                }),
+            })
+            .unwrap();
+        session_mgr
+            .append(SessionEntry::Message {
+                id: "u2".into(),
+                parent_id: None,
+                message: imp_llm::Message::user("recent request"),
+            })
+            .unwrap();
+        session_mgr
+            .append(SessionEntry::Compaction {
+                id: "c1".into(),
+                parent_id: None,
+                summary: "[CONTEXT COMPACTION] compacted summary".into(),
+                first_kept_id: "u2".into(),
+                tokens_before: 100,
+                tokens_after: 40,
+            })
+            .unwrap();
+
+        let (agent, handle) = Agent::new(clone_model(&model), cwd.clone());
+        let mut session = ImpSession {
+            agent: Some(agent),
+            handle,
+            session_mgr,
+            config: Config::default(),
+            model,
+            auth_store: AuthStore::new(tmp.path().join("auth.json")),
+            model_registry: ModelRegistry::with_builtins(),
+            cwd,
+            agent_task: None,
+            completed_run_result: None,
+            pending_persistence_errors: VecDeque::new(),
+            context_prefill: Vec::new(),
+            context_prefill_injected: false,
+        };
+
+        session.prompt("new follow-up").await.unwrap();
+        while let Some(event) = session.recv_event().await {
+            if matches!(event, AgentEvent::AgentEnd { .. }) {
+                break;
+            }
+        }
+        session.wait().await.unwrap();
+
+        let messages = session.session_mgr.get_active_messages();
+        assert_eq!(messages.len(), 4);
+        match &messages[0] {
+            imp_llm::Message::User(user) => match user.content.as_slice() {
+                [ContentBlock::Text { text }] => assert!(text.contains("CONTEXT COMPACTION")),
+                other => panic!("unexpected summary content: {other:?}"),
+            },
+            other => panic!("unexpected message: {other:?}"),
+        }
+        match &messages[1] {
+            imp_llm::Message::User(user) => match user.content.as_slice() {
+                [ContentBlock::Text { text }] => assert_eq!(text, "recent request"),
+                other => panic!("unexpected recent user content: {other:?}"),
+            },
+            other => panic!("unexpected message: {other:?}"),
+        }
+        match &messages[2] {
+            imp_llm::Message::User(user) => match user.content.as_slice() {
+                [ContentBlock::Text { text }] => assert_eq!(text, "new follow-up"),
+                other => panic!("unexpected follow-up content: {other:?}"),
             },
             other => panic!("unexpected message: {other:?}"),
         }

@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod builder;
+pub mod compaction;
 pub mod config;
 pub mod context;
 pub mod context_prefill;
