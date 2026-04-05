@@ -67,12 +67,17 @@ pub fn discover_agents_md(cwd: &Path, user_config_dir: &Path) -> Vec<AgentsMd> {
 
 /// Discover skills from user and project directories.
 pub fn discover_skills(cwd: &Path, user_config_dir: &Path) -> Vec<Skill> {
-    let mut skills = Vec::new();
+    let mut by_name = HashMap::new();
+    let mut dirs = vec![user_config_dir.join("skills")];
 
-    let dirs = [
-        user_config_dir.join("skills"),
-        cwd.join(".imp").join("skills"),
-    ];
+    let mut ancestry = Vec::new();
+    let mut dir = Some(cwd);
+    while let Some(current) = dir {
+        ancestry.push(current.join(".imp").join("skills"));
+        dir = current.parent();
+    }
+    ancestry.reverse();
+    dirs.extend(ancestry);
 
     for dir in &dirs {
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -86,17 +91,22 @@ pub fn discover_skills(cwd: &Path, user_config_dir: &Path) -> Vec<Skill> {
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default();
                         let description = extract_description(&content);
-                        skills.push(Skill {
-                            name,
-                            description,
-                            path: skill_file,
-                        });
+                        by_name.insert(
+                            name.clone(),
+                            Skill {
+                                name,
+                                description,
+                                path: skill_file,
+                            },
+                        );
                     }
                 }
             }
         }
     }
 
+    let mut skills: Vec<Skill> = by_name.into_values().collect();
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
 }
 
@@ -293,6 +303,48 @@ mod tests {
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"global-skill"));
         assert!(names.contains(&"local-skill"));
+    }
+
+    #[test]
+    fn resource_discover_skills_walks_up_from_cwd() {
+        let dir = TempDir::new().unwrap();
+        let user_dir = dir.path().join("config");
+        fs::create_dir_all(&user_dir).unwrap();
+
+        let project = dir.path().join("project");
+        let nested = project.join("src").join("deep");
+        let skills_dir = project.join(".imp").join("skills").join("project-skill");
+        fs::create_dir_all(&skills_dir).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            skills_dir.join("SKILL.md"),
+            "# Project Skill\n\nProject-specific automation.\n",
+        )
+        .unwrap();
+
+        let skills = discover_skills(&nested, &user_dir);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "project-skill");
+    }
+
+    #[test]
+    fn resource_discover_skills_project_overrides_user_by_name() {
+        let dir = TempDir::new().unwrap();
+        let user_dir = dir.path().join("config");
+        let user_skill = user_dir.join("skills").join("mana");
+        fs::create_dir_all(&user_skill).unwrap();
+        fs::write(user_skill.join("SKILL.md"), "# Mana\n\nUser version.\n").unwrap();
+
+        let project = dir.path().join("project");
+        let project_skill = project.join(".imp").join("skills").join("mana");
+        fs::create_dir_all(&project_skill).unwrap();
+        fs::write(project_skill.join("SKILL.md"), "# Mana\n\nProject version.\n").unwrap();
+
+        let skills = discover_skills(&project, &user_dir);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "mana");
+        assert!(skills[0].description.contains("Project version"));
+        assert_eq!(skills[0].path, project_skill.join("SKILL.md"));
     }
 
     #[test]

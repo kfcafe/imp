@@ -107,7 +107,7 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
 
     // Layer 3: Skills index
     if !p.skills.is_empty() {
-        parts.push(skills_layer(p.skills));
+        parts.push(skills_layer(p.skills, p.mode));
     }
 
     // Layer 4: Mana facts
@@ -146,55 +146,6 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
     }
 }
 
-/// Mana delegation guidance injected when the mana tool is available and the
-/// mode can create child jobs (Full, Orchestrator, Planner).
-const MANA_DELEGATION_GUIDANCE: &str = "\
-## Mana delegation
-
-Mana is the delegation substrate. When work is too broad for one pass, create child jobs. \
-Do not invent a separate todo or planning system.
-
-### When to decompose
-- Task touches >5 files or has >3 independent outcomes → child jobs
-- Task mixes investigation with implementation → separate them
-- Task has sequential phases → child jobs with dependencies
-- If you can finish it in <5 tool calls, just do it
-
-### Writing child job descriptions
-You are the orchestrator. Child jobs run on non-thinking workers who follow \
-instructions literally. Do the thinking yourself — put the solution in the \
-description, not the problem.
-
-Each description must include:
-1. Goal and current state — what exists now, what needs to change
-2. Concrete numbered steps — the worker follows these literally
-3. File paths with intent — e.g. `src/auth.rs (add validate_token fn)`
-4. Embedded context — paste types, signatures, patterns the worker needs; don't make it search
-5. Scope boundaries — what's in, what's explicitly out
-6. What NOT to do — anti-patterns or known pitfalls
-
-Bad: \"implement caching\" / \"investigate the bug\" / \"add validation\"
-Good: \"Add LRU cache in src/cache.rs: 1000 entries, keyed by RequestId, invalidate on write in update_record()\"
-
-### Verify commands
-The verify gate is the safety net. Weak verify = work completes without being correct.
-
-Good: `grep -rq \"fn validate_email\" src/ && cargo test auth::validation`
-Bad: `cargo check` (compilation ≠ correctness), `cargo test` (too broad), `echo done` (always passes)
-
-Always pair test filters with existence checks — `cargo test my_filter` exits 0 with 0 matching tests.
-
-### Rules
-- One outcome per child job. 1-5 files, 1-5 functions.
-- Pick the approach. If two could work, choose one — don't make the worker decide.
-- Size for one pass. If you can't fully specify the solution, split further.
-- Never retry identical instructions. Diagnose the failure, update the description.
-
-### After child jobs complete
-Check results with mana show. Synthesize: what changed, what files were touched, \
-what's unresolved, what to do next. Don't replay raw transcripts.
-If a child failed, diagnose the root cause before retrying or creating a new child.";
-
 fn identity_layer(
     tools: &ToolRegistry,
     role: Option<&Role>,
@@ -231,12 +182,6 @@ fn identity_layer(
         }
     }
 
-    if defs.iter().any(|def| def.name == "mana") && defs.iter().any(|def| def.name == "bash") {
-        s.push_str(
-            "\nMana guidance:\n- Prefer the native `mana` tool for mana operations instead of `bash` commands like `mana ...` whenever an equivalent native action exists.\n- If you need mana status, listing, show/read, create/update/close/claim/release, logs, agents, next, tree, or orchestration runs, use the native `mana` tool first.\n- Use `bash` for mana only when there is no equivalent native mana action available.\n- For longer orchestration, prefer native mana background runs and inspect progress with native mana actions like `agents`, `logs`, `status`, and `next`.\n",
-        );
-    }
-
     // Append role instructions after identity layer
     if let Some(role) = role {
         if let Some(ref instructions) = role.instructions {
@@ -250,18 +195,6 @@ fn identity_layer(
     if let Some(instructions) = mode.instructions() {
         s.push('\n');
         s.push_str(instructions);
-        s.push('\n');
-    }
-
-    // Delegation guidance: only when mana tool is available and mode can create jobs
-    if defs.iter().any(|def| def.name == "mana")
-        && matches!(
-            mode,
-            AgentMode::Full | AgentMode::Orchestrator | AgentMode::Planner
-        )
-    {
-        s.push('\n');
-        s.push_str(MANA_DELEGATION_GUIDANCE);
         s.push('\n');
     }
 
@@ -282,6 +215,7 @@ fn working_style_lines(sliders: &crate::personality::PersonalitySliders) -> Vec<
         caution_line(sliders.caution),
         warmth_line(sliders.warmth),
         planning_depth_line(sliders.planning_depth),
+        "If you find yourself repeating the same action without progress, step back and try a different approach or ask the user for guidance.",
     ]
 }
 
@@ -297,10 +231,10 @@ fn autonomy_line(band: PersonalityBand) -> &'static str {
             "Act on clear next steps, but ask when requirements are ambiguous."
         }
         PersonalityBand::High => {
-            "Act independently by default and ask when blocked, uncertain, or facing a consequential decision."
+            "Act independently by default and ask when blocked, uncertain, or facing a consequential decision. Keep working until the task is fully resolved before yielding."
         }
         PersonalityBand::VeryHigh => {
-            "Take initiative aggressively on clear work and only ask when blocked or genuinely uncertain."
+            "Take initiative aggressively on clear work and only ask when blocked or genuinely uncertain. Keep working until the task is fully resolved before yielding."
         }
     }
 }
@@ -408,8 +342,11 @@ fn agents_md_layer(agents: &[AgentsMd]) -> String {
     s
 }
 
-fn skills_layer(skills: &[Skill]) -> String {
+fn skills_layer(skills: &[Skill], mode: &AgentMode) -> String {
     let mut s = String::from("Available skills (use read to load when relevant):\n");
+    if let Some(trigger) = mana_skill_trigger(skills, mode) {
+        s.push_str(&format!("- Trigger: {trigger}\n"));
+    }
     for skill in skills {
         s.push_str(&format!(
             "- {}: {} [{}]\n",
@@ -419,6 +356,54 @@ fn skills_layer(skills: &[Skill]) -> String {
         ));
     }
     s
+}
+
+fn mana_skill_trigger(skills: &[Skill], mode: &AgentMode) -> Option<&'static str> {
+    let has_mana = skills.iter().any(|skill| skill.name == "mana");
+    let has_mana_basics = skills.iter().any(|skill| skill.name == "mana-basics");
+    let has_mana_delegation = skills
+        .iter()
+        .any(|skill| skill.name == "mana-delegation");
+
+    match mode {
+        AgentMode::Full | AgentMode::Orchestrator => {
+            if has_mana_delegation {
+                Some("Load `mana-delegation` before splitting work into units or handing work to workers.")
+            } else if has_mana {
+                Some("Load `mana` before splitting work into units or handing work to workers.")
+            } else {
+                None
+            }
+        }
+        AgentMode::Planner => {
+            if has_mana_delegation {
+                Some("Load `mana-delegation` before writing units for worker agents.")
+            } else if has_mana {
+                Some("Load `mana` before writing units for worker agents.")
+            } else {
+                None
+            }
+        }
+        AgentMode::Worker => {
+            if has_mana_basics {
+                Some("Load `mana-basics` before using worker-safe mana actions beyond a quick status check.")
+            } else if has_mana {
+                Some("Load `mana` before using worker-safe mana actions beyond a quick status check.")
+            } else {
+                None
+            }
+        }
+        AgentMode::Auditor => {
+            if has_mana_basics {
+                Some("Load `mana-basics` before inspecting mana state across multiple units or runs.")
+            } else if has_mana {
+                Some("Load `mana` before inspecting mana state across multiple units or runs.")
+            } else {
+                None
+            }
+        }
+        AgentMode::Reviewer => None,
+    }
 }
 
 fn facts_layer(facts: &[Fact]) -> String {
@@ -529,9 +514,9 @@ mod tests {
             readonly: false,
         }));
         reg.register(Arc::new(FakeTool {
-            name: "grep",
-            description: "Search file contents for a pattern",
-            readonly: true,
+            name: "bash",
+            description: "Run shell commands",
+            readonly: false,
         }));
         reg
     }
@@ -637,11 +622,13 @@ mod tests {
             .contains("- edit: Edit a file by replacing exact text"));
         assert!(result
             .text
-            .contains("- grep: Search file contents for a pattern"));
+            .contains("- bash: Run shell commands"));
     }
 
     #[test]
-    fn system_prompt_mana_guidance_appears_when_mana_and_bash_available() {
+    fn system_prompt_no_mana_guidance_or_delegation_in_prompt() {
+        // Mana guidance and delegation blocks have been moved to the mana skill.
+        // Verify they no longer appear regardless of tool availability.
         let mut reg = make_registry();
         reg.register(Arc::new(FakeTool {
             name: "bash",
@@ -655,77 +642,13 @@ mod tests {
         }));
 
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
-        assert!(result.text.contains("Mana guidance:"));
-        assert!(result
-            .text
-            .contains("Prefer the native `mana` tool for mana operations"));
-        assert!(result.text.contains("use the native `mana` tool first"));
-    }
-
-    #[test]
-    fn system_prompt_mana_guidance_skipped_without_bash_and_mana_pair() {
-        let reg = make_registry();
-        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
-        assert!(!result.text.contains("Mana guidance:"));
-    }
-
-    #[test]
-    fn system_prompt_delegation_guidance_in_full_mode_with_mana_tool() {
-        let mut reg = make_registry();
-        reg.register(Arc::new(FakeTool {
-            name: "mana",
-            description: "Manage mana work",
-            readonly: false,
-        }));
-        // Full mode (default in test_assemble) + mana tool → delegation guidance
-        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(
-            result.text.contains("## Mana delegation"),
-            "delegation guidance should appear in Full mode with mana tool"
+            !result.text.contains("Mana guidance:"),
+            "mana guidance block should not appear in system prompt"
         );
-        assert!(result.text.contains("When to decompose"));
-        assert!(result.text.contains("Writing child job descriptions"));
-        assert!(result.text.contains("Verify commands"));
-        assert!(result.text.contains("After child jobs complete"));
-    }
-
-    #[test]
-    fn system_prompt_delegation_guidance_skipped_for_worker_mode() {
-        let mut reg = make_registry();
-        reg.register(Arc::new(FakeTool {
-            name: "mana",
-            description: "Manage mana work",
-            readonly: false,
-        }));
-        let result = assemble(&AssembleParams {
-            tools: &reg,
-            agents_md: &[],
-            skills: &[],
-            facts: &[],
-            personality: None,
-            task: None,
-            role: None,
-            mode: &AgentMode::Worker,
-            memory: None,
-            user_profile: None,
-            cwd: None,
-            learning_enabled: false,
-            guardrail_profile: None,
-        });
         assert!(
             !result.text.contains("## Mana delegation"),
-            "delegation guidance should NOT appear for Worker mode"
-        );
-    }
-
-    #[test]
-    fn system_prompt_delegation_guidance_skipped_without_mana_tool() {
-        let reg = make_registry();
-        // Full mode but no mana tool → no delegation guidance
-        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
-        assert!(
-            !result.text.contains("## Mana delegation"),
-            "delegation guidance should NOT appear without mana tool"
+            "delegation guidance should not appear in system prompt"
         );
     }
 
@@ -833,6 +756,126 @@ mod tests {
         assert!(result
             .text
             .contains("- testing: Write and review tests [/home/.imp/skills/testing/SKILL.md]"));
+    }
+
+    #[test]
+    fn system_prompt_includes_mode_aware_mana_skill_trigger() {
+        let reg = make_registry();
+        let skills = vec![make_skill(
+            "mana-delegation",
+            "Split work into units and hand it to workers",
+            "/home/.imp/skills/mana-delegation/SKILL.md",
+        )];
+        let result = assemble(&AssembleParams {
+            tools: &reg,
+            agents_md: &[],
+            skills: &skills,
+            facts: &[],
+            personality: None,
+            task: None,
+            role: None,
+            mode: &AgentMode::Planner,
+            memory: None,
+            user_profile: None,
+            cwd: None,
+            learning_enabled: false,
+            guardrail_profile: None,
+        });
+
+        assert!(result.text.contains("- Trigger:"));
+        assert!(result
+            .text
+            .contains("Load `mana-delegation` before writing units for worker agents."));
+    }
+
+    #[test]
+    fn system_prompt_worker_prefers_mana_basics_trigger() {
+        let reg = make_registry();
+        let skills = vec![
+            make_skill(
+                "mana",
+                "Coordinate multi-step work through mana",
+                "/home/.imp/skills/mana/SKILL.md",
+            ),
+            make_skill(
+                "mana-basics",
+                "Use native mana actions safely and efficiently",
+                "/home/.imp/skills/mana-basics/SKILL.md",
+            ),
+        ];
+        let result = assemble(&AssembleParams {
+            tools: &reg,
+            agents_md: &[],
+            skills: &skills,
+            facts: &[],
+            personality: None,
+            task: None,
+            role: None,
+            mode: &AgentMode::Worker,
+            memory: None,
+            user_profile: None,
+            cwd: None,
+            learning_enabled: false,
+            guardrail_profile: None,
+        });
+
+        assert!(result.text.contains(
+            "Load `mana-basics` before using worker-safe mana actions beyond a quick status check."
+        ));
+    }
+
+    #[test]
+    fn system_prompt_omits_mana_trigger_without_mana_skill() {
+        let reg = make_registry();
+        let skills = vec![make_skill(
+            "rust",
+            "Conventions for Rust code",
+            "/home/.imp/skills/rust/SKILL.md",
+        )];
+        let result = assemble(&AssembleParams {
+            tools: &reg,
+            agents_md: &[],
+            skills: &skills,
+            facts: &[],
+            personality: None,
+            task: None,
+            role: None,
+            mode: &AgentMode::Planner,
+            memory: None,
+            user_profile: None,
+            cwd: None,
+            learning_enabled: false,
+            guardrail_profile: None,
+        });
+
+        assert!(!result.text.contains("- Trigger:"));
+    }
+
+    #[test]
+    fn system_prompt_reviewer_mode_omits_mana_trigger() {
+        let reg = make_registry();
+        let skills = vec![make_skill(
+            "mana",
+            "Coordinate multi-step work through mana",
+            "/home/.imp/skills/mana/SKILL.md",
+        )];
+        let result = assemble(&AssembleParams {
+            tools: &reg,
+            agents_md: &[],
+            skills: &skills,
+            facts: &[],
+            personality: None,
+            task: None,
+            role: None,
+            mode: &AgentMode::Reviewer,
+            memory: None,
+            user_profile: None,
+            cwd: None,
+            learning_enabled: false,
+            guardrail_profile: None,
+        });
+
+        assert!(!result.text.contains("- Trigger:"));
     }
 
     #[test]
@@ -978,7 +1021,6 @@ mod tests {
         let result = test_assemble(&reg, &[], &[], &[], None, None, Some(&role));
         // Should include readonly tools
         assert!(result.text.contains("- read:"));
-        assert!(result.text.contains("- grep:"));
         // Should NOT include write tools
         assert!(!result.text.contains("- write:"));
         assert!(!result.text.contains("- edit:"));
@@ -1002,7 +1044,7 @@ mod tests {
         assert!(result.text.contains("- read:"));
         assert!(result.text.contains("- write:"));
         assert!(result.text.contains("- edit:"));
-        assert!(result.text.contains("- grep:"));
+        assert!(result.text.contains("- bash:"));
     }
 
     #[test]
@@ -1012,7 +1054,7 @@ mod tests {
         let result = test_assemble(&reg, &[], &[], &[], None, None, Some(&role));
         // Worker has no instructions, so the prompt shouldn't have extra instruction text
         let lines: Vec<&str> = result.text.lines().collect();
-        let after_tools = lines.iter().position(|l| l.starts_with("- grep:")).unwrap();
+        let after_tools = lines.iter().position(|l| l.starts_with("- bash:")).unwrap();
         // Next non-empty line after the last tool should be end of identity layer
         // (no instructions appended)
         let remaining = &lines[after_tools + 1..];
