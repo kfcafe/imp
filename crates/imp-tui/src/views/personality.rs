@@ -1,14 +1,17 @@
+use std::path::PathBuf;
+
 use imp_core::personality::{
-    PersonaFocus, PersonaRole, PersonalityBand, PersonalityConfig, PersonalityIdentity,
-    PersonalityProfile, VoiceWord, WorkStyleWord,
+    default_soul_markdown, generated_tunable_line, replace_tunable_line, soul_identity_text,
+    tunable_state_for_label, SoulTunableState,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 
 use crate::theme::Theme;
+use crate::views::editor::EditorState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PersonalityScope {
@@ -17,78 +20,77 @@ pub enum PersonalityScope {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersonalityTab {
+    Builder,
+    Source,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PersonalityField {
-    Name,
-    WorkStyle,
-    Voice,
-    Focus,
-    Role,
+    Scope,
     Autonomy,
-    Verbosity,
+    Brevity,
     Caution,
     Warmth,
-    PlanningDepth,
-    Profile,
-    Scope,
+    Planning,
     Save,
-    DeleteProfile,
 }
 
 const FIELDS: &[PersonalityField] = &[
-    PersonalityField::Name,
-    PersonalityField::WorkStyle,
-    PersonalityField::Voice,
-    PersonalityField::Focus,
-    PersonalityField::Role,
+    PersonalityField::Scope,
     PersonalityField::Autonomy,
-    PersonalityField::Verbosity,
+    PersonalityField::Brevity,
     PersonalityField::Caution,
     PersonalityField::Warmth,
-    PersonalityField::PlanningDepth,
-    PersonalityField::Profile,
-    PersonalityField::Scope,
+    PersonalityField::Planning,
     PersonalityField::Save,
-    PersonalityField::DeleteProfile,
 ];
+
+#[derive(Debug, Clone)]
+pub struct PendingOverwrite {
+    pub label: &'static str,
+    pub replacement_line: String,
+    pub diff_preview: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct PersonalityState {
     pub selected: usize,
-    pub editing_name: bool,
-    pub identity: PersonalityIdentity,
-    pub sliders: imp_core::personality::PersonalitySliders,
     pub scope: PersonalityScope,
-    pub profile_name: String,
-    pub saved_profiles: Vec<String>,
-    pub active_profile: Option<String>,
-    pub dirty: bool,
+    pub tab: PersonalityTab,
+    pub editor: EditorState,
+    pub dirty_global: bool,
+    pub dirty_project: bool,
+    pub pending_overwrite: Option<PendingOverwrite>,
+    global_path: PathBuf,
+    project_path: PathBuf,
+    global_source: String,
+    project_source: String,
 }
 
 impl PersonalityState {
-    pub fn new(
-        global: &PersonalityConfig,
-        project: Option<&PersonalityConfig>,
-        scope: PersonalityScope,
-    ) -> Self {
-        let config = match scope {
-            PersonalityScope::Global => global,
-            PersonalityScope::Project => project.unwrap_or(global),
-        };
-        let profile = config.effective_profile();
+    pub fn new(cwd: PathBuf, scope: PersonalityScope) -> Self {
+        let global_path = imp_core::config::Config::user_config_dir().join("soul.md");
+        let project_path = cwd.join(".imp").join("soul.md");
+        let global_source = std::fs::read_to_string(&global_path).unwrap_or_else(|_| default_soul_markdown());
+        let project_source = std::fs::read_to_string(&project_path).unwrap_or_else(|_| default_soul_markdown());
+        let mut editor = EditorState::new();
+        editor.set_content(match scope {
+            PersonalityScope::Global => &global_source,
+            PersonalityScope::Project => &project_source,
+        });
         Self {
             selected: 0,
-            editing_name: false,
-            identity: profile.identity.clone(),
-            sliders: profile.sliders.clone(),
             scope,
-            profile_name: config
-                .profiles
-                .active
-                .clone()
-                .unwrap_or_else(|| "default".to_string()),
-            saved_profiles: config.profiles.profile_names(),
-            active_profile: config.profiles.active.clone(),
-            dirty: false,
+            tab: PersonalityTab::Builder,
+            editor,
+            dirty_global: false,
+            dirty_project: false,
+            pending_overwrite: None,
+            global_path,
+            project_path,
+            global_source,
+            project_source,
         }
     }
 
@@ -96,179 +98,198 @@ impl PersonalityState {
         FIELDS[self.selected]
     }
 
+    pub fn current_path(&self) -> &PathBuf {
+        match self.scope {
+            PersonalityScope::Global => &self.global_path,
+            PersonalityScope::Project => &self.project_path,
+        }
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        match self.scope {
+            PersonalityScope::Global => self.dirty_global,
+            PersonalityScope::Project => self.dirty_project,
+        }
+    }
+
+    fn set_dirty(&mut self, dirty: bool) {
+        match self.scope {
+            PersonalityScope::Global => self.dirty_global = dirty,
+            PersonalityScope::Project => self.dirty_project = dirty,
+        }
+    }
+
+    fn sync_editor_to_scope_store(&mut self) {
+        match self.scope {
+            PersonalityScope::Global => self.global_source = self.editor.content().to_string(),
+            PersonalityScope::Project => self.project_source = self.editor.content().to_string(),
+        }
+    }
+
+    fn load_scope_into_editor(&mut self) {
+        let content = match self.scope {
+            PersonalityScope::Global => self.global_source.as_str(),
+            PersonalityScope::Project => self.project_source.as_str(),
+        };
+        self.editor.set_content(content);
+    }
+
+    pub fn sentence(&self) -> String {
+        soul_identity_text(self.editor.content())
+    }
+
     pub fn move_up(&mut self) {
-        self.editing_name = false;
-        if self.selected > 0 {
+        if self.tab == PersonalityTab::Builder && self.selected > 0 {
             self.selected -= 1;
         }
     }
 
     pub fn move_down(&mut self) {
-        self.editing_name = false;
-        if self.selected + 1 < FIELDS.len() {
+        if self.tab == PersonalityTab::Builder && self.selected + 1 < FIELDS.len() {
             self.selected += 1;
         }
     }
 
+    pub fn switch_tab(&mut self) {
+        self.pending_overwrite = None;
+        self.tab = match self.tab {
+            PersonalityTab::Builder => PersonalityTab::Source,
+            PersonalityTab::Source => PersonalityTab::Builder,
+        };
+    }
+
+    pub fn toggle_scope(&mut self) {
+        self.sync_editor_to_scope_store();
+        self.scope = match self.scope {
+            PersonalityScope::Global => PersonalityScope::Project,
+            PersonalityScope::Project => PersonalityScope::Global,
+        };
+        self.load_scope_into_editor();
+        self.pending_overwrite = None;
+    }
+
+    pub fn tunable_display(&self, label: &'static str) -> &'static str {
+        match tunable_state_for_label(self.editor.content(), label) {
+            SoulTunableState::Preset(0) => "very low",
+            SoulTunableState::Preset(1) => "low",
+            SoulTunableState::Preset(2) => "balanced",
+            SoulTunableState::Preset(3) => "high",
+            SoulTunableState::Preset(4) => "very high",
+            SoulTunableState::Preset(_) => "preset",
+            SoulTunableState::Edited => "edited",
+            SoulTunableState::Missing => "missing",
+        }
+    }
+
+    fn cycle_tunable(&mut self, label: &'static str, forward: bool) {
+        let state = tunable_state_for_label(self.editor.content(), label);
+        let next_idx = match state {
+            SoulTunableState::Preset(idx) => {
+                if forward { (idx + 1) % 5 } else { (idx + 4) % 5 }
+            }
+            SoulTunableState::Missing => {
+                if forward { 0 } else { 4 }
+            }
+            SoulTunableState::Edited => {
+                if forward { 0 } else { 4 }
+            }
+        };
+        let Some(new_line) = generated_tunable_line(label, next_idx) else {
+            return;
+        };
+
+        if matches!(state, SoulTunableState::Edited) {
+            let current = imp_core::personality::parse_tunables_section(self.editor.content())
+                .get(label)
+                .cloned()
+                .unwrap_or_default();
+            self.pending_overwrite = Some(PendingOverwrite {
+                label,
+                replacement_line: new_line.clone(),
+                diff_preview: format!("- {label}: {current}\n+ {new_line}"),
+            });
+            return;
+        }
+
+        let updated = replace_tunable_line(self.editor.content(), label, &new_line);
+        self.editor.set_content(&updated);
+        self.sync_editor_to_scope_store();
+        self.set_dirty(true);
+    }
+
     pub fn cycle_forward(&mut self) {
-        self.dirty = true;
+        if self.tab != PersonalityTab::Builder {
+            return;
+        }
         match self.current_field() {
-            PersonalityField::Name => {
-                self.editing_name = true;
-            }
-            PersonalityField::WorkStyle => {
-                self.identity.work_style = next_work_style(self.identity.work_style.clone());
-            }
-            PersonalityField::Voice => {
-                self.identity.voice = next_voice(self.identity.voice.clone());
-            }
-            PersonalityField::Focus => {
-                self.identity.focus = next_focus(self.identity.focus.clone());
-            }
-            PersonalityField::Role => {
-                self.identity.role = next_role(self.identity.role.clone());
-            }
-            PersonalityField::Autonomy => self.sliders.autonomy = next_band(self.sliders.autonomy),
-            PersonalityField::Verbosity => {
-                self.sliders.verbosity = next_band(self.sliders.verbosity)
-            }
-            PersonalityField::Caution => self.sliders.caution = next_band(self.sliders.caution),
-            PersonalityField::Warmth => self.sliders.warmth = next_band(self.sliders.warmth),
-            PersonalityField::PlanningDepth => {
-                self.sliders.planning_depth = next_band(self.sliders.planning_depth)
-            }
-            PersonalityField::Profile => {
-                self.profile_name = next_profile_name(&self.profile_name, &self.saved_profiles);
-                self.active_profile = if self.profile_name == "default" {
-                    None
-                } else {
-                    Some(self.profile_name.clone())
-                };
-            }
-            PersonalityField::Scope => {
-                self.scope = match self.scope {
-                    PersonalityScope::Global => PersonalityScope::Project,
-                    PersonalityScope::Project => PersonalityScope::Global,
-                }
-            }
+            PersonalityField::Scope => self.toggle_scope(),
+            PersonalityField::Autonomy => self.cycle_tunable("Autonomy", true),
+            PersonalityField::Brevity => self.cycle_tunable("Brevity", true),
+            PersonalityField::Caution => self.cycle_tunable("Caution", true),
+            PersonalityField::Warmth => self.cycle_tunable("Warmth", true),
+            PersonalityField::Planning => self.cycle_tunable("Planning", true),
             PersonalityField::Save => {}
-            PersonalityField::DeleteProfile => {}
         }
     }
 
     pub fn cycle_backward(&mut self) {
-        self.dirty = true;
+        if self.tab != PersonalityTab::Builder {
+            return;
+        }
         match self.current_field() {
-            PersonalityField::Name => {
-                self.editing_name = true;
-            }
-            PersonalityField::WorkStyle => {
-                self.identity.work_style = prev_work_style(self.identity.work_style.clone());
-            }
-            PersonalityField::Voice => {
-                self.identity.voice = prev_voice(self.identity.voice.clone());
-            }
-            PersonalityField::Focus => {
-                self.identity.focus = prev_focus(self.identity.focus.clone());
-            }
-            PersonalityField::Role => {
-                self.identity.role = prev_role(self.identity.role.clone());
-            }
-            PersonalityField::Autonomy => self.sliders.autonomy = prev_band(self.sliders.autonomy),
-            PersonalityField::Verbosity => {
-                self.sliders.verbosity = prev_band(self.sliders.verbosity)
-            }
-            PersonalityField::Caution => self.sliders.caution = prev_band(self.sliders.caution),
-            PersonalityField::Warmth => self.sliders.warmth = prev_band(self.sliders.warmth),
-            PersonalityField::PlanningDepth => {
-                self.sliders.planning_depth = prev_band(self.sliders.planning_depth)
-            }
-            PersonalityField::Profile => {
-                self.profile_name = prev_profile_name(&self.profile_name, &self.saved_profiles);
-                self.active_profile = if self.profile_name == "default" {
-                    None
-                } else {
-                    Some(self.profile_name.clone())
-                };
-            }
-            PersonalityField::Scope => {
-                self.scope = match self.scope {
-                    PersonalityScope::Global => PersonalityScope::Project,
-                    PersonalityScope::Project => PersonalityScope::Global,
-                }
-            }
+            PersonalityField::Scope => self.toggle_scope(),
+            PersonalityField::Autonomy => self.cycle_tunable("Autonomy", false),
+            PersonalityField::Brevity => self.cycle_tunable("Brevity", false),
+            PersonalityField::Caution => self.cycle_tunable("Caution", false),
+            PersonalityField::Warmth => self.cycle_tunable("Warmth", false),
+            PersonalityField::Planning => self.cycle_tunable("Planning", false),
             PersonalityField::Save => {}
-            PersonalityField::DeleteProfile => {}
         }
     }
 
-    pub fn push_char(&mut self, c: char) {
-        if self.current_field() == PersonalityField::Name || self.editing_name {
-            if !c.is_control() {
-                self.identity.name.push(c);
-                self.editing_name = true;
-                self.dirty = true;
-            }
-        }
+    pub fn confirm_overwrite(&mut self) {
+        let Some(pending) = self.pending_overwrite.take() else {
+            return;
+        };
+        let updated = replace_tunable_line(self.editor.content(), pending.label, &pending.replacement_line);
+        self.editor.set_content(&updated);
+        self.sync_editor_to_scope_store();
+        self.set_dirty(true);
+    }
+
+    pub fn cancel_overwrite(&mut self) {
+        self.pending_overwrite = None;
+    }
+
+    pub fn save_success(&mut self) {
+        self.sync_editor_to_scope_store();
+        self.set_dirty(false);
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        self.editor.insert_char(c);
+        self.sync_editor_to_scope_store();
+        self.set_dirty(true);
+    }
+
+    pub fn insert_newline(&mut self) {
+        self.editor.insert_newline();
+        self.sync_editor_to_scope_store();
+        self.set_dirty(true);
     }
 
     pub fn pop_char(&mut self) {
-        if self.current_field() == PersonalityField::Name || self.editing_name {
-            self.identity.name.pop();
-            self.editing_name = true;
-            self.dirty = true;
-        }
+        self.editor.delete_back();
+        self.sync_editor_to_scope_store();
+        self.set_dirty(true);
     }
 
-    pub fn save_to_config(&self, config: &mut PersonalityConfig) {
-        let profile = self.profile();
-        if self.profile_name == "default" {
-            config.profile = profile;
-            config.profiles.clear_active();
-        } else {
-            let saved_name = config
-                .profiles
-                .save_profile(self.profile_name.clone(), profile.clone());
-            config.profile = profile;
-            config.profiles.set_active(saved_name);
-        }
+    pub fn move_left(&mut self) {
+        self.editor.move_left();
     }
 
-    pub fn delete_active_profile(&mut self, config: &mut PersonalityConfig) -> bool {
-        let Some(active) = self.active_profile.clone() else {
-            return false;
-        };
-        let deleted = config.profiles.delete_profile(&active);
-        if deleted {
-            self.saved_profiles = config.profiles.profile_names();
-            self.active_profile = None;
-            self.profile_name = "default".into();
-            self.identity = config.profile.identity.clone();
-            self.sliders = config.profile.sliders.clone();
-            self.dirty = true;
-        }
-        deleted
-    }
-
-    pub fn profile(&self) -> PersonalityProfile {
-        PersonalityProfile {
-            identity: self.identity.clone(),
-            sliders: self.sliders.clone(),
-        }
-    }
-
-    pub fn set_profile_name(&mut self, name: impl Into<String>) {
-        self.profile_name = name.into();
-        self.active_profile = if self.profile_name == "default" {
-            None
-        } else {
-            Some(self.profile_name.clone())
-        };
-        self.dirty = true;
-    }
-
-    pub fn sentence(&self) -> String {
-        self.identity.render_sentence()
+    pub fn move_right(&mut self) {
+        self.editor.move_right();
     }
 }
 
@@ -285,7 +306,7 @@ impl<'a> PersonalityView<'a> {
 
 impl Widget for PersonalityView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.height < 12 || area.width < 40 {
+        if area.height < 12 || area.width < 50 {
             return;
         }
 
@@ -307,145 +328,83 @@ impl Widget for PersonalityView<'_> {
             ])
             .split(inner);
 
-        let sentence = Paragraph::new(self.state.sentence())
+        Paragraph::new(self.state.sentence())
             .style(self.theme.style())
-            .block(
-                Block::default()
-                    .title(" Identity sentence ")
-                    .borders(Borders::ALL),
-            );
-        sentence.render(rows[0], buf);
+            .block(Block::default().title(" Identity ").borders(Borders::ALL))
+            .wrap(Wrap { trim: false })
+            .render(rows[0], buf);
 
         let scope = match self.state.scope {
             PersonalityScope::Global => "global",
             PersonalityScope::Project => "project",
         };
-        let status = Paragraph::new(format!(
-            "Scope: {}{}{}",
-            scope,
-            match &self.state.active_profile {
-                Some(name) => format!("  • profile: {}", name),
-                None => "  • profile: default".to_string(),
-            },
-            if self.state.dirty {
-                "  • unsaved"
-            } else {
-                ""
-            }
+        let tab = match self.state.tab {
+            PersonalityTab::Builder => "builder",
+            PersonalityTab::Source => "source",
+        };
+        Paragraph::new(format!(
+            "Scope: {scope}  •  Tab: {tab}  •  Path: {}{}",
+            self.state.current_path().display(),
+            if self.state.is_dirty() { "  • unsaved" } else { "" }
         ))
-        .style(self.theme.muted_style());
-        status.render(rows[1], buf);
-
-        let mut lines = Vec::new();
-        push_field_line(
-            &mut lines,
-            self.state,
-            PersonalityField::Name,
-            "name",
-            &self.state.identity.name,
-        );
-        push_field_line(
-            &mut lines,
-            self.state,
-            PersonalityField::WorkStyle,
-            "work style",
-            self.state.identity.work_style.as_str(),
-        );
-        push_field_line(
-            &mut lines,
-            self.state,
-            PersonalityField::Voice,
-            "voice",
-            self.state.identity.voice.as_str(),
-        );
-        push_field_line(
-            &mut lines,
-            self.state,
-            PersonalityField::Focus,
-            "focus",
-            self.state.identity.focus.as_str(),
-        );
-        push_field_line(
-            &mut lines,
-            self.state,
-            PersonalityField::Role,
-            "role",
-            self.state.identity.role.as_str(),
-        );
-        push_field_line(
-            &mut lines,
-            self.state,
-            PersonalityField::Autonomy,
-            "autonomy",
-            band_label(self.state.sliders.autonomy),
-        );
-        push_field_line(
-            &mut lines,
-            self.state,
-            PersonalityField::Verbosity,
-            "verbosity",
-            band_label(self.state.sliders.verbosity),
-        );
-        push_field_line(
-            &mut lines,
-            self.state,
-            PersonalityField::Caution,
-            "caution",
-            band_label(self.state.sliders.caution),
-        );
-        push_field_line(
-            &mut lines,
-            self.state,
-            PersonalityField::Warmth,
-            "warmth",
-            band_label(self.state.sliders.warmth),
-        );
-        push_field_line(
-            &mut lines,
-            self.state,
-            PersonalityField::PlanningDepth,
-            "planning",
-            band_label(self.state.sliders.planning_depth),
-        );
-        push_field_line(
-            &mut lines,
-            self.state,
-            PersonalityField::Profile,
-            "profile",
-            &self.state.profile_name,
-        );
-        push_field_line(
-            &mut lines,
-            self.state,
-            PersonalityField::Scope,
-            "scope",
-            scope,
-        );
-        push_field_line(
-            &mut lines,
-            self.state,
-            PersonalityField::Save,
-            "save",
-            "apply changes",
-        );
-        push_field_line(
-            &mut lines,
-            self.state,
-            PersonalityField::DeleteProfile,
-            "delete",
-            "delete active profile",
-        );
-
-        Paragraph::new(lines)
-            .block(Block::default().title(" Fields ").borders(Borders::ALL))
-            .render(rows[2], buf);
-
-        Paragraph::new(
-            "↑/↓ move  ←/→ change  type to edit name/profile  Enter apply/delete  Esc close",
-        )
         .style(self.theme.muted_style())
-        .render(rows[3], buf);
+        .render(rows[1], buf);
+
+        match self.state.tab {
+            PersonalityTab::Builder => render_builder(rows[2], buf, self.state),
+            PersonalityTab::Source => render_source(rows[2], buf, self.state),
+        }
+
+        let hints = if self.state.pending_overwrite.is_some() {
+            "Enter/Y: confirm overwrite  Esc/N: cancel"
+        } else {
+            match self.state.tab {
+                PersonalityTab::Builder => {
+                    "Tab: source  ↑/↓ move  ←/→ change  Enter on save to write file  Ctrl-S save  Esc close"
+                }
+                PersonalityTab::Source => {
+                    "Tab: builder  type to edit  arrows move  Enter newline  Backspace delete  Ctrl-S save  Esc close"
+                }
+            }
+        };
+        Paragraph::new(hints)
+            .style(self.theme.muted_style())
+            .render(rows[3], buf);
+
+        if let Some(pending) = &self.state.pending_overwrite {
+            let modal = centered_rect(70, 40, area);
+            Clear.render(modal, buf);
+            Paragraph::new(pending.diff_preview.clone())
+                .block(Block::default().title(" Confirm overwrite ").borders(Borders::ALL))
+                .wrap(Wrap { trim: false })
+                .render(modal, buf);
+        }
     }
+}
+
+fn render_builder(area: Rect, buf: &mut Buffer, state: &PersonalityState) {
+    let mut lines = Vec::new();
+    push_field_line(lines.as_mut(), state, PersonalityField::Scope, "scope", match state.scope {
+        PersonalityScope::Global => "global",
+        PersonalityScope::Project => "project",
+    });
+    push_field_line(lines.as_mut(), state, PersonalityField::Autonomy, "autonomy", state.tunable_display("Autonomy"));
+    push_field_line(lines.as_mut(), state, PersonalityField::Brevity, "brevity", state.tunable_display("Brevity"));
+    push_field_line(lines.as_mut(), state, PersonalityField::Caution, "caution", state.tunable_display("Caution"));
+    push_field_line(lines.as_mut(), state, PersonalityField::Warmth, "warmth", state.tunable_display("Warmth"));
+    push_field_line(lines.as_mut(), state, PersonalityField::Planning, "planning", state.tunable_display("Planning"));
+    push_field_line(lines.as_mut(), state, PersonalityField::Save, "save", "write soul.md");
+
+    Paragraph::new(lines)
+        .block(Block::default().title(" Builder ").borders(Borders::ALL))
+        .render(area, buf);
+}
+
+fn render_source(area: Rect, buf: &mut Buffer, state: &PersonalityState) {
+    Paragraph::new(state.editor.content().to_string())
+        .block(Block::default().title(" Source ").borders(Borders::ALL))
+        .wrap(Wrap { trim: false })
+        .render(area, buf);
 }
 
 fn push_field_line(
@@ -455,12 +414,12 @@ fn push_field_line(
     label: &str,
     value: &str,
 ) {
-    let selected = state.current_field() == field;
+    let selected = state.tab == PersonalityTab::Builder && state.current_field() == field;
     let indicator = if selected { "▸" } else { " " };
     let style = if selected {
-        state_line_style_selected()
+        Style::default().add_modifier(Modifier::REVERSED)
     } else {
-        Default::default()
+        Style::default()
     };
     lines.push(Line::from(vec![
         Span::styled(format!("{} ", indicator), style),
@@ -469,217 +428,42 @@ fn push_field_line(
     ]));
 }
 
-fn state_line_style_selected() -> ratatui::style::Style {
-    ratatui::style::Style::default().add_modifier(Modifier::REVERSED)
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
-
-fn band_label(band: PersonalityBand) -> &'static str {
-    band.ui_label()
-}
-
-fn next_band(band: PersonalityBand) -> PersonalityBand {
-    match band {
-        PersonalityBand::VeryLow => PersonalityBand::Low,
-        PersonalityBand::Low => PersonalityBand::Medium,
-        PersonalityBand::Medium => PersonalityBand::High,
-        PersonalityBand::High => PersonalityBand::VeryHigh,
-        PersonalityBand::VeryHigh => PersonalityBand::VeryLow,
-    }
-}
-
-fn prev_band(band: PersonalityBand) -> PersonalityBand {
-    match band {
-        PersonalityBand::VeryLow => PersonalityBand::VeryHigh,
-        PersonalityBand::Low => PersonalityBand::VeryLow,
-        PersonalityBand::Medium => PersonalityBand::Low,
-        PersonalityBand::High => PersonalityBand::Medium,
-        PersonalityBand::VeryHigh => PersonalityBand::High,
-    }
-}
-
-fn next_profile_name(current: &str, saved_profiles: &[String]) -> String {
-    let mut names = vec!["default".to_string()];
-    names.extend(saved_profiles.iter().cloned());
-    let idx = names.iter().position(|name| name == current).unwrap_or(0);
-    names[(idx + 1) % names.len()].clone()
-}
-
-fn prev_profile_name(current: &str, saved_profiles: &[String]) -> String {
-    let mut names = vec!["default".to_string()];
-    names.extend(saved_profiles.iter().cloned());
-    let idx = names.iter().position(|name| name == current).unwrap_or(0);
-    names[(idx + names.len() - 1) % names.len()].clone()
-}
-
-macro_rules! cycle_enum {
-    ($name:ident, $ty:ty, [$($variant:expr),+ $(,)?]) => {
-        fn $name(value: $ty) -> $ty {
-            let values = [$($variant),+];
-            let idx = values.iter().position(|v| *v == value).unwrap_or(0);
-            values[(idx + 1) % values.len()].clone()
-        }
-    };
-}
-
-macro_rules! cycle_enum_prev {
-    ($name:ident, $ty:ty, [$($variant:expr),+ $(,)?]) => {
-        fn $name(value: $ty) -> $ty {
-            let values = [$($variant),+];
-            let idx = values.iter().position(|v| *v == value).unwrap_or(0);
-            values[(idx + values.len() - 1) % values.len()].clone()
-        }
-    };
-}
-
-cycle_enum!(
-    next_work_style,
-    WorkStyleWord,
-    [
-        WorkStyleWord::Practical,
-        WorkStyleWord::Careful,
-        WorkStyleWord::Disciplined,
-        WorkStyleWord::Methodical,
-        WorkStyleWord::Focused,
-        WorkStyleWord::Thorough,
-        WorkStyleWord::Precise,
-        WorkStyleWord::Deliberate,
-        WorkStyleWord::Skeptical,
-        WorkStyleWord::Patient,
-    ]
-);
-cycle_enum_prev!(
-    prev_work_style,
-    WorkStyleWord,
-    [
-        WorkStyleWord::Practical,
-        WorkStyleWord::Careful,
-        WorkStyleWord::Disciplined,
-        WorkStyleWord::Methodical,
-        WorkStyleWord::Focused,
-        WorkStyleWord::Thorough,
-        WorkStyleWord::Precise,
-        WorkStyleWord::Deliberate,
-        WorkStyleWord::Skeptical,
-        WorkStyleWord::Patient,
-    ]
-);
-cycle_enum!(
-    next_voice,
-    VoiceWord,
-    [
-        VoiceWord::Concise,
-        VoiceWord::Clear,
-        VoiceWord::Direct,
-        VoiceWord::Calm,
-        VoiceWord::Thoughtful,
-        VoiceWord::Collaborative,
-        VoiceWord::Structured,
-        VoiceWord::Friendly,
-        VoiceWord::Terse,
-        VoiceWord::Warm,
-    ]
-);
-cycle_enum_prev!(
-    prev_voice,
-    VoiceWord,
-    [
-        VoiceWord::Concise,
-        VoiceWord::Clear,
-        VoiceWord::Direct,
-        VoiceWord::Calm,
-        VoiceWord::Thoughtful,
-        VoiceWord::Collaborative,
-        VoiceWord::Structured,
-        VoiceWord::Friendly,
-        VoiceWord::Terse,
-        VoiceWord::Warm,
-    ]
-);
-cycle_enum!(
-    next_focus,
-    PersonaFocus,
-    [
-        PersonaFocus::Coding,
-        PersonaFocus::Engineering,
-        PersonaFocus::Software,
-        PersonaFocus::Debugging,
-        PersonaFocus::Research,
-        PersonaFocus::Writing,
-        PersonaFocus::Planning,
-        PersonaFocus::Operations,
-        PersonaFocus::Analysis,
-        PersonaFocus::General,
-    ]
-);
-cycle_enum_prev!(
-    prev_focus,
-    PersonaFocus,
-    [
-        PersonaFocus::Coding,
-        PersonaFocus::Engineering,
-        PersonaFocus::Software,
-        PersonaFocus::Debugging,
-        PersonaFocus::Research,
-        PersonaFocus::Writing,
-        PersonaFocus::Planning,
-        PersonaFocus::Operations,
-        PersonaFocus::Analysis,
-        PersonaFocus::General,
-    ]
-);
-cycle_enum!(
-    next_role,
-    PersonaRole,
-    [
-        PersonaRole::Agent,
-        PersonaRole::Assistant,
-        PersonaRole::Worker,
-        PersonaRole::Collaborator,
-        PersonaRole::Partner,
-        PersonaRole::Reviewer,
-        PersonaRole::Planner,
-    ]
-);
-cycle_enum_prev!(
-    prev_role,
-    PersonaRole,
-    [
-        PersonaRole::Agent,
-        PersonaRole::Assistant,
-        PersonaRole::Worker,
-        PersonaRole::Collaborator,
-        PersonaRole::Partner,
-        PersonaRole::Reviewer,
-        PersonaRole::Planner,
-    ]
-);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn personality_state_sentence_updates_with_identity_changes() {
-        let global = PersonalityConfig::default();
-        let state = PersonalityState::new(&global, None, PersonalityScope::Global);
-        assert_eq!(
-            state.sentence(),
-            "You are imp, a practical, concise, coding agent."
-        );
+    fn personality_state_defaults_to_generated_soul() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = PersonalityState::new(tmp.path().to_path_buf(), PersonalityScope::Global);
+        assert!(state.sentence().contains("You are imp"));
+        assert_eq!(state.tunable_display("Autonomy"), "high");
     }
 
     #[test]
-    fn personality_state_can_save_named_profile_to_config() {
-        let global = PersonalityConfig::default();
-        let mut state = PersonalityState::new(&global, None, PersonalityScope::Global);
-        state.set_profile_name("Builder");
-        state.identity.name = "Patch".into();
-
-        let mut config = PersonalityConfig::default();
-        state.save_to_config(&mut config);
-
-        assert_eq!(config.profiles.active.as_deref(), Some("Builder"));
-        assert!(config.profiles.saved.contains_key("Builder"));
-        assert_eq!(config.profiles.saved["Builder"].identity.name, "Patch");
+    fn personality_state_marks_custom_lines_as_edited() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = PersonalityState::new(tmp.path().to_path_buf(), PersonalityScope::Global);
+        state.editor.set_content("# Soul\n\nYou are imp.\n\n## Tunables\n\n- Autonomy: custom autonomy line\n");
+        assert_eq!(state.tunable_display("Autonomy"), "edited");
     }
 }

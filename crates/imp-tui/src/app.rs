@@ -17,6 +17,7 @@ use imp_core::compaction::{
     DEFAULT_KEEP_RECENT_GROUPS,
 };
 use imp_core::config::Config;
+use imp_core::personality::default_soul_markdown;
 use imp_core::session::{SessionEntry, SessionManager};
 use imp_core::Error as ImpCoreError;
 use imp_llm::auth::AuthStore;
@@ -3228,17 +3229,13 @@ impl App {
     }
 
     fn open_personality(&mut self) {
-        let project_config = Config::load(&self.cwd.join(".imp").join("config.toml")).ok();
-        let scope = if project_config.is_some() {
+        let project_soul = self.cwd.join(".imp").join("soul.md");
+        let scope = if project_soul.exists() {
             PersonalityScope::Project
         } else {
             PersonalityScope::Global
         };
-        let state = PersonalityState::new(
-            &self.config.personality,
-            project_config.as_ref().map(|c| &c.personality),
-            scope,
-        );
+        let state = PersonalityState::new(self.cwd.clone(), scope);
         self.mode = UiMode::Personality(state);
     }
 
@@ -3616,56 +3613,105 @@ impl App {
     }
 
     fn handle_personality_key(&mut self, key: KeyEvent) {
-        use crate::views::personality::PersonalityField;
-
         match key.code {
             KeyCode::Esc => {
-                self.mode = UiMode::Normal;
+                if let UiMode::Personality(ref mut state) = self.mode {
+                    if state.pending_overwrite.is_some() {
+                        state.cancel_overwrite();
+                    } else {
+                        self.mode = UiMode::Normal;
+                    }
+                }
+            }
+            KeyCode::Tab => {
+                if let UiMode::Personality(ref mut state) = self.mode {
+                    state.switch_tab();
+                }
             }
             KeyCode::Up => {
                 if let UiMode::Personality(ref mut state) = self.mode {
-                    state.move_up();
+                    match state.tab {
+                        crate::views::personality::PersonalityTab::Builder => state.move_up(),
+                        crate::views::personality::PersonalityTab::Source => {
+                            state.editor.move_up();
+                        }
+                    }
                 }
             }
             KeyCode::Down => {
                 if let UiMode::Personality(ref mut state) = self.mode {
-                    state.move_down();
+                    match state.tab {
+                        crate::views::personality::PersonalityTab::Builder => state.move_down(),
+                        crate::views::personality::PersonalityTab::Source => {
+                            state.editor.move_down();
+                        }
+                    }
                 }
             }
             KeyCode::Left => {
                 if let UiMode::Personality(ref mut state) = self.mode {
-                    state.cycle_backward();
+                    match state.tab {
+                        crate::views::personality::PersonalityTab::Builder => state.cycle_backward(),
+                        crate::views::personality::PersonalityTab::Source => state.move_left(),
+                    }
                 }
             }
             KeyCode::Right => {
                 if let UiMode::Personality(ref mut state) = self.mode {
-                    state.cycle_forward();
+                    match state.tab {
+                        crate::views::personality::PersonalityTab::Builder => state.cycle_forward(),
+                        crate::views::personality::PersonalityTab::Source => state.move_right(),
+                    }
                 }
             }
             KeyCode::Enter => {
-                let (is_save, is_delete) = match &self.mode {
-                    UiMode::Personality(s) => (
-                        s.current_field() == PersonalityField::Save,
-                        s.current_field() == PersonalityField::DeleteProfile,
-                    ),
-                    _ => (false, false),
-                };
-                if is_save {
+                let should_save = matches!(&self.mode, UiMode::Personality(s) if s.pending_overwrite.is_none() && matches!(s.tab, crate::views::personality::PersonalityTab::Builder) && matches!(s.current_field(), crate::views::personality::PersonalityField::Save));
+                if should_save {
                     self.save_personality();
-                } else if is_delete {
-                    self.delete_personality_profile();
                 } else if let UiMode::Personality(ref mut state) = self.mode {
-                    state.cycle_forward();
+                    if state.pending_overwrite.is_some() {
+                        state.confirm_overwrite();
+                    } else {
+                        match state.tab {
+                            crate::views::personality::PersonalityTab::Builder => state.cycle_forward(),
+                            crate::views::personality::PersonalityTab::Source => state.insert_newline(),
+                        }
+                    }
                 }
             }
             KeyCode::Backspace => {
                 if let UiMode::Personality(ref mut state) = self.mode {
-                    state.pop_char();
+                    if state.pending_overwrite.is_none() && matches!(state.tab, crate::views::personality::PersonalityTab::Source) {
+                        state.pop_char();
+                    }
                 }
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if let UiMode::Personality(ref mut state) = self.mode {
+                    if state.pending_overwrite.is_some() {
+                        state.confirm_overwrite();
+                    } else if matches!(state.tab, crate::views::personality::PersonalityTab::Source) {
+                        if let KeyCode::Char(c) = key.code { state.insert_char(c); }
+                    }
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                if let UiMode::Personality(ref mut state) = self.mode {
+                    if state.pending_overwrite.is_some() {
+                        state.cancel_overwrite();
+                    } else if matches!(state.tab, crate::views::personality::PersonalityTab::Source) {
+                        if let KeyCode::Char(c) = key.code { state.insert_char(c); }
+                    }
+                }
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.save_personality();
             }
             KeyCode::Char(c) => {
                 if let UiMode::Personality(ref mut state) = self.mode {
-                    state.push_char(c);
+                    if state.pending_overwrite.is_none() && matches!(state.tab, crate::views::personality::PersonalityTab::Source) {
+                        state.insert_char(c);
+                    }
                 }
             }
             _ => {}
@@ -3966,99 +4012,28 @@ impl App {
             _ => return,
         };
 
-        match state.scope {
-            PersonalityScope::Global => {
-                state.save_to_config(&mut self.config.personality);
-                let config_path = Config::user_config_path();
-                match self.config.save(&config_path) {
-                    Ok(()) => {
-                        if let UiMode::Personality(ref mut current) = self.mode {
-                            current.dirty = false;
-                            current.saved_profiles =
-                                self.config.personality.profiles.profile_names();
-                            current.active_profile =
-                                self.config.personality.profiles.active.clone();
-                            current.profile_name = current
-                                .active_profile
-                                .clone()
-                                .unwrap_or_else(|| "default".to_string());
-                        }
-                        self.push_system_msg(&format!(
-                            "Personality saved to {}",
-                            config_path.display()
-                        ));
-                    }
-                    Err(e) => self.push_error_msg(&format!("Failed to save personality: {e}")),
-                }
-            }
-            PersonalityScope::Project => {
-                let path = self.cwd.join(".imp").join("config.toml");
-                let mut project_config = Config::load(&path).unwrap_or_default();
-                state.save_to_config(&mut project_config.personality);
-                match project_config.save(&path) {
-                    Ok(()) => {
-                        if let UiMode::Personality(ref mut current) = self.mode {
-                            current.dirty = false;
-                            current.saved_profiles =
-                                project_config.personality.profiles.profile_names();
-                            current.active_profile =
-                                project_config.personality.profiles.active.clone();
-                            current.profile_name = current
-                                .active_profile
-                                .clone()
-                                .unwrap_or_else(|| "default".to_string());
-                        }
-                        self.push_system_msg(&format!(
-                            "Project personality saved to {}",
-                            path.display()
-                        ));
-                    }
-                    Err(e) => {
-                        self.push_error_msg(&format!("Failed to save project personality: {e}"))
-                    }
-                }
+        let path = state.current_path().clone();
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                self.push_error_msg(&format!("Failed to create soul directory: {e}"));
+                return;
             }
         }
-    }
 
-    fn delete_personality_profile(&mut self) {
-        let state = match &self.mode {
-            UiMode::Personality(state) => state.clone(),
-            _ => return,
+        let content = if state.editor.is_empty() {
+            default_soul_markdown()
+        } else {
+            state.editor.content().to_string()
         };
 
-        match state.scope {
-            PersonalityScope::Global => {
-                let deleted = if let UiMode::Personality(ref mut current) = self.mode {
-                    current.delete_active_profile(&mut self.config.personality)
-                } else {
-                    false
-                };
-                if deleted {
-                    let config_path = Config::user_config_path();
-                    match self.config.save(&config_path) {
-                        Ok(()) => self.push_system_msg("Deleted global personality profile."),
-                        Err(e) => self.push_error_msg(&format!("Failed to save personality: {e}")),
-                    }
+        match std::fs::write(&path, content) {
+            Ok(()) => {
+                if let UiMode::Personality(ref mut current) = self.mode {
+                    current.save_success();
                 }
+                self.push_system_msg(&format!("Soul saved to {}", path.display()));
             }
-            PersonalityScope::Project => {
-                let path = self.cwd.join(".imp").join("config.toml");
-                let mut project_config = Config::load(&path).unwrap_or_default();
-                let deleted = if let UiMode::Personality(ref mut current) = self.mode {
-                    current.delete_active_profile(&mut project_config.personality)
-                } else {
-                    false
-                };
-                if deleted {
-                    match project_config.save(&path) {
-                        Ok(()) => self.push_system_msg("Deleted project personality profile."),
-                        Err(e) => {
-                            self.push_error_msg(&format!("Failed to save project personality: {e}"))
-                        }
-                    }
-                }
-            }
+            Err(e) => self.push_error_msg(&format!("Failed to save soul: {e}")),
         }
     }
 
@@ -5310,10 +5285,9 @@ mod session_lifecycle {
 
     #[test]
     fn personality_state_default_sentence_is_visible() {
-        let global = imp_core::personality::PersonalityConfig::default();
+        let tmp = TempDir::new().unwrap();
         let state = crate::views::personality::PersonalityState::new(
-            &global,
-            None,
+            tmp.path().to_path_buf(),
             crate::views::personality::PersonalityScope::Global,
         );
         assert_eq!(

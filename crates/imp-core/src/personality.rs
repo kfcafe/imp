@@ -1,6 +1,30 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
-/// Ordered editable words that render the top-line identity sentence.
+use crate::resources::SoulDoc;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SoulTunableSpec {
+    pub label: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoulTunableState {
+    Preset(usize),
+    Edited,
+    Missing,
+}
+
+pub const SOUL_TUNABLE_SPECS: &[SoulTunableSpec] = &[
+    SoulTunableSpec { label: "Autonomy" },
+    SoulTunableSpec { label: "Brevity" },
+    SoulTunableSpec { label: "Caution" },
+    SoulTunableSpec { label: "Warmth" },
+    SoulTunableSpec { label: "Planning" },
+];
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum PersonaFocus {
@@ -590,13 +614,258 @@ fn sanitize_profile_name(name: &str) -> String {
         .to_string()
 }
 
+pub fn tunable_variants_for_label(label: &str) -> Option<[&'static str; 5]> {
+    match label {
+        "Autonomy" => Some([
+            crate::system_prompt::autonomy_line(PersonalityBand::VeryLow),
+            crate::system_prompt::autonomy_line(PersonalityBand::Low),
+            crate::system_prompt::autonomy_line(PersonalityBand::Medium),
+            crate::system_prompt::autonomy_line(PersonalityBand::High),
+            crate::system_prompt::autonomy_line(PersonalityBand::VeryHigh),
+        ]),
+        "Brevity" => Some([
+            crate::system_prompt::verbosity_line(PersonalityBand::VeryLow),
+            crate::system_prompt::verbosity_line(PersonalityBand::Low),
+            crate::system_prompt::verbosity_line(PersonalityBand::Medium),
+            crate::system_prompt::verbosity_line(PersonalityBand::High),
+            crate::system_prompt::verbosity_line(PersonalityBand::VeryHigh),
+        ]),
+        "Caution" => Some([
+            crate::system_prompt::caution_line(PersonalityBand::VeryLow),
+            crate::system_prompt::caution_line(PersonalityBand::Low),
+            crate::system_prompt::caution_line(PersonalityBand::Medium),
+            crate::system_prompt::caution_line(PersonalityBand::High),
+            crate::system_prompt::caution_line(PersonalityBand::VeryHigh),
+        ]),
+        "Warmth" => Some([
+            crate::system_prompt::warmth_line(PersonalityBand::VeryLow),
+            crate::system_prompt::warmth_line(PersonalityBand::Low),
+            crate::system_prompt::warmth_line(PersonalityBand::Medium),
+            crate::system_prompt::warmth_line(PersonalityBand::High),
+            crate::system_prompt::warmth_line(PersonalityBand::VeryHigh),
+        ]),
+        "Planning" => Some([
+            crate::system_prompt::planning_depth_line(PersonalityBand::VeryLow),
+            crate::system_prompt::planning_depth_line(PersonalityBand::Low),
+            crate::system_prompt::planning_depth_line(PersonalityBand::Medium),
+            crate::system_prompt::planning_depth_line(PersonalityBand::High),
+            crate::system_prompt::planning_depth_line(PersonalityBand::VeryHigh),
+        ]),
+        _ => None,
+    }
+}
+
+pub fn parse_tunables_section(content: &str) -> BTreeMap<String, String> {
+    let mut in_tunables = false;
+    let mut out = BTreeMap::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") {
+            in_tunables = trimmed == "## Tunables";
+            continue;
+        }
+        if !in_tunables {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("- ") {
+            if let Some((label, value)) = rest.split_once(':') {
+                out.insert(label.trim().to_string(), value.trim().to_string());
+            }
+        }
+    }
+
+    out
+}
+
+pub fn tunable_state_for_label(content: &str, label: &str) -> SoulTunableState {
+    let parsed = parse_tunables_section(content);
+    let Some(current) = parsed.get(label) else {
+        return SoulTunableState::Missing;
+    };
+    let Some(_spec) = SOUL_TUNABLE_SPECS.iter().find(|s| s.label == label) else {
+        return SoulTunableState::Edited;
+    };
+    let Some(variants) = tunable_variants_for_label(label) else {
+        return SoulTunableState::Edited;
+    };
+    match variants.iter().position(|v| *v == current) {
+        Some(idx) => SoulTunableState::Preset(idx),
+        None => SoulTunableState::Edited,
+    }
+}
+
+pub fn generated_tunable_line(label: &str, variant_idx: usize) -> Option<String> {
+    let _spec = SOUL_TUNABLE_SPECS.iter().find(|s| s.label == label)?;
+    let variants = tunable_variants_for_label(label)?;
+    let variant = variants.get(variant_idx)?;
+    Some(format!("- {label}: {variant}"))
+}
+
+pub fn replace_tunable_line(content: &str, label: &str, new_line: &str) -> String {
+    let mut out = Vec::new();
+    let mut in_tunables = false;
+    let mut replaced = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") {
+            if in_tunables && !replaced {
+                out.push(new_line.to_string());
+                replaced = true;
+            }
+            in_tunables = trimmed == "## Tunables";
+            out.push(line.to_string());
+            continue;
+        }
+        if in_tunables && trimmed.starts_with("- ") && trimmed[2..].starts_with(&format!("{label}:")) {
+            if !replaced {
+                out.push(new_line.to_string());
+                replaced = true;
+            }
+            continue;
+        }
+        out.push(line.to_string());
+    }
+
+    if !replaced {
+        if in_tunables {
+            out.push(new_line.to_string());
+        } else {
+            if !content.ends_with('\n') && !content.is_empty() {
+                out.push(String::new());
+            }
+            out.push("## Tunables".to_string());
+            out.push(String::new());
+            out.push(new_line.to_string());
+        }
+    }
+
+    out.join("\n")
+}
+
 fn default_personality_name() -> String {
     "imp".to_string()
 }
 
+pub fn soul_identity_text(content: &str) -> String {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('-') {
+            continue;
+        }
+        return trimmed.to_string();
+    }
+    "You are imp, a coding agent.".to_string()
+}
+
+pub fn default_soul_markdown() -> String {
+    let profile = PersonalityProfile::default();
+    format!(
+        "# Soul\n\n{}\n\n## Tunables\n\n- Autonomy: {}\n- Brevity: {}\n- Caution: {}\n- Warmth: {}\n- Planning: {}\n",
+        profile.identity.render_sentence(),
+        crate::system_prompt::autonomy_line(profile.sliders.autonomy),
+        crate::system_prompt::verbosity_line(profile.sliders.verbosity),
+        crate::system_prompt::caution_line(profile.sliders.caution),
+        crate::system_prompt::warmth_line(profile.sliders.warmth),
+        crate::system_prompt::planning_depth_line(profile.sliders.planning_depth),
+    )
+}
+
+pub fn write_default_soul_if_missing(path: &std::path::Path) -> crate::Result<bool> {
+    if path.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, default_soul_markdown())?;
+    Ok(true)
+}
+
+pub fn migrate_personality_to_soul(profile: &PersonalityProfile) -> String {
+    format!(
+        "# Soul\n\n{}\n\n## Tunables\n\n- Autonomy: {}\n- Brevity: {}\n- Caution: {}\n- Warmth: {}\n- Planning: {}\n",
+        profile.identity.render_sentence(),
+        crate::system_prompt::autonomy_line(profile.sliders.autonomy),
+        crate::system_prompt::verbosity_line(profile.sliders.verbosity),
+        crate::system_prompt::caution_line(profile.sliders.caution),
+        crate::system_prompt::warmth_line(profile.sliders.warmth),
+        crate::system_prompt::planning_depth_line(profile.sliders.planning_depth),
+    )
+}
+
+pub fn soul_prompt_block(soul: &SoulDoc) -> String {
+    let mut s = String::from("Soul:\n");
+    s.push_str(&soul.content);
+    s
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soul_default_file_write_only_happens_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("soul.md");
+        assert_eq!(write_default_soul_if_missing(&path).unwrap(), true);
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert!(first.contains("# Soul"));
+        assert_eq!(write_default_soul_if_missing(&path).unwrap(), false);
+        let second = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn personality_profile_can_migrate_to_soul_markdown() {
+        let profile = PersonalityProfile::default();
+        let soul = migrate_personality_to_soul(&profile);
+        assert!(soul.contains("# Soul"));
+        assert!(soul.contains("## Tunables"));
+        assert!(soul.contains("- Autonomy:"));
+    }
+
+    #[test]
+    fn soul_tunables_parse_and_match_presets() {
+        let soul = default_soul_markdown();
+        let parsed = parse_tunables_section(&soul);
+        assert!(parsed.contains_key("Autonomy"));
+        assert!(parsed.contains_key("Brevity"));
+        assert_eq!(tunable_state_for_label(&soul, "Autonomy"), SoulTunableState::Preset(3));
+        assert_eq!(tunable_state_for_label(&soul, "Brevity"), SoulTunableState::Preset(1));
+    }
+
+    #[test]
+    fn soul_tunables_report_edited_when_line_changes() {
+        let soul = "# Soul\n\nYou are imp.\n\n## Tunables\n\n- Autonomy: Do your own thing in a custom way.\n";
+        assert_eq!(tunable_state_for_label(soul, "Autonomy"), SoulTunableState::Edited);
+    }
+
+    #[test]
+    fn soul_tunables_report_missing_when_absent() {
+        let soul = "# Soul\n\nHello\n";
+        assert_eq!(tunable_state_for_label(soul, "Autonomy"), SoulTunableState::Missing);
+    }
+
+    #[test]
+    fn soul_tunables_replace_line_in_place() {
+        let soul = default_soul_markdown();
+        let replacement = generated_tunable_line("Warmth", 4).unwrap();
+        let updated = replace_tunable_line(&soul, "Warmth", &replacement);
+        assert!(updated.contains(&replacement));
+        assert_eq!(tunable_state_for_label(&updated, "Warmth"), SoulTunableState::Preset(4));
+    }
+
+    #[test]
+    fn soul_tunables_append_section_when_missing() {
+        let soul = "# Soul\n\nYou are imp.\n";
+        let replacement = generated_tunable_line("Autonomy", 3).unwrap();
+        let updated = replace_tunable_line(soul, "Autonomy", &replacement);
+        assert!(updated.contains("## Tunables"));
+        assert!(updated.contains(&replacement));
+    }
 
     #[test]
     fn default_identity_sentence_is_strong_and_compact() {

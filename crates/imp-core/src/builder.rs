@@ -173,6 +173,7 @@ impl AgentBuilder {
         } else {
             let user_config_dir = Config::user_config_dir();
             let agents_md = resources::discover_agents_md(&self.cwd, &user_config_dir);
+            let soul = resources::discover_soul(&self.cwd, &user_config_dir);
             let skills = resources::discover_skills(&self.cwd, &user_config_dir);
             agent.has_mana_skill = skills.iter().any(|skill| skill.name == "mana");
             agent.has_mana_basics_skill = skills.iter().any(|skill| skill.name == "mana-basics");
@@ -207,6 +208,7 @@ impl AgentBuilder {
                 skills: &skills,
                 facts: &[],
                 personality: Some(&self.config.personality.profile),
+                soul: soul.as_ref(),
                 task: self.task.as_ref(),
                 role: self.role.as_ref(),
                 mode: &agent.mode,

@@ -38,6 +38,34 @@ impl PromptTemplate {
     }
 }
 
+/// Discovered soul document.
+#[derive(Debug, Clone)]
+pub struct SoulDoc {
+    pub path: PathBuf,
+    pub content: String,
+}
+
+/// Discover the active soul document.
+///
+/// Precedence:
+/// 1. nearest project `.imp/soul.md` while walking up from cwd
+/// 2. global `<user_config_dir>/soul.md`
+pub fn discover_soul(cwd: &Path, user_config_dir: &Path) -> Option<SoulDoc> {
+    let mut dir = Some(cwd);
+    while let Some(d) = dir {
+        let path = d.join(".imp").join("soul.md");
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            return Some(SoulDoc { path, content });
+        }
+        dir = d.parent();
+    }
+
+    let global = user_config_dir.join("soul.md");
+    std::fs::read_to_string(&global)
+        .ok()
+        .map(|content| SoulDoc { path: global, content })
+}
+
 /// Discover all AGENTS.md files by walking up from cwd.
 pub fn discover_agents_md(cwd: &Path, user_config_dir: &Path) -> Vec<AgentsMd> {
     let mut results = Vec::new();
@@ -161,6 +189,50 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    // -- soul discovery --
+
+    #[test]
+    fn resource_discover_soul_uses_global_fallback() {
+        let dir = TempDir::new().unwrap();
+        let user_dir = dir.path().join("config");
+        let cwd = dir.path().join("project");
+        fs::create_dir_all(&user_dir).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(user_dir.join("soul.md"), "# Soul\n\nglobal soul").unwrap();
+
+        let soul = discover_soul(&cwd, &user_dir).expect("global soul should load");
+        assert!(soul.content.contains("global soul"));
+        assert_eq!(soul.path, user_dir.join("soul.md"));
+    }
+
+    #[test]
+    fn resource_discover_soul_prefers_nearest_project_override() {
+        let dir = TempDir::new().unwrap();
+        let user_dir = dir.path().join("config");
+        let project = dir.path().join("project");
+        let nested = project.join("src").join("deep");
+        fs::create_dir_all(&user_dir).unwrap();
+        fs::create_dir_all(project.join(".imp")).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(user_dir.join("soul.md"), "# Soul\n\nglobal soul").unwrap();
+        fs::write(project.join(".imp").join("soul.md"), "# Soul\n\nproject soul").unwrap();
+
+        let soul = discover_soul(&nested, &user_dir).expect("project soul should load");
+        assert!(soul.content.contains("project soul"));
+        assert_eq!(soul.path, project.join(".imp").join("soul.md"));
+    }
+
+    #[test]
+    fn resource_discover_soul_empty_when_absent() {
+        let dir = TempDir::new().unwrap();
+        let user_dir = dir.path().join("config");
+        let cwd = dir.path().join("project");
+        fs::create_dir_all(&user_dir).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+
+        assert!(discover_soul(&cwd, &user_dir).is_none());
+    }
 
     // -- AGENTS.md discovery --
 

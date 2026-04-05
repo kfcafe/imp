@@ -1002,7 +1002,7 @@ fn mana_skill_follow_up_hint(
     mode: AgentMode,
     has_mana_skill: bool,
     has_mana_basics_skill: bool,
-    has_mana_delegation_skill: bool,
+    _has_mana_delegation_skill: bool,
 ) -> Option<&'static str> {
     let lower = prompt.to_ascii_lowercase();
 
@@ -1044,10 +1044,8 @@ fn mana_skill_follow_up_hint(
         AgentMode::Full | AgentMode::Orchestrator | AgentMode::Planner
             if orchestration_signal || mana_signal =>
         {
-            if has_mana_delegation_skill {
-                Some("Before you continue: load `mana-delegation` with `read` and follow it for unit design, decomposition, and worker handoff.")
-            } else if has_mana_skill {
-                Some("Before you continue: load `mana` with `read` and follow it for unit design, decomposition, and worker handoff.")
+            if has_mana_skill {
+                Some("Before you continue: load `mana` with `read` and follow it for unit design, decomposition, retries, and worker handoff.")
             } else {
                 None
             }
@@ -1528,15 +1526,15 @@ mod tests {
     }
 
     #[test]
-    fn agent_queues_mana_delegation_hint_for_planner_requests() {
+    fn agent_queues_mana_hint_for_planner_requests() {
         let provider = Arc::new(MockProvider::new(vec![
-            text_response("Loaded delegation skill", 100, 20),
+            text_response("Loaded mana skill", 100, 20),
             text_response("Done", 120, 25),
         ]));
 
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.has_mana_delegation_skill = true;
+        agent.has_mana_skill = true;
         agent.mode = AgentMode::Planner;
 
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1560,7 +1558,7 @@ mod tests {
 
         assert_eq!(user_texts.len(), 2);
         assert_eq!(user_texts[0], "Please split this into units for workers");
-        assert!(user_texts[1].contains("load `mana-delegation`"));
+        assert!(user_texts[1].contains("load `mana`"));
     }
 
     #[tokio::test]
@@ -1602,7 +1600,7 @@ mod tests {
 
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.has_mana_delegation_skill = true;
+        agent.has_mana_skill = true;
         agent.mode = AgentMode::Planner;
 
         agent.run("Explain how this parser works".to_string())
@@ -3827,6 +3825,7 @@ mod mode_tests {
             skills: &[],
             facts: &[],
             personality: None,
+            soul: None,
             task: None,
             role: None,
             mode: &mode,
@@ -3874,6 +3873,7 @@ mod mode_tests {
             skills: &[],
             facts: &[],
             personality: None,
+            soul: None,
             task: None,
             role: None,
             mode: &AgentMode::Full,
@@ -3900,6 +3900,7 @@ mod mode_tests {
             skills: &[],
             facts: &[],
             personality: None,
+            soul: None,
             task: None,
             role: None,
             mode: &AgentMode::Orchestrator,
@@ -3922,6 +3923,7 @@ mod mode_tests {
             skills: &[],
             facts: &[],
             personality: None,
+            soul: None,
             task: None,
             role: None,
             mode: &AgentMode::Worker,
@@ -3943,6 +3945,7 @@ mod mode_tests {
             skills: &[],
             facts: &[],
             personality: None,
+            soul: None,
             task: None,
             role: None,
             mode: &AgentMode::Reviewer,

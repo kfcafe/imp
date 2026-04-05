@@ -3,8 +3,8 @@ use std::fmt;
 use crate::config::AgentMode;
 use crate::context::estimate_tokens;
 use crate::guardrails::{self, GuardrailProfile};
-use crate::personality::{PersonalityBand, PersonalityProfile};
-use crate::resources::{AgentsMd, Skill};
+use crate::personality::{soul_identity_text, PersonalityBand, PersonalityProfile};
+use crate::resources::{AgentsMd, Skill, SoulDoc};
 use crate::roles::Role;
 use crate::tools::ToolRegistry;
 
@@ -61,6 +61,7 @@ pub struct AssembleParams<'a> {
     pub skills: &'a [Skill],
     pub facts: &'a [Fact],
     pub personality: Option<&'a PersonalityProfile>,
+    pub soul: Option<&'a SoulDoc>,
     pub task: Option<&'a TaskContext>,
     pub role: Option<&'a Role>,
     pub mode: &'a AgentMode,
@@ -95,6 +96,7 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
         p.mode,
         p.learning_enabled,
         p.personality,
+        p.soul,
     ));
 
     // Layer 1.5: Environment context
@@ -152,9 +154,12 @@ fn identity_layer(
     mode: &AgentMode,
     learning_enabled: bool,
     personality: Option<&PersonalityProfile>,
+    soul: Option<&SoulDoc>,
 ) -> String {
     let mut s = String::new();
-    if let Some(personality) = personality {
+    if let Some(soul) = soul {
+        s.push_str(&soul_identity_text(&soul.content));
+    } else if let Some(personality) = personality {
         s.push_str(&personality.identity.render_sentence());
     } else {
         s.push_str("You are imp, a coding agent.");
@@ -170,7 +175,11 @@ fn identity_layer(
         s.push_str(&format!("- {}: {}\n", def.name, def.description));
     }
 
-    if let Some(personality) = personality {
+    if let Some(soul) = soul {
+        s.push_str("\n\nSoul:\n");
+        s.push_str(&soul.content);
+        s.push('\n');
+    } else if let Some(personality) = personality {
         let working_style = working_style_lines(&personality.sliders);
         if !working_style.is_empty() {
             s.push_str("\nWorking style:\n");
@@ -188,6 +197,12 @@ fn identity_layer(
     s.push_str("- Use `scan` for structural code understanding and for extracting code at file:line, file:start-end, or file#symbol.\n");
     s.push_str("- Use `edit` and `write` for file changes.\n");
     s.push_str("- Use specialized tools like `mana`, `ask`, `web`, `extend`, `memory`, and `session_search` when the task calls for them.\n");
+
+    s.push_str("\nMana doctrine:\n");
+    s.push_str("- Mana is imp's substrate for explicit work. Represent work in mana whenever structure, verification, retries, dependencies, or handoff would help. Any mana unit must be detailed enough for another agent to execute cold without guesswork, even if you end up doing the work yourself.\n");
+    s.push_str("- Treat each unit description as an execution prompt.\n");
+    s.push_str("- Include current state, concrete steps, file paths with intent, edge cases, and a targeted verify command.\n");
+    s.push_str("- Update units with new context after failures; do not retry unchanged.\n");
 
     // Append role instructions after identity layer
     if let Some(role) = role {
@@ -226,7 +241,7 @@ fn working_style_lines(sliders: &crate::personality::PersonalitySliders) -> Vec<
     ]
 }
 
-fn autonomy_line(band: PersonalityBand) -> &'static str {
+pub(crate) fn autonomy_line(band: PersonalityBand) -> &'static str {
     match band {
         PersonalityBand::VeryLow => {
             "Ask for confirmation before making consequential decisions or larger changes."
@@ -246,7 +261,7 @@ fn autonomy_line(band: PersonalityBand) -> &'static str {
     }
 }
 
-fn verbosity_line(band: PersonalityBand) -> &'static str {
+pub(crate) fn verbosity_line(band: PersonalityBand) -> &'static str {
     match band {
         PersonalityBand::VeryLow => "Keep responses terse and strongly action-oriented.",
         PersonalityBand::Low => "Keep responses brief and focused on progress.",
@@ -262,7 +277,7 @@ fn verbosity_line(band: PersonalityBand) -> &'static str {
     }
 }
 
-fn caution_line(band: PersonalityBand) -> &'static str {
+pub(crate) fn caution_line(band: PersonalityBand) -> &'static str {
     match band {
         PersonalityBand::VeryLow => {
             "Move forward with reasonable assumptions when the path is clear."
@@ -278,7 +293,7 @@ fn caution_line(band: PersonalityBand) -> &'static str {
     }
 }
 
-fn warmth_line(band: PersonalityBand) -> &'static str {
+pub(crate) fn warmth_line(band: PersonalityBand) -> &'static str {
     match band {
         PersonalityBand::VeryLow => "Use a direct, neutral tone.",
         PersonalityBand::Low => "Use a clear, matter-of-fact tone.",
@@ -290,7 +305,7 @@ fn warmth_line(band: PersonalityBand) -> &'static str {
     }
 }
 
-fn planning_depth_line(band: PersonalityBand) -> &'static str {
+pub(crate) fn planning_depth_line(band: PersonalityBand) -> &'static str {
     match band {
         PersonalityBand::VeryLow => "Favor immediate execution on the most obvious next step.",
         PersonalityBand::Low => "Plan lightly, then move quickly into execution.",
@@ -368,25 +383,11 @@ fn skills_layer(skills: &[Skill], mode: &AgentMode) -> String {
 fn mana_skill_trigger(skills: &[Skill], mode: &AgentMode) -> Option<&'static str> {
     let has_mana = skills.iter().any(|skill| skill.name == "mana");
     let has_mana_basics = skills.iter().any(|skill| skill.name == "mana-basics");
-    let has_mana_delegation = skills
-        .iter()
-        .any(|skill| skill.name == "mana-delegation");
 
     match mode {
-        AgentMode::Full | AgentMode::Orchestrator => {
-            if has_mana_delegation {
-                Some("Load `mana-delegation` before splitting work into units or handing work to workers.")
-            } else if has_mana {
-                Some("Load `mana` before splitting work into units or handing work to workers.")
-            } else {
-                None
-            }
-        }
-        AgentMode::Planner => {
-            if has_mana_delegation {
-                Some("Load `mana-delegation` before writing units for worker agents.")
-            } else if has_mana {
-                Some("Load `mana` before writing units for worker agents.")
+        AgentMode::Full | AgentMode::Orchestrator | AgentMode::Planner => {
+            if has_mana {
+                Some("Load `mana` before writing or restructuring mana units for non-trivial work.")
             } else {
                 None
             }
@@ -465,6 +466,7 @@ mod tests {
         PersonaFocus, PersonaRole, PersonalityBand, PersonalityIdentity, PersonalityProfile,
         PersonalitySliders, VoiceWord, WorkStyleWord,
     };
+    use crate::resources::SoulDoc;
     use crate::tools::{Tool, ToolContext, ToolOutput};
     use async_trait::async_trait;
 
@@ -604,6 +606,7 @@ mod tests {
             skills,
             facts,
             personality,
+            soul: None,
             task,
             role,
             mode: &AgentMode::Full,
@@ -704,6 +707,44 @@ mod tests {
             .contains("Favor immediate execution on the most obvious next step."));
     }
 
+    #[test]
+    fn system_prompt_prefers_soul_over_personality_profile() {
+        let reg = make_registry();
+        let personality = make_personality();
+        let soul = SoulDoc {
+            path: PathBuf::from("/tmp/soul.md"),
+            content: "# Soul\n\nYou are Sol, a tuned and reflective collaborator.\n\n## Tunables\n\n- Autonomy: Act independently by default.\n".into(),
+        };
+        let result = assemble(&AssembleParams {
+            tools: &reg,
+            agents_md: &[],
+            skills: &[],
+            facts: &[],
+            personality: Some(&personality),
+            soul: Some(&soul),
+            task: None,
+            role: None,
+            mode: &AgentMode::Full,
+            memory: None,
+            user_profile: None,
+            cwd: None,
+            learning_enabled: false,
+            guardrail_profile: None,
+        });
+        assert!(result.text.contains("You are Sol, a tuned and reflective collaborator."));
+        assert!(result.text.contains("Soul:"));
+        assert!(result.text.contains("## Tunables"));
+        assert!(!result.text.contains("Working style:"));
+    }
+
+    #[test]
+    fn system_prompt_without_soul_keeps_personality_working_style_block() {
+        let reg = make_registry();
+        let personality = make_personality();
+        let result = test_assemble(&reg, &[], &[], &[], Some(&personality), None, None);
+        assert!(result.text.contains("Working style:"));
+    }
+
     // -- Layer 2: AGENTS.md --
 
     #[test]
@@ -769,9 +810,9 @@ mod tests {
     fn system_prompt_includes_mode_aware_mana_skill_trigger() {
         let reg = make_registry();
         let skills = vec![make_skill(
-            "mana-delegation",
-            "Split work into units and hand it to workers",
-            "/home/.imp/skills/mana-delegation/SKILL.md",
+            "mana",
+            "Coordinate explicit work through mana",
+            "/home/.imp/skills/mana/SKILL.md",
         )];
         let result = assemble(&AssembleParams {
             tools: &reg,
@@ -779,6 +820,7 @@ mod tests {
             skills: &skills,
             facts: &[],
             personality: None,
+            soul: None,
             task: None,
             role: None,
             mode: &AgentMode::Planner,
@@ -792,7 +834,37 @@ mod tests {
         assert!(result.text.contains("- Trigger:"));
         assert!(result
             .text
-            .contains("Load `mana-delegation` before writing units for worker agents."));
+            .contains("Load `mana` before writing or restructuring mana units for non-trivial work."));
+    }
+
+    #[test]
+    fn system_prompt_orchestrator_uses_same_mana_trigger() {
+        let reg = make_registry();
+        let skills = vec![make_skill(
+            "mana",
+            "Coordinate explicit work through mana",
+            "/home/.imp/skills/mana/SKILL.md",
+        )];
+        let result = assemble(&AssembleParams {
+            tools: &reg,
+            agents_md: &[],
+            skills: &skills,
+            facts: &[],
+            personality: None,
+            soul: None,
+            task: None,
+            role: None,
+            mode: &AgentMode::Orchestrator,
+            memory: None,
+            user_profile: None,
+            cwd: None,
+            learning_enabled: false,
+            guardrail_profile: None,
+        });
+
+        assert!(result.text.contains(
+            "Load `mana` before writing or restructuring mana units for non-trivial work."
+        ));
     }
 
     #[test]
@@ -816,6 +888,7 @@ mod tests {
             skills: &skills,
             facts: &[],
             personality: None,
+            soul: None,
             task: None,
             role: None,
             mode: &AgentMode::Worker,
@@ -845,6 +918,7 @@ mod tests {
             skills: &skills,
             facts: &[],
             personality: None,
+            soul: None,
             task: None,
             role: None,
             mode: &AgentMode::Planner,
@@ -872,6 +946,7 @@ mod tests {
             skills: &skills,
             facts: &[],
             personality: None,
+            soul: None,
             task: None,
             role: None,
             mode: &AgentMode::Reviewer,
@@ -1175,6 +1250,7 @@ mod tests {
             skills: &[],
             facts: &[],
             personality: None,
+            soul: None,
             task: None,
             role: None,
             mode: &AgentMode::Full,
@@ -1199,6 +1275,7 @@ mod tests {
             skills: &[],
             facts: &[],
             personality: None,
+            soul: None,
             task: None,
             role: None,
             mode: &AgentMode::Full,
@@ -1221,6 +1298,7 @@ mod tests {
             skills: &[],
             facts: &[],
             personality: None,
+            soul: None,
             task: None,
             role: None,
             mode: &AgentMode::Full,
@@ -1257,6 +1335,7 @@ mod tests {
             skills: &skills,
             facts: &facts,
             personality: None,
+            soul: None,
             task: Some(&task),
             role: None,
             mode: &AgentMode::Full,
