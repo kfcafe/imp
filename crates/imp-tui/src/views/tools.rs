@@ -5,6 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
+use serde_json::Value;
 
 use crate::animation::spinner_frame;
 use crate::theme::Theme;
@@ -145,7 +146,7 @@ impl DisplayToolCall {
                 .to_string(),
             "bash" => {
                 let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                let truncated = truncate_chars_with_suffix(cmd, 57, "…");
+                let truncated = truncate_chars_with_suffix(cmd, 80, "…");
                 format!("$ {truncated}")
             }
             "edit" | "write" => args
@@ -153,29 +154,262 @@ impl DisplayToolCall {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            "grep" => {
-                let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-                format!("\"{pattern}\" {path}")
-            }
-            "find" => {
-                let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-                pattern.to_string()
-            }
-            "ls" => args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".")
-                .to_string(),
-            _ => {
-                let json = serde_json::to_string(args).unwrap_or_default();
-                if json.len() > 60 {
-                    truncate_chars_with_suffix(&json, 57, "…")
-                } else {
-                    json
+            "scan" => {
+                let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                match action {
+                    "extract" => args
+                        .get("files")
+                        .and_then(|v| v.as_array())
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_else(|| "extract".to_string()),
+                    _ => action.to_string(),
                 }
             }
+            "mana" => format_mana_args(args),
+            _ => summarize_json_object(args),
         }
+    }
+}
+
+fn format_mana_args(args: &Value) -> String {
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("?");
+    let mut fields = Vec::new();
+
+    match action {
+        "create" => {
+            push_field(
+                &mut fields,
+                "title",
+                args.get("title")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "priority",
+                args.get("priority").and_then(value_to_short_string),
+            );
+            push_field(
+                &mut fields,
+                "parent",
+                args.get("parent")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "verify",
+                args.get("verify")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "deps",
+                args.get("deps").and_then(Value::as_str).map(str::to_string),
+            );
+        }
+        "update" => {
+            push_field(
+                &mut fields,
+                "id",
+                args.get("id").and_then(Value::as_str).map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "status",
+                args.get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "title",
+                args.get("title")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "priority",
+                args.get("priority").and_then(value_to_short_string),
+            );
+            push_field(
+                &mut fields,
+                "notes",
+                args.get("notes")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+        }
+        "run" => {
+            push_field(
+                &mut fields,
+                "id",
+                args.get("id").and_then(Value::as_str).map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "jobs",
+                args.get("jobs").and_then(value_to_short_string),
+            );
+            push_field(
+                &mut fields,
+                "background",
+                args.get("background").and_then(value_to_short_string),
+            );
+            push_field(
+                &mut fields,
+                "dry_run",
+                args.get("dry_run").and_then(value_to_short_string),
+            );
+            push_field(
+                &mut fields,
+                "review",
+                args.get("review").and_then(value_to_short_string),
+            );
+        }
+        "show" | "close" | "claim" | "release" | "logs" | "tree" => {
+            push_field(
+                &mut fields,
+                "id",
+                args.get("id").and_then(Value::as_str).map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "run_id",
+                args.get("run_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "reason",
+                args.get("reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "by",
+                args.get("by").and_then(Value::as_str).map(str::to_string),
+            );
+        }
+        "list" => {
+            push_field(
+                &mut fields,
+                "status",
+                args.get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "parent",
+                args.get("parent")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "priority",
+                args.get("priority").and_then(value_to_short_string),
+            );
+            push_field(
+                &mut fields,
+                "all",
+                args.get("all").and_then(value_to_short_string),
+            );
+        }
+        "next" => {
+            push_field(
+                &mut fields,
+                "count",
+                args.get("count").and_then(value_to_short_string),
+            );
+        }
+        "status" | "agents" | "run_state" | "evaluate" => {
+            push_field(
+                &mut fields,
+                "run_id",
+                args.get("run_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+        }
+        _ => {
+            for key in [
+                "id", "title", "status", "priority", "run_id", "reason", "count",
+            ] {
+                push_field(
+                    &mut fields,
+                    key,
+                    args.get(key).and_then(value_to_short_string),
+                );
+            }
+        }
+    }
+
+    if fields.is_empty() {
+        action.to_string()
+    } else {
+        format!("{action}  {}", fields.join("  "))
+    }
+}
+
+fn summarize_json_object(args: &Value) -> String {
+    let Some(obj) = args.as_object() else {
+        let json = serde_json::to_string(args).unwrap_or_default();
+        return truncate_chars_with_suffix(&json, 80, "…");
+    };
+
+    let mut fields = Vec::new();
+    for (key, value) in obj {
+        if let Some(short) = value_to_short_string(value) {
+            fields.push(format!("{key}={short}"));
+        }
+    }
+
+    if fields.is_empty() {
+        "{}".to_string()
+    } else {
+        fields.join("  ")
+    }
+}
+
+fn push_field(fields: &mut Vec<String>, key: &str, value: Option<String>) {
+    if let Some(value) = value {
+        if !value.is_empty() {
+            fields.push(format!("{key}={value}"));
+        }
+    }
+}
+
+fn value_to_short_string(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(s) => Some(truncate_chars_with_suffix(s, 32, "…")),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Array(items) => {
+            let joined = items
+                .iter()
+                .filter_map(value_to_short_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            if joined.is_empty() {
+                None
+            } else {
+                Some(truncate_chars_with_suffix(&joined, 32, "…"))
+            }
+        }
+        Value::Object(_) => Some("{…}".to_string()),
     }
 }
 
@@ -346,6 +580,26 @@ mod tests {
     }
 
     #[test]
+    fn make_args_summary_formats_mana_compactly() {
+        let summary = DisplayToolCall::make_args_summary(
+            "mana",
+            &serde_json::json!({
+                "action": "create",
+                "title": "Fix hotkeys",
+                "priority": 1,
+                "verify": "cargo check -p imp-tui",
+                "deps": "1.2,1.3"
+            }),
+        );
+
+        assert!(summary.starts_with("create  "));
+        assert!(summary.contains("title=Fix hotkeys"));
+        assert!(summary.contains("priority=1"));
+        assert!(summary.contains("verify=cargo check -p imp-tui"));
+        assert!(summary.contains("deps=1.2,1.3"));
+    }
+
+    #[test]
     fn compactable_completed_success() {
         let tc = make_tc("read", "file.rs", Some("contents"), false);
         assert!(is_compactable(&tc));
@@ -403,7 +657,7 @@ mod tests {
     fn compact_group_fits_one_line() {
         let tcs = vec![
             make_tc("read", "file.rs", Some("ok"), false),
-            make_tc("grep", "pat", Some("ok"), false),
+            make_tc("bash", "$ grep foo .", Some("ok"), false),
         ];
         assert_eq!(compact_group_line_count(&tcs, 80), 1);
     }
@@ -442,7 +696,7 @@ mod tests {
     fn compact_height_all_compactable() {
         let tcs = vec![
             make_tc("read", "a.rs", Some("ok"), false),
-            make_tc("grep", "pat", Some("ok"), false),
+            make_tc("bash", "$ grep foo .", Some("ok"), false),
             make_tc("edit", "b.rs", Some("ok"), false),
         ];
         let h = tool_calls_compact_height(&tcs, 80);

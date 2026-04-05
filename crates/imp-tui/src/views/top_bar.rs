@@ -3,6 +3,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use crate::animation::format_elapsed;
 use crate::theme::Theme;
 use crate::views::status::StatusInfo;
 
@@ -30,14 +31,36 @@ impl Widget for TopBar<'_> {
         let cwd = shorten_path(&self.info.cwd, 36);
         let title = self.info.session_name.trim();
 
-        let line = if title.is_empty() {
-            Line::from(vec![Span::styled(cwd, self.theme.muted_style())])
+        let left = if title.is_empty() {
+            vec![Span::styled(cwd, self.theme.muted_style())]
         } else {
-            Line::from(vec![
+            vec![
                 Span::styled(cwd, self.theme.muted_style()),
                 sep,
                 Span::styled(title.to_string(), self.theme.accent_style()),
-            ])
+            ]
+        };
+
+        let right = self
+            .info
+            .turn_elapsed
+            .map(|elapsed| vec![Span::styled(format_elapsed(elapsed), self.theme.muted_style())])
+            .unwrap_or_default();
+
+        let left_width: usize = left.iter().map(|span| span.content.chars().count()).sum();
+        let right_width: usize = right.iter().map(|span| span.content.chars().count()).sum();
+        let available = area.width as usize;
+
+        let line = if !right.is_empty() && available > left_width + right_width + 2 {
+            let gap = available.saturating_sub(left_width + right_width);
+            let mut spans = left;
+            spans.push(Span::raw(" ".repeat(gap)));
+            spans.extend(right);
+            Line::from(spans)
+        } else if !right.is_empty() && left_width == 0 {
+            Line::from(right)
+        } else {
+            Line::from(left)
         };
 
         buf.set_line(area.x, area.y, &line, area.width);
@@ -125,14 +148,20 @@ mod tests {
         let content = render_to_string(&info, 100);
 
         assert!(content.contains("~/tower/imp"), "should contain cwd");
-        assert!(
-            content.contains("debug-oauth"),
-            "should contain chat title"
-        );
+        assert!(content.contains("debug-oauth"), "should contain chat title");
         assert!(
             !content.contains("sonnet"),
             "should no longer contain model name"
         );
+    }
+
+    #[test]
+    fn top_bar_renders_elapsed_when_streaming() {
+        let mut info = default_info();
+        info.turn_elapsed = Some(std::time::Duration::from_secs(7));
+        let content = render_to_string(&info, 100);
+
+        assert!(content.contains("7s"));
     }
 
     #[test]
@@ -147,8 +176,9 @@ mod tests {
     }
 
     #[test]
-    fn top_bar_narrow_terminal_still_shows_identity() {
-        let info = default_info();
+    fn top_bar_narrow_terminal_prefers_identity_over_elapsed() {
+        let mut info = default_info();
+        info.turn_elapsed = Some(std::time::Duration::from_secs(75));
         let content = render_to_string(&info, 20);
 
         assert!(

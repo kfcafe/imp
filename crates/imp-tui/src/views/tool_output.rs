@@ -16,7 +16,7 @@ pub fn styled_tool_output_lines(
     match tc.name.as_str() {
         "read" => styled_read_output(tc, highlighter, theme, with_line_numbers),
         "write" => styled_write_output(tc, highlighter, theme),
-        "edit" | "multi_edit" | "diff" => styled_diff_output(tc, theme),
+        "edit" | "multi_edit" => styled_diff_output(tc, theme),
         _ => styled_plain_output(tc, theme),
     }
 }
@@ -424,10 +424,4 @@ mod tests {
         assert!(plain.iter().any(|line| line.contains("fn main()")));
     }
 
-    #[test]
-    fn diff_lines_get_classified() {
-        let tc = make_tc("diff", Some("--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new"));
-        let lines = styled_tool_output_lines(&tc, &Highlighter::new(), &Theme::default(), false);
-        assert_eq!(lines.len(), 5);
-    }
 }

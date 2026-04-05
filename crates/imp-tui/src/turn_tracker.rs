@@ -109,6 +109,14 @@ impl TurnTracker {
                 if let Some(cmd) = args["command"].as_str() {
                     let truncated = cmd.chars().take(80).collect::<String>();
                     self.commands_run.push(truncated);
+                    if cmd.trim_start().starts_with("grep ")
+                        || cmd.trim_start().starts_with("find ")
+                        || cmd.trim_start() == "find"
+                        || cmd.trim_start().starts_with("ls ")
+                        || cmd.trim_start() == "ls"
+                    {
+                        self.searches += 1;
+                    }
                 }
             }
             "grep" | "find" | "probe_search" | "probe_extract" => {
@@ -162,6 +170,7 @@ mod tests {
 
         let long_cmd = "a".repeat(120);
         tracker.record_tool_start("id-bash", "bash", &json!({"command": long_cmd}));
+        tracker.record_tool_start("id-bash-grep", "bash", &json!({"command": "grep foo ."}));
         tracker.record_tool_start("id-grep", "grep", &json!({"pattern": "foo"}));
         tracker.record_tool_start("id-find", "find", &json!({"pattern": "*.rs"}));
         tracker.record_tool_start(
@@ -171,11 +180,11 @@ mod tests {
         );
         tracker.record_tool_start("id-probe2", "probe_extract", &json!({"targets": []}));
 
-        assert_eq!(tracker.commands_run.len(), 1);
+        assert_eq!(tracker.commands_run.len(), 2);
         // Command should be truncated to 80 chars
         assert_eq!(tracker.commands_run[0].len(), 80);
-        // grep, find, probe_search, probe_extract = 4 search calls
-        assert_eq!(tracker.searches, 4);
+        // bash grep + grep, find, probe_search, probe_extract = 5 search calls
+        assert_eq!(tracker.searches, 5);
     }
 
     #[test]

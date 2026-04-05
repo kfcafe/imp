@@ -92,15 +92,24 @@ impl SessionPickerState {
             .iter()
             .enumerate()
             .filter_map(|(idx, session)| {
-                session_score(session, &needle, self.preferred_cwd.as_deref()).map(|score| (score, idx))
+                session_score(session, &needle, self.preferred_cwd.as_deref())
+                    .map(|score| (score, idx))
             })
             .collect();
 
         ranked.sort_by(|(score_a, idx_a), (score_b, idx_b)| {
             score_b
                 .cmp(score_a)
-                .then_with(|| self.sessions[*idx_b].updated_at.cmp(&self.sessions[*idx_a].updated_at))
-                .then_with(|| self.sessions[*idx_b].created_at.cmp(&self.sessions[*idx_a].created_at))
+                .then_with(|| {
+                    self.sessions[*idx_b]
+                        .updated_at
+                        .cmp(&self.sessions[*idx_a].updated_at)
+                })
+                .then_with(|| {
+                    self.sessions[*idx_b]
+                        .created_at
+                        .cmp(&self.sessions[*idx_a].created_at)
+                })
         });
 
         self.filtered_indices = ranked.into_iter().map(|(_, idx)| idx).collect();
@@ -258,12 +267,7 @@ fn render_session_list(area: Rect, state: &SessionPickerState, buf: &mut Buffer,
 
     if scroll_offset > 0 {
         let indicator = Line::from(Span::styled("▲", theme.muted_style()));
-        buf.set_line(
-            area.x + area.width.saturating_sub(1),
-            area.y,
-            &indicator,
-            1,
-        );
+        buf.set_line(area.x + area.width.saturating_sub(1), area.y, &indicator, 1);
     }
     if scroll_offset + visible_rows < total {
         let indicator = Line::from(Span::styled("▼", theme.muted_style()));
@@ -376,7 +380,11 @@ fn session_score(session: &SessionInfo, needle: &str, preferred_cwd: Option<&str
     let mut best_match = 0i64;
     best_match = best_match.max(text_match_score(session.name.as_deref(), needle, 1_200));
     best_match = best_match.max(text_match_score(session.summary.as_deref(), needle, 1_000));
-    best_match = best_match.max(text_match_score(session.first_message.as_deref(), needle, 700));
+    best_match = best_match.max(text_match_score(
+        session.first_message.as_deref(),
+        needle,
+        700,
+    ));
     best_match = best_match.max(text_match_score(Some(&session.cwd), needle, 500));
     best_match = best_match.max(text_match_score(Some(&session.id), needle, 300));
 

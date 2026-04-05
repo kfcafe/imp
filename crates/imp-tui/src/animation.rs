@@ -84,7 +84,10 @@ pub fn activity_label(
                 ActivitySurface::TopBar => {
                     format!("{} waiting for response", waiting_badge(tick, level))
                 }
-                ActivitySurface::Editor | ActivitySurface::Chat => String::new(),
+                ActivitySurface::Chat => {
+                    format!("{} waiting", waiting_badge(tick, level))
+                }
+                ActivitySurface::Editor => String::new(),
             },
         },
         AnimationState::Thinking => match level {
@@ -114,7 +117,13 @@ pub fn activity_label(
                     format!("{} responding", spinner_frame(tick))
                 }
             },
-            ActivitySurface::Editor | ActivitySurface::Chat => String::new(),
+            ActivitySurface::Chat => match level {
+                AnimationLevel::None => "responding".into(),
+                AnimationLevel::Spinner | AnimationLevel::Minimal => {
+                    format!("{} responding", spinner_frame(tick))
+                }
+            },
+            ActivitySurface::Editor => String::new(),
         },
         AnimationState::Queued => match level {
             AnimationLevel::None => "queued".into(),

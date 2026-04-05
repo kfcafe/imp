@@ -76,7 +76,7 @@ pub fn resolve_normal(key: KeyEvent) -> Option<Action> {
         // Model / thinking
         KeyCode::Char('l') if ctrl => Some(Action::SelectModel),
         KeyCode::Char('p') if ctrl && shift => Some(Action::CycleModelBackward),
-        KeyCode::Char('p') if ctrl => Some(Action::SidebarToggle),
+        KeyCode::Char('p') if ctrl => Some(Action::CycleModelForward),
         KeyCode::Char('o') if ctrl => Some(Action::ToolToggle),
         KeyCode::BackTab => Some(Action::CycleThinking),
 
@@ -135,5 +135,45 @@ pub fn resolve_overlay(key: KeyEvent) -> Option<Action> {
         KeyCode::Backspace => Some(Action::OverlayBackspace),
         KeyCode::Char(c) => Some(Action::OverlayFilter(c)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_p_cycles_model_forward() {
+        assert_eq!(
+            resolve_normal(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            Some(Action::CycleModelForward)
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_p_cycles_model_backward() {
+        assert_eq!(
+            resolve_normal(KeyEvent::new(
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            Some(Action::CycleModelBackward)
+        );
+    }
+
+    #[test]
+    fn tab_toggles_sidebar() {
+        assert_eq!(
+            resolve_normal(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty())),
+            Some(Action::SidebarToggle)
+        );
+    }
+
+    #[test]
+    fn ctrl_p_no_longer_toggles_sidebar() {
+        assert_ne!(
+            resolve_normal(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            Some(Action::SidebarToggle)
+        );
     }
 }
