@@ -181,6 +181,11 @@ struct DragAutoScroll {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ThemeKind {
+    is_light: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ChatRenderCacheKey {
     width: u16,
     messages_epoch: u64,
@@ -192,7 +197,7 @@ struct ChatRenderCacheKey {
     show_timestamps: bool,
     animation_level: imp_core::config::AnimationLevel,
     activity_state: AnimationState,
-    theme_is_light: bool,
+    theme: ThemeKind,
 }
 
 #[derive(Debug)]
@@ -211,7 +216,7 @@ struct SidebarStreamCacheKey {
     tool_output: imp_core::config::ToolOutputDisplay,
     tool_output_lines: usize,
     animation_level: imp_core::config::AnimationLevel,
-    theme_is_light: bool,
+    theme: ThemeKind,
 }
 
 #[derive(Debug)]
@@ -228,7 +233,7 @@ struct SidebarDetailCacheKey {
     word_wrap: bool,
     tool_output_lines: usize,
     animation_level: imp_core::config::AnimationLevel,
-    theme_is_light: bool,
+    theme: ThemeKind,
 }
 
 #[derive(Debug)]
@@ -568,8 +573,6 @@ impl App {
         &mut self,
         terminal: &mut InteractiveTerminal,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let tick_rate = Duration::from_millis(16); // ~60fps
-
         loop {
             self.sync_window_title();
             // Render
@@ -578,9 +581,10 @@ impl App {
                 self.needs_redraw = false;
             }
 
-            // Poll for terminal events with short timeout
-            let timeout = tick_rate;
-            if crossterm::event::poll(timeout)? {
+            let tick_rate = self.effective_tick_rate();
+
+            // Poll for terminal events with adaptive timeout
+            if crossterm::event::poll(tick_rate)? {
                 let event = crossterm::event::read()?;
                 match event {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -896,6 +900,20 @@ impl App {
         )
     }
 
+    fn theme_kind(&self) -> ThemeKind {
+        ThemeKind {
+            is_light: self.theme.bg == Theme::light().bg,
+        }
+    }
+
+    fn effective_tick_rate(&self) -> Duration {
+        if self.is_streaming || self.drag_autoscroll.is_some() {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(100)
+        }
+    }
+
     fn chat_render_cache_key(
         &self,
         width: u16,
@@ -914,7 +932,7 @@ impl App {
             show_timestamps: self.config.ui.show_timestamps,
             animation_level: self.config.ui.animations,
             activity_state,
-            theme_is_light: self.theme.bg == Theme::light().bg,
+            theme: self.theme_kind(),
         }
     }
 
@@ -976,7 +994,7 @@ impl App {
             tool_output: self.config.ui.tool_output,
             tool_output_lines: self.config.ui.tool_output_lines,
             animation_level: self.config.ui.animations,
-            theme_is_light: self.theme.bg == Theme::light().bg,
+            theme: self.theme_kind(),
         }
     }
 
@@ -1019,7 +1037,7 @@ impl App {
             word_wrap: self.config.ui.word_wrap,
             tool_output_lines: self.config.ui.tool_output_lines,
             animation_level: self.config.ui.animations,
-            theme_is_light: self.theme.bg == Theme::light().bg,
+            theme: self.theme_kind(),
         }
     }
 
@@ -1139,6 +1157,7 @@ impl App {
         } else {
             (chat_area, None)
         };
+        let _ = self.theme_kind();
 
         // Top bar (header line)
         let status_info = self.build_status_info();

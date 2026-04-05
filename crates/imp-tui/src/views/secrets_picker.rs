@@ -9,38 +9,42 @@ use imp_llm::model::ProviderRegistry;
 use crate::theme::Theme;
 
 #[derive(Debug, Clone)]
-pub struct LoginProviderOption {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub description: &'static str,
-    pub logged_in: bool,
+pub struct SecretProviderOption {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub configured: bool,
 }
 
-pub fn login_providers(_registry: &ProviderRegistry) -> Vec<LoginProviderOption> {
-    vec![
-        LoginProviderOption {
-            id: "anthropic",
-            label: "Anthropic",
-            description: "Claude Max/Pro subscription (OAuth)",
-            logged_in: false,
-        },
-        LoginProviderOption {
-            id: "openai",
-            label: "OpenAI",
-            description: "OpenAI / ChatGPT account (OAuth)",
-            logged_in: false,
-        },
-    ]
+pub fn secret_providers(registry: &ProviderRegistry) -> Vec<SecretProviderOption> {
+    let mut providers: Vec<SecretProviderOption> = registry
+        .list()
+        .iter()
+        .filter(|provider| !matches!(provider.id, "anthropic" | "openai" | "openai-codex"))
+        .map(|provider| SecretProviderOption {
+            id: provider.id.to_string(),
+            label: provider.name.to_string(),
+            description: if provider.docs_url.is_empty() {
+                "Secure API/service secrets".into()
+            } else {
+                format!("Secure API/service secrets · {}", provider.docs_url)
+            },
+            configured: false,
+        })
+        .collect();
+
+    providers.sort_by(|a, b| a.label.cmp(&b.label));
+    providers
 }
 
 #[derive(Debug, Clone)]
-pub struct LoginPickerState {
-    pub providers: Vec<LoginProviderOption>,
+pub struct SecretsPickerState {
+    pub providers: Vec<SecretProviderOption>,
     pub selected: usize,
 }
 
-impl LoginPickerState {
-    pub fn new(providers: Vec<LoginProviderOption>) -> Self {
+impl SecretsPickerState {
+    pub fn new(providers: Vec<SecretProviderOption>) -> Self {
         Self {
             providers,
             selected: 0,
@@ -59,23 +63,23 @@ impl LoginPickerState {
         }
     }
 
-    pub fn selected_provider(&self) -> Option<&LoginProviderOption> {
+    pub fn selected_provider(&self) -> Option<&SecretProviderOption> {
         self.providers.get(self.selected)
     }
 }
 
-pub struct LoginPickerView<'a> {
-    state: &'a LoginPickerState,
+pub struct SecretsPickerView<'a> {
+    state: &'a SecretsPickerState,
     theme: &'a Theme,
 }
 
-impl<'a> LoginPickerView<'a> {
-    pub fn new(state: &'a LoginPickerState, theme: &'a Theme) -> Self {
+impl<'a> SecretsPickerView<'a> {
+    pub fn new(state: &'a SecretsPickerState, theme: &'a Theme) -> Self {
         Self { state, theme }
     }
 }
 
-impl Widget for LoginPickerView<'_> {
+impl Widget for SecretsPickerView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.height < 6 || area.width < 20 {
             return;
@@ -83,7 +87,7 @@ impl Widget for LoginPickerView<'_> {
 
         Clear.render(area, buf);
         let block = Block::default()
-            .title(" Provider Login ")
+            .title(" Secure Secrets ")
             .borders(Borders::ALL)
             .border_style(self.theme.accent_style());
         let inner = block.inner(area);
@@ -113,7 +117,7 @@ impl Widget for LoginPickerView<'_> {
                 Style::default()
             };
 
-            let status = if provider.logged_in {
+            let status = if provider.configured {
                 vec![
                     Span::raw("  "),
                     Span::styled("✓ configured", self.theme.success_style()),
@@ -127,9 +131,9 @@ impl Widget for LoginPickerView<'_> {
                     if is_selected { " ▸ " } else { "   " },
                     self.theme.accent_style(),
                 ),
-                Span::styled(provider.label, row_style),
+                Span::styled(&provider.label, row_style),
                 Span::raw("  "),
-                Span::styled(provider.description, self.theme.muted_style()),
+                Span::styled(&provider.description, self.theme.muted_style()),
             ];
             spans.extend(status);
             let line = Line::from(spans);
@@ -146,46 +150,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn login_picker_includes_oauth_providers() {
+    fn secrets_picker_excludes_oauth_providers() {
         let registry = ProviderRegistry::with_builtins();
-        let state = LoginPickerState::new(login_providers(&registry));
-        let ids: Vec<&str> = state.providers.iter().map(|provider| provider.id).collect();
-        assert!(ids.contains(&"anthropic"));
-        assert!(ids.contains(&"openai"));
-    }
-
-    #[test]
-    fn login_picker_only_lists_oauth_providers() {
-        let registry = ProviderRegistry::with_builtins();
-        let providers = login_providers(&registry);
-        let ids: Vec<&str> = providers.iter().map(|provider| provider.id).collect();
-        assert!(ids.contains(&"anthropic"));
-        assert!(ids.contains(&"openai"));
-        assert!(!ids.contains(&"tavily"));
-        assert!(!ids.contains(&"exa"));
-    }
-
-    #[test]
-    fn picker_selection_moves_with_bounds() {
-        let registry = ProviderRegistry::with_builtins();
-        let mut state = LoginPickerState::new(login_providers(&registry));
-        assert_eq!(
-            state.selected_provider().map(|provider| provider.id),
-            Some("anthropic")
-        );
-
-        state.move_down();
-        assert_eq!(
-            state.selected_provider().map(|provider| provider.id),
-            Some("openai")
-        );
-
-        for _ in 0..20 {
-            state.move_down();
-        }
-        assert!(state.selected_provider().is_some());
-
-        state.move_up();
-        assert!(state.selected_provider().is_some());
+        let providers = secret_providers(&registry);
+        let ids: Vec<&str> = providers.iter().map(|provider| provider.id.as_str()).collect();
+        assert!(ids.contains(&"exa"));
+        assert!(!ids.contains(&"anthropic"));
+        assert!(!ids.contains(&"openai"));
     }
 }

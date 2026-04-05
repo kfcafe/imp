@@ -781,7 +781,8 @@ impl WelcomeView<'_> {
         row += 1;
         let selected = self.state.selected_web_provider();
         if selected.id != "none" && !selected.has_auth() {
-            let prompt_line = Line::from(vec![Span::styled("  API Key: ", self.theme.muted_style())]);
+            let prompt_line =
+                Line::from(vec![Span::styled("  API Key: ", self.theme.muted_style())]);
             buf.set_line(x, area.y + row, &prompt_line, area.width);
             row += 1;
 
@@ -817,7 +818,10 @@ impl WelcomeView<'_> {
         } else if selected.id == "none" {
             let ready = Line::from(vec![
                 Span::styled("  ↷ ", self.theme.muted_style()),
-                Span::styled("Skipping web search setup for now.", self.theme.muted_style()),
+                Span::styled(
+                    "Skipping web search setup for now.",
+                    self.theme.muted_style(),
+                ),
             ]);
             buf.set_line(x, area.y + row, &ready, area.width);
         } else {

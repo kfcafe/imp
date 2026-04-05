@@ -18,6 +18,7 @@ use crate::theme::Theme;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsField {
     Model,
+    ChosenModels,
     Theme,
     ThinkingLevel,
     MaxTurns,
@@ -48,6 +49,7 @@ pub enum SettingsField {
 
 const FIELDS: &[SettingsField] = &[
     SettingsField::Model,
+    SettingsField::ChosenModels,
     SettingsField::Theme,
     SettingsField::ThinkingLevel,
     SettingsField::MaxTurns,
@@ -82,6 +84,7 @@ pub struct SettingsState {
     pub selected: usize,
     pub model: String,
     pub model_options: Vec<String>,
+    pub chosen_models: Vec<String>,
     pub theme_name: String,
     pub theme_options: Vec<String>,
     pub thinking_level: ThinkingLevel,
@@ -116,11 +119,17 @@ pub struct SettingsState {
 }
 
 impl SettingsState {
-    pub fn new(config: &Config, model_name: &str, models: &[ModelMeta], auth_store: &AuthStore) -> Self {
+    pub fn new(
+        config: &Config,
+        model_name: &str,
+        models: &[ModelMeta],
+        auth_store: &AuthStore,
+    ) -> Self {
         Self {
             selected: 0,
             model: model_name.to_string(),
             model_options: models.iter().map(|m| m.id.clone()).collect(),
+            chosen_models: config.enabled_models.clone().unwrap_or_default(),
             theme_name: config.theme.clone().unwrap_or_else(|| "default".into()),
             theme_options: vec!["default".into(), "light".into()],
             thinking_level: config.thinking.unwrap_or(ThinkingLevel::Medium),
@@ -147,8 +156,10 @@ impl SettingsState {
             web_search_provider: config.web.search_provider,
             tavily_api_key: String::new(),
             exa_api_key: String::new(),
-            tavily_configured: auth_store.stored.contains_key("tavily") || std::env::var("TAVILY_API_KEY").is_ok(),
-            exa_configured: auth_store.stored.contains_key("exa") || std::env::var("EXA_API_KEY").is_ok(),
+            tavily_configured: auth_store.stored.contains_key("tavily")
+                || std::env::var("TAVILY_API_KEY").is_ok(),
+            exa_configured: auth_store.stored.contains_key("exa")
+                || std::env::var("EXA_API_KEY").is_ok(),
             editing_number: false,
             edit_buffer: String::new(),
             dirty: false,
@@ -182,6 +193,9 @@ impl SettingsState {
                     let next = (idx + 1) % self.model_options.len();
                     self.model = self.model_options[next].clone();
                 }
+            }
+            SettingsField::ChosenModels => {
+                self.toggle_current_model_in_chosen();
             }
             SettingsField::Theme => {
                 if let Some(idx) = self
@@ -299,6 +313,9 @@ impl SettingsState {
                     };
                     self.model = self.model_options[prev].clone();
                 }
+            }
+            SettingsField::ChosenModels => {
+                self.toggle_current_model_in_chosen();
             }
             SettingsField::Theme => {
                 if let Some(idx) = self
@@ -463,6 +480,18 @@ impl SettingsState {
                 self.exa_api_key.push(c);
                 self.dirty = true;
             }
+            SettingsField::ChosenModels => {
+                if !c.is_control() {
+                    let lower = c.to_ascii_lowercase();
+                    if let Some(next) = self
+                        .model_options
+                        .iter()
+                        .find(|m| m.to_ascii_lowercase().starts_with(lower))
+                    {
+                        self.model = next.clone();
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -527,6 +556,11 @@ impl SettingsState {
     /// Write current settings into a Config for saving and in-session use.
     pub fn apply_to_config(&self, config: &mut Config) {
         config.model = Some(self.model.clone());
+        config.enabled_models = if self.chosen_models.is_empty() {
+            None
+        } else {
+            Some(self.chosen_models.clone())
+        };
         config.theme = Some(self.theme_name.clone());
         config.thinking = Some(self.thinking_level);
         config.max_turns = Some(self.max_turns);
@@ -561,6 +595,26 @@ impl SettingsState {
         config.web = imp_core::tools::web::types::WebConfig {
             search_provider: self.web_search_provider,
         };
+    }
+    fn model_is_chosen(&self, model_id: &str) -> bool {
+        self.chosen_models.iter().any(|m| m == model_id)
+    }
+
+    fn toggle_current_model_in_chosen(&mut self) {
+        let model = self.model.clone();
+        if let Some(idx) = self.chosen_models.iter().position(|m| m == &model) {
+            self.chosen_models.remove(idx);
+        } else {
+            self.chosen_models.push(model);
+        }
+    }
+
+    fn chosen_models_summary(&self) -> String {
+        if self.chosen_models.is_empty() {
+            "all models".to_string()
+        } else {
+            format!("{} chosen", self.chosen_models.len())
+        }
     }
 }
 
@@ -684,6 +738,12 @@ impl Widget for SettingsView<'_> {
             "← →",
         );
 
+        let chosen_hint = if self.state.model_is_chosen(&self.state.model) {
+            "← → toggle current"
+        } else {
+            "← → add current"
+        };
+        let chosen_summary = self.state.chosen_models_summary();
         render_field(
             self.state,
             self.theme,
@@ -691,6 +751,18 @@ impl Widget for SettingsView<'_> {
             inner,
             &mut row,
             1,
+            "Chosen models",
+            &chosen_summary,
+            chosen_hint,
+        );
+
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            2,
             "Theme",
             &self.state.theme_name,
             "← →",
@@ -703,7 +775,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            2,
+            3,
             "Thinking level",
             thinking_label(self.state.thinking_level),
             "← →",
@@ -722,7 +794,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            3,
+            4,
             "Max turns",
             &max_turns_val,
             "← → / type",
@@ -745,7 +817,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            4,
+            5,
             "Observation mask",
             &obs_val,
             "← →",
@@ -758,7 +830,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            5,
+            6,
             "Shell backend",
             shell_label(&self.state.shell_backend),
             "← →",
@@ -1079,7 +1151,10 @@ impl Widget for SettingsView<'_> {
                 "not set".to_string()
             }
         } else {
-            format!("{}▎", "•".repeat(self.state.tavily_api_key.chars().count().max(1)))
+            format!(
+                "{}▎",
+                "•".repeat(self.state.tavily_api_key.chars().count().max(1))
+            )
         };
         render_field(
             self.state,
@@ -1100,7 +1175,10 @@ impl Widget for SettingsView<'_> {
                 "not set".to_string()
             }
         } else {
-            format!("{}▎", "•".repeat(self.state.exa_api_key.chars().count().max(1)))
+            format!(
+                "{}▎",
+                "•".repeat(self.state.exa_api_key.chars().count().max(1))
+            )
         };
         render_field(
             self.state,
@@ -1184,4 +1262,40 @@ fn render_field(
     ]);
     buf.set_line(inner.x, inner.y + *row, &line, inner.width);
     *row += 1;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use imp_core::config::Config;
+    use imp_llm::auth::AuthStore;
+    use imp_llm::model::ModelRegistry;
+
+    #[test]
+    fn chosen_models_round_trip_into_config() {
+        let registry = ModelRegistry::with_builtins();
+        let models = registry.list().to_vec();
+        let auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
+        let mut config = Config::default();
+        let mut state = SettingsState::new(&config, &models[0].id, &models, &auth_store);
+
+        state.selected = 1;
+        state.cycle_forward();
+        assert_eq!(state.chosen_models, vec![models[0].id.clone()]);
+
+        state.apply_to_config(&mut config);
+        assert_eq!(config.enabled_models, Some(vec![models[0].id.clone()]));
+    }
+
+    #[test]
+    fn empty_chosen_models_means_all_models() {
+        let registry = ModelRegistry::with_builtins();
+        let models = registry.list().to_vec();
+        let auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
+        let mut config = Config::default();
+        let state = SettingsState::new(&config, &models[0].id, &models, &auth_store);
+
+        state.apply_to_config(&mut config);
+        assert_eq!(config.enabled_models, None);
+    }
 }

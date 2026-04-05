@@ -57,6 +57,10 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
             description: "Export session".into(),
         },
         SlashCommand {
+            name: "personality".into(),
+            description: "Customize imp personality".into(),
+        },
+        SlashCommand {
             name: "memory".into(),
             description: "View/edit agent memory".into(),
         },
@@ -70,7 +74,11 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
         },
         SlashCommand {
             name: "login".into(),
-            description: "Login or enter provider API keys (Anthropic, OpenAI, Tavily, Exa, etc.)".into(),
+            description: "OAuth login for Anthropic or OpenAI/ChatGPT".into(),
+        },
+        SlashCommand {
+            name: "secrets".into(),
+            description: "Configure API keys / multi-field service secrets".into(),
         },
         SlashCommand {
             name: "setup".into(),
