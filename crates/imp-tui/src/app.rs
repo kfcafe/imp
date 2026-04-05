@@ -270,6 +270,7 @@ pub struct App {
 
     pub ctrl_c_count: u8,
     pub needs_redraw: bool,
+    last_terminal_title: Option<String>,
     pub last_esc: Option<Instant>,
     pub tick: u64,
     pub max_turns_override: Option<u32>,
@@ -438,6 +439,7 @@ impl App {
 
             ctrl_c_count: 0,
             needs_redraw: true,
+            last_terminal_title: None,
             last_esc: None,
             tick: 0,
             max_turns_override: None,
@@ -569,7 +571,7 @@ impl App {
         let tick_rate = Duration::from_millis(16); // ~60fps
 
         loop {
-            let _ = set_window_title(&self.terminal_title());
+            self.sync_window_title();
             // Render
             if self.needs_redraw {
                 terminal.draw(|frame| self.render(frame))?;
@@ -613,6 +615,15 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn sync_window_title(&mut self) {
+        let title = self.terminal_title();
+        if self.last_terminal_title.as_deref() == Some(title.as_str()) {
+            return;
+        }
+        let _ = set_window_title(&title);
+        self.last_terminal_title = Some(title);
     }
 
     fn pump_runtime_signals(&mut self) {
