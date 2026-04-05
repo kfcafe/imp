@@ -37,17 +37,12 @@ impl AgentMode {
             AgentMode::Full => &[],
             AgentMode::Worker => &[
                 "read",
-                "grep",
-                "find",
-                "ls",
                 "scan",
                 "web",
                 "session_search",
-                "diff_show",
                 "write",
                 "edit",
                 "multi_edit",
-                "diff_apply",
                 "bash",
                 "mana",
                 "memory",
@@ -55,48 +50,32 @@ impl AgentMode {
             ],
             AgentMode::Orchestrator => &[
                 "read",
-                "grep",
-                "find",
-                "ls",
                 "scan",
                 "web",
                 "session_search",
-                "diff_show",
                 "mana",
                 "ask",
             ],
             AgentMode::Planner => &[
                 "read",
-                "grep",
-                "find",
-                "ls",
                 "scan",
                 "web",
                 "session_search",
-                "diff_show",
                 "mana",
                 "ask",
             ],
             AgentMode::Reviewer => &[
                 "read",
-                "grep",
-                "find",
-                "ls",
                 "scan",
                 "web",
                 "session_search",
-                "diff_show",
                 "ask",
             ],
             AgentMode::Auditor => &[
                 "read",
-                "grep",
-                "find",
-                "ls",
                 "scan",
                 "web",
                 "session_search",
-                "diff_show",
                 "mana",
             ],
         }
@@ -1179,12 +1158,9 @@ model = "sonnet"
     fn agent_mode_orchestrator_allows_read() {
         let mode = AgentMode::Orchestrator;
         assert!(mode.allows_tool("read"));
-        assert!(mode.allows_tool("grep"));
-        assert!(mode.allows_tool("find"));
-        assert!(mode.allows_tool("ls"));
         assert!(mode.allows_tool("scan"));
         assert!(mode.allows_tool("web"));
-        assert!(mode.allows_tool("diff_show"));
+        assert!(mode.allows_tool("session_search"));
         assert!(mode.allows_tool("mana"));
         assert!(mode.allows_tool("ask"));
     }
@@ -1195,7 +1171,6 @@ model = "sonnet"
         assert!(!mode.allows_tool("write"));
         assert!(!mode.allows_tool("edit"));
         assert!(!mode.allows_tool("multi_edit"));
-        assert!(!mode.allows_tool("diff_apply"));
         assert!(!mode.allows_tool("bash"));
     }
 

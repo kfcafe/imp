@@ -228,21 +228,15 @@ impl AgentBuilder {
 /// This is the canonical list — update here when adding or removing tools.
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
-        ask::AskTool, bash::BashTool, diff::{DiffApplyTool, DiffShowTool, DiffTool}, edit::EditTool, extend::ExtendTool,
-        find::FindTool, grep::GrepTool, ls::LsTool, mana::ManaTool, memory::MemoryTool, read::ReadTool, scan::ScanTool,
+        ask::AskTool, bash::BashTool, edit::EditTool, extend::ExtendTool,
+        mana::ManaTool, memory::MemoryTool, read::ReadTool, scan::ScanTool,
         session_search::SessionSearchTool, web::WebTool, write::WriteTool,
     };
 
     tools.register(Arc::new(AskTool));
     tools.register(Arc::new(BashTool));
-    tools.register(Arc::new(DiffTool));
-    tools.register(Arc::new(DiffShowTool));
-    tools.register(Arc::new(DiffApplyTool));
     tools.register(Arc::new(EditTool));
     tools.register(Arc::new(ExtendTool));
-    tools.register(Arc::new(FindTool));
-    tools.register(Arc::new(GrepTool));
-    tools.register(Arc::new(LsTool));
     tools.register(Arc::new(ManaTool::default()));
     tools.register(Arc::new(MemoryTool));
     tools.register(Arc::new(ReadTool));

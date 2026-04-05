@@ -1,11 +1,7 @@
 pub mod ask;
 pub mod bash;
-pub mod diff;
 pub mod edit;
 pub mod extend;
-pub mod find;
-pub mod grep;
-pub mod ls;
 pub mod lua;
 pub mod mana;
 pub mod memory;
