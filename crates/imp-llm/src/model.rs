@@ -126,54 +126,6 @@ pub fn builtin_providers() -> Vec<ProviderMeta> {
             docs_url: "console.groq.com/keys",
             api_style: ApiStyle::OpenAiCompat,
         },
-        ProviderMeta {
-            id: "together",
-            name: "Together",
-            env_vars: &["TOGETHER_API_KEY"],
-            api_base_url: Some("https://api.together.xyz"),
-            docs_url: "api.together.ai/settings/api-keys",
-            api_style: ApiStyle::OpenAiCompat,
-        },
-        ProviderMeta {
-            id: "mistral",
-            name: "Mistral",
-            env_vars: &["MISTRAL_API_KEY"],
-            api_base_url: Some("https://api.mistral.ai"),
-            docs_url: "console.mistral.ai/api-keys",
-            api_style: ApiStyle::OpenAiCompat,
-        },
-        ProviderMeta {
-            id: "xai",
-            name: "xAI",
-            env_vars: &["XAI_API_KEY"],
-            api_base_url: Some("https://api.x.ai"),
-            docs_url: "console.x.ai",
-            api_style: ApiStyle::OpenAiCompat,
-        },
-        ProviderMeta {
-            id: "openrouter",
-            name: "OpenRouter",
-            env_vars: &["OPENROUTER_API_KEY"],
-            api_base_url: Some("https://openrouter.ai/api"),
-            docs_url: "openrouter.ai/settings/keys",
-            api_style: ApiStyle::OpenAiCompat,
-        },
-        ProviderMeta {
-            id: "fireworks",
-            name: "Fireworks",
-            env_vars: &["FIREWORKS_API_KEY"],
-            api_base_url: Some("https://api.fireworks.ai/inference"),
-            docs_url: "fireworks.ai/account/api-keys",
-            api_style: ApiStyle::OpenAiCompat,
-        },
-        ProviderMeta {
-            id: "cerebras",
-            name: "Cerebras",
-            env_vars: &["CEREBRAS_API_KEY"],
-            api_base_url: Some("https://api.cerebras.ai"),
-            docs_url: "cloud.cerebras.ai",
-            api_style: ApiStyle::OpenAiCompat,
-        },
     ]
 }
 
@@ -367,44 +319,6 @@ fn builtin_models() -> Vec<ModelMeta> {
                 tool_use: true,
             },
         },
-        // Sonnet 4.5 (released 2025-09)
-        ModelMeta {
-            id: "claude-sonnet-4-5-20250929".into(),
-            provider: "anthropic".into(),
-            name: "Claude Sonnet 4.5".into(),
-            context_window: 200_000,
-            max_output_tokens: 64_000,
-            pricing: ModelPricing {
-                input_per_mtok: 3.0,
-                output_per_mtok: 15.0,
-                cache_read_per_mtok: 0.3,
-                cache_write_per_mtok: 3.75,
-            },
-            capabilities: Capabilities {
-                reasoning: true,
-                images: true,
-                tool_use: true,
-            },
-        },
-        // Sonnet 4.0 (released 2025-05)
-        ModelMeta {
-            id: "claude-sonnet-4-20250514".into(),
-            provider: "anthropic".into(),
-            name: "Claude Sonnet 4".into(),
-            context_window: 200_000,
-            max_output_tokens: 64_000,
-            pricing: ModelPricing {
-                input_per_mtok: 3.0,
-                output_per_mtok: 15.0,
-                cache_read_per_mtok: 0.3,
-                cache_write_per_mtok: 3.75,
-            },
-            capabilities: Capabilities {
-                reasoning: true,
-                images: true,
-                tool_use: true,
-            },
-        },
         // Latest: Haiku 4.5 (released 2025-10)
         ModelMeta {
             id: "claude-haiku-4-5-20251001".into(),
@@ -424,25 +338,6 @@ fn builtin_models() -> Vec<ModelMeta> {
                 tool_use: true,
             },
         },
-        // Legacy: Haiku 3.5 (kept for compatibility)
-        ModelMeta {
-            id: "claude-haiku-3-5-20241022".into(),
-            provider: "anthropic".into(),
-            name: "Claude 3.5 Haiku".into(),
-            context_window: 200_000,
-            max_output_tokens: 8_192,
-            pricing: ModelPricing {
-                input_per_mtok: 0.80,
-                output_per_mtok: 4.0,
-                cache_read_per_mtok: 0.08,
-                cache_write_per_mtok: 1.0,
-            },
-            capabilities: Capabilities {
-                reasoning: false,
-                images: true,
-                tool_use: true,
-            },
-        },
         // Latest: Opus 4.6 (released 2026-02)
         ModelMeta {
             id: "claude-opus-4-6".into(),
@@ -455,44 +350,6 @@ fn builtin_models() -> Vec<ModelMeta> {
                 output_per_mtok: 25.0,
                 cache_read_per_mtok: 0.5,
                 cache_write_per_mtok: 6.25,
-            },
-            capabilities: Capabilities {
-                reasoning: true,
-                images: true,
-                tool_use: true,
-            },
-        },
-        // Opus 4.5 (released 2025-11)
-        ModelMeta {
-            id: "claude-opus-4-5-20251101".into(),
-            provider: "anthropic".into(),
-            name: "Claude Opus 4.5".into(),
-            context_window: 200_000,
-            max_output_tokens: 64_000,
-            pricing: ModelPricing {
-                input_per_mtok: 5.0,
-                output_per_mtok: 25.0,
-                cache_read_per_mtok: 0.5,
-                cache_write_per_mtok: 6.25,
-            },
-            capabilities: Capabilities {
-                reasoning: true,
-                images: true,
-                tool_use: true,
-            },
-        },
-        // Opus 4.0 (released 2025-05, deprecated 2026-05)
-        ModelMeta {
-            id: "claude-opus-4-20250514".into(),
-            provider: "anthropic".into(),
-            name: "Claude Opus 4".into(),
-            context_window: 200_000,
-            max_output_tokens: 32_000,
-            pricing: ModelPricing {
-                input_per_mtok: 15.0,
-                output_per_mtok: 75.0,
-                cache_read_per_mtok: 1.5,
-                cache_write_per_mtok: 18.75,
             },
             capabilities: Capabilities {
                 reasoning: true,
@@ -593,175 +450,8 @@ fn builtin_models() -> Vec<ModelMeta> {
                 tool_use: true,
             },
         },
-        // -- Together --
-        ModelMeta {
-            id: "meta-llama/Llama-3.3-70B-Instruct-Turbo".into(),
-            provider: "together".into(),
-            name: "Llama 3.3 70B Turbo".into(),
-            context_window: 128_000,
-            max_output_tokens: 4_096,
-            pricing: ModelPricing {
-                input_per_mtok: 0.88,
-                output_per_mtok: 0.88,
-                cache_read_per_mtok: 0.0,
-                cache_write_per_mtok: 0.0,
-            },
-            capabilities: Capabilities {
-                reasoning: false,
-                images: false,
-                tool_use: true,
-            },
-        },
-        ModelMeta {
-            id: "Qwen/Qwen2.5-72B-Instruct-Turbo".into(),
-            provider: "together".into(),
-            name: "Qwen 2.5 72B Turbo".into(),
-            context_window: 128_000,
-            max_output_tokens: 4_096,
-            pricing: ModelPricing {
-                input_per_mtok: 1.20,
-                output_per_mtok: 1.20,
-                cache_read_per_mtok: 0.0,
-                cache_write_per_mtok: 0.0,
-            },
-            capabilities: Capabilities {
-                reasoning: false,
-                images: false,
-                tool_use: true,
-            },
-        },
-        // -- Mistral --
-        ModelMeta {
-            id: "mistral-large-latest".into(),
-            provider: "mistral".into(),
-            name: "Mistral Large".into(),
-            context_window: 128_000,
-            max_output_tokens: 8_192,
-            pricing: ModelPricing {
-                input_per_mtok: 2.0,
-                output_per_mtok: 6.0,
-                cache_read_per_mtok: 0.0,
-                cache_write_per_mtok: 0.0,
-            },
-            capabilities: Capabilities {
-                reasoning: false,
-                images: true,
-                tool_use: true,
-            },
-        },
-        ModelMeta {
-            id: "codestral-latest".into(),
-            provider: "mistral".into(),
-            name: "Codestral".into(),
-            context_window: 256_000,
-            max_output_tokens: 8_192,
-            pricing: ModelPricing {
-                input_per_mtok: 0.30,
-                output_per_mtok: 0.90,
-                cache_read_per_mtok: 0.0,
-                cache_write_per_mtok: 0.0,
-            },
-            capabilities: Capabilities {
-                reasoning: false,
-                images: false,
-                tool_use: true,
-            },
-        },
-        // -- xAI --
-        ModelMeta {
-            id: "grok-3".into(),
-            provider: "xai".into(),
-            name: "Grok 3".into(),
-            context_window: 131_072,
-            max_output_tokens: 131_072,
-            pricing: ModelPricing {
-                input_per_mtok: 3.0,
-                output_per_mtok: 15.0,
-                cache_read_per_mtok: 0.0,
-                cache_write_per_mtok: 0.0,
-            },
-            capabilities: Capabilities {
-                reasoning: true,
-                images: false,
-                tool_use: true,
-            },
-        },
-        ModelMeta {
-            id: "grok-3-mini".into(),
-            provider: "xai".into(),
-            name: "Grok 3 Mini".into(),
-            context_window: 131_072,
-            max_output_tokens: 131_072,
-            pricing: ModelPricing {
-                input_per_mtok: 0.30,
-                output_per_mtok: 0.50,
-                cache_read_per_mtok: 0.0,
-                cache_write_per_mtok: 0.0,
-            },
-            capabilities: Capabilities {
-                reasoning: true,
-                images: false,
-                tool_use: true,
-            },
-        },
-        // -- OpenRouter --
-        ModelMeta {
-            id: "anthropic/claude-sonnet-4".into(),
-            provider: "openrouter".into(),
-            name: "Claude Sonnet 4 (via OpenRouter)".into(),
-            context_window: 200_000,
-            max_output_tokens: 64_000,
-            pricing: ModelPricing {
-                input_per_mtok: 3.0,
-                output_per_mtok: 15.0,
-                cache_read_per_mtok: 0.3,
-                cache_write_per_mtok: 3.75,
-            },
-            capabilities: Capabilities {
-                reasoning: true,
-                images: true,
-                tool_use: true,
-            },
-        },
-        // -- Fireworks --
-        ModelMeta {
-            id: "accounts/fireworks/models/llama-v3p3-70b-instruct".into(),
-            provider: "fireworks".into(),
-            name: "Llama 3.3 70B (Fireworks)".into(),
-            context_window: 128_000,
-            max_output_tokens: 16_384,
-            pricing: ModelPricing {
-                input_per_mtok: 0.90,
-                output_per_mtok: 0.90,
-                cache_read_per_mtok: 0.0,
-                cache_write_per_mtok: 0.0,
-            },
-            capabilities: Capabilities {
-                reasoning: false,
-                images: false,
-                tool_use: true,
-            },
-        },
-        // -- Cerebras --
-        ModelMeta {
-            id: "llama-3.3-70b".into(),
-            provider: "cerebras".into(),
-            name: "Llama 3.3 70B (Cerebras)".into(),
-            context_window: 128_000,
-            max_output_tokens: 8_192,
-            pricing: ModelPricing {
-                input_per_mtok: 0.60,
-                output_per_mtok: 0.60,
-                cache_read_per_mtok: 0.0,
-                cache_write_per_mtok: 0.0,
-            },
-            capabilities: Capabilities {
-                reasoning: false,
-                images: false,
-                tool_use: true,
-            },
-        },
     ];
+
 
     let openai_insert_at = models
         .iter()
@@ -1106,19 +796,14 @@ fn builtin_aliases() -> Vec<(String, String)> {
         ("sonnet".into(), "claude-sonnet-4-6".into()),
         ("claude-sonnet".into(), "claude-sonnet-4-6".into()),
         ("sonnet-4.6".into(), "claude-sonnet-4-6".into()),
-        ("sonnet-4.5".into(), "claude-sonnet-4-5-20250929".into()),
-        ("sonnet-4".into(), "claude-sonnet-4-20250514".into()),
         // Anthropic — haiku
         ("haiku".into(), "claude-haiku-4-5-20251001".into()),
         ("claude-haiku".into(), "claude-haiku-4-5-20251001".into()),
         ("haiku-4.5".into(), "claude-haiku-4-5-20251001".into()),
-        ("haiku-3.5".into(), "claude-haiku-3-5-20241022".into()),
         // Anthropic — opus
         ("opus".into(), "claude-opus-4-6".into()),
         ("claude-opus".into(), "claude-opus-4-6".into()),
         ("opus-4.6".into(), "claude-opus-4-6".into()),
-        ("opus-4.5".into(), "claude-opus-4-5-20251101".into()),
-        ("opus-4".into(), "claude-opus-4-20250514".into()),
         // OpenAI
         ("gpt5".into(), "gpt-5.4".into()),
         ("gpt5.4".into(), "gpt-5.4".into()),
@@ -1144,14 +829,6 @@ fn builtin_aliases() -> Vec<(String, String)> {
         ("deepseek-r1".into(), "deepseek-reasoner".into()),
         // Groq
         ("llama-groq".into(), "llama-3.3-70b-versatile".into()),
-        // Mistral
-        ("mistral".into(), "mistral-large-latest".into()),
-        ("codestral".into(), "codestral-latest".into()),
-        // xAI
-        ("grok".into(), "grok-3".into()),
-        ("grok-mini".into(), "grok-3-mini".into()),
-        // Cerebras
-        ("cerebras".into(), "llama-3.3-70b".into()),
     ]
 }
 
@@ -1176,15 +853,6 @@ mod tests {
             .find_by_alias("haiku")
             .expect("haiku alias should resolve");
         assert_eq!(model.id, "claude-haiku-4-5-20251001");
-    }
-
-    #[test]
-    fn find_by_alias_resolves_haiku_legacy() {
-        let reg = ModelRegistry::with_builtins();
-        let model = reg
-            .find_by_alias("haiku-3.5")
-            .expect("haiku-3.5 alias should resolve");
-        assert_eq!(model.id, "claude-haiku-3-5-20241022");
     }
 
     #[test]
@@ -1271,7 +939,7 @@ mod tests {
     fn list_by_provider_filters_correctly() {
         let reg = ModelRegistry::with_builtins();
         let anthropic = reg.list_by_provider("anthropic");
-        assert_eq!(anthropic.len(), 8);
+        assert_eq!(anthropic.len(), 3);
         assert!(anthropic.iter().all(|m| m.provider == "anthropic"));
 
         let openai = reg.list_by_provider("openai");

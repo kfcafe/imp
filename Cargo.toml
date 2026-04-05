@@ -40,7 +40,7 @@ tree-sitter-python = "0.23"
 tree-sitter-go = "0.23"
 readability-rust = "0.1"
 project-detect = "0.1"
-mana-core = "0.3"
+mana-core = { path = "../mana/crates/mana-core" }
 
 imp-llm = { path = "crates/imp-llm" }
 imp-core = { path = "crates/imp-core" }

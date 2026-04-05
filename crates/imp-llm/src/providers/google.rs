@@ -275,6 +275,14 @@ fn thinking_budget(model: &Model, level: ThinkingLevel) -> Option<i32> {
     Some(budget.min(max_thinking_budget(&model.meta.id)))
 }
 
+fn default_max_output_tokens(model: &Model, thinking_budget: Option<i32>) -> u32 {
+    let base = model.meta.max_output_tokens.min(8_192);
+    match thinking_budget {
+        Some(budget) => base.max((budget as u32).saturating_add(1024)),
+        None => base,
+    }
+}
+
 fn build_request(model: &Model, context: Context, options: RequestOptions) -> ApiRequest {
     let thinking_config =
         thinking_budget(model, options.thinking_level).map(|thinking_budget| ApiThinkingConfig {
@@ -287,7 +295,9 @@ fn build_request(model: &Model, context: Context, options: RequestOptions) -> Ap
         system_instruction: build_system_instruction(&options.system_prompt),
         tools: build_tools(&options.tools),
         generation_config: ApiGenerationConfig {
-            max_output_tokens: options.max_tokens.or(Some(model.meta.max_output_tokens)),
+            max_output_tokens: options
+                .max_tokens
+                .or(Some(default_max_output_tokens(model, thinking_budget(model, options.thinking_level)))),
             temperature: options.temperature,
             thinking_config,
         },
@@ -823,6 +833,18 @@ mod tests {
         assert_eq!(thinking_budget(&pro, ThinkingLevel::High), Some(24_576));
         assert_eq!(thinking_budget(&pro, ThinkingLevel::XHigh), Some(32_768));
         assert_eq!(thinking_budget(&flash, ThinkingLevel::XHigh), Some(24_576));
+    }
+
+    #[test]
+    fn default_max_output_tokens_caps_google_models_without_thinking() {
+        let pro = test_model("gemini-2.5-pro");
+        assert_eq!(default_max_output_tokens(&pro, None), 8_192);
+    }
+
+    #[test]
+    fn default_max_output_tokens_grows_for_google_thinking_budget() {
+        let pro = test_model("gemini-2.5-pro");
+        assert_eq!(default_max_output_tokens(&pro, Some(24_576)), 25_600);
     }
 
     #[test]

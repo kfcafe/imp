@@ -14,6 +14,7 @@ tokio.workspace = true
 futures-core.workspace = true
 futures.workspace = true
 reqwest.workspace = true
+keyring = "3.6"
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"

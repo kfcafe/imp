@@ -183,6 +183,10 @@ fn reasoning_effort(level: ThinkingLevel) -> Option<String> {
     }
 }
 
+fn default_max_output_tokens(model: &Model) -> u32 {
+    model.meta.max_output_tokens.min(8_192)
+}
+
 fn build_request(model: &Model, context: Context, options: RequestOptions) -> ApiRequest {
     let instructions = if options.system_prompt.is_empty() {
         None
@@ -207,7 +211,7 @@ fn build_request(model: &Model, context: Context, options: RequestOptions) -> Ap
         options.temperature
     };
 
-    let max_output_tokens = options.max_tokens.or(Some(model.meta.max_output_tokens));
+    let max_output_tokens = options.max_tokens.or(Some(default_max_output_tokens(model)));
 
     ApiRequest {
         model: model.meta.id.clone(),
@@ -1010,6 +1014,55 @@ mod tests {
         assert!(req.instructions.is_none());
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("instructions").is_none());
+    }
+
+    #[test]
+    fn openai_default_max_output_tokens_are_capped() {
+        let model_meta = ModelMeta {
+            id: "gpt-5.4".into(),
+            provider: "openai".into(),
+            name: "GPT-5.4".into(),
+            context_window: 400_000,
+            max_output_tokens: 32_768,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let provider = OpenAiProvider::new();
+        let model = Model {
+            meta: model_meta,
+            provider: Arc::new(provider),
+        };
+
+        let req = build_request(&model, Context::default(), RequestOptions::default());
+        assert_eq!(req.max_output_tokens, Some(8_192));
+    }
+
+    #[test]
+    fn openai_explicit_max_output_tokens_override_cap() {
+        let model_meta = ModelMeta {
+            id: "gpt-5.4".into(),
+            provider: "openai".into(),
+            name: "GPT-5.4".into(),
+            context_window: 400_000,
+            max_output_tokens: 32_768,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let provider = OpenAiProvider::new();
+        let model = Model {
+            meta: model_meta,
+            provider: Arc::new(provider),
+        };
+
+        let req = build_request(
+            &model,
+            Context::default(),
+            RequestOptions {
+                max_tokens: Some(12_000),
+                ..Default::default()
+            },
+        );
+        assert_eq!(req.max_output_tokens, Some(12_000));
     }
 
     #[test]

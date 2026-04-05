@@ -156,6 +156,10 @@ pub struct OpenAiCompatProvider {
     models: Vec<ModelMeta>,
 }
 
+fn default_max_tokens(model: &Model) -> u32 {
+    model.meta.max_output_tokens.min(8_192)
+}
+
 impl OpenAiCompatProvider {
     /// Create a new OpenAI-compatible provider.
     ///
@@ -194,7 +198,7 @@ fn build_request(model: &Model, context: Context, options: RequestOptions) -> Ap
     }
 
     let tools = build_tool_defs(&options.tools);
-    let max_tokens = options.max_tokens.or(Some(model.meta.max_output_tokens));
+    let max_tokens = options.max_tokens.or(Some(default_max_tokens(model)));
 
     ApiRequest {
         model: model.meta.id.clone(),
@@ -800,11 +804,67 @@ mod tests {
     }
 
     #[test]
-    fn openai_compat_max_tokens_falls_back_to_model_default() {
+    fn openai_compat_max_tokens_falls_back_to_provider_default_cap() {
         let model = test_model();
         let req = build_request(&model, Context::default(), RequestOptions::default());
-        // model.meta.max_output_tokens is 4096
         assert_eq!(req.max_tokens, Some(4_096));
+    }
+
+    #[test]
+    fn openai_compat_large_model_default_max_tokens_are_capped() {
+        let meta = ModelMeta {
+            id: "large-compat".into(),
+            provider: "deepseek".into(),
+            name: "Large Compat".into(),
+            context_window: 128_000,
+            max_output_tokens: 32_768,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let provider = OpenAiCompatProvider::new(
+            "deepseek",
+            "https://api.deepseek.com",
+            vec![meta.clone()],
+        );
+        let model = Model {
+            meta,
+            provider: Arc::new(provider),
+        };
+
+        let req = build_request(&model, Context::default(), RequestOptions::default());
+        assert_eq!(req.max_tokens, Some(8_192));
+    }
+
+    #[test]
+    fn openai_compat_explicit_max_tokens_override_cap() {
+        let meta = ModelMeta {
+            id: "large-compat".into(),
+            provider: "deepseek".into(),
+            name: "Large Compat".into(),
+            context_window: 128_000,
+            max_output_tokens: 32_768,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let provider = OpenAiCompatProvider::new(
+            "deepseek",
+            "https://api.deepseek.com",
+            vec![meta.clone()],
+        );
+        let model = Model {
+            meta,
+            provider: Arc::new(provider),
+        };
+
+        let req = build_request(
+            &model,
+            Context::default(),
+            RequestOptions {
+                max_tokens: Some(12_000),
+                ..Default::default()
+            },
+        );
+        assert_eq!(req.max_tokens, Some(12_000));
     }
 
     #[test]
