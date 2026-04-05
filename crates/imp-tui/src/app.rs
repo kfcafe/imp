@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::Hasher;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,6 +26,7 @@ use imp_llm::{
     truncate_chars_with_suffix, Cost, Message, Model, StreamEvent, ThinkingLevel, Usage,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
@@ -39,7 +41,8 @@ use crate::theme::Theme;
 use crate::turn_tracker::TurnTracker;
 use crate::views::ask_bar::AskState;
 use crate::views::chat::{
-    build_text_surface, clamped_scroll_offset, ChatView, DisplayMessage, MessageRole,
+    build_chat_render_data, build_text_surface_from_lines, clamped_scroll_offset_for_total_lines,
+    DisplayMessage, MessageRole, RenderedChatView,
 };
 use crate::views::command_palette::{builtin_commands, CommandPaletteState, CommandPaletteView};
 use crate::views::editor::{EditorState, EditorView};
@@ -50,7 +53,10 @@ use crate::views::personality::{PersonalityScope, PersonalityState, PersonalityV
 use crate::views::secrets_picker::{secret_providers, SecretsPickerState, SecretsPickerView};
 use crate::views::session_picker::{SessionPickerState, SessionPickerView};
 use crate::views::settings::{SettingsState, SettingsView};
-use crate::views::sidebar::{build_detail_text_surface, sidebar_sub_areas, Sidebar, SidebarView};
+use crate::views::sidebar::{
+    build_detail_render_data, build_detail_text_surface_from_plain_lines, build_stream_lines,
+    sidebar_sub_areas, Sidebar, SidebarDetailRenderData, SidebarView,
+};
 use crate::views::status::StatusInfo;
 use crate::views::tools::DisplayToolCall;
 use crate::views::top_bar::TopBar;
@@ -174,6 +180,63 @@ struct DragAutoScroll {
     row: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChatRenderCacheKey {
+    width: u16,
+    messages_epoch: u64,
+    tick: u64,
+    chat_tool_focus: Option<usize>,
+    word_wrap: bool,
+    chat_tool_display: imp_core::config::ChatToolDisplay,
+    thinking_lines: usize,
+    show_timestamps: bool,
+    animation_level: imp_core::config::AnimationLevel,
+    activity_state: AnimationState,
+    theme_is_light: bool,
+}
+
+#[derive(Debug)]
+struct ChatRenderCache {
+    key: ChatRenderCacheKey,
+    render: crate::views::chat::ChatRenderData,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SidebarStreamCacheKey {
+    width: u16,
+    messages_epoch: u64,
+    tick: u64,
+    selected: Option<usize>,
+    word_wrap: bool,
+    tool_output: imp_core::config::ToolOutputDisplay,
+    tool_output_lines: usize,
+    animation_level: imp_core::config::AnimationLevel,
+    theme_is_light: bool,
+}
+
+#[derive(Debug)]
+struct SidebarStreamCache {
+    key: SidebarStreamCacheKey,
+    lines: Vec<Line<'static>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SidebarDetailCacheKey {
+    width: u16,
+    messages_epoch: u64,
+    selected_tool_id_hash: u64,
+    word_wrap: bool,
+    tool_output_lines: usize,
+    animation_level: imp_core::config::AnimationLevel,
+    theme_is_light: bool,
+}
+
+#[derive(Debug)]
+struct SidebarDetailCache {
+    key: SidebarDetailCacheKey,
+    render: SidebarDetailRenderData,
+}
+
 pub struct App {
     // Core
     pub running: bool,
@@ -221,6 +284,7 @@ pub struct App {
     pub accumulated_cost: Cost,
     /// Last turn's input tokens — best proxy for actual current context size.
     pub current_context_tokens: u32,
+    chat_render_epoch: u64,
 
     // Extension state
     pub status_items: HashMap<String, String>,
@@ -248,6 +312,10 @@ pub struct App {
     pub drag_selection: Option<SelectablePane>,
     /// Active edge-autoscroll while dragging a selection.
     drag_autoscroll: Option<DragAutoScroll>,
+    /// Cached chat render data reused while only scroll offset changes.
+    chat_render_cache: Option<ChatRenderCache>,
+    sidebar_stream_cache: Option<SidebarStreamCache>,
+    sidebar_detail_cache: Option<SidebarDetailCache>,
 
     // Turn activity tracking
     pub turn_tracker: TurnTracker,
@@ -322,6 +390,16 @@ fn parse_secret_field_names(input: &str) -> Vec<String> {
     }
 }
 
+fn bump_epoch(epoch: &mut u64) {
+    *epoch = epoch.wrapping_add(1);
+}
+
+fn stable_hash<T: std::hash::Hash>(value: &T) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
 impl App {
     pub fn new(
         config: Config,
@@ -371,6 +449,7 @@ impl App {
             accumulated_usage: Usage::default(),
             accumulated_cost: Cost::default(),
             current_context_tokens: 0,
+            chat_render_epoch: 0,
             status_items: HashMap::new(),
             widgets: HashMap::new(),
             lua_runtime: None,
@@ -383,6 +462,9 @@ impl App {
             selection: None,
             drag_selection: None,
             drag_autoscroll: None,
+            chat_render_cache: None,
+            sidebar_stream_cache: None,
+            sidebar_detail_cache: None,
             turn_tracker: TurnTracker::new(),
             theme,
             highlighter: Highlighter::new(),
@@ -393,6 +475,7 @@ impl App {
     /// Load messages from the current session branch into display messages.
     pub fn load_session_messages(&mut self) {
         self.messages.clear();
+        self.invalidate_chat_render_cache();
 
         let mut branch_messages: Vec<Message> = self.session.get_active_messages();
         imp_core::session::sanitize_messages(&mut branch_messages);
@@ -802,6 +885,156 @@ impl App {
         )
     }
 
+    fn chat_render_cache_key(
+        &self,
+        width: u16,
+        chat_tool_focus: Option<usize>,
+        chat_tool_display: imp_core::config::ChatToolDisplay,
+        activity_state: AnimationState,
+    ) -> ChatRenderCacheKey {
+        ChatRenderCacheKey {
+            width,
+            messages_epoch: self.chat_render_epoch,
+            tick: self.tick,
+            chat_tool_focus,
+            word_wrap: self.config.ui.word_wrap,
+            chat_tool_display,
+            thinking_lines: self.config.ui.thinking_lines,
+            show_timestamps: self.config.ui.show_timestamps,
+            animation_level: self.config.ui.animations,
+            activity_state,
+            theme_is_light: self.theme.bg == Theme::light().bg,
+        }
+    }
+
+    fn cached_chat_render(
+        &mut self,
+        width: u16,
+        chat_tool_focus: Option<usize>,
+        chat_tool_display: imp_core::config::ChatToolDisplay,
+        activity_state: AnimationState,
+    ) -> &crate::views::chat::ChatRenderData {
+        let key = self.chat_render_cache_key(
+            width,
+            chat_tool_focus,
+            chat_tool_display,
+            activity_state,
+        );
+        let cache_hit = self
+            .chat_render_cache
+            .as_ref()
+            .is_some_and(|cache| cache.key == key);
+        if !cache_hit {
+            let render = build_chat_render_data(
+                &self.messages,
+                &self.theme,
+                &self.highlighter,
+                width as usize,
+                self.tick,
+                chat_tool_focus,
+                self.config.ui.word_wrap,
+                chat_tool_display,
+                self.config.ui.thinking_lines,
+                self.config.ui.show_timestamps,
+                self.config.ui.animations,
+                activity_state,
+            );
+            self.chat_render_cache = Some(ChatRenderCache { key, render });
+        }
+
+        &self.chat_render_cache
+            .as_ref()
+            .expect("chat render cache set")
+            .render
+    }
+
+    fn invalidate_chat_render_cache(&mut self) {
+        self.chat_render_cache = None;
+        bump_epoch(&mut self.chat_render_epoch);
+        self.sidebar_stream_cache = None;
+        self.sidebar_detail_cache = None;
+    }
+
+    fn sidebar_stream_cache_key(&self, width: u16) -> SidebarStreamCacheKey {
+        SidebarStreamCacheKey {
+            width,
+            messages_epoch: self.chat_render_epoch,
+            tick: self.tick,
+            selected: self.tool_focus,
+            word_wrap: self.config.ui.word_wrap,
+            tool_output: self.config.ui.tool_output,
+            tool_output_lines: self.config.ui.tool_output_lines,
+            animation_level: self.config.ui.animations,
+            theme_is_light: self.theme.bg == Theme::light().bg,
+        }
+    }
+
+    fn cached_sidebar_stream_lines(&mut self, width: u16) -> &Vec<Line<'static>> {
+        let key = self.sidebar_stream_cache_key(width);
+        let cache_hit = self
+            .sidebar_stream_cache
+            .as_ref()
+            .is_some_and(|cache| cache.key == key);
+        if !cache_hit {
+            let all_tool_calls: Vec<&DisplayToolCall> = self
+                .messages
+                .iter()
+                .flat_map(|m| m.tool_calls.iter())
+                .collect();
+            let lines = build_stream_lines(
+                &all_tool_calls,
+                self.tool_focus,
+                &self.theme,
+                &self.highlighter,
+                self.tick,
+                &self.config.ui,
+                self.config.ui.animations,
+                width as usize,
+            );
+            self.sidebar_stream_cache = Some(SidebarStreamCache { key, lines });
+        }
+        &self.sidebar_stream_cache.as_ref().expect("sidebar stream cache set").lines
+    }
+
+    fn sidebar_detail_cache_key(
+        &self,
+        width: u16,
+        selected_tc: Option<&DisplayToolCall>,
+    ) -> SidebarDetailCacheKey {
+        SidebarDetailCacheKey {
+            width,
+            messages_epoch: self.chat_render_epoch,
+            selected_tool_id_hash: stable_hash(&selected_tc.map(|tc| &tc.id)),
+            word_wrap: self.config.ui.word_wrap,
+            tool_output_lines: self.config.ui.tool_output_lines,
+            animation_level: self.config.ui.animations,
+            theme_is_light: self.theme.bg == Theme::light().bg,
+        }
+    }
+
+    fn cached_sidebar_detail_render(
+        &mut self,
+        width: u16,
+        selected_tc: Option<&DisplayToolCall>,
+    ) -> &SidebarDetailRenderData {
+        let key = self.sidebar_detail_cache_key(width, selected_tc);
+        let cache_hit = self
+            .sidebar_detail_cache
+            .as_ref()
+            .is_some_and(|cache| cache.key == key);
+        if !cache_hit {
+            let render = build_detail_render_data(
+                selected_tc,
+                &self.config.ui,
+                &self.highlighter,
+                &self.theme,
+                width as usize,
+            );
+            self.sidebar_detail_cache = Some(SidebarDetailCache { key, render });
+        }
+        &self.sidebar_detail_cache.as_ref().expect("sidebar detail cache set").render
+    }
+
     fn render_widget_tray(&self, frame: &mut Frame, area: Rect) {
         if self.widgets.is_empty() || area.height == 0 {
             return;
@@ -913,94 +1146,111 @@ impl App {
             None
         };
         let activity_state = self.current_activity_state();
-        self.scroll_offset = clamped_scroll_offset(
-            &self.messages,
-            &self.theme,
-            &self.highlighter,
+        let total_chat_lines = {
+            let chat_render = self.cached_chat_render(
+                chat_area.width,
+                chat_tool_focus,
+                chat_tool_display,
+                activity_state,
+            );
+            chat_render.lines.len()
+        };
+        self.scroll_offset = clamped_scroll_offset_for_total_lines(
+            total_chat_lines,
             chat_area,
             self.scroll_offset,
-            self.tick,
-            chat_tool_focus,
-            self.config.ui.word_wrap,
-            chat_tool_display,
-            self.config.ui.thinking_lines,
-            self.config.ui.show_timestamps,
-            self.config.ui.animations,
-            activity_state,
         );
         if self.scroll_offset == 0 {
             self.auto_scroll = true;
         }
 
-        let chat = ChatView::new(&self.messages, &self.theme, &self.highlighter)
-            .scroll(self.scroll_offset)
-            .tick(self.tick)
-            .tool_focus(chat_tool_focus)
-            .word_wrap(self.config.ui.word_wrap)
-            .chat_tool_display(chat_tool_display)
-            .thinking_lines(self.config.ui.thinking_lines)
-            .show_timestamps(self.config.ui.show_timestamps)
-            .animation_level(self.config.ui.animations)
-            .activity_state(activity_state);
+        let chat_lines = {
+            self.cached_chat_render(
+                chat_area.width,
+                chat_tool_focus,
+                chat_tool_display,
+                activity_state,
+            )
+            .lines
+            .clone()
+        };
+
+        let chat = RenderedChatView::new(&chat_lines).scroll(self.scroll_offset);
         frame.render_widget(chat, chat_area);
 
-        self.chat_surface = Some(build_text_surface(
-            &self.messages,
-            &self.theme,
-            &self.highlighter,
+        self.chat_surface = Some(build_text_surface_from_lines(
+            &chat_lines,
             chat_area,
             self.scroll_offset,
-            self.tick,
-            chat_tool_focus,
-            self.config.ui.word_wrap,
-            chat_tool_display,
-            self.config.ui.thinking_lines,
-            self.config.ui.show_timestamps,
-            self.config.ui.animations,
-            activity_state,
         ));
 
         // Sidebar
         if let Some(sidebar_area) = sidebar_area {
-            // Collect all tool calls, render, then cache hit-test rects
-            let sub = {
-                let all_tool_calls: Vec<&DisplayToolCall> = self
-                    .messages
-                    .iter()
-                    .flat_map(|m| m.tool_calls.iter())
-                    .collect();
-                let tc_count = all_tool_calls.len();
-                let areas = sidebar_sub_areas(sidebar_area, tc_count, self.config.ui.sidebar_style);
+            let tc_count = self.total_tool_calls();
+            let sub = sidebar_sub_areas(sidebar_area, tc_count, self.config.ui.sidebar_style);
+            let selected_tc_index = self.tool_focus;
 
-                let view = SidebarView::new(
-                    all_tool_calls,
-                    self.tool_focus,
-                    &self.theme,
-                    &self.highlighter,
-                    self.tick,
-                    self.sidebar.list_scroll,
-                    self.sidebar.detail_scroll,
-                    &self.config.ui,
-                );
-                frame.render_widget(view, sidebar_area);
-                areas
+            let stream_lines = if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Stream {
+                Some(self.cached_sidebar_stream_lines(sub.0.width).clone())
+            } else {
+                None
             };
+            let detail_render = if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Split {
+                let selected_tc_owned = selected_tc_index.and_then(|i| {
+                    self.messages
+                        .iter()
+                        .flat_map(|m| m.tool_calls.iter())
+                        .nth(i)
+                        .cloned()
+                });
+                Some(
+                    self.cached_sidebar_detail_render(sub.1.width, selected_tc_owned.as_ref())
+                        .clone(),
+                )
+            } else {
+                None
+            };
+
+            let all_tool_calls: Vec<&DisplayToolCall> = self
+                .messages
+                .iter()
+                .flat_map(|m| m.tool_calls.iter())
+                .collect();
+            let mut view = SidebarView::new(
+                all_tool_calls,
+                self.tool_focus,
+                &self.theme,
+                &self.highlighter,
+                self.tick,
+                self.sidebar.list_scroll,
+                self.sidebar.detail_scroll,
+                &self.config.ui,
+            );
+
+            match self.config.ui.sidebar_style {
+                imp_core::config::SidebarStyle::Stream => {
+                    let stream_lines = stream_lines.expect("stream cache lines");
+                    view = view.precomputed_stream_lines(&stream_lines);
+                    frame.render_widget(view, sidebar_area);
+                }
+                imp_core::config::SidebarStyle::Split => {
+                    let detail_lines = detail_render.as_ref().expect("detail cache lines");
+                    view = view.precomputed_detail_lines(&detail_lines.lines);
+                    frame.render_widget(view, sidebar_area);
+                }
+            }
+
             self.sidebar_list_rect = Some(sub.0);
             self.sidebar_detail_rect = Some(sub.1);
             self.sidebar.list_height = sub.0.height;
-            let selected_tc = self.tool_focus.and_then(|i| {
-                self.messages
-                    .iter()
-                    .flat_map(|m| m.tool_calls.iter())
-                    .nth(i)
-            });
-            self.sidebar_detail_surface = Some(build_detail_text_surface(
-                selected_tc,
+            let detail_plain_lines = detail_render
+                .as_ref()
+                .map(|render| render.plain_lines.clone())
+                .unwrap_or_default();
+            self.sidebar_detail_surface = Some(build_detail_text_surface_from_plain_lines(
+                &detail_plain_lines,
                 sub.1,
                 self.sidebar.detail_scroll,
-                &self.config.ui,
-                &self.highlighter,
-                &self.theme,
             ));
         } else {
             self.sidebar_list_rect = None;
@@ -1343,6 +1593,7 @@ impl App {
                         tc.expanded = self.tools_expanded;
                     }
                 }
+                self.invalidate_chat_render_cache();
             }
             Some(Action::ToolToggle) => {
                 if let Some(idx) = self.tool_focus {
@@ -1350,6 +1601,7 @@ impl App {
                     if let Some(tc) = self.get_tool_call_mut(idx) {
                         tc.expanded = !tc.expanded;
                     }
+                    self.invalidate_chat_render_cache();
                 } else {
                     // No focus: toggle all (global expand/collapse)
                     self.tools_expanded = !self.tools_expanded;
@@ -1358,6 +1610,7 @@ impl App {
                             tc.expanded = self.tools_expanded;
                         }
                     }
+                    self.invalidate_chat_render_cache();
                 }
             }
             Some(Action::ToolFocusNext) => {
@@ -2271,6 +2524,7 @@ impl App {
             is_streaming: false,
             timestamp: imp_llm::now(),
         });
+        self.invalidate_chat_render_cache();
 
         // Persist to session
         let msg_id = uuid::Uuid::new_v4().to_string();
@@ -2290,6 +2544,7 @@ impl App {
             is_streaming: true,
             timestamp: imp_llm::now(),
         });
+        self.invalidate_chat_render_cache();
 
         self.is_streaming = true;
         self.auto_scroll = true;
@@ -2310,6 +2565,7 @@ impl App {
                 is_streaming: false,
                 timestamp: imp_llm::now(),
             });
+            self.invalidate_chat_render_cache();
         }
     }
 
@@ -2326,7 +2582,9 @@ impl App {
             }
             "new" => {
                 self.messages.clear();
+                self.invalidate_chat_render_cache();
                 self.session = SessionManager::in_memory();
+                self.tool_focus = None;
             }
             "compact" => {
                 self.run_manual_compaction();
@@ -3940,10 +4198,12 @@ impl App {
         };
         self.model_name = models[next_idx].id.clone();
         self.context_window = models[next_idx].context_window;
+        self.invalidate_chat_render_cache();
         self.push_system_msg(&format!("Model: {}", self.model_name));
     }
 
     fn cycle_thinking_level(&mut self) {
+        self.invalidate_chat_render_cache();
         self.thinking_level = match self.thinking_level {
             ThinkingLevel::Off => ThinkingLevel::Low,
             ThinkingLevel::Minimal => ThinkingLevel::Low,
@@ -3966,6 +4226,7 @@ impl App {
             is_streaming: false,
             timestamp: imp_llm::now(),
         });
+        self.invalidate_chat_render_cache();
     }
 
     fn push_error_msg(&mut self, content: &str) {
@@ -3978,6 +4239,7 @@ impl App {
             is_streaming: false,
             timestamp: imp_llm::now(),
         });
+        self.invalidate_chat_render_cache();
     }
 
     fn run_manual_compaction(&mut self) {
@@ -4211,6 +4473,7 @@ impl App {
                 self.model_name = model;
                 self.is_streaming = true;
                 self.tool_focus = None;
+                self.invalidate_chat_render_cache();
                 self.turn_tracker.reset();
             }
             AgentEvent::AgentEnd { cost, .. } => {
@@ -4223,6 +4486,7 @@ impl App {
                 if let Some(last) = self.messages.last_mut() {
                     last.is_streaming = false;
                 }
+                self.invalidate_chat_render_cache();
 
                 // Process follow-up messages
                 let follow_ups: Vec<_> = self
@@ -4268,6 +4532,7 @@ impl App {
                         _ => {}
                     }
                 }
+                self.invalidate_chat_render_cache();
                 // Auto-scroll to bottom
                 if self.auto_scroll {
                     self.scroll_offset = 0;
@@ -4288,6 +4553,7 @@ impl App {
                         }
                     }
                 }
+                self.invalidate_chat_render_cache();
                 // Sidebar: auto-follow the new tool call
                 if let Some(idx) = self.find_tool_call_index(&tool_call_id) {
                     self.focus_tool(idx);
@@ -4332,6 +4598,7 @@ impl App {
                         }
                     }
                 }
+                self.invalidate_chat_render_cache();
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -4370,6 +4637,8 @@ impl App {
                         }
                     }
                 }
+
+                self.invalidate_chat_render_cache();
 
                 // Persist tool result to session so resume has full conversation
                 let _ = self.session.append_tool_result_message(result);
@@ -4413,6 +4682,7 @@ impl App {
                 if let Some(last) = self.messages.last_mut() {
                     last.is_streaming = false;
                 }
+                self.invalidate_chat_render_cache();
 
                 // Parse the error for a cleaner display
                 let display_error = parse_api_error(&error);
@@ -4426,6 +4696,7 @@ impl App {
                     is_streaming: false,
                     timestamp: imp_llm::now(),
                 });
+                self.invalidate_chat_render_cache();
             }
             _ => {}
         }

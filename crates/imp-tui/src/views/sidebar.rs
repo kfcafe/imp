@@ -11,6 +11,12 @@ use crate::theme::Theme;
 use crate::views::tool_output::{styled_tool_output_lines, wrap_styled_lines};
 use crate::views::tools::DisplayToolCall;
 
+#[derive(Debug, Clone)]
+pub struct SidebarDetailRenderData {
+    pub lines: Vec<Line<'static>>,
+    pub plain_lines: Vec<String>,
+}
+
 // ── Sidebar state ───────────────────────────────────────────────
 
 /// Sidebar state tracked in App.
@@ -171,6 +177,8 @@ pub struct SidebarView<'a> {
     list_scroll: usize,
     detail_scroll: usize,
     ui_config: &'a UiConfig,
+    precomputed_stream_lines: Option<&'a [Line<'static>]>,
+    precomputed_detail_lines: Option<&'a [Line<'static>]>,
 }
 
 impl<'a> SidebarView<'a> {
@@ -193,7 +201,19 @@ impl<'a> SidebarView<'a> {
             list_scroll,
             detail_scroll,
             ui_config,
+            precomputed_stream_lines: None,
+            precomputed_detail_lines: None,
         }
+    }
+
+    pub fn precomputed_stream_lines(mut self, lines: &'a [Line<'static>]) -> Self {
+        self.precomputed_stream_lines = Some(lines);
+        self
+    }
+
+    pub fn precomputed_detail_lines(mut self, lines: &'a [Line<'static>]) -> Self {
+        self.precomputed_detail_lines = Some(lines);
+        self
     }
 }
 
@@ -232,18 +252,22 @@ impl Widget for SidebarView<'_> {
 
         match self.ui_config.sidebar_style {
             SidebarStyle::Stream => {
-                render_stream(
-                    &self.tool_calls,
-                    self.selected,
-                    self.theme,
-                    self.highlighter,
-                    self.tick,
-                    self.detail_scroll,
-                    self.ui_config,
-                    content,
-                    buf,
-                    self.ui_config.animations,
-                );
+                if let Some(lines) = self.precomputed_stream_lines {
+                    render_stream_from_lines(lines, self.theme, self.detail_scroll, content, buf);
+                } else {
+                    render_stream(
+                        &self.tool_calls,
+                        self.selected,
+                        self.theme,
+                        self.highlighter,
+                        self.tick,
+                        self.detail_scroll,
+                        self.ui_config,
+                        content,
+                        buf,
+                        self.ui_config.animations,
+                    );
+                }
             }
             SidebarStyle::Split => {
                 let (list_area, sep_y, detail_area) = compute_split(content, self.tool_calls.len());
@@ -265,21 +289,96 @@ impl Widget for SidebarView<'_> {
                 }
 
                 let selected_tc = self.selected.and_then(|i| self.tool_calls.get(i)).copied();
-                render_detail(
-                    selected_tc,
-                    self.theme,
-                    self.highlighter,
-                    self.detail_scroll,
-                    self.ui_config,
-                    detail_area,
-                    buf,
-                );
+                if let Some(lines) = self.precomputed_detail_lines {
+                    render_detail_from_lines(lines, self.theme, self.detail_scroll, detail_area, buf);
+                } else {
+                    render_detail(
+                        selected_tc,
+                        self.theme,
+                        self.highlighter,
+                        self.detail_scroll,
+                        self.ui_config,
+                        detail_area,
+                        buf,
+                    );
+                }
             }
         }
     }
 }
 
 // ── Stream mode rendering ───────────────────────────────────────
+
+fn render_scrolled_lines(lines: &[Line<'_>], area: Rect, buf: &mut Buffer, scroll: usize) -> usize {
+    let total = lines.len();
+    let visible = area.height as usize;
+    let start = scroll.min(total.saturating_sub(visible));
+
+    for (i, line) in lines.iter().skip(start).take(visible).enumerate() {
+        let row = area.y + i as u16;
+        buf.set_line(area.x, row, line, area.width);
+    }
+
+    total
+}
+
+pub fn build_stream_lines(
+    tool_calls: &[&DisplayToolCall],
+    selected: Option<usize>,
+    theme: &Theme,
+    highlighter: &Highlighter,
+    tick: u64,
+    ui_config: &UiConfig,
+    animation_level: AnimationLevel,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut all_lines: Vec<Line<'static>> = Vec::new();
+
+    for (idx, tc) in tool_calls.iter().enumerate() {
+        let focused = selected == Some(idx);
+        let header = tc.header_line_animated_focused(theme, tick, focused, animation_level);
+        all_lines.push(header);
+
+        let output_lines = styled_output_lines(tc, ui_config, highlighter, theme, width);
+        for line in output_lines {
+            all_lines.push(indent_line(line));
+        }
+
+        if idx + 1 < tool_calls.len() {
+            all_lines.push(Line::raw(""));
+        }
+    }
+
+    all_lines
+}
+
+pub fn render_stream_from_lines(
+    lines: &[Line<'_>],
+    theme: &Theme,
+    scroll: usize,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let total = render_scrolled_lines(lines, area, buf, scroll);
+    let visible = area.height as usize;
+    let start = scroll.min(total.saturating_sub(visible));
+
+    if total > visible && visible > 0 {
+        let pct = ((start + visible).min(total) * 100) / total;
+        let indicator = format!(" {pct}% ");
+        let iw = indicator.len() as u16;
+        if area.width > iw {
+            let ix = area.x + area.width - iw;
+            let iy = area.y + area.height.saturating_sub(1);
+            buf.set_line(
+                ix,
+                iy,
+                &Line::from(Span::styled(indicator, theme.muted_style())),
+                iw,
+            );
+        }
+    }
+}
 
 /// Render the sidebar as a single chronological stream of tool calls
 /// with their results shown inline underneath each header.
@@ -301,53 +400,18 @@ fn render_stream(
     }
 
     let width = area.width as usize;
+    let all_lines = build_stream_lines(
+        tool_calls,
+        selected,
+        theme,
+        highlighter,
+        tick,
+        ui_config,
+        animation_level,
+        width,
+    );
 
-    // Build all lines: for each tool call, header + output
-    let mut all_lines: Vec<(Line<'_>, bool)> = Vec::new(); // (line, is_header)
-
-    for (idx, tc) in tool_calls.iter().enumerate() {
-        let focused = selected == Some(idx);
-        let header = tc.header_line_animated_focused(theme, tick, focused, animation_level);
-        all_lines.push((header, true));
-
-        // Inline output below the header
-        let output_lines = styled_output_lines(tc, ui_config, highlighter, theme, width);
-        for line in output_lines {
-            all_lines.push((indent_line(line), false));
-        }
-
-        // Blank line between tool calls (except after last)
-        if idx + 1 < tool_calls.len() {
-            all_lines.push((Line::raw(""), false));
-        }
-    }
-
-    // Scrollable render
-    let total = all_lines.len();
-    let visible = area.height as usize;
-    let start = scroll.min(total.saturating_sub(visible));
-
-    for (i, (line, _)) in all_lines.iter().skip(start).take(visible).enumerate() {
-        let row = area.y + i as u16;
-        buf.set_line(area.x, row, line, area.width);
-    }
-
-    // Scroll indicator
-    if total > visible && visible > 0 {
-        let pct = ((start + visible).min(total) * 100) / total;
-        let indicator = format!(" {pct}% ");
-        let iw = indicator.len() as u16;
-        if area.width > iw {
-            let ix = area.x + area.width - iw;
-            let iy = area.y + area.height.saturating_sub(1);
-            buf.set_line(
-                ix,
-                iy,
-                &Line::from(Span::styled(indicator, theme.muted_style())),
-                iw,
-            );
-        }
-    }
+    render_stream_from_lines(&all_lines, theme, scroll, area, buf);
 }
 
 // ── Split mode: tool list ───────────────────────────────────────
@@ -397,6 +461,44 @@ fn render_list(
 
 // ── Split mode: detail pane ─────────────────────────────────────
 
+pub fn build_detail_render_data(
+    tc: Option<&DisplayToolCall>,
+    ui_config: &UiConfig,
+    highlighter: &Highlighter,
+    theme: &Theme,
+    content_w: usize,
+) -> SidebarDetailRenderData {
+    let lines = styled_detail_lines(tc, ui_config, highlighter, theme, content_w);
+    let plain_lines = lines.iter().map(line_to_plain_text).collect();
+    SidebarDetailRenderData { lines, plain_lines }
+}
+
+pub fn build_detail_text_surface_from_plain_lines(
+    lines: &[String],
+    area: Rect,
+    scroll: usize,
+) -> TextSurface {
+    if area.height == 0 || area.width == 0 {
+        return TextSurface::new(
+            crate::selection::SelectablePane::SidebarDetail,
+            area,
+            Vec::new(),
+            0,
+        );
+    }
+
+    let rect = area;
+    let lines = lines.to_vec();
+    let start = scroll.min(lines.len().saturating_sub(rect.height as usize));
+
+    TextSurface::new(
+        crate::selection::SelectablePane::SidebarDetail,
+        rect,
+        lines,
+        start,
+    )
+}
+
 pub fn build_detail_text_surface(
     tc: Option<&DisplayToolCall>,
     area: Rect,
@@ -414,19 +516,36 @@ pub fn build_detail_text_surface(
         );
     }
 
-    let rect = area;
-    let lines = styled_detail_lines(tc, ui_config, highlighter, theme, area.width as usize)
-        .into_iter()
-        .map(line_to_plain_text)
-        .collect::<Vec<_>>();
-    let start = scroll.min(lines.len().saturating_sub(rect.height as usize));
+    let render = build_detail_render_data(tc, ui_config, highlighter, theme, area.width as usize);
+    build_detail_text_surface_from_plain_lines(&render.plain_lines, area, scroll)
+}
 
-    TextSurface::new(
-        crate::selection::SelectablePane::SidebarDetail,
-        rect,
-        lines,
-        start,
-    )
+pub fn render_detail_from_lines(
+    lines: &[Line<'_>],
+    theme: &Theme,
+    scroll: usize,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let total = render_scrolled_lines(lines, area, buf, scroll);
+
+    if total > area.height as usize && area.height > 0 {
+        let visible = area.height as usize;
+        let start = scroll.min(total.saturating_sub(visible));
+        let pct = ((start + visible).min(total) * 100) / total;
+        let indicator = format!(" {pct}% ");
+        let iw = indicator.len() as u16;
+        if area.width > iw {
+            let ix = area.x + area.width - iw;
+            let iy = area.y + area.height.saturating_sub(1);
+            buf.set_line(
+                ix,
+                iy,
+                &Line::from(Span::styled(indicator, theme.muted_style())),
+                iw,
+            );
+        }
+    }
 }
 
 fn render_detail(
@@ -443,42 +562,13 @@ fn render_detail(
     }
 
     let Some(tc) = tc else {
-        let line = Line::from(Span::styled("Select a tool call", theme.muted_style()));
-        buf.set_line(area.x, area.y, &line, area.width);
+        let lines = vec![Line::from(Span::styled("Select a tool call", theme.muted_style()))];
+        render_detail_from_lines(&lines, theme, scroll, area, buf);
         return;
     };
 
-    // Content fills the full detail pane; selection is already indicated in the list above.
     let lines = styled_detail_lines(Some(tc), ui_config, highlighter, theme, area.width as usize);
-    let total = lines.len();
-    let start = scroll.min(total.saturating_sub(area.height as usize));
-
-    for (i, line) in lines
-        .iter()
-        .skip(start)
-        .take(area.height as usize)
-        .enumerate()
-    {
-        let row = area.y + i as u16;
-        buf.set_line(area.x, row, line, area.width);
-    }
-
-    if total > area.height as usize && area.height > 0 {
-        let visible = area.height as usize;
-        let pct = ((start + visible).min(total) * 100) / total;
-        let indicator = format!(" {pct}% ");
-        let iw = indicator.len() as u16;
-        if area.width > iw {
-            let ix = area.x + area.width - iw;
-            let iy = area.y + area.height.saturating_sub(1);
-            buf.set_line(
-                ix,
-                iy,
-                &Line::from(Span::styled(indicator, theme.muted_style())),
-                iw,
-            );
-        }
-    }
+    render_detail_from_lines(&lines, theme, scroll, area, buf);
 }
 
 fn styled_detail_lines(
@@ -621,16 +711,64 @@ fn indent_line(line: Line<'static>) -> Line<'static> {
     Line::from(spans)
 }
 
-fn line_to_plain_text(line: Line<'static>) -> String {
-    line.spans.into_iter().map(|span| span.content).collect()
+fn line_to_plain_text(line: &Line<'_>) -> String {
+    line.spans.iter().map(|span| span.content.as_ref()).collect()
 }
 fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
     let mut lines = Vec::new();
 
+    let action = tc
+        .details
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !action.is_empty() {
+        lines.push(format!("action: {action}"));
+
+        match action {
+            "create" => {
+                push_mana_detail_line(&mut lines, "title", tc.details.get("title"));
+                push_mana_detail_line(&mut lines, "description", tc.details.get("description"));
+                push_mana_detail_line(&mut lines, "verify", tc.details.get("verify"));
+                push_mana_detail_line(&mut lines, "priority", tc.details.get("priority"));
+                push_mana_detail_line(&mut lines, "parent", tc.details.get("parent"));
+                push_mana_detail_line(&mut lines, "deps", tc.details.get("deps"));
+                push_mana_detail_line(&mut lines, "labels", tc.details.get("labels"));
+            }
+            "update" => {
+                push_mana_detail_line(&mut lines, "id", tc.details.get("id"));
+                push_mana_detail_line(&mut lines, "status", tc.details.get("status"));
+                push_mana_detail_line(&mut lines, "title", tc.details.get("title"));
+                push_mana_detail_line(&mut lines, "description", tc.details.get("description"));
+                push_mana_detail_line(&mut lines, "priority", tc.details.get("priority"));
+                push_mana_detail_line(&mut lines, "notes", tc.details.get("notes"));
+            }
+            "run" => {
+                push_mana_detail_line(&mut lines, "id", tc.details.get("id"));
+                push_mana_detail_line(&mut lines, "jobs", tc.details.get("jobs"));
+                push_mana_detail_line(&mut lines, "background", tc.details.get("background"));
+                push_mana_detail_line(&mut lines, "dry_run", tc.details.get("dry_run"));
+                push_mana_detail_line(&mut lines, "review", tc.details.get("review"));
+                push_mana_detail_line(&mut lines, "timeout", tc.details.get("timeout"));
+                push_mana_detail_line(&mut lines, "idle_timeout", tc.details.get("idle_timeout"));
+            }
+            _ => {
+                for key in ["id", "run_id", "reason", "by", "status", "count"] {
+                    push_mana_detail_line(&mut lines, key, tc.details.get(key));
+                }
+            }
+        }
+
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+    }
+
     if let Some(view) = tc.details.get("view") {
         if let Some(summary) = view.get("summary") {
+            lines.push("summary".to_string());
             lines.push(format!(
-                "{} total · {} done · {} failed · {} awaiting verify · {} skipped",
+                "  total={}  done={}  failed={}  awaiting-verify={}  skipped={}",
                 summary
                     .get("total_units")
                     .and_then(Value::as_u64)
@@ -655,6 +793,12 @@ fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
         }
 
         if let Some(units) = view.get("units").and_then(Value::as_array) {
+            if !units.is_empty() {
+                if !lines.is_empty() {
+                    lines.push(String::new());
+                }
+                lines.push("units".to_string());
+            }
             for unit in units {
                 let status = unit
                     .get("status")
@@ -669,22 +813,25 @@ fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
                 };
                 let id = unit.get("id").and_then(Value::as_str).unwrap_or("?");
                 let title = unit.get("title").and_then(Value::as_str).unwrap_or("");
-                let mut extras = Vec::new();
+                lines.push(format!("  {marker} {id}  {title}"));
+
+                let mut meta = Vec::new();
+                meta.push(format!("status={status}"));
                 if let Some(round) = unit.get("round").and_then(Value::as_u64) {
-                    extras.push(format!("wave {round}"));
+                    meta.push(format!("wave={round}"));
                 }
                 if let Some(agent) = unit.get("agent").and_then(Value::as_str) {
-                    extras.push(agent.to_string());
+                    meta.push(format!("agent={agent}"));
                 }
                 if let Some(duration) = unit.get("duration_secs").and_then(Value::as_u64) {
-                    extras.push(format!("{}s", duration));
+                    meta.push(format!("duration={}s", duration));
                 }
-                let suffix = if extras.is_empty() {
-                    String::new()
-                } else {
-                    format!("  {}", extras.join(" · "))
-                };
-                lines.push(format!("{marker} {id}  {title}  {status}{suffix}"));
+                if let Some(error) = unit.get("error").and_then(Value::as_str) {
+                    meta.push(format!("error={error}"));
+                }
+                if !meta.is_empty() {
+                    lines.push(format!("    {}", meta.join("  ")));
+                }
             }
         }
     } else if !tc.streaming_output.is_empty() {
@@ -699,6 +846,32 @@ fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
         vec!["Running…".to_string()]
     } else {
         lines
+    }
+}
+
+fn push_mana_detail_line(lines: &mut Vec<String>, key: &str, value: Option<&Value>) {
+    let Some(value) = value else {
+        return;
+    };
+    let rendered = match value {
+        Value::Null => return,
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                Value::String(s) => Some(s.clone()),
+                Value::Bool(b) => Some(b.to_string()),
+                Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        Value::Object(_) => serde_json::to_string(value).unwrap_or_default(),
+    };
+    if !rendered.is_empty() {
+        lines.push(format!("{key}: {rendered}"));
     }
 }
 
@@ -856,6 +1029,9 @@ mod tests {
             args_summary: "run".into(),
             output: None,
             details: serde_json::json!({
+                "action": "run",
+                "jobs": 4,
+                "background": true,
                 "view": {
                     "summary": {
                         "total_units": 3,
@@ -877,16 +1053,20 @@ mod tests {
         };
 
         let lines = format_mana_output(&tc);
-        assert_eq!(
-            lines[0],
-            "3 total · 2 done · 1 failed · 0 awaiting verify · 0 skipped"
-        );
+        assert_eq!(lines[0], "action: run");
+        assert!(lines.iter().any(|l| l == "jobs: 4"));
+        assert!(lines.iter().any(|l| l == "background: true"));
+        assert!(lines.iter().any(|l| l == "summary"));
         assert!(lines
             .iter()
-            .any(|l| l.contains("✓ 1.1  First  done  wave 1 · 8s")));
+            .any(|l| l.contains("total=3  done=2  failed=1  awaiting-verify=0  skipped=0")));
+        assert!(lines.iter().any(|l| l == "units"));
+        assert!(lines.iter().any(|l| l.contains("✓ 1.1  First")));
         assert!(lines
             .iter()
-            .any(|l| l.contains("✗ 1.2  Second  failed  wave 1")));
+            .any(|l| l.contains("status=done  wave=1  duration=8s")));
+        assert!(lines.iter().any(|l| l.contains("✗ 1.2  Second")));
+        assert!(lines.iter().any(|l| l.contains("status=failed  wave=1")));
     }
 
     #[test]
@@ -1007,6 +1187,31 @@ mod tests {
             .map(|line| line.spans.into_iter().map(|span| span.content).collect())
             .collect();
         assert!(plain.iter().any(|line| line.contains("pub fn hi")));
+    }
+
+    #[test]
+    fn styled_output_lines_wrap_long_plain_lines() {
+        let tc = make_tc(
+            "bash",
+            "$ echo",
+            Some("this is a very long line that should wrap inside the sidebar viewer"),
+            false,
+        );
+        let config = UiConfig {
+            tool_output: ToolOutputDisplay::Full,
+            word_wrap: true,
+            ..Default::default()
+        };
+
+        let lines = styled_output_lines(
+            &tc,
+            &config,
+            &crate::highlight::Highlighter::new(),
+            &Theme::default(),
+            20,
+        );
+
+        assert!(lines.len() > 1);
     }
 
     // ── Widget rendering ────────────────────────────────────────
