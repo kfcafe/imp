@@ -212,6 +212,11 @@ async fn execute_read(params: serde_json::Value) -> Result<ToolOutput> {
         page.content_type.as_deref().unwrap_or("unknown")
     ));
     output.push_str(&format!(
+        "Format: {} (requested markdown, received {})\n",
+        page.format_received.name(),
+        page.format_received.name()
+    ));
+    output.push_str(&format!(
         "Response size: {} bytes → {} chars extracted\n",
         page.raw_body_bytes, page.content_length
     ));

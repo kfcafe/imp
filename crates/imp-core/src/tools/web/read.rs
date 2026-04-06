@@ -6,11 +6,13 @@
 use reqwest::Client;
 use url::Url;
 
-use super::types::PageContent;
+use super::types::{ContentFormat, PageContent};
 
 /// User-Agent string that identifies as a legitimate browser to avoid blocks.
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const ACCEPT_HEADER: &str =
+    "text/markdown,text/plain;q=0.9,text/html;q=0.8,application/xhtml+xml;q=0.7,*/*;q=0.5";
 
 /// Fetch a URL and extract its readable content.
 pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent, ReadError> {
@@ -26,10 +28,7 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
     let response = client
         .get(url)
         .header("User-Agent", USER_AGENT)
-        .header(
-            "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        )
+        .header("Accept", ACCEPT_HEADER)
         .header("Accept-Language", "en-US,en;q=0.9")
         .send()
         .await
@@ -53,6 +52,8 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+
+    let format_received = detect_content_format(&content_type);
 
     // Reject binary content types (images, video, audio, etc.)
     let is_text = content_type.is_empty()
@@ -88,36 +89,42 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
         } else {
             Some(content_type.clone())
         },
+        format_received,
         was_redirected,
         raw_body_bytes,
     };
 
-    // Plain text — return as-is
-    if content_type.contains("text/plain") {
-        let mut page = PageContent {
-            title: None,
-            content_length: html.len(),
-            text: html,
-            url: final_url,
-            requested_url: meta.requested_url,
-            status_code: meta.status_code,
-            content_type: meta.content_type,
-            was_redirected: meta.was_redirected,
-            raw_body_bytes: meta.raw_body_bytes,
-            diagnostics: Vec::new(),
-        };
-        page.diagnostics = diagnose(&page, "");
-        return Ok(page);
+    match format_received {
+        ContentFormat::Markdown | ContentFormat::PlainText => {
+            let cleaned = clean_text(&html);
+            let mut page = PageContent {
+                title: None,
+                content_length: cleaned.len(),
+                text: cleaned,
+                url: final_url,
+                requested_url: meta.requested_url,
+                status_code: meta.status_code,
+                content_type: meta.content_type,
+                format_received: meta.format_received,
+                was_redirected: meta.was_redirected,
+                raw_body_bytes: meta.raw_body_bytes,
+                diagnostics: Vec::new(),
+            };
+            page.diagnostics = diagnose(&page, "");
+            Ok(page)
+        }
+        ContentFormat::Html => {
+            let mut page = extract_readable(&html, &final_url)?;
+            page.requested_url = meta.requested_url;
+            page.status_code = meta.status_code;
+            page.content_type = meta.content_type;
+            page.format_received = meta.format_received;
+            page.was_redirected = meta.was_redirected;
+            page.raw_body_bytes = meta.raw_body_bytes;
+            page.diagnostics = diagnose(&page, &html);
+            Ok(page)
+        }
     }
-
-    let mut page = extract_readable(&html, &final_url)?;
-    page.requested_url = meta.requested_url;
-    page.status_code = meta.status_code;
-    page.content_type = meta.content_type;
-    page.was_redirected = meta.was_redirected;
-    page.raw_body_bytes = meta.raw_body_bytes;
-    page.diagnostics = diagnose(&page, &html);
-    Ok(page)
 }
 
 /// Metadata captured from the HTTP response before extraction.
@@ -125,6 +132,7 @@ struct ResponseMeta {
     requested_url: String,
     status_code: u16,
     content_type: Option<String>,
+    format_received: ContentFormat,
     was_redirected: bool,
     raw_body_bytes: usize,
 }
@@ -162,6 +170,7 @@ fn extract_readable(html: &str, url: &str) -> Result<PageContent, ReadError> {
         requested_url: url.to_string(),
         status_code: 200,
         content_type: None,
+        format_received: ContentFormat::Html,
         was_redirected: false,
         raw_body_bytes: 0,
         diagnostics: Vec::new(),
@@ -245,6 +254,20 @@ fn clean_text(text: &str) -> String {
     result.trim().to_string()
 }
 
+fn detect_content_format(content_type: &str) -> ContentFormat {
+    let content_type = content_type.to_ascii_lowercase();
+
+    if content_type.contains("text/markdown") || content_type.contains("text/x-markdown") {
+        ContentFormat::Markdown
+    } else if content_type.contains("text/html")
+        || content_type.contains("application/xhtml+xml")
+    {
+        ContentFormat::Html
+    } else {
+        ContentFormat::PlainText
+    }
+}
+
 fn is_youtube_url(url: &Url) -> bool {
     url.host_str()
         .is_some_and(|h| h.contains("youtube.com") || h.contains("youtu.be"))
@@ -280,6 +303,44 @@ impl std::fmt::Display for ReadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accept_header_prefers_markdown() {
+        assert_eq!(
+            ACCEPT_HEADER,
+            "text/markdown,text/plain;q=0.9,text/html;q=0.8,application/xhtml+xml;q=0.7,*/*;q=0.5"
+        );
+    }
+
+    #[test]
+    fn detect_content_format_treats_markdown_as_markdown() {
+        assert_eq!(
+            detect_content_format("text/markdown; charset=utf-8"),
+            ContentFormat::Markdown
+        );
+    }
+
+    #[test]
+    fn detect_content_format_treats_plain_text_as_plain_text() {
+        assert_eq!(
+            detect_content_format("text/plain; charset=utf-8"),
+            ContentFormat::PlainText
+        );
+        assert_eq!(detect_content_format("application/json"), ContentFormat::PlainText);
+    }
+
+    #[test]
+    fn markdown_and_plain_text_skip_readability_cleaning_path() {
+        let markdown = "# Title\n\n\nParagraph";
+        let cleaned_markdown = clean_text(markdown);
+        assert_eq!(cleaned_markdown, "# Title\n\n\nParagraph");
+        assert_eq!(detect_content_format("text/markdown"), ContentFormat::Markdown);
+
+        let plain = "  hello  \n\n\nworld  ";
+        let cleaned_plain = clean_text(plain);
+        assert_eq!(cleaned_plain, "hello\n\n\nworld");
+        assert_eq!(detect_content_format("text/plain"), ContentFormat::PlainText);
+    }
 
     #[test]
     fn clean_text_collapses_blank_lines() {
@@ -359,6 +420,7 @@ mod tests {
         page.requested_url = "https://example.com/start".to_string();
         page.status_code = 200;
         page.content_type = Some("text/html; charset=utf-8".to_string());
+        page.format_received = ContentFormat::Html;
         page.was_redirected = true;
         page.raw_body_bytes = html.len();
 
@@ -380,6 +442,7 @@ mod tests {
             requested_url: "https://example.com/docs".to_string(),
             status_code: 200,
             content_type: Some("text/html".to_string()),
+            format_received: ContentFormat::Html,
             was_redirected: false,
             raw_body_bytes: 2_000,
             diagnostics: Vec::new(),
@@ -400,6 +463,7 @@ mod tests {
             requested_url: "https://example.com/missing".to_string(),
             status_code: 200,
             content_type: Some("text/html".to_string()),
+            format_received: ContentFormat::Html,
             was_redirected: false,
             raw_body_bytes: 1_500,
             diagnostics: Vec::new(),
@@ -420,6 +484,7 @@ mod tests {
             requested_url: "https://example.com/guide".to_string(),
             status_code: 200,
             content_type: Some("text/html".to_string()),
+            format_received: ContentFormat::Html,
             was_redirected: false,
             raw_body_bytes: 8_000,
             diagnostics: Vec::new(),
@@ -440,6 +505,7 @@ mod tests {
             requested_url: "https://example.com/big".to_string(),
             status_code: 200,
             content_type: Some("text/html".to_string()),
+            format_received: ContentFormat::Html,
             was_redirected: false,
             raw_body_bytes: 150_000,
             diagnostics: Vec::new(),

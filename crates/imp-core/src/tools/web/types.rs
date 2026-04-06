@@ -1,5 +1,24 @@
 use serde::{Deserialize, Serialize};
 
+/// Which content format the server returned for a page read.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ContentFormat {
+    Markdown,
+    PlainText,
+    Html,
+}
+
+impl ContentFormat {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Markdown => "markdown",
+            Self::PlainText => "plain text",
+            Self::Html => "html",
+        }
+    }
+}
+
 /// Which search provider to use.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -64,6 +83,8 @@ pub struct PageContent {
     pub status_code: u16,
     /// Content-Type header value from the response.
     pub content_type: Option<String>,
+    /// Which content format was actually received from the server.
+    pub format_received: ContentFormat,
     /// Whether the response URL differs from the requested URL (redirect occurred).
     pub was_redirected: bool,
     /// Size in bytes of the raw response body before extraction.
