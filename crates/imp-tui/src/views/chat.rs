@@ -64,7 +64,7 @@ impl DisplayMessage {
                     .join("");
                 Self {
                     role: MessageRole::User,
-                    content: text,
+                    content: summarize_user_text_for_display(&text),
                     thinking: None,
                     tool_calls: Vec::new(),
                     assistant_blocks: Vec::new(),
@@ -204,6 +204,97 @@ impl DisplayMessage {
         count += 1;
         count
     }
+}
+
+const PASTED_SUMMARY_MIN_LINES: usize = 3;
+const PASTED_SUMMARY_MIN_CODE_LIKE_LINES: usize = 3;
+
+pub fn summarize_user_text_for_display(text: &str) -> String {
+    pasted_block_summary(text).unwrap_or_else(|| text.to_string())
+}
+
+fn pasted_block_summary(text: &str) -> Option<String> {
+    let line_count = text.lines().count();
+    if line_count < PASTED_SUMMARY_MIN_LINES {
+        return None;
+    }
+
+    let code_like_lines = text.lines().filter(|line| is_code_like_line(line)).count();
+    if code_like_lines < PASTED_SUMMARY_MIN_CODE_LIKE_LINES {
+        return None;
+    }
+
+    Some(format!(
+        "[Pasted {line_count} {}]",
+        if line_count == 1 { "Line" } else { "Lines" }
+    ))
+}
+
+fn is_code_like_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if trimmed.starts_with("```") {
+        return true;
+    }
+
+    if line.starts_with(' ') || line.starts_with('\t') {
+        return true;
+    }
+
+    if trimmed.ends_with('{')
+        || trimmed.ends_with('}')
+        || trimmed.ends_with(';')
+        || trimmed.ends_with(",")
+        || trimmed.ends_with(")")
+        || trimmed.ends_with("]")
+    {
+        return true;
+    }
+
+    [
+        "fn ",
+        "let ",
+        "const ",
+        "pub ",
+        "impl ",
+        "use ",
+        "mod ",
+        "struct ",
+        "enum ",
+        "trait ",
+        "async ",
+        "await ",
+        "return ",
+        "if ",
+        "else",
+        "match ",
+        "for ",
+        "while ",
+        "loop ",
+        "class ",
+        "def ",
+        "import ",
+        "from ",
+        "function ",
+        "interface ",
+        "type ",
+        "SELECT ",
+        "INSERT ",
+        "UPDATE ",
+        "DELETE ",
+        "CREATE ",
+        "ALTER ",
+    ]
+    .iter()
+    .any(|prefix| trimmed.starts_with(prefix))
+        || trimmed.contains("::")
+        || trimmed.contains("->")
+        || trimmed.contains("=>")
+        || trimmed.contains("</")
+        || trimmed.contains("/>")
 }
 
 /// Chat view: displays conversation messages with streaming support.
@@ -1034,6 +1125,46 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn large_pasted_code_is_summarized_for_display() {
+        let code = (1..=25)
+            .map(|i| format!("fn example_{i}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(summarize_user_text_for_display(&code), "[Pasted 25 Lines]");
+    }
+
+    #[test]
+    fn ordinary_multiline_text_is_not_summarized() {
+        let text = (1..=25)
+            .map(|i| format!("This is regular prose line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(summarize_user_text_for_display(&text), text);
+    }
+
+    #[test]
+    fn short_code_block_is_not_summarized() {
+        let code = (1..=2)
+            .map(|i| format!("let value_{i} = {i};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(summarize_user_text_for_display(&code), code);
+    }
+
+    #[test]
+    fn three_line_code_block_is_summarized() {
+        let code = (1..=3)
+            .map(|i| format!("let value_{i} = {i};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(summarize_user_text_for_display(&code), "[Pasted 3 Lines]");
     }
 
     #[test]

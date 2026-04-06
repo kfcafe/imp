@@ -43,7 +43,7 @@ use crate::turn_tracker::TurnTracker;
 use crate::views::ask_bar::AskState;
 use crate::views::chat::{
     build_chat_render_data, build_text_surface_from_lines, clamped_scroll_offset_for_total_lines,
-    DisplayMessage, MessageRole, RenderedChatView,
+    summarize_user_text_for_display, DisplayMessage, MessageRole, RenderedChatView,
 };
 use crate::views::command_palette::{builtin_commands, CommandPaletteState, CommandPaletteView};
 use crate::views::editor::{EditorState, EditorView};
@@ -2583,7 +2583,7 @@ impl App {
         // Add user message to display
         self.messages.push(DisplayMessage {
             role: MessageRole::User,
-            content: text.clone(),
+            content: summarize_user_text_for_display(&text),
             thinking: None,
             tool_calls: Vec::new(),
             assistant_blocks: Vec::new(),
@@ -5071,6 +5071,34 @@ mod session_lifecycle {
         assert!(app.messages.len() >= 2);
         assert_eq!(app.messages[0].role, MessageRole::User);
         assert_eq!(app.messages[0].content, "hello world");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tui_integration_send_message_large_paste_displays_summary() {
+        let tmp = TempDir::new().unwrap();
+        let mut app = make_persistent_app(&tmp);
+        let pasted = (1..=25)
+            .map(|i| format!("fn example_{i}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        app.editor.set_content(&pasted);
+        app.send_message();
+
+        assert!(app.messages.len() >= 2);
+        assert_eq!(app.messages[0].role, MessageRole::User);
+        assert_eq!(app.messages[0].content, "[Pasted 25 Lines]");
+
+        let persisted = app.session.get_messages();
+        assert_eq!(persisted.len(), 1);
+        let stored_text = match &persisted[0] {
+            imp_llm::Message::User(user) => match user.content.as_slice() {
+                [imp_llm::ContentBlock::Text { text }] => text.clone(),
+                other => panic!("unexpected user content: {other:?}"),
+            },
+            other => panic!("expected user message, got {other:?}"),
+        };
+        assert_eq!(stored_text, pasted);
     }
 
     #[test]

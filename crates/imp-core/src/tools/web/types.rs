@@ -54,8 +54,20 @@ pub struct SearchResponse {
 pub struct PageContent {
     pub title: Option<String>,
     pub text: String,
+    /// Final URL after any redirects.
     pub url: String,
+    /// Number of chars in the extracted text.
     pub content_length: usize,
+    /// Original URL before redirects (same as `url` if no redirect occurred).
+    pub requested_url: String,
+    /// HTTP status code of the response.
+    pub status_code: u16,
+    /// Content-Type header value from the response.
+    pub content_type: Option<String>,
+    /// Whether the response URL differs from the requested URL (redirect occurred).
+    pub was_redirected: bool,
+    /// Size in bytes of the raw response body before extraction.
+    pub raw_body_bytes: usize,
 }
 
 /// Web tool configuration, typically from `[web]` in config.toml.

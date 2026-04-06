@@ -21,6 +21,8 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
         return Err(ReadError::YoutubeNotSupported);
     }
 
+    let requested_url = url.to_string();
+
     let response = client
         .get(url)
         .header("User-Agent", USER_AGENT)
@@ -33,11 +35,15 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
         .await
         .map_err(|e| ReadError::Fetch(e.to_string()))?;
 
-    let status = response.status();
-    if !status.is_success() {
+    let status_code = response.status().as_u16();
+    if !response.status().is_success() {
         return Err(ReadError::HttpStatus(
-            status.as_u16(),
-            status.canonical_reason().unwrap_or("Unknown").to_string(),
+            status_code,
+            response
+                .status()
+                .canonical_reason()
+                .unwrap_or("Unknown")
+                .to_string(),
         ));
     }
 
@@ -62,14 +68,29 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
     }
 
     let final_url = response.url().to_string();
+    let was_redirected = final_url != requested_url;
     let html = response
         .text()
         .await
         .map_err(|e| ReadError::Fetch(e.to_string()))?;
+    let raw_body_bytes = html.len();
 
     if html.len() < 100 {
         return Err(ReadError::InsufficientContent);
     }
+
+    // Shared metadata for all paths
+    let meta = ResponseMeta {
+        requested_url,
+        status_code,
+        content_type: if content_type.is_empty() {
+            None
+        } else {
+            Some(content_type.clone())
+        },
+        was_redirected,
+        raw_body_bytes,
+    };
 
     // Plain text — return as-is
     if content_type.contains("text/plain") {
@@ -78,10 +99,30 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
             content_length: html.len(),
             text: html,
             url: final_url,
+            requested_url: meta.requested_url,
+            status_code: meta.status_code,
+            content_type: meta.content_type,
+            was_redirected: meta.was_redirected,
+            raw_body_bytes: meta.raw_body_bytes,
         });
     }
 
-    extract_readable(&html, &final_url)
+    let mut page = extract_readable(&html, &final_url)?;
+    page.requested_url = meta.requested_url;
+    page.status_code = meta.status_code;
+    page.content_type = meta.content_type;
+    page.was_redirected = meta.was_redirected;
+    page.raw_body_bytes = meta.raw_body_bytes;
+    Ok(page)
+}
+
+/// Metadata captured from the HTTP response before extraction.
+struct ResponseMeta {
+    requested_url: String,
+    status_code: u16,
+    content_type: Option<String>,
+    was_redirected: bool,
+    raw_body_bytes: usize,
 }
 
 /// Extract readable content from raw HTML using Mozilla Readability algorithm.
@@ -113,6 +154,12 @@ fn extract_readable(html: &str, url: &str) -> Result<PageContent, ReadError> {
         title,
         text: clean_text(&text),
         url: url.to_string(),
+        // Populated by caller (fetch_and_extract) after extraction
+        requested_url: url.to_string(),
+        status_code: 200,
+        content_type: None,
+        was_redirected: false,
+        raw_body_bytes: 0,
     })
 }
 

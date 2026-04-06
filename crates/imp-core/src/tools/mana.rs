@@ -894,7 +894,7 @@ impl Tool for ManaTool {
         "Mana"
     }
     fn description(&self) -> &str {
-        "Work coordination substrate. Prefer this over bash for mana operations when an equivalent action exists: inspect units, create/update/claim/release work, inspect orchestration logs/agents, and run orchestration natively with in-session run state. Use for complex tasks or delegation. Load the `mana` skill when coordinating multi-step work or delegation to learn the workflow."
+        "Work coordination substrate. Prefer this over bash for equivalent mana operations: inspect/create/update/claim/release units, inspect orchestration logs/agents/next/tree, and run orchestration natively with background runs plus in-session run state. Use it for complex tasks or delegation. Load the `mana` skill when coordinating multi-step work or delegation to learn the workflow."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({

@@ -193,6 +193,9 @@ fn identity_layer(
 
     s.push_str("\nTool usage guide:\n");
     s.push_str("- Use `bash` for search, file discovery, directory listing, builds, tests, git, scripts, package managers, and other shell-native tasks.\n");
+    if defs.iter().any(|def| def.name == "mana") {
+        s.push_str("- Prefer the native `mana` tool over `bash` for mana operations when an equivalent action exists; use `bash` only for mana-adjacent shell work with no native mana action.\n");
+    }
     s.push_str("- Use `read` to inspect a specific file with stable line-oriented output.\n");
     s.push_str("- Use `scan` for structural code understanding and for extracting code at file:line, file:start-end, or file#symbol.\n");
     s.push_str("- Use `edit` and `write` for file changes.\n");
@@ -633,6 +636,30 @@ mod tests {
         assert!(result
             .text
             .contains("- bash: Run shell commands"));
+    }
+
+    #[test]
+    fn system_prompt_mana_guidance_prefers_native_tool_when_available() {
+        let mut reg = make_registry();
+        reg.register(Arc::new(FakeTool {
+            name: "mana",
+            description: "Manage mana work natively",
+            readonly: false,
+        }));
+
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
+        assert!(result.text.contains(
+            "Prefer the native `mana` tool over `bash` for mana operations when an equivalent action exists"
+        ));
+    }
+
+    #[test]
+    fn system_prompt_mana_guidance_omitted_without_mana_tool() {
+        let reg = make_registry();
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
+        assert!(!result.text.contains(
+            "Prefer the native `mana` tool over `bash` for mana operations when an equivalent action exists"
+        ));
     }
 
     #[test]
