@@ -36,7 +36,7 @@ Notable slash commands:
 
 imp is an agent engine — not a wrapper around an LLM API. It runs a full ReAct loop (think → act → observe → repeat), manages context intelligently, and gives the model real tools to work with.
 
-**Tools** — File I/O, shell execution, code search (grep, find, AST scan), web search, diff preview/apply, user prompts, mana unit management, session search, and persistent memory. Readonly tools run in parallel. Prefer native tools over shell wrappers when available; for mana operations, use the built-in `mana` tool instead of `bash` for equivalent actions.
+**Tools** — File I/O, shell execution, code search (grep, find, AST scan), web search, diff preview/apply, user prompts, mana unit management, persistent memory, session search across past conversations, and built-in multi-edit for coordinated file changes. Readonly tools run in parallel. Prefer native tools over shell wrappers when available; for mana operations, use the built-in `mana` tool instead of `bash` for equivalent actions.
 
 **Context management** — As conversations grow, imp first masks old tool outputs and can now compact older history behind an explicit branch-local compaction boundary. `/compact` preserves recent working turns verbatim, summarizes older work into a structured handoff, and makes future turns use the compacted active history rather than the full raw transcript. Raw session entries remain on disk for replay/fork/export.
 
@@ -79,7 +79,7 @@ The interactive terminal UI gives you:
 | `web` | Web search (Tavily/Exa) and page content extraction |
 | `ask` | Prompt the user for input or multiple-choice |
 | `mana` | Native mana work coordination — status, list/show, create/update/close/claim/release, logs/agents, next/tree, and run |
-| `memory` | Persistent key-value store across sessions |
+| `memory` | Persistent memory across sessions |
 | `session_search` | Search past conversations from the local session index |
 
 You can also define shell tools via TOML config, or register tools from Lua extensions.
