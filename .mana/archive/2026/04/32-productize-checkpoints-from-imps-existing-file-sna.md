@@ -2,17 +2,20 @@
 id: '32'
 title: Productize checkpoints from imp's existing file snapshot safety
 slug: productize-checkpoints-from-imps-existing-file-sna
-status: open
+status: closed
 priority: 1
 created_at: '2026-03-27T03:47:46.773527Z'
-updated_at: '2026-03-27T03:47:46.773527Z'
+updated_at: '2026-04-06T22:38:54.691075Z'
 labels:
 - feature
 - safety
 - ux
 - imp-core
+closed_at: '2026-04-06T22:38:54.691075Z'
+close_reason: 'Auto-closed: all children completed'
 verify: cd /Users/asher/tower/imp && rg 'checkpoint' crates/imp-core/src/tools crates/imp-core/src/session.rs && cargo test -p imp-core rollback checkpoint && cargo check -p imp-core
 fail_first: true
+is_archived: true
 kind: epic
 ---
 
