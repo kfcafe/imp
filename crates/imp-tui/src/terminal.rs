@@ -19,6 +19,21 @@ pub fn set_window_title(title: &str) -> io::Result<()> {
     Ok(())
 }
 
+pub fn ring_terminal_bell() -> io::Result<()> {
+    #[cfg(test)]
+    {
+        return Ok(());
+    }
+
+    #[cfg(not(test))]
+    {
+        let mut stdout = io::stdout();
+        write!(stdout, "\x07")?;
+        stdout.flush()?;
+        Ok(())
+    }
+}
+
 pub struct TerminalSession {
     terminal: InteractiveTerminal,
     last_title: Option<String>,

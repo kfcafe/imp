@@ -51,6 +51,7 @@ imp is an agent engine — not a wrapper around an LLM API. It runs a full ReAct
 The interactive terminal UI gives you:
 
 - Streaming responses with thinking indicators
+- Optional terminal bell when an agent fully finishes a run
 - Command palette (`/`) with fuzzy search
 - Personality editor (`/personality`) for identity, behavior, scope, and profiles
 - Model selector (Ctrl+L) with quick cycling
@@ -217,6 +218,9 @@ planning_depth = "medium"
 
 [web]
 search_provider = "exa"
+
+[ui]
+notify_on_agent_complete = true
 ```
 
 Personality is layered through the same config stack as everything else:
@@ -243,6 +247,8 @@ Slider bands use five stable labels:
 - high
 - very high
 
+
+Use `/settings` in the TUI to edit display and behavior preferences too, including the completion bell (`Bell on done`).
 
 ```bash
 export IMP_WEB_PROVIDER=exa

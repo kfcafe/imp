@@ -41,6 +41,7 @@ pub enum SettingsField {
     ShowTimestamps,
     ShowCost,
     ShowContextUsage,
+    NotifyOnAgentComplete,
     WebSearchProvider,
     TavilyApiKey,
     ExaApiKey,
@@ -72,6 +73,7 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::ShowTimestamps,
     SettingsField::ShowCost,
     SettingsField::ShowContextUsage,
+    SettingsField::NotifyOnAgentComplete,
     SettingsField::WebSearchProvider,
     SettingsField::TavilyApiKey,
     SettingsField::ExaApiKey,
@@ -108,6 +110,7 @@ pub struct SettingsState {
     pub show_timestamps: bool,
     pub show_cost: bool,
     pub show_context_usage: bool,
+    pub notify_on_agent_complete: bool,
     pub web_search_provider: Option<SearchProvider>,
     pub tavily_api_key: String,
     pub exa_api_key: String,
@@ -153,6 +156,7 @@ impl SettingsState {
             show_timestamps: config.ui.show_timestamps,
             show_cost: config.ui.show_cost,
             show_context_usage: config.ui.show_context_usage,
+            notify_on_agent_complete: config.ui.notify_on_agent_complete,
             web_search_provider: config.web.search_provider,
             tavily_api_key: String::new(),
             exa_api_key: String::new(),
@@ -285,6 +289,9 @@ impl SettingsState {
             SettingsField::ShowContextUsage => {
                 self.show_context_usage = !self.show_context_usage;
             }
+            SettingsField::NotifyOnAgentComplete => {
+                self.notify_on_agent_complete = !self.notify_on_agent_complete;
+            }
             SettingsField::WebSearchProvider => {
                 self.web_search_provider = match self.web_search_provider {
                     None => Some(SearchProvider::Tavily),
@@ -409,6 +416,9 @@ impl SettingsState {
             }
             SettingsField::ShowContextUsage => {
                 self.show_context_usage = !self.show_context_usage;
+            }
+            SettingsField::NotifyOnAgentComplete => {
+                self.notify_on_agent_complete = !self.notify_on_agent_complete;
             }
             SettingsField::WebSearchProvider => {
                 self.web_search_provider = match self.web_search_provider {
@@ -591,6 +601,7 @@ impl SettingsState {
             show_timestamps: self.show_timestamps,
             show_cost: self.show_cost,
             show_context_usage: self.show_context_usage,
+            notify_on_agent_complete: self.notify_on_agent_complete,
         };
         config.web = imp_core::tools::web::types::WebConfig {
             search_provider: self.web_search_provider,
@@ -1133,6 +1144,22 @@ impl Widget for SettingsView<'_> {
             inner,
             &mut row,
             23,
+            "Bell on done",
+            if self.state.notify_on_agent_complete {
+                "on"
+            } else {
+                "off"
+            },
+            "← →",
+        );
+
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            24,
             "Web provider",
             match self.state.web_search_provider {
                 None => "auto",
@@ -1162,7 +1189,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            24,
+            25,
             "Tavily API key",
             &tavily_val,
             "Enter to edit",
@@ -1186,7 +1213,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            25,
+            26,
             "Exa API key",
             &exa_val,
             "Enter to edit",
@@ -1285,6 +1312,21 @@ mod tests {
 
         state.apply_to_config(&mut config);
         assert_eq!(config.enabled_models, Some(vec![models[0].id.clone()]));
+    }
+
+    #[test]
+    fn bell_setting_round_trips_into_config() {
+        let registry = ModelRegistry::with_builtins();
+        let models = registry.list().to_vec();
+        let auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
+        let mut config = Config::default();
+        let state = SettingsState {
+            notify_on_agent_complete: false,
+            ..SettingsState::new(&config, &models[0].id, &models, &auth_store)
+        };
+
+        state.apply_to_config(&mut config);
+        assert!(!config.ui.notify_on_agent_complete);
     }
 
     #[test]

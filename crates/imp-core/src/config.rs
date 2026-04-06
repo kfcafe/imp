@@ -402,6 +402,11 @@ pub struct UiConfig {
     /// Show context usage in the top bar. Default: true.
     #[serde(default = "default_true")]
     pub show_context_usage: bool,
+
+    /// Emit a terminal bell when an agent run fully completes in the TUI.
+    /// Default: true.
+    #[serde(default = "default_true")]
+    pub notify_on_agent_complete: bool,
 }
 
 fn default_tool_output_lines() -> usize {
@@ -451,6 +456,7 @@ impl Default for UiConfig {
             show_timestamps: false,
             show_cost: true,
             show_context_usage: true,
+            notify_on_agent_complete: true,
         }
     }
 }

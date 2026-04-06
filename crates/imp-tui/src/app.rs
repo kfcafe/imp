@@ -37,7 +37,7 @@ use crate::keybindings::{self, Action};
 use crate::selection::{
     extract_selected_text, SelectablePane, SelectionOverlay, SelectionState, TextSurface,
 };
-use crate::terminal::{set_window_title, InteractiveTerminal};
+use crate::terminal::{ring_terminal_bell, set_window_title, InteractiveTerminal};
 use crate::theme::Theme;
 use crate::turn_tracker::TurnTracker;
 use crate::views::ask_bar::AskState;
@@ -280,6 +280,8 @@ pub struct App {
     pub last_esc: Option<Instant>,
     pub tick: u64,
     pub max_turns_override: Option<u32>,
+    completed_turns_in_run: u32,
+    suppress_completion_notification: bool,
     pub ui_rx: Option<tokio::sync::mpsc::Receiver<crate::tui_interface::UiRequest>>,
     pub ask_state: Option<crate::views::ask_bar::AskState>,
     pub ask_reply: Option<AskReply>,
@@ -449,6 +451,8 @@ impl App {
             last_esc: None,
             tick: 0,
             max_turns_override: None,
+            completed_turns_in_run: 0,
+            suppress_completion_notification: false,
             ui_rx: None,
             ask_state: None,
             ask_reply: None,
@@ -712,6 +716,7 @@ impl App {
         match signal {
             RuntimeSignal::AgentEvent(event) => self.handle_agent_event(event),
             RuntimeSignal::AgentTaskCompleted => {
+                self.maybe_notify_agent_completion();
                 // AgentEnd handling can synchronously spawn a replacement run via a
                 // queued follow-up. Only clear the handle if no active task has
                 // taken over by the time we process completion.
@@ -741,11 +746,33 @@ impl App {
     }
 
     fn present_agent_failure(&mut self, error: String) {
+        self.completed_turns_in_run = 0;
         self.is_streaming = false;
         if let Some(last) = self.messages.last_mut() {
             last.is_streaming = false;
         }
         self.push_error_msg(&parse_api_error(&error));
+    }
+
+    fn maybe_notify_agent_completion(&mut self) {
+        if self.is_streaming {
+            return;
+        }
+        if self.completed_turns_in_run == 0 {
+            return;
+        }
+        if self.suppress_completion_notification {
+            self.completed_turns_in_run = 0;
+            self.suppress_completion_notification = false;
+            return;
+        }
+        if !self.config.ui.notify_on_agent_complete {
+            self.completed_turns_in_run = 0;
+            return;
+        }
+
+        let _ = ring_terminal_bell();
+        self.completed_turns_in_run = 0;
     }
 
     fn handle_ui_request(&mut self, req: crate::tui_interface::UiRequest) {
@@ -2420,6 +2447,7 @@ impl App {
             if let Some(ref handle) = self.agent_handle {
                 let _ = handle.command_tx.try_send(AgentCommand::Cancel);
             }
+            self.suppress_completion_notification = true;
             self.is_streaming = false;
             self.ctrl_c_count = 0;
         } else {
@@ -2578,6 +2606,8 @@ impl App {
         self.invalidate_chat_render_cache();
 
         self.is_streaming = true;
+        self.completed_turns_in_run = 0;
+        self.suppress_completion_notification = false;
         self.auto_scroll = true;
         self.scroll_offset = 0;
         self.tool_focus = None;
@@ -4482,6 +4512,7 @@ impl App {
                 self.turn_tracker.reset();
             }
             AgentEvent::AgentEnd { cost, .. } => {
+                self.completed_turns_in_run = self.completed_turns_in_run.max(1);
                 self.accumulated_cost.total += cost.total;
                 self.accumulated_cost.input += cost.input;
                 self.accumulated_cost.output += cost.output;
@@ -4659,6 +4690,7 @@ impl App {
                 );
             }
             AgentEvent::TurnEnd { index, message } => {
+                self.completed_turns_in_run += 1;
                 // Update context tracking from this turn's usage
                 if let Some(ref usage) = message.usage {
                     self.current_context_tokens = usage.input_tokens + usage.cache_read_tokens;
@@ -4682,6 +4714,7 @@ impl App {
                 }
             }
             AgentEvent::Error { error } => {
+                self.completed_turns_in_run = 0;
                 // Stop streaming — errors can be terminal (no AgentEnd follows)
                 self.is_streaming = false;
                 if let Some(last) = self.messages.last_mut() {
@@ -5983,6 +6016,43 @@ mod session_lifecycle {
         assert_eq!(app.accumulated_usage.input_tokens, 500_000);
         assert_eq!(app.accumulated_usage.output_tokens, 25_000);
         assert_eq!(app.accumulated_cost.total, 3.0);
+    }
+
+    #[test]
+    fn completion_bell_requires_completed_turn_and_resets_latch() {
+        let mut app = make_app();
+        app.config.ui.notify_on_agent_complete = true;
+
+        app.maybe_notify_agent_completion();
+        assert_eq!(app.completed_turns_in_run, 0);
+
+        app.completed_turns_in_run = 2;
+        app.maybe_notify_agent_completion();
+        assert_eq!(app.completed_turns_in_run, 0);
+    }
+
+    #[test]
+    fn completion_bell_toggle_still_resets_latch() {
+        let mut app = make_app();
+        app.config.ui.notify_on_agent_complete = false;
+        app.completed_turns_in_run = 1;
+
+        app.maybe_notify_agent_completion();
+
+        assert_eq!(app.completed_turns_in_run, 0);
+    }
+
+    #[test]
+    fn completion_bell_cancel_suppresses_notification_once() {
+        let mut app = make_app();
+        app.config.ui.notify_on_agent_complete = true;
+        app.completed_turns_in_run = 1;
+        app.suppress_completion_notification = true;
+
+        app.maybe_notify_agent_completion();
+
+        assert_eq!(app.completed_turns_in_run, 0);
+        assert!(!app.suppress_completion_notification);
     }
 
     #[test]
