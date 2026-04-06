@@ -2,13 +2,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mana::commands::agents::load_agents;
+use mana::commands::agents::{agents_file_path, load_agents};
 use mana::commands::logs::find_all_logs;
 use mana::commands::next::ScoredUnit;
 use mana::commands::run::{RunArgs, RunSummary, RunUnitStatus, RunView};
 use mana::stream::StreamEvent;
 use mana_core::ops::claim::ClaimParams;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{truncate_head, Tool, ToolContext, ToolOutput, ToolUpdate};
@@ -17,6 +17,8 @@ use crate::ui::{NotifyLevel, WidgetContent};
 const MAX_OUTPUT_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const MAX_STORED_RUN_EVENTS: usize = 64;
+const MAX_PERSISTED_RUN_LOG_LINES: usize = 50;
+const FINISHED_RUN_TTL_MS: u128 = 60 * 60 * 1000;
 
 fn find_mana_dir(cwd: &Path) -> std::result::Result<std::path::PathBuf, String> {
     mana_core::discovery::find_mana_dir(cwd).map_err(|e| e.to_string())
@@ -40,7 +42,7 @@ fn send_update(ctx: &ToolContext, text: impl Into<String>, details: serde_json::
     });
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct NativeRunArgsView {
     id: Option<String>,
     jobs: u32,
@@ -67,7 +69,7 @@ impl From<&RunArgs> for NativeRunArgsView {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct NativeRunState {
     run_id: String,
     scope: String,
@@ -114,10 +116,7 @@ impl NativeRunState {
         self.event_count += 1;
         if let Some(line) = stream_event_line(event) {
             self.log_lines.push(line);
-            if self.log_lines.len() > MAX_STORED_RUN_EVENTS {
-                let overflow = self.log_lines.len() - MAX_STORED_RUN_EVENTS;
-                self.log_lines.drain(0..overflow);
-            }
+            trim_log_lines(&mut self.log_lines, MAX_STORED_RUN_EVENTS);
         }
 
         match event {
@@ -241,14 +240,17 @@ impl NativeRunState {
         self.error = Some(error.clone());
         self.finished_at_ms = Some(unix_time_ms());
         self.log_lines.push(error);
-        if self.log_lines.len() > MAX_STORED_RUN_EVENTS {
-            let overflow = self.log_lines.len() - MAX_STORED_RUN_EVENTS;
-            self.log_lines.drain(0..overflow);
-        }
+        trim_log_lines(&mut self.log_lines, MAX_STORED_RUN_EVENTS);
+    }
+
+    fn persisted(&self) -> Self {
+        let mut state = self.clone();
+        trim_log_lines(&mut state.log_lines, MAX_PERSISTED_RUN_LOG_LINES);
+        state
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ManaRunStore {
     next_id: u64,
     runs: Vec<NativeRunState>,
@@ -262,6 +264,47 @@ impl ManaRunStore {
             .push(NativeRunState::new(run_id.clone(), scope, background, args));
         self.trim_history();
         run_id
+    }
+
+    fn persist(&self) {
+        let path = run_state_file();
+        let persisted = Self {
+            next_id: self.next_id,
+            runs: self.runs.iter().map(NativeRunState::persisted).collect(),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&persisted) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    fn load_persisted() -> Self {
+        let path = run_state_file();
+        if !path.exists() {
+            return Self::default();
+        }
+
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+        if contents.trim().is_empty() {
+            return Self::default();
+        }
+
+        let Ok(mut store) = serde_json::from_str::<Self>(&contents) else {
+            return Self::default();
+        };
+
+        store.discard_expired_finished_runs();
+        store.trim_history();
+        store
+    }
+
+    fn discard_expired_finished_runs(&mut self) {
+        let cutoff = unix_time_ms().saturating_sub(FINISHED_RUN_TTL_MS);
+        self.runs.retain(|run| match run.finished_at_ms {
+            Some(finished_at_ms) => finished_at_ms >= cutoff,
+            None => true,
+        });
     }
 
     fn update_with_event(&mut self, run_id: &str, event: &StreamEvent) {
@@ -310,6 +353,28 @@ impl ManaRunStore {
             }
         }
     }
+}
+
+fn trim_log_lines(log_lines: &mut Vec<String>, max_lines: usize) {
+    if log_lines.len() > max_lines {
+        let overflow = log_lines.len() - max_lines;
+        log_lines.drain(0..overflow);
+    }
+}
+
+fn run_state_file() -> std::path::PathBuf {
+    if let Ok(path) = agents_file_path() {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).ok();
+            return dir.join("run_state.json");
+        }
+    }
+
+    let dir = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".local").join("share").join("units"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp").join("mana"));
+    std::fs::create_dir_all(&dir).ok();
+    dir.join("run_state.json")
 }
 
 fn unix_time_ms() -> u128 {
@@ -474,12 +539,14 @@ fn update_run_store_with_event(
 fn finish_run_in_store(store: &std::sync::Mutex<ManaRunStore>, run_id: &str, view: &RunView) {
     if let Ok(mut store) = store.lock() {
         store.finish_run(run_id, view);
+        store.persist();
     }
 }
 
 fn fail_run_in_store(store: &std::sync::Mutex<ManaRunStore>, run_id: &str, error: String) {
     if let Ok(mut store) = store.lock() {
         store.fail_run(run_id, error);
+        store.persist();
     }
 }
 
@@ -813,7 +880,7 @@ pub struct ManaTool {
 impl Default for ManaTool {
     fn default() -> Self {
         Self {
-            run_store: Arc::new(std::sync::Mutex::new(ManaRunStore::default())),
+            run_store: Arc::new(std::sync::Mutex::new(ManaRunStore::load_persisted())),
         }
     }
 }
@@ -1111,6 +1178,10 @@ impl Tool for ManaTool {
                                     && e.has_verify
                                     && !e.feature
                                     && mana_core::blocking::check_blocked(e, &index).is_none()
+                                    && !index.units.iter().any(|child| {
+                                        child.parent.as_deref() == Some(e.id.as_str())
+                                            && child.status != mana_core::unit::Status::Closed
+                                    })
                             })
                             .collect();
 
@@ -1269,7 +1340,9 @@ impl Tool for ManaTool {
                     let mut store = self.run_store.lock().map_err(|_| {
                         crate::error::Error::Tool("mana run state lock poisoned".into())
                     })?;
-                    store.start_run(scope.clone(), background, &run_args)
+                    let run_id = store.start_run(scope.clone(), background, &run_args);
+                    store.persist();
+                    run_id
                 };
 
                 if background {

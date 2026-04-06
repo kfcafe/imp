@@ -89,6 +89,9 @@ pub struct SessionOptions {
     /// Maximum turns before the agent stops.
     pub max_turns: Option<u32>,
 
+    /// Max output tokens per response.
+    pub max_tokens: Option<u32>,
+
     /// Replace the assembled system prompt entirely.
     pub system_prompt: Option<String>,
 
@@ -129,6 +132,7 @@ impl Default for SessionOptions {
             thinking: None,
             mode: None,
             max_turns: None,
+            max_tokens: None,
             system_prompt: None,
             no_tools: false,
             session: SessionChoice::default(),
@@ -250,6 +254,9 @@ impl ImpSession {
             if let Some(max_turns) = options.max_turns.or(config.max_turns) {
                 a.max_turns = max_turns;
             }
+            if let Some(max_tokens) = options.max_tokens.or(config.max_tokens) {
+                a.max_tokens = Some(max_tokens);
+            }
             a.system_prompt = options.system_prompt.clone().unwrap_or_default();
             if let Some(ui) = &options.ui {
                 a.ui = Arc::clone(ui);
@@ -273,6 +280,9 @@ impl ImpSession {
 
             if let Some(max_turns) = options.max_turns {
                 a.max_turns = max_turns;
+            }
+            if let Some(max_tokens) = options.max_tokens {
+                a.max_tokens = Some(max_tokens);
             }
             if let Some(ui) = &options.ui {
                 a.ui = Arc::clone(ui);
@@ -804,6 +814,7 @@ mod tests {
     fn session_options_default_is_sensible() {
         let opts = SessionOptions::default();
         assert!(opts.model.is_none());
+        assert!(opts.max_tokens.is_none());
         assert!(!opts.no_tools);
         assert!(matches!(opts.session, SessionChoice::New));
     }

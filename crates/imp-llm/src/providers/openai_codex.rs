@@ -62,7 +62,6 @@ fn add_codex_request_fields(request: &mut Value, session_id: Option<&str>) {
         return;
     };
 
-    object.remove("max_output_tokens");
     object.insert("store".into(), Value::Bool(false));
     object.insert("parallel_tool_calls".into(), Value::Bool(true));
     object.insert("tool_choice".into(), Value::String("auto".into()));
@@ -165,7 +164,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_request_removes_max_output_tokens() {
+    fn codex_request_preserves_max_output_tokens() {
         let mut request = serde_json::json!({
             "model": "gpt-5.4",
             "max_output_tokens": 1234,
@@ -174,11 +173,23 @@ mod tests {
         add_codex_request_fields(&mut request, None);
 
         let object = request.as_object().expect("request object");
-        assert!(!object.contains_key("max_output_tokens"));
+        assert_eq!(object.get("max_output_tokens"), Some(&Value::from(1234)));
         assert_eq!(object.get("store"), Some(&Value::Bool(false)));
         assert_eq!(
             object.get("tool_choice"),
             Some(&Value::String("auto".into()))
         );
+    }
+
+    #[test]
+    fn codex_request_leaves_max_output_tokens_absent_when_unset() {
+        let mut request = serde_json::json!({
+            "model": "gpt-5.4"
+        });
+
+        add_codex_request_fields(&mut request, None);
+
+        let object = request.as_object().expect("request object");
+        assert!(!object.contains_key("max_output_tokens"));
     }
 }

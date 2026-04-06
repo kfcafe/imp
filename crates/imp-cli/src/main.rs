@@ -175,6 +175,10 @@ struct Cli {
     #[arg(long)]
     max_turns: Option<u32>,
 
+    /// Max output tokens per response
+    #[arg(long)]
+    max_tokens: Option<u32>,
+
     /// Verbose startup logging
     #[arg(long)]
     verbose: bool,
@@ -1237,6 +1241,7 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
             .as_ref()
             .map(|thinking| parse_thinking_level(thinking)),
         max_turns: cli.max_turns.or(config.max_turns),
+        max_tokens: cli.max_tokens.or(config.max_tokens),
         system_prompt: cli.system_prompt.clone(),
         no_tools: cli.no_tools,
         session: SessionChoice::InMemory,
@@ -2446,6 +2451,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
             .as_ref()
             .map(|thinking| parse_thinking_level(thinking)),
         max_turns: cli.max_turns.or(config.max_turns),
+        max_tokens: cli.max_tokens.or(config.max_tokens),
         system_prompt: cli.system_prompt.clone(),
         no_tools: cli.no_tools,
         session: session_choice,
@@ -2668,6 +2674,7 @@ mod tests {
             system_prompt: None,
             mode: "interactive".to_string(),
             max_turns: None,
+            max_tokens: None,
             verbose: false,
             list_models: false,
             args: Vec::new(),

@@ -116,6 +116,11 @@ impl AgentBuilder {
             agent.max_turns = max_turns;
         }
 
+        // Wire max output tokens from config
+        if let Some(max_tokens) = self.config.max_tokens {
+            agent.max_tokens = Some(max_tokens);
+        }
+
         // Wire context thresholds from config
         agent.context_config = self.config.context.clone();
 
@@ -327,6 +332,21 @@ mod tests {
                 .unwrap();
 
         assert_eq!(agent.max_turns, 42);
+    }
+
+    #[test]
+    fn builder_applies_config_max_tokens() {
+        let config = Config {
+            max_tokens: Some(2048),
+            ..Default::default()
+        };
+
+        let (agent, _handle) =
+            AgentBuilder::new(config, PathBuf::from("/tmp"), test_model(), "key".into())
+                .build()
+                .unwrap();
+
+        assert_eq!(agent.max_tokens, Some(2048));
     }
 
     #[test]

@@ -106,6 +106,19 @@ Set an env var and it's auto-detected — no login step needed. Prompt caching i
 
 imp also uses provider-tuned default output caps when `max_tokens` is not set explicitly. That helps avoid accidentally requesting each model's absolute maximum completion size on every turn, which improves latency and reduces output-token spend while preserving explicit user overrides.
 
+You can set a default output cap in config:
+
+```toml
+# ~/.config/imp/config.toml or <project>/.imp/config.toml
+max_tokens = 2048
+```
+
+Or override per run:
+
+```bash
+imp --max-tokens 2048
+```
+
 ### Web search provider keys
 
 The `web` tool supports Tavily, Exa, Linkup, and Perplexity.

@@ -21,6 +21,7 @@ pub enum SettingsField {
     ChosenModels,
     Theme,
     ThinkingLevel,
+    MaxTokens,
     MaxTurns,
     ObservationMask,
     ShellBackend,
@@ -53,6 +54,7 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::ChosenModels,
     SettingsField::Theme,
     SettingsField::ThinkingLevel,
+    SettingsField::MaxTokens,
     SettingsField::MaxTurns,
     SettingsField::ObservationMask,
     SettingsField::ShellBackend,
@@ -90,6 +92,7 @@ pub struct SettingsState {
     pub theme_name: String,
     pub theme_options: Vec<String>,
     pub thinking_level: ThinkingLevel,
+    pub max_tokens: u32,
     pub max_turns: u32,
     pub observation_mask: f64,
     pub shell_backend: ShellBackend,
@@ -136,6 +139,7 @@ impl SettingsState {
             theme_name: config.theme.clone().unwrap_or_else(|| "default".into()),
             theme_options: vec!["default".into(), "light".into()],
             thinking_level: config.thinking.unwrap_or(ThinkingLevel::Medium),
+            max_tokens: config.max_tokens.unwrap_or(4096),
             max_turns: config.max_turns.unwrap_or(100),
             observation_mask: config.context.observation_mask_threshold,
             shell_backend: config.shell.backend.clone(),
@@ -213,6 +217,9 @@ impl SettingsState {
             }
             SettingsField::ThinkingLevel => {
                 self.thinking_level = next_thinking(self.thinking_level);
+            }
+            SettingsField::MaxTokens => {
+                self.max_tokens = self.max_tokens.saturating_add(256).min(128_000);
             }
             SettingsField::ShellBackend => {
                 self.shell_backend = next_shell(&self.shell_backend);
@@ -341,6 +348,9 @@ impl SettingsState {
             SettingsField::ThinkingLevel => {
                 self.thinking_level = prev_thinking(self.thinking_level);
             }
+            SettingsField::MaxTokens => {
+                self.max_tokens = self.max_tokens.saturating_sub(256).max(1);
+            }
             SettingsField::ShellBackend => {
                 self.shell_backend = prev_shell(&self.shell_backend);
             }
@@ -438,6 +448,10 @@ impl SettingsState {
     /// Begin direct numeric input for the current field.
     pub fn start_edit(&mut self) {
         match self.current_field() {
+            SettingsField::MaxTokens => {
+                self.editing_number = true;
+                self.edit_buffer = self.max_tokens.to_string();
+            }
             SettingsField::MaxTurns => {
                 self.editing_number = true;
                 self.edit_buffer = self.max_turns.to_string();
@@ -533,6 +547,11 @@ impl SettingsState {
         self.editing_number = false;
         self.dirty = true;
         match self.current_field() {
+            SettingsField::MaxTokens => {
+                if let Ok(v) = self.edit_buffer.parse::<u32>() {
+                    self.max_tokens = v.max(1);
+                }
+            }
             SettingsField::MaxTurns => {
                 if let Ok(v) = self.edit_buffer.parse::<u32>() {
                     self.max_turns = v.max(1);
@@ -573,6 +592,7 @@ impl SettingsState {
         };
         config.theme = Some(self.theme_name.clone());
         config.thinking = Some(self.thinking_level);
+        config.max_tokens = Some(self.max_tokens);
         config.max_turns = Some(self.max_turns);
         config.context = ContextConfig {
             observation_mask_threshold: self.observation_mask,
@@ -792,6 +812,26 @@ impl Widget for SettingsView<'_> {
             "← →",
         );
 
+        // Max tokens
+        let max_tokens_val = if self.state.editing_number
+            && self.state.current_field() == SettingsField::MaxTokens
+        {
+            format!("{}▎", self.state.edit_buffer)
+        } else {
+            self.state.max_tokens.to_string()
+        };
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            4,
+            "Max tokens",
+            &max_tokens_val,
+            "← → / type",
+        );
+
         // Max turns
         let max_turns_val =
             if self.state.editing_number && self.state.current_field() == SettingsField::MaxTurns {
@@ -805,7 +845,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            4,
+            5,
             "Max turns",
             &max_turns_val,
             "← → / type",
@@ -828,7 +868,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            5,
+            6,
             "Observation mask",
             &obs_val,
             "← →",
@@ -841,7 +881,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            6,
+            7,
             "Shell backend",
             shell_label(&self.state.shell_backend),
             "← →",
@@ -861,7 +901,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            6,
+            8,
             "Sidebar style",
             sidebar_label,
             "← →",
@@ -879,7 +919,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            7,
+            9,
             "Tool output",
             tool_output_label,
             "← →",
@@ -899,7 +939,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            8,
+            10,
             "Tool output lines",
             &tol_val,
             "← → / type",
@@ -918,7 +958,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            9,
+            11,
             "Read max lines",
             &rml_val,
             "← → / type (0 = no limit)",
@@ -938,7 +978,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            10,
+            12,
             "Sidebar width",
             &sw_val,
             "← → / type",
@@ -951,7 +991,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            11,
+            13,
             "Word wrap",
             if self.state.word_wrap { "on" } else { "off" },
             "← →",
@@ -963,7 +1003,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            12,
+            14,
             "Animations",
             animation_label(self.state.animations),
             "← →",
@@ -975,7 +1015,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            13,
+            15,
             "Chat tool display",
             match self.state.chat_tool_display {
                 ChatToolDisplay::Interleaved => "interleaved",
@@ -990,7 +1030,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            14,
+            16,
             "Auto-open sidebar",
             if self.state.auto_open_sidebar {
                 "on"
@@ -1013,7 +1053,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            15,
+            17,
             "Auto-open width",
             &sao_val,
             "← → / type",
@@ -1032,7 +1072,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            16,
+            18,
             "Thinking lines",
             &thinking_lines_val,
             "← → / type",
@@ -1051,7 +1091,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            17,
+            19,
             "Streaming lines",
             &streaming_lines_val,
             "← → / type",
@@ -1070,7 +1110,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            18,
+            20,
             "Mouse scroll",
             &mouse_scroll_val,
             "← → / type",
@@ -1089,7 +1129,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            19,
+            21,
             "Keyboard scroll",
             &keyboard_scroll_val,
             "← → / type",
@@ -1101,7 +1141,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            20,
+            22,
             "Show timestamps",
             if self.state.show_timestamps {
                 "on"
@@ -1116,7 +1156,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            21,
+            23,
             "Show cost",
             if self.state.show_cost { "on" } else { "off" },
             "← →",
@@ -1127,7 +1167,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            22,
+            24,
             "Show context",
             if self.state.show_context_usage {
                 "on"
@@ -1143,7 +1183,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            23,
+            25,
             "Bell on done",
             if self.state.notify_on_agent_complete {
                 "on"
@@ -1159,7 +1199,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            24,
+            26,
             "Web provider",
             match self.state.web_search_provider {
                 None => "auto",
@@ -1189,7 +1229,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            25,
+            27,
             "Tavily API key",
             &tavily_val,
             "Enter to edit",
@@ -1213,7 +1253,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            26,
+            28,
             "Exa API key",
             &exa_val,
             "Enter to edit",

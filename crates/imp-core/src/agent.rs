@@ -112,6 +112,7 @@ pub struct Agent {
     pub system_prompt: String,
     pub cwd: PathBuf,
     pub max_turns: u32,
+    pub max_tokens: Option<u32>,
     pub role: Option<Role>,
     pub hooks: HookRunner,
     pub api_key: String,
@@ -183,6 +184,7 @@ impl Agent {
             system_prompt: String::new(),
             cwd,
             max_turns: 50,
+            max_tokens: None,
             role: None,
             hooks: HookRunner::new(),
             api_key: String::new(),
@@ -310,10 +312,9 @@ impl Agent {
 
             let options = RequestOptions {
                 thinking_level: self.thinking_level,
-                // Let providers choose their own sensible default output budget.
-                // Anthropic in particular should not default to the model's absolute
-                // max output size for every request.
-                max_tokens: None,
+                // Use configured output cap when present; otherwise let providers
+                // choose their own sensible default output budget.
+                max_tokens: self.max_tokens,
                 temperature: None,
                 system_prompt: self.system_prompt.clone(),
                 tools: self.tools.definitions(),

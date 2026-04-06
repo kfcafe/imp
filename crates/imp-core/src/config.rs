@@ -146,14 +146,17 @@ impl AgentMode {
         match self {
             AgentMode::Full => None,
             AgentMode::Worker => Some(
-                "You are a worker agent. Your job is to complete the assigned unit. \
-                You may read files, write files, and run shell commands. \
-                You may not create or run mana units — use `mana update` to report progress.",
+                "You are a worker agent. Your job is to implement the assigned unit as specified and stay within its scope. \
+                You may read files, write files, and run shell commands. Use fast scoped checks for local feedback while implementing, \
+                and record meaningful progress or failure context with `mana update`. \
+                You may not create, run, or close mana units — final verification and closure belong to the orchestrator workflow.",
             ),
             AgentMode::Orchestrator => Some(
-                "You are an orchestrator agent. Your job is to plan and execute work \
-                by creating and running mana units. You may not read or write files directly — \
-                delegate all file work to worker agents via mana.",
+                "You are an orchestrator agent. Use mana as your primary execution substrate for non-trivial work. \
+                Write detailed units, split larger efforts into child units with dependencies, dispatch workers through mana, \
+                and own the final verification, retry, and closure workflow. \
+                You may not read or write files directly — delegate all file work to worker agents via mana. \
+                You are responsible for unit structure, completeness, and verify quality.",
             ),
             AgentMode::Planner => Some(
                 "You are a planner agent. Your job is to decompose work into mana units. \
@@ -212,6 +215,9 @@ pub struct Config {
 
     /// Default thinking level.
     pub thinking: Option<ThinkingLevel>,
+
+    /// Default max output tokens per response.
+    pub max_tokens: Option<u32>,
 
     /// Maximum agent turns.
     pub max_turns: Option<u32>,
@@ -571,6 +577,11 @@ impl Config {
         if let Ok(thinking) = std::env::var("IMP_THINKING") {
             config.thinking = parse_thinking_level(&thinking);
         }
+        if let Ok(max_tokens) = std::env::var("IMP_MAX_TOKENS") {
+            if let Ok(parsed) = max_tokens.parse::<u32>() {
+                config.max_tokens = Some(parsed);
+            }
+        }
         if let Ok(mode) = std::env::var("IMP_MODE") {
             if let Some(m) = parse_agent_mode(&mode) {
                 config.mode = m;
@@ -595,6 +606,9 @@ impl Config {
         }
         if other.thinking.is_some() {
             self.thinking = other.thinking;
+        }
+        if other.max_tokens.is_some() {
+            self.max_tokens = other.max_tokens;
         }
         if other.max_turns.is_some() {
             self.max_turns = other.max_turns;
@@ -714,6 +728,7 @@ mod tests {
         let config = Config::default();
         assert!(config.model.is_none());
         assert!(config.thinking.is_none());
+        assert!(config.max_tokens.is_none());
         assert!(config.max_turns.is_none());
         assert!(config.tools.is_none());
         assert_eq!(config.ui.read_max_lines, 500);
@@ -735,6 +750,7 @@ mod tests {
             r#"
 model = "sonnet"
 thinking = "high"
+max_tokens = 2048
 max_turns = 50
 tools = ["read", "write", "bash"]
 
@@ -758,6 +774,7 @@ search_provider = "exa"
         let config = Config::load(&config_path).unwrap();
         assert_eq!(config.model.as_deref(), Some("sonnet"));
         assert_eq!(config.thinking, Some(ThinkingLevel::High));
+        assert_eq!(config.max_tokens, Some(2048));
         assert_eq!(config.max_turns, Some(50));
         assert_eq!(config.tools.as_ref().unwrap().len(), 3);
         assert_eq!(config.guardrails.enabled, Some(true));
@@ -866,18 +883,21 @@ role = "assistant"
     fn config_merge_project_overrides_user() {
         let mut user = Config {
             model: Some("haiku".into()),
+            max_tokens: Some(1024),
             max_turns: Some(20),
             ..Default::default()
         };
 
         let project = Config {
             model: Some("sonnet".into()),
+            max_tokens: None,
             max_turns: None, // not set → user value preserved
             ..Default::default()
         };
 
         user.merge(project);
         assert_eq!(user.model.as_deref(), Some("sonnet"));
+        assert_eq!(user.max_tokens, Some(1024));
         assert_eq!(user.max_turns, Some(20));
     }
 
@@ -1045,6 +1065,7 @@ mask_window = 5
         let mut config = Config {
             model: Some("haiku".into()),
             thinking: Some(ThinkingLevel::Low),
+            max_tokens: Some(2048),
             ..Default::default()
         };
 
@@ -1056,8 +1077,13 @@ mask_window = 5
         let env_thinking = "high";
         config.thinking = parse_thinking_level(env_thinking);
 
+        // Simulate IMP_MAX_TOKENS override
+        let env_max_tokens = "1024";
+        config.max_tokens = env_max_tokens.parse::<u32>().ok();
+
         assert_eq!(config.model.as_deref(), Some("opus"));
         assert_eq!(config.thinking, Some(ThinkingLevel::High));
+        assert_eq!(config.max_tokens, Some(1024));
     }
 
     #[test]
@@ -1066,6 +1092,7 @@ mask_window = 5
         let config = Config::resolve(dir.path(), None).unwrap();
         assert!(config.model.is_none());
         assert!(config.thinking.is_none());
+        assert!(config.max_tokens.is_none());
         assert!(config.max_turns.is_none());
     }
 
@@ -1137,6 +1164,7 @@ model = "sonnet"
         assert_eq!(config.model.as_deref(), Some("sonnet"));
         // Unspecified fields use defaults
         assert!(config.thinking.is_none());
+        assert!(config.max_tokens.is_none());
         assert!(config.max_turns.is_none());
         assert!((config.context.observation_mask_threshold - 0.6).abs() < f64::EPSILON);
     }
@@ -1259,6 +1287,14 @@ model = "sonnet"
         // Spot-check content is mode-specific
         let worker = AgentMode::Worker.instructions().unwrap();
         assert!(worker.contains("worker"));
+        assert!(worker.contains("implement the assigned unit as specified"));
+        assert!(worker.contains("final verification and closure belong to the orchestrator workflow"));
+
+        let orchestrator = AgentMode::Orchestrator.instructions().unwrap();
+        assert!(orchestrator.contains("orchestrator agent"));
+        assert!(orchestrator.contains("primary execution substrate"));
+        assert!(orchestrator.contains("final verification, retry, and closure workflow"));
+
         let reviewer = AgentMode::Reviewer.instructions().unwrap();
         assert!(reviewer.contains("reviewer") || reviewer.contains("read"));
     }

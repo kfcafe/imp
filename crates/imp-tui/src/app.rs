@@ -2501,6 +2501,8 @@ impl App {
         let mut config = self.config.clone();
         config.thinking = Some(self.thinking_level);
 
+        let requested_max_tokens = self.config.max_tokens;
+
         let lua_cwd = self.cwd.clone();
         let user_config_dir = imp_core::config::Config::user_config_dir();
         let (mut agent, handle) = AgentBuilder::new(config, self.cwd.clone(), model, api_key)
@@ -2518,6 +2520,9 @@ impl App {
         // Apply max_turns override from CLI
         if let Some(max_turns) = self.max_turns_override {
             agent.max_turns = max_turns;
+        }
+        if let Some(max_tokens) = requested_max_tokens {
+            agent.max_tokens = Some(max_tokens);
         }
 
         let mut messages: Vec<Message> = self.session.get_active_messages();
@@ -4386,6 +4391,7 @@ impl App {
         let model_id = model.meta.id.clone();
         let model_meta = model.meta.clone();
         let model_provider = Arc::clone(&model.provider);
+        let requested_max_tokens = self.config.max_tokens;
 
         let mut config = self.config.clone();
         config.thinking = Some(self.thinking_level);
@@ -4450,7 +4456,7 @@ impl App {
                         };
                         let options = RequestOptions {
                             thinking_level,
-                            max_tokens: Some(2048),
+                            max_tokens: requested_max_tokens.or(Some(2048)),
                             temperature: Some(0.2),
                             system_prompt,
                             tools: Vec::new(),
