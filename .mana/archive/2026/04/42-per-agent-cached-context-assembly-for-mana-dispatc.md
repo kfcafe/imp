@@ -2,16 +2,26 @@
 id: '42'
 title: Per-agent cached context assembly for mana dispatch
 slug: per-agent-cached-context-assembly-for-mana-dispatc
-status: open
+status: closed
 priority: 0
 created_at: '2026-04-01T06:36:07.304781Z'
-updated_at: '2026-04-01T06:36:07.304781Z'
+updated_at: '2026-04-06T21:33:24.161794Z'
 labels:
 - epic
 - context
 - cache
 - mana
+closed_at: '2026-04-06T21:33:24.161794Z'
+close_reason: 'Already complete in repo: context_prefill module exists, SessionOptions/ImpSession inject prefill, headless mana dispatch parses files and assembles context, and the unit verify tests pass. Closing stale-open unit after confirmation.'
 verify: 'cd /Users/asher/tower && cargo test -p imp-core context_prefill 2>&1 | tail -5 | grep -q "test result: ok" && cargo test -p imp-llm cache 2>&1 | tail -5 | grep -q "test result: ok"'
+is_archived: true
+history:
+- attempt: 1
+  started_at: '2026-04-06T21:33:23.774286Z'
+  finished_at: '2026-04-06T21:33:24.147735Z'
+  duration_secs: 0.373
+  result: pass
+  exit_code: 0
 kind: epic
 ---
 
