@@ -782,6 +782,7 @@ impl App {
         match req {
             UiRequest::Select {
                 title,
+                context,
                 options,
                 reply,
             } => {
@@ -796,7 +797,7 @@ impl App {
                 self.begin_ask(
                     AskState::with_placeholder(
                         title,
-                        String::new(),
+                        context,
                         ask_options,
                         false,
                         "type to filter or answer freely…".into(),
@@ -806,13 +807,14 @@ impl App {
             }
             UiRequest::Input {
                 title,
+                context,
                 placeholder,
                 reply,
             } => {
                 self.begin_ask(
                     AskState::with_placeholder(
                         title,
-                        String::new(),
+                        context,
                         vec![],
                         false,
                         placeholder,
@@ -1138,7 +1140,7 @@ impl App {
         // 3 lines for the chat area and 1 for the top bar.
         let editor_inner_width = area.width.saturating_sub(2).max(1);
         let desired_editor_height = if let Some(state) = self.ask_state.as_ref() {
-            state.prompt_height()
+            state.prompt_height(editor_inner_width)
         } else {
             self.editor.visual_line_count(editor_inner_width) as u16 + 2
         };
@@ -3450,12 +3452,30 @@ impl App {
         let result = state.confirm();
         self.restore_editor_after_ask();
 
-        // Show Q&A in chat
-        self.push_system_msg(&format!("❯ {}", state.question));
+        // Show Q&A in chat as user-style messages so they stay visually distinct
+        // (System messages render muted/grey which makes them look faded.)
+        self.messages.push(DisplayMessage {
+            role: MessageRole::User,
+            content: state.question.clone(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: false,
+            timestamp: imp_llm::now(),
+        });
 
         match (&result, reply) {
             (AskResult::Text(text), Some(AskReply::Input(tx))) => {
-                self.push_system_msg(&format!("  {text}"));
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::User,
+                    content: text.clone(),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+                self.invalidate_chat_render_cache();
                 let _ = tx.send(Some(text.clone()));
                 self.advance_secrets_flow(Some(text.clone()));
             }
@@ -3464,7 +3484,16 @@ impl App {
                     .iter()
                     .filter_map(|&i| state.options.get(i).map(|o| o.label.clone()))
                     .collect();
-                self.push_system_msg(&format!("  {}", labels.join(", ")));
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::User,
+                    content: labels.join(", "),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+                self.invalidate_chat_render_cache();
                 // Send first selected index for single select
                 let _ = tx.send(indices.first().copied());
             }
@@ -3476,12 +3505,29 @@ impl App {
                     .iter()
                     .position(|o| o.label.eq_ignore_ascii_case(text));
                 if let Some(idx) = match_idx {
-                    self.push_system_msg(&format!("  {}", state.options[idx].label));
+                    self.messages.push(DisplayMessage {
+                        role: MessageRole::User,
+                        content: state.options[idx].label.clone(),
+                        thinking: None,
+                        tool_calls: Vec::new(),
+                        assistant_blocks: Vec::new(),
+                        is_streaming: false,
+                        timestamp: imp_llm::now(),
+                    });
+                    self.invalidate_chat_render_cache();
                     let _ = tx.send(Some(idx));
                 } else {
                     // No match — send None. The ask tool will get "User cancelled".
-                    // The custom text is shown in chat so the user knows what happened.
-                    self.push_system_msg(&format!("  {text}"));
+                    self.messages.push(DisplayMessage {
+                        role: MessageRole::User,
+                        content: text.clone(),
+                        thinking: None,
+                        tool_calls: Vec::new(),
+                        assistant_blocks: Vec::new(),
+                        is_streaming: false,
+                        timestamp: imp_llm::now(),
+                    });
+                    self.invalidate_chat_render_cache();
                     let _ = tx.send(None);
                 }
             }

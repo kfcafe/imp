@@ -88,12 +88,7 @@ impl Tool for AskTool {
         let _multi_select = params["multiSelect"].as_bool().unwrap_or(false);
         let placeholder = params["placeholder"].as_str().unwrap_or("");
 
-        // Build the title: context + question
-        let title = if context.is_empty() {
-            question.to_string()
-        } else {
-            format!("{context}\n\n{question}")
-        };
+        let title = question.to_string();
 
         // If options are provided, use select; otherwise use text input
         let raw_options: Option<Vec<OptionItem>> = params
@@ -120,7 +115,7 @@ impl Tool for AskTool {
                     });
                 }
 
-                match ctx.ui.select(&title, &options).await {
+                match ctx.ui.select_with_context(&title, context, &options).await {
                     Some(idx) => {
                         // If "Other..." was selected and allow_other is on
                         if allow_other && idx == options.len() - 1 {
@@ -137,7 +132,7 @@ impl Tool for AskTool {
             }
             _ => {
                 // Free text input
-                match ctx.ui.input(&title, placeholder).await {
+                match ctx.ui.input_with_context(&title, context, placeholder).await {
                     Some(text) => Ok(ToolOutput::text(text)),
                     None => Ok(ToolOutput::text("User skipped")),
                 }
@@ -299,10 +294,10 @@ mod tests {
         async fn confirm(&self, _: &str, _: &str) -> Option<bool> {
             None
         }
-        async fn select(&self, _: &str, _: &[SelectOption]) -> Option<usize> {
+        async fn select_with_context(&self, _: &str, _: &str, _: &[SelectOption]) -> Option<usize> {
             None
         }
-        async fn input(&self, _: &str, _: &str) -> Option<String> {
+        async fn input_with_context(&self, _: &str, _: &str, _: &str) -> Option<String> {
             None
         }
         async fn set_status(&self, _: &str, _: Option<&str>) {}

@@ -1833,12 +1833,13 @@ impl UserInterface for RpcUi {
         .as_bool()
     }
 
-    async fn select(&self, title: &str, options: &[SelectOption]) -> Option<usize> {
+    async fn select_with_context(&self, title: &str, context: &str, options: &[SelectOption]) -> Option<usize> {
         let result = self
             .request(
                 "select",
                 json!({
                     "title": title,
+                    "context": context,
                     "options": serde_json::to_value(options).unwrap_or_else(|_| json!([])),
                 }),
             )
@@ -1847,11 +1848,12 @@ impl UserInterface for RpcUi {
         result.as_u64().map(|index| index as usize)
     }
 
-    async fn input(&self, title: &str, placeholder: &str) -> Option<String> {
+    async fn input_with_context(&self, title: &str, context: &str, placeholder: &str) -> Option<String> {
         self.request(
             "input",
             json!({
                 "title": title,
+                "context": context,
                 "placeholder": placeholder,
             }),
         )

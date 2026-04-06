@@ -18,11 +18,13 @@ pub enum UiRequest {
     },
     Select {
         title: String,
+        context: String,
         options: Vec<SelectOption>,
         reply: tokio::sync::oneshot::Sender<Option<usize>>,
     },
     Input {
         title: String,
+        context: String,
         placeholder: String,
         reply: tokio::sync::oneshot::Sender<Option<String>>,
     },
@@ -84,12 +86,13 @@ impl UserInterface for TuiInterface {
         reply_rx.await.ok().flatten()
     }
 
-    async fn select(&self, title: &str, options: &[SelectOption]) -> Option<usize> {
+    async fn select_with_context(&self, title: &str, context: &str, options: &[SelectOption]) -> Option<usize> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
             .send(UiRequest::Select {
                 title: title.to_string(),
+                context: context.to_string(),
                 options: options.to_vec(),
                 reply: reply_tx,
             })
@@ -97,12 +100,13 @@ impl UserInterface for TuiInterface {
         reply_rx.await.ok().flatten()
     }
 
-    async fn input(&self, title: &str, placeholder: &str) -> Option<String> {
+    async fn input_with_context(&self, title: &str, context: &str, placeholder: &str) -> Option<String> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
             .send(UiRequest::Input {
                 title: title.to_string(),
+                context: context.to_string(),
                 placeholder: placeholder.to_string(),
                 reply: reply_tx,
             })

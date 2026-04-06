@@ -82,23 +82,26 @@ impl AskState {
         }
     }
 
-    pub fn height(&self) -> u16 {
-        let mut h: u16 = line_count(&self.question); // question line(s)
+    pub fn height(&self, width: u16) -> u16 {
+        let w = width.max(1);
+        let mut h: u16 = wrapped_lines_for_width(&self.question, w).len() as u16;
         if !self.context.is_empty() {
-            h += line_count(&self.context); // context line(s)
+            h += wrapped_lines_for_width(&self.context, w).len() as u16;
         }
         if !self.options.is_empty() {
             h += self.options.len() as u16; // one per option
             h += 1; // blank line between options and input
         }
-        h += 1; // input line
+        // Input line(s) — account for "❯ " prefix
+        let input_w = w.saturating_sub(2).max(1);
+        h += wrapped_lines_for_width(&self.input, input_w).len() as u16;
         h += 1; // hint line
         h
     }
 
     /// Height needed to render this prompt, including its border.
-    pub fn prompt_height(&self) -> u16 {
-        self.height().saturating_add(2)
+    pub fn prompt_height(&self, width: u16) -> u16 {
+        self.height(width).saturating_add(2)
     }
 
     /// Cursor position inside the ask prompt area.
@@ -107,9 +110,9 @@ impl AskState {
         let inner_y = area.y.saturating_add(1);
         let inner_width = area.width.saturating_sub(2).max(1);
 
-        let mut input_row = inner_y.saturating_add(line_count(&self.question));
+        let mut input_row = inner_y.saturating_add(wrapped_lines_for_width(&self.question, inner_width).len() as u16);
         if !self.context.is_empty() {
-            input_row = input_row.saturating_add(line_count(&self.context));
+            input_row = input_row.saturating_add(wrapped_lines_for_width(&self.context, inner_width).len() as u16);
         }
         if !self.options.is_empty() {
             input_row = input_row
@@ -285,29 +288,29 @@ impl Widget for AskBar<'_> {
         let mut y = inner.y;
         let w = inner.width as usize;
 
-        // Question
-        for line in s.question.lines() {
+        // Question (word-wrapped)
+        let question_wrapped = wrapped_lines_for_width(&s.question, inner.width);
+        for ql in &question_wrapped {
             if y >= inner.y + inner.height {
                 return;
             }
-            let q = truncate(line, w);
             buf.set_line(
                 inner.x,
                 y,
-                &Line::from(Span::styled(q, question_style)),
+                &Line::from(Span::styled(ql.clone(), question_style)),
                 inner.width,
             );
             y += 1;
         }
 
-        // Context (if any)
+        // Context (if any, word-wrapped)
         if !s.context.is_empty() {
-            for line in s.context.lines() {
+            let context_wrapped = wrapped_lines_for_width(&s.context, inner.width);
+            for cl in &context_wrapped {
                 if y >= inner.y + inner.height {
                     return;
                 }
-                let c = truncate(line, w);
-                buf.set_line(inner.x, y, &Line::from(Span::styled(c, dim)), inner.width);
+                buf.set_line(inner.x, y, &Line::from(Span::styled(cl.clone(), dim)), inner.width);
                 y += 1;
             }
         }
@@ -455,21 +458,7 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-fn line_count(s: &str) -> u16 {
-    s.lines().count().max(1) as u16
-}
 
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        let mut end = max;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        &s[..end]
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -628,6 +617,7 @@ mod tests {
         ];
         let state = AskState::new("Q".into(), "ctx".into(), opts, false);
         // question(1) + context(1) + 2 options(2) + blank(1) + input(1) + hints(1) = 7
-        assert_eq!(state.height(), 7);
+        // Use a wide width so nothing wraps
+        assert_eq!(state.height(100), 7);
     }
 }
