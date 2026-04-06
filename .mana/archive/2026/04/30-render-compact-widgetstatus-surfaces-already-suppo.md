@@ -2,16 +2,52 @@
 id: '30'
 title: Render compact widget/status surfaces already supported by imp UI abstractions
 slug: render-compact-widgetstatus-surfaces-already-suppo
-status: open
+status: closed
 priority: 1
 created_at: '2026-03-26T03:27:21.781799Z'
-updated_at: '2026-03-26T03:27:21.781799Z'
+updated_at: '2026-04-06T21:30:20.394744Z'
 labels:
 - feature
 - ux
 - imp-tui
+closed_at: '2026-04-06T21:30:20.394744Z'
+close_reason: 'Already complete in repo: widget state storage, SetWidget handling, render_widget_tray, and verification all pass. Closing stale-open unit after confirming the TUI widget surface exists.'
 verify: cd /Users/asher/tower/imp && rg '_ => \{\} // SetWidget, Custom — not yet handled' crates/imp-tui/src/app.rs && exit 1; rg 'UiRequest::SetWidget' crates/imp-tui/src/app.rs && rg 'render_widget' crates/imp-tui/src/app.rs crates/imp-tui/src/views && cargo check -p imp-tui
 fail_first: true
+is_archived: true
+history:
+- attempt: 1
+  started_at: '2026-04-06T21:30:20.110645Z'
+  finished_at: '2026-04-06T21:30:20.381060Z'
+  duration_secs: 0.27
+  result: pass
+  exit_code: 0
+outputs:
+  text: |-
+    UiRequest::SetWidget { key, content } => {
+            app.handle_ui_request(crate::tui_interface::UiRequest::SetWidget {
+            app.handle_ui_request(crate::tui_interface::UiRequest::SetWidget {
+    crates/imp-tui/src/app.rs:    fn render_widget_tray(&self, frame: &mut Frame, area: Rect) {
+    crates/imp-tui/src/app.rs:        frame.render_widget(widget, area);
+    crates/imp-tui/src/app.rs:        frame.render_widget(Clear, area);
+    crates/imp-tui/src/app.rs:        frame.render_widget(top_bar, top_bar_area);
+    crates/imp-tui/src/app.rs:            self.render_widget_tray(frame, widget_area);
+    crates/imp-tui/src/app.rs:        frame.render_widget(chat, chat_area);
+    crates/imp-tui/src/app.rs:                    frame.render_widget(view, sidebar_area);
+    crates/imp-tui/src/app.rs:                    frame.render_widget(view, sidebar_area);
+    crates/imp-tui/src/app.rs:            frame.render_widget(AskBar::new(state, &self.theme), editor_area);
+    crates/imp-tui/src/app.rs:            frame.render_widget(editor, editor_area);
+    crates/imp-tui/src/app.rs:        frame.render_widget(
+    crates/imp-tui/src/app.rs:                frame.render_widget(view, overlay_area);
+    crates/imp-tui/src/app.rs:                frame.render_widget(view, palette_area);
+    crates/imp-tui/src/app.rs:                frame.render_widget(view, finder_area);
+    crates/imp-tui/src/app.rs:                frame.render_widget(view, overlay_area);
+    crates/imp-tui/src/app.rs:                frame.render_widget(view, overlay_area);
+    crates/imp-tui/src/app.rs:                frame.render_widget(view, tree_area);
+    crates/imp-tui/src/app.rs:                frame.render_widget(view, overlay_area);
+    crates/imp-tui/src/app.rs:                frame.render_widget(view, overlay_area);
+    crates/imp-tui/src/app.rs:                frame.render_widget(view, overlay_area);
+    crates/imp-tui/src/app.rs:                frame.render_widget(view, overlay_area);
 kind: epic
 ---
 
