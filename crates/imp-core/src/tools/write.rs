@@ -71,6 +71,13 @@ impl Tool for WriteTool {
             tokio::fs::create_dir_all(parent).await?;
         }
 
+        if existed {
+            ctx.checkpoint_state.snapshot_paths(
+                std::slice::from_ref(&path),
+                Some(format!("write {}", path.display())),
+            )?;
+        }
+
         // Detect existing line endings to preserve them, default to LF for new files
         let normalized = if existed {
             if let Ok(existing) = tokio::fs::read(&path).await {
@@ -161,6 +168,7 @@ mod tests {
             update_tx: tx,
             ui: Arc::new(crate::ui::NullInterface),
             file_cache: Arc::new(crate::tools::FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
@@ -209,6 +217,32 @@ mod tests {
         assert!(!result.is_error);
         let written = std::fs::read_to_string(dir.path().join("a/b/c/deep.txt")).unwrap();
         assert_eq!(written, "deep");
+    }
+
+    #[tokio::test]
+    async fn write_overwrite_creates_checkpoint_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("existing.txt");
+        std::fs::write(&file, "original").unwrap();
+
+        let tool = WriteTool;
+        let ctx = test_ctx(dir.path());
+        let checkpoint_state = ctx.checkpoint_state.clone();
+
+        let result = tool
+            .execute(
+                "c-overwrite",
+                serde_json::json!({"path": "existing.txt", "content": "updated"}),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(checkpoint_state.original(&file).as_deref(), Some("original"));
+        let checkpoints = checkpoint_state.checkpoints();
+        assert_eq!(checkpoints.len(), 1);
+        assert!(checkpoints[0].files.contains(&file));
     }
 
     #[tokio::test]

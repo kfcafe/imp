@@ -200,10 +200,30 @@ async fn execute_read(params: serde_json::Value) -> Result<ToolOutput> {
     };
 
     let title = page.title.as_deref().unwrap_or(url);
-    let mut output = format!(
-        "# {title}\nURL: {}\nLength: {} chars\n\n---\n\n",
-        page.url, page.content_length
-    );
+    let mut output = format!("# {title}\nURL: {}\n", page.url);
+
+    if page.was_redirected {
+        output.push_str(&format!("Requested: {}\n", page.requested_url));
+    }
+
+    output.push_str(&format!("Status: {}\n", page.status_code));
+    output.push_str(&format!(
+        "Content-Type: {}\n",
+        page.content_type.as_deref().unwrap_or("unknown")
+    ));
+    output.push_str(&format!(
+        "Response size: {} bytes → {} chars extracted\n",
+        page.raw_body_bytes, page.content_length
+    ));
+
+    if !page.diagnostics.is_empty() {
+        output.push_str("\n⚠ Diagnostics:\n");
+        for warning in &page.diagnostics {
+            output.push_str(&format!("- {warning}\n"));
+        }
+    }
+
+    output.push_str("\n---\n\n");
 
     // Wrap content in delimiters to reduce prompt injection risk
     output.push_str("<web_content>\n");
@@ -274,6 +294,7 @@ mod tests {
             update_tx: tx,
             ui: std::sync::Arc::new(crate::ui::NullInterface),
             file_cache: std::sync::Arc::new(crate::tools::FileCache::new()),
+            checkpoint_state: std::sync::Arc::new(crate::tools::CheckpointState::new()),
             file_tracker: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::tools::FileTracker::new(),
             )),

@@ -90,6 +90,10 @@ impl Tool for EditTool {
         };
 
         let raw_content = tokio::fs::read_to_string(&path).await?;
+        ctx.checkpoint_state.snapshot_paths(
+            std::slice::from_ref(&path),
+            Some(format!("edit {}", path.display())),
+        )?;
 
         // Normalize to LF for internal processing
         let content = raw_content.replace("\r\n", "\n");
@@ -183,6 +187,7 @@ mod tests {
             update_tx: tx,
             ui: Arc::new(crate::ui::NullInterface),
             file_cache: Arc::new(crate::tools::FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
@@ -213,6 +218,34 @@ mod tests {
         let written = std::fs::read_to_string(&file).unwrap();
         assert!(written.contains("world"));
         assert!(!written.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn edit_creates_checkpoint_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("checkpoint.txt");
+        std::fs::write(&file, "alpha\n").unwrap();
+
+        let tool = EditTool;
+        let ctx = test_ctx(dir.path());
+        let checkpoint_state = ctx.checkpoint_state.clone();
+
+        let result = tool
+            .execute(
+                "c-checkpoint",
+                json!({
+                    "path": "checkpoint.txt",
+                    "oldText": "alpha",
+                    "newText": "beta"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(checkpoint_state.original(&file).as_deref(), Some("alpha\n"));
+        assert_eq!(checkpoint_state.checkpoints().len(), 1);
     }
 
     #[tokio::test]

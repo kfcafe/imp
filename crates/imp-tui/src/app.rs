@@ -2637,6 +2637,28 @@ impl App {
         }
     }
 
+    fn restore_checkpoint_command(&mut self, needle: &str) {
+        match self.session.find_checkpoint_record(needle) {
+            None => self.push_system_msg(&format!("Checkpoint not found: {needle}")),
+            Some(record) => {
+                let mut lines = vec![format!(
+                    "Checkpoint `{}` is recorded for this session, but TUI restore is not wired yet.",
+                    record.checkpoint_id
+                )];
+                if let Some(label) = record.label {
+                    lines.push(format!("Label: {label}"));
+                }
+                if !record.files.is_empty() {
+                    lines.push("Files:".into());
+                    for path in record.files {
+                        lines.push(format!("- {path}"));
+                    }
+                }
+                self.push_system_msg(&lines.join("\n"));
+            }
+        }
+    }
+
     fn execute_command(&mut self, cmd: &str) {
         match cmd.split_whitespace().next().unwrap_or("") {
             "quit" | "q" => {
@@ -2780,6 +2802,40 @@ impl App {
             "memory" | "mem" => {
                 self.handle_memory_command(cmd);
             }
+            "checkpoints" => {
+                let checkpoints = self.session.checkpoint_records();
+                if checkpoints.is_empty() {
+                    self.push_system_msg("No checkpoints recorded in this session.");
+                } else {
+                    let mut lines = vec![format!("{} checkpoint(s):", checkpoints.len())];
+                    for checkpoint in checkpoints {
+                        let label = checkpoint
+                            .label
+                            .as_deref()
+                            .map(|label| format!(" — {label}"))
+                            .unwrap_or_default();
+                        lines.push(format!(
+                            "- {}{} ({} file{})",
+                            checkpoint.checkpoint_id,
+                            label,
+                            checkpoint.files.len(),
+                            if checkpoint.files.len() == 1 { "" } else { "s" }
+                        ));
+                    }
+                    self.push_system_msg(&lines.join("\n"));
+                }
+            }
+            "restore-checkpoint" => {
+                let needle = cmd
+                    .strip_prefix("restore-checkpoint")
+                    .unwrap_or("")
+                    .trim();
+                if needle.is_empty() {
+                    self.push_system_msg("Usage: /restore-checkpoint <checkpoint id or label>");
+                } else {
+                    self.restore_checkpoint_command(needle);
+                }
+            }
             "help" => {
                 self.push_system_msg(concat!(
                     "Commands:\n",
@@ -2793,6 +2849,8 @@ impl App {
                     "  /export [f] — export to markdown\n",
                     "  /copy       — copy selection or last response\n",
                     "  /memory     — view/edit agent memory\n",
+                    "  /checkpoints — list recorded file checkpoints\n",
+                    "  /restore-checkpoint <id> — inspect restore target for a checkpoint\n",
                     "  /reload     — reload config\n",
                     "  /settings   — edit settings\n",
                     "  /personality — customize imp personality\n",
@@ -4969,6 +5027,13 @@ mod session_lifecycle {
         App::new(config, session, registry, PathBuf::from("/tmp/test"))
     }
 
+    /// Helper: build an App with defaults and a provided session.
+    fn make_app_with_session(session: SessionManager, cwd: PathBuf) -> App {
+        let config = Config::default();
+        let registry = ModelRegistry::with_builtins();
+        App::new(config, session, registry, cwd)
+    }
+
     /// Helper: build an App backed by a persistent session in `dir`.
     fn make_persistent_app(tmp: &TempDir) -> App {
         let cwd = tmp.path().join("project");
@@ -5251,6 +5316,62 @@ mod session_lifecycle {
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].role, MessageRole::Error);
         assert!(app.messages[0].content.contains("nonexistent"));
+    }
+
+    #[test]
+    fn command_palette_includes_checkpoint_commands() {
+        let commands = builtin_commands();
+        assert!(commands.iter().any(|cmd| cmd.name == "checkpoints"));
+        assert!(commands.iter().any(|cmd| cmd.name == "restore-checkpoint"));
+    }
+
+    #[test]
+    fn execute_checkpoints_command_lists_recorded_checkpoints() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let session_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let mut session = SessionManager::new(&cwd, &session_dir).unwrap();
+        session
+            .append_checkpoint_record(imp_core::session::SessionCheckpointRecord {
+                version: imp_core::session::CHECKPOINT_RECORD_VERSION,
+                checkpoint_id: "cp-1".into(),
+                created_at: 123,
+                label: Some("before edits".into()),
+                files: vec!["src/main.rs".into()],
+            })
+            .unwrap();
+
+        let mut app = make_app_with_session(session, cwd.clone());
+        app.execute_command("checkpoints");
+        let last = app.messages.last().expect("system message");
+        assert!(last.content.contains("cp-1"));
+        assert!(last.content.contains("before edits"));
+    }
+
+    #[test]
+    fn execute_restore_checkpoint_command_reports_recorded_files() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let session_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let mut session = SessionManager::new(&cwd, &session_dir).unwrap();
+        session
+            .append_checkpoint_record(imp_core::session::SessionCheckpointRecord {
+                version: imp_core::session::CHECKPOINT_RECORD_VERSION,
+                checkpoint_id: "cp-restore".into(),
+                created_at: 123,
+                label: Some("restore me".into()),
+                files: vec!["src/main.rs".into(), "src/lib.rs".into()],
+            })
+            .unwrap();
+
+        let mut app = make_app_with_session(session, cwd.clone());
+        app.execute_command("restore-checkpoint restore me");
+        let last = app.messages.last().expect("system message");
+        assert!(last.content.contains("cp-restore"));
+        assert!(last.content.contains("src/main.rs"));
+        assert!(last.content.contains("not wired yet"));
     }
 
     #[tokio::test(flavor = "current_thread")]

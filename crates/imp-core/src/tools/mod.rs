@@ -126,6 +126,8 @@ pub struct ToolContext {
     pub update_tx: tokio::sync::mpsc::Sender<ToolUpdate>,
     pub ui: Arc<dyn UserInterface>,
     pub file_cache: Arc<FileCache>,
+    /// Shared checkpoint/file-history state for destructive tool operations.
+    pub checkpoint_state: Arc<CheckpointState>,
     /// Tracks file reads for staleness detection and unread-edit warnings.
     pub file_tracker: Arc<std::sync::Mutex<FileTracker>>,
     /// Active agent mode — determines which actions are permitted.
@@ -201,6 +203,112 @@ impl FileCache {
 /// Enables rollback to pre-session state if the agent makes bad edits.
 pub struct FileHistory {
     originals: std::sync::Mutex<HashMap<PathBuf, String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointRecord {
+    pub id: String,
+    pub label: Option<String>,
+    pub created_at: u64,
+    pub files: Vec<PathBuf>,
+}
+
+/// Shared session-scoped checkpoint state built on top of FileHistory.
+///
+/// This keeps the existing rollback primitive as the source of truth for file
+/// contents while adding lightweight checkpoint metadata that later layers can
+/// persist or surface in the UI.
+pub struct CheckpointState {
+    history: FileHistory,
+    records: std::sync::Mutex<Vec<CheckpointRecord>>,
+}
+
+impl Default for CheckpointState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CheckpointState {
+    pub fn new() -> Self {
+        Self {
+            history: FileHistory::new(),
+            records: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Snapshot a set of existing files and record a checkpoint if any were captured.
+    pub fn snapshot_paths(
+        &self,
+        paths: &[PathBuf],
+        label: Option<String>,
+    ) -> std::io::Result<Option<CheckpointRecord>> {
+        let mut unique = Vec::new();
+        for path in paths {
+            if !unique.iter().any(|existing: &PathBuf| existing == path) {
+                unique.push(path.clone());
+            }
+        }
+
+        let mut captured = Vec::new();
+        for path in unique {
+            self.history.snapshot_before_edit(&path)?;
+            if self.history.original(&path).is_some() {
+                captured.push(path);
+            }
+        }
+
+        if captured.is_empty() {
+            return Ok(None);
+        }
+
+        let record = CheckpointRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            label,
+            created_at: imp_llm::now(),
+            files: captured,
+        };
+        self.records.lock().unwrap().push(record.clone());
+        Ok(Some(record))
+    }
+
+    pub fn checkpoints(&self) -> Vec<CheckpointRecord> {
+        self.records.lock().unwrap().clone()
+    }
+
+    pub fn checkpoint(&self, id: &str) -> Option<CheckpointRecord> {
+        self.records
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|record| record.id == id)
+            .cloned()
+    }
+
+    pub fn restore_checkpoint(&self, id: &str) -> std::io::Result<Vec<PathBuf>> {
+        let Some(record) = self.checkpoint(id) else {
+            return Ok(Vec::new());
+        };
+
+        let mut restored = Vec::new();
+        for path in &record.files {
+            self.history.rollback(path)?;
+            restored.push(path.clone());
+        }
+        Ok(restored)
+    }
+
+    pub fn rollback(&self, path: &Path) -> std::io::Result<()> {
+        self.history.rollback(path)
+    }
+
+    pub fn tracked_files(&self) -> Vec<PathBuf> {
+        self.history.tracked_files()
+    }
+
+    pub fn original(&self, path: &Path) -> Option<String> {
+        self.history.original(path)
+    }
 }
 
 impl Default for FileHistory {

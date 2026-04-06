@@ -94,7 +94,7 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
 
     // Plain text — return as-is
     if content_type.contains("text/plain") {
-        return Ok(PageContent {
+        let mut page = PageContent {
             title: None,
             content_length: html.len(),
             text: html,
@@ -104,7 +104,10 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
             content_type: meta.content_type,
             was_redirected: meta.was_redirected,
             raw_body_bytes: meta.raw_body_bytes,
-        });
+            diagnostics: Vec::new(),
+        };
+        page.diagnostics = diagnose(&page, "");
+        return Ok(page);
     }
 
     let mut page = extract_readable(&html, &final_url)?;
@@ -113,6 +116,7 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
     page.content_type = meta.content_type;
     page.was_redirected = meta.was_redirected;
     page.raw_body_bytes = meta.raw_body_bytes;
+    page.diagnostics = diagnose(&page, &html);
     Ok(page)
 }
 
@@ -160,7 +164,63 @@ fn extract_readable(html: &str, url: &str) -> Result<PageContent, ReadError> {
         content_type: None,
         was_redirected: false,
         raw_body_bytes: 0,
+        diagnostics: Vec::new(),
     })
+}
+
+pub fn diagnose(page: &PageContent, raw_html: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let text_lower = page.text.to_lowercase();
+    let html_lower = raw_html.to_lowercase();
+
+    let short_text = page.content_length < 500;
+    let has_loading_indicator = ["loading...", "loading documentation"]
+        .iter()
+        .any(|needle| text_lower.contains(needle));
+    let has_noscript = html_lower.contains("<noscript");
+    let nav_link_count = html_lower.matches("<nav").count()
+        + html_lower.matches("<a ").count()
+        + html_lower.matches("<a>").count();
+    let has_nav_shell_pattern = short_text && nav_link_count >= 8;
+    if short_text && (has_loading_indicator || has_noscript || has_nav_shell_pattern) {
+        warnings.push(
+            "Page appears to be a client-rendered shell. Content may require JavaScript."
+                .to_string(),
+        );
+    }
+
+    let very_short_text = page.content_length < 300;
+    let has_soft_404_indicator = [
+        "page not found",
+        "can't find that page",
+        "404",
+        "doesn't exist",
+        "has been moved",
+    ]
+    .iter()
+    .any(|needle| text_lower.contains(needle));
+    if page.status_code == 200 && very_short_text && has_soft_404_indicator {
+        warnings.push("Page appears to be a soft 404 (HTTP 200 but error page content).".to_string());
+    }
+
+    if page.raw_body_bytes > 20 * 1024 && page.content_length < 2 * 1024 {
+        warnings.push(format!(
+            "Large page ({} bytes) but only {} chars extracted. Content may be incomplete.",
+            page.raw_body_bytes, page.content_length
+        ));
+    }
+
+    if page.raw_body_bytes > 100 * 1024
+        && (page.content_length as f64) < (page.raw_body_bytes as f64 * 0.1)
+    {
+        let pct = ((page.content_length as f64 / page.raw_body_bytes as f64) * 100.0).round();
+        warnings.push(format!(
+            "Significant content may have been lost during extraction ({}% of response retained).",
+            pct as usize
+        ));
+    }
+
+    warnings
 }
 
 /// Clean extracted text: normalize whitespace, remove excessive blank lines.
@@ -265,11 +325,128 @@ mod tests {
             Ok(page) => {
                 assert!(page.text.contains("main content"));
                 assert!(!page.text.contains("Skip this navigation"));
+                assert_eq!(page.url, "https://example.com/test");
+                assert_eq!(page.requested_url, "https://example.com/test");
+                assert_eq!(page.status_code, 200);
+                assert!(!page.was_redirected);
+                assert_eq!(page.raw_body_bytes, 0);
+                assert!(page.content_type.is_none());
+                assert!(page.diagnostics.is_empty());
             }
             Err(ReadError::InsufficientContent) | Err(ReadError::NoContent) => {
                 // Readability may not extract from minimal HTML — that's acceptable
             }
             Err(e) => panic!("Unexpected error: {e}"),
         }
+    }
+
+    #[test]
+    fn response_metadata_can_be_applied_after_extraction() {
+        let html = r#"
+        <html>
+        <head><title>Redirected Article</title></head>
+        <body>
+            <article>
+                <p>This article has enough body text to survive readability extraction and
+                prove that metadata can be preserved when the requested URL differs from
+                the final URL after redirects.</p>
+                <p>Additional text keeps the extractor happy and representative of a real page.</p>
+            </article>
+        </body>
+        </html>"#;
+
+        let mut page = extract_readable(html, "https://example.com/final").unwrap();
+        page.requested_url = "https://example.com/start".to_string();
+        page.status_code = 200;
+        page.content_type = Some("text/html; charset=utf-8".to_string());
+        page.was_redirected = true;
+        page.raw_body_bytes = html.len();
+
+        assert_eq!(page.url, "https://example.com/final");
+        assert_eq!(page.requested_url, "https://example.com/start");
+        assert_eq!(page.status_code, 200);
+        assert_eq!(page.content_type.as_deref(), Some("text/html; charset=utf-8"));
+        assert!(page.was_redirected);
+        assert_eq!(page.raw_body_bytes, html.len());
+    }
+
+    #[test]
+    fn diagnose_spa_shell_from_loading_text() {
+        let page = PageContent {
+            title: Some("Docs".to_string()),
+            text: "Loading documentation...".to_string(),
+            url: "https://example.com/docs".to_string(),
+            content_length: "Loading documentation...".len(),
+            requested_url: "https://example.com/docs".to_string(),
+            status_code: 200,
+            content_type: Some("text/html".to_string()),
+            was_redirected: false,
+            raw_body_bytes: 2_000,
+            diagnostics: Vec::new(),
+        };
+
+        let warnings = diagnose(&page, "<html><body><noscript>Enable JS</noscript></body></html>");
+        assert!(warnings.iter().any(|w| w.contains("client-rendered shell")));
+    }
+
+    #[test]
+    fn diagnose_soft_404_with_http_200() {
+        let text = "Page not found. The page has been moved.";
+        let page = PageContent {
+            title: Some("Missing".to_string()),
+            text: text.to_string(),
+            url: "https://example.com/missing".to_string(),
+            content_length: text.len(),
+            requested_url: "https://example.com/missing".to_string(),
+            status_code: 200,
+            content_type: Some("text/html".to_string()),
+            was_redirected: false,
+            raw_body_bytes: 1_500,
+            diagnostics: Vec::new(),
+        };
+
+        let warnings = diagnose(&page, "<html><body>404</body></html>");
+        assert!(warnings.iter().any(|w| w.contains("soft 404")));
+    }
+
+    #[test]
+    fn diagnose_does_not_flag_normal_page() {
+        let text = "This is a normal documentation page with enough content to explain installation, configuration, and usage in detail. It includes several paragraphs of useful information for readers and should not be treated as a shell or error page. Extra explanation here keeps it comfortably above the short-content heuristics and avoids false positives.";
+        let page = PageContent {
+            title: Some("Guide".to_string()),
+            text: text.to_string(),
+            url: "https://example.com/guide".to_string(),
+            content_length: text.len(),
+            requested_url: "https://example.com/guide".to_string(),
+            status_code: 200,
+            content_type: Some("text/html".to_string()),
+            was_redirected: false,
+            raw_body_bytes: 8_000,
+            diagnostics: Vec::new(),
+        };
+
+        let warnings = diagnose(&page, "<html><body><article>real docs</article></body></html>");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn diagnose_low_extraction_ratio_warning() {
+        let text = "A short extracted summary.";
+        let page = PageContent {
+            title: Some("Big Page".to_string()),
+            text: text.to_string(),
+            url: "https://example.com/big".to_string(),
+            content_length: text.len(),
+            requested_url: "https://example.com/big".to_string(),
+            status_code: 200,
+            content_type: Some("text/html".to_string()),
+            was_redirected: false,
+            raw_body_bytes: 150_000,
+            diagnostics: Vec::new(),
+        };
+
+        let warnings = diagnose(&page, "<html></html>");
+        assert!(warnings.iter().any(|w| w.contains("Large page")));
+        assert!(warnings.iter().any(|w| w.contains("Significant content may have been lost")));
     }
 }

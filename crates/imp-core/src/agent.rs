@@ -138,6 +138,8 @@ pub struct Agent {
     pub guardrail_profile: Option<GuardrailProfile>,
     /// In-session file content cache, shared across tool calls.
     pub file_cache: Arc<crate::tools::FileCache>,
+    /// Shared checkpoint/file-history state, used to capture destructive edit restore points.
+    pub checkpoint_state: Arc<crate::tools::CheckpointState>,
     /// Tracks which files have been read; used for staleness and unread-edit warnings.
     pub file_tracker: Arc<std::sync::Mutex<crate::tools::FileTracker>>,
     /// Max lines the read tool may return before truncating. 0 means unlimited.
@@ -198,6 +200,7 @@ impl Agent {
             guardrail_config: GuardrailConfig::default(),
             guardrail_profile: None,
             file_cache: Arc::new(crate::tools::FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
             read_max_lines: 500,
             auth_store: None,
@@ -810,6 +813,7 @@ impl Agent {
                     update_tx,
                     ui: self.ui.clone(),
                     file_cache: self.file_cache.clone(),
+                    checkpoint_state: self.checkpoint_state.clone(),
                     file_tracker: self.file_tracker.clone(),
                     mode: self.mode,
                     read_max_lines: self.read_max_lines,

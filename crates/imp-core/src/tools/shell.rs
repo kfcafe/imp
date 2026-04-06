@@ -390,6 +390,7 @@ mod tests {
             update_tx: tx,
             ui: Arc::new(NullInterface),
             file_cache: Arc::new(crate::tools::FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,

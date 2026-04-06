@@ -11,6 +11,19 @@ use crate::usage::{
     usage_records_from_session, SessionUsageRecord, UsageRecordV1, USAGE_CUSTOM_TYPE,
 };
 
+pub const CHECKPOINT_CUSTOM_TYPE: &str = "checkpoint-record";
+pub const CHECKPOINT_RECORD_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCheckpointRecord {
+    pub version: u32,
+    pub checkpoint_id: String,
+    pub created_at: u64,
+    pub label: Option<String>,
+    pub files: Vec<String>,
+}
+
+
 const SESSION_META_VERSION: u32 = 1;
 
 /// A single entry in the session JSONL file.
@@ -103,6 +116,19 @@ pub struct SessionInfo {
     pub name: Option<String>,
     pub summary: Option<String>,
 }
+
+pub fn checkpoint_record_entry(
+    entry_id: impl Into<String>,
+    record: SessionCheckpointRecord,
+) -> Result<SessionEntry> {
+    Ok(SessionEntry::Custom {
+        id: entry_id.into(),
+        parent_id: None,
+        custom_type: CHECKPOINT_CUSTOM_TYPE.to_string(),
+        data: serde_json::to_value(record)?,
+    })
+}
+
 
 impl SessionInfo {
     /// A short, single-line chat title derived from persisted session metadata or message history.
@@ -515,6 +541,56 @@ impl SessionManager {
     /// Read canonical usage rows attached to this session.
     pub fn usage_records(&self) -> Vec<SessionUsageRecord> {
         usage_records_from_session(self)
+    }
+
+    pub fn append_checkpoint_record(
+        &mut self,
+        record: SessionCheckpointRecord,
+    ) -> Result<String> {
+        let entry_id = uuid::Uuid::new_v4().to_string();
+        let entry = checkpoint_record_entry(entry_id.clone(), record)?;
+        self.append(entry)?;
+        Ok(entry_id)
+    }
+
+    pub fn checkpoint_records(&self) -> Vec<SessionCheckpointRecord> {
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let SessionEntry::Custom {
+                    custom_type, data, ..
+                } = entry
+                else {
+                    return None;
+                };
+
+                if custom_type != CHECKPOINT_CUSTOM_TYPE {
+                    return None;
+                }
+
+                serde_json::from_value::<SessionCheckpointRecord>(data.clone()).ok()
+            })
+            .collect()
+    }
+
+    pub fn find_checkpoint_record(&self, needle: &str) -> Option<SessionCheckpointRecord> {
+        self.checkpoint_records().into_iter().find(|record| {
+            record.checkpoint_id == needle
+                || record.label.as_deref() == Some(needle)
+        })
+    }
+
+    pub fn restore_checkpoint(
+        &self,
+        checkpoint_state: &crate::tools::CheckpointState,
+        needle: &str,
+    ) -> Result<Vec<PathBuf>> {
+        let Some(record) = self.find_checkpoint_record(needle) else {
+            return Ok(Vec::new());
+        };
+        checkpoint_state
+            .restore_checkpoint(&record.checkpoint_id)
+            .map_err(Into::into)
     }
 
     /// Check whether a canonical usage record already exists for the given request id.
@@ -2187,6 +2263,70 @@ mod tests {
         assert_eq!(usage_records[0].turn_index, Some(3));
         assert_eq!(usage_records[0].provider.as_deref(), Some("test-provider"));
         assert_eq!(usage_records[0].model.as_deref(), Some("test-model"));
+    }
+
+    #[test]
+    fn append_checkpoint_record_round_trips_and_lookup_works() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("project");
+        let session_dir = tmp.path().join("sessions");
+        let mut mgr = SessionManager::new(&cwd, &session_dir).unwrap();
+
+        let record = SessionCheckpointRecord {
+            version: CHECKPOINT_RECORD_VERSION,
+            checkpoint_id: "cp-1".into(),
+            created_at: 123,
+            label: Some("before edits".into()),
+            files: vec!["src/main.rs".into(), "src/lib.rs".into()],
+        };
+        mgr.append_checkpoint_record(record.clone()).unwrap();
+
+        assert_eq!(mgr.checkpoint_records(), vec![record.clone()]);
+        assert_eq!(
+            mgr.find_checkpoint_record("cp-1").unwrap().label.as_deref(),
+            Some("before edits")
+        );
+        assert_eq!(
+            mgr.find_checkpoint_record("before edits")
+                .unwrap()
+                .checkpoint_id,
+            "cp-1"
+        );
+    }
+
+    #[test]
+    fn restore_checkpoint_uses_checkpoint_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("project");
+        let session_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let file = cwd.join("main.rs");
+        std::fs::write(&file, "original").unwrap();
+
+        let checkpoint_state = crate::tools::CheckpointState::new();
+        let checkpoint = checkpoint_state
+            .snapshot_paths(std::slice::from_ref(&file), Some("before edits".into()))
+            .unwrap()
+            .unwrap();
+        std::fs::write(&file, "modified").unwrap();
+
+        let mut mgr = SessionManager::new(&cwd, &session_dir).unwrap();
+        mgr.append_checkpoint_record(SessionCheckpointRecord {
+            version: CHECKPOINT_RECORD_VERSION,
+            checkpoint_id: checkpoint.id.clone(),
+            created_at: checkpoint.created_at,
+            label: checkpoint.label.clone(),
+            files: checkpoint
+                .files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect(),
+        })
+        .unwrap();
+
+        let restored = mgr.restore_checkpoint(&checkpoint_state, "before edits").unwrap();
+        assert_eq!(restored, vec![file.clone()]);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
     }
 
     #[test]

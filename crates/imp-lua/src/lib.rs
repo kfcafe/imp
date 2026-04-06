@@ -87,6 +87,7 @@ mod tests {
             update_tx: tx,
             ui: Arc::new(NullInterface),
             file_cache: Arc::new(imp_core::tools::FileCache::new()),
+            checkpoint_state: Arc::new(imp_core::tools::CheckpointState::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(
                 imp_core::tools::FileTracker::default(),
             )),
@@ -884,6 +885,7 @@ mod tests {
             update_tx: tx,
             ui: Arc::new(NullInterface),
             file_cache: Arc::new(imp_core::tools::FileCache::new()),
+            checkpoint_state: Arc::new(imp_core::tools::CheckpointState::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(
                 imp_core::tools::FileTracker::default(),
             )),

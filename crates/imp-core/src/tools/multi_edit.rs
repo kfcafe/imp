@@ -93,6 +93,10 @@ impl Tool for MultiEditTool {
         };
 
         let raw_content = tokio::fs::read_to_string(&path).await?;
+        ctx.checkpoint_state.snapshot_paths(
+            std::slice::from_ref(&path),
+            Some(format!("multi_edit {}", path.display())),
+        )?;
         let original = raw_content.replace("\r\n", "\n");
         let has_crlf = raw_content.contains("\r\n");
 
@@ -176,6 +180,7 @@ mod tests {
             update_tx: tx,
             ui: Arc::new(crate::ui::NullInterface),
             file_cache: Arc::new(crate::tools::FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
@@ -265,6 +270,35 @@ mod tests {
         assert!(!result.is_error);
         let written = std::fs::read_to_string(&file).unwrap();
         assert_eq!(written, "farewell\n");
+    }
+
+    #[tokio::test]
+    async fn multi_edit_creates_checkpoint_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("checkpoint.txt");
+        std::fs::write(&file, "foo\nbar\n").unwrap();
+
+        let tool = MultiEditTool;
+        let ctx = test_ctx(dir.path());
+        let checkpoint_state = ctx.checkpoint_state.clone();
+        let result = tool
+            .execute(
+                "c-checkpoint",
+                json!({
+                    "path": "checkpoint.txt",
+                    "edits": [
+                        {"oldText": "foo", "newText": "FOO"},
+                        {"oldText": "bar", "newText": "BAR"}
+                    ]
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(checkpoint_state.original(&file).as_deref(), Some("foo\nbar\n"));
+        assert_eq!(checkpoint_state.checkpoints().len(), 1);
     }
 
     #[tokio::test]

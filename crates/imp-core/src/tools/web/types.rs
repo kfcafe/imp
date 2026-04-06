@@ -68,6 +68,8 @@ pub struct PageContent {
     pub was_redirected: bool,
     /// Size in bytes of the raw response body before extraction.
     pub raw_body_bytes: usize,
+    /// Informational warnings about potential page quality or extraction issues.
+    pub diagnostics: Vec<String>,
 }
 
 /// Web tool configuration, typically from `[web]` in config.toml.

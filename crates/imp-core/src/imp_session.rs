@@ -43,7 +43,9 @@ use crate::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use crate::builder::AgentBuilder;
 use crate::config::{AgentMode, Config};
 use crate::error::{Error, Result};
-use crate::session::{SessionEntry, SessionManager};
+use crate::session::{
+    SessionCheckpointRecord, SessionEntry, SessionManager,
+};
 use crate::system_prompt::TaskContext;
 use crate::ui::UserInterface;
 
@@ -589,7 +591,7 @@ impl ImpSession {
     }
 
     fn persist_event_entries(&mut self, event: &AgentEvent) -> Vec<&'static str> {
-        match self
+        let persisted = match self
             .session_mgr
             .persist_agent_event_entries(&self.model, event)
         {
@@ -601,7 +603,19 @@ impl ImpSession {
                 );
                 Vec::new()
             }
+        };
+
+        if let Some(agent) = self.agent.as_ref() {
+            if let Err(error) = persist_checkpoint_records(&mut self.session_mgr, &agent.checkpoint_state)
+            {
+                self.push_persistence_error(
+                    persisted.clone(),
+                    format!("failed to persist checkpoint records: {error}"),
+                );
+            }
         }
+
+        persisted
     }
 
     fn drain_pending_events_for_persistence(&mut self) {
@@ -659,6 +673,38 @@ fn clone_model(model: &Model) -> Model {
         meta: model.meta.clone(),
         provider: Arc::clone(&model.provider),
     }
+}
+
+fn persist_checkpoint_records(
+    session_mgr: &mut SessionManager,
+    checkpoint_state: &crate::tools::CheckpointState,
+) -> Result<Vec<String>> {
+    let existing: std::collections::HashSet<String> = session_mgr
+        .checkpoint_records()
+        .into_iter()
+        .map(|record| record.checkpoint_id)
+        .collect();
+
+    let mut persisted = Vec::new();
+    for record in checkpoint_state.checkpoints() {
+        if existing.contains(&record.id) {
+            continue;
+        }
+        session_mgr.append_checkpoint_record(SessionCheckpointRecord {
+            version: crate::session::CHECKPOINT_RECORD_VERSION,
+            checkpoint_id: record.id.clone(),
+            created_at: record.created_at,
+            label: record.label.clone(),
+            files: record
+                .files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect(),
+        })?;
+        persisted.push(record.id);
+    }
+
+    Ok(persisted)
 }
 
 fn codex_supports_model(_registry: &ModelRegistry, model_id: &str) -> bool {
@@ -1133,10 +1179,19 @@ mod tests {
         let session_dir = tmp.path().join("sessions");
         let model = test_model();
         let session_mgr = SessionManager::new(&cwd, &session_dir).unwrap();
-        let (_agent, handle) = Agent::new(clone_model(&model), cwd.clone());
+        let (agent, handle) = Agent::new(clone_model(&model), cwd.clone());
+        std::fs::create_dir_all(&cwd).unwrap();
+        let file = cwd.join("tracked.rs");
+        std::fs::write(&file, "original").unwrap();
+        let checkpoint = agent
+            .checkpoint_state
+            .snapshot_paths(std::slice::from_ref(&file), Some("before tool result".into()))
+            .unwrap()
+            .unwrap();
+        std::fs::write(&file, "modified").unwrap();
 
         let mut session = ImpSession {
-            agent: None,
+            agent: Some(agent),
             handle,
             session_mgr,
             config: Config::default(),
@@ -1171,5 +1226,22 @@ mod tests {
                 ..
             }
         )));
+        let checkpoints = session.session_mgr.checkpoint_records();
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].checkpoint_id, checkpoint.id);
+        let restored = session
+            .session_mgr
+            .restore_checkpoint(
+                session
+                    .agent
+                    .as_ref()
+                    .expect("agent retained for persistence test")
+                    .checkpoint_state
+                    .as_ref(),
+                &checkpoints[0].checkpoint_id,
+            )
+            .unwrap();
+        assert_eq!(restored, vec![file.clone()]);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
     }
 }

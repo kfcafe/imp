@@ -287,6 +287,7 @@ mod tests {
             update_tx: tx,
             ui: std::sync::Arc::new(crate::ui::NullInterface),
             file_cache: std::sync::Arc::new(crate::tools::FileCache::new()),
+            checkpoint_state: std::sync::Arc::new(crate::tools::CheckpointState::new()),
             file_tracker: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::tools::FileTracker::new(),
             )),

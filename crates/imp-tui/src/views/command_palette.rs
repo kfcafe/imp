@@ -65,6 +65,14 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
             description: "View/edit agent memory".into(),
         },
         SlashCommand {
+            name: "checkpoints".into(),
+            description: "List recorded file checkpoints".into(),
+        },
+        SlashCommand {
+            name: "restore-checkpoint".into(),
+            description: "Restore files from a checkpoint by id or label".into(),
+        },
+        SlashCommand {
             name: "reload".into(),
             description: "Reload extensions".into(),
         },

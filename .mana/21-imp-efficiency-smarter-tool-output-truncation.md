@@ -2,10 +2,10 @@
 id: '21'
 title: 'imp efficiency: smarter tool output truncation'
 slug: imp-efficiency-smarter-tool-output-truncation
-status: in_progress
+status: open
 priority: 2
 created_at: '2026-03-23T00:00:21.665478Z'
-updated_at: '2026-04-06T21:30:50.666617Z'
+updated_at: '2026-04-06T21:37:56.565660Z'
 notes: |2
 
   ## Attempt 1 — 2026-03-24T06:26:56Z
@@ -18,8 +18,6 @@ verify: cd /Users/asher/tower && grep -q 'DEFAULT_LIMIT.*50\|of.*matches\|of.*re
 checkpoint: '55c295c8901f6c58954da8e2bae9bbb1c578e7f8'
 verify_hash: '55ad6a7f846ba231c25ba58d6f6c5c10b2a7a0e13d71a340161f3109ae693c58'
 attempts: 1
-claimed_by: imp
-claimed_at: '2026-04-06T21:30:50.666617Z'
 history:
 - attempt: 1
   started_at: '2026-03-24T06:26:56.676229Z'
@@ -33,6 +31,7 @@ attempt_log:
   outcome: abandoned
   agent: imp
   started_at: '2026-04-06T21:30:50.666617Z'
+  finished_at: '2026-04-06T21:37:56.565660Z'
 ---
 
 ## Problem
