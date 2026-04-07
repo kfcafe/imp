@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::path::Path;
 
 use imp_core::session::SessionInfo;
@@ -87,32 +88,31 @@ impl SessionPickerState {
 
     fn refresh_filter(&mut self) {
         let needle = self.filter.trim().to_lowercase();
-        let mut ranked: Vec<(i64, usize)> = self
-            .sessions
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, session)| {
-                session_score(session, &needle, self.preferred_cwd.as_deref())
-                    .map(|score| (score, idx))
-            })
-            .collect();
 
-        ranked.sort_by(|(score_a, idx_a), (score_b, idx_b)| {
-            score_b
-                .cmp(score_a)
-                .then_with(|| {
-                    self.sessions[*idx_b]
-                        .updated_at
-                        .cmp(&self.sessions[*idx_a].updated_at)
+        if needle.is_empty() {
+            self.filtered_indices = (0..self.sessions.len()).collect();
+            self.filtered_indices.sort_by(|idx_a, idx_b| {
+                compare_session_recency(&self.sessions[*idx_a], &self.sessions[*idx_b])
+            });
+        } else {
+            let mut ranked: Vec<(i64, usize)> = self
+                .sessions
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, session)| {
+                    session_score(session, &needle, self.preferred_cwd.as_deref())
+                        .map(|score| (score, idx))
                 })
-                .then_with(|| {
-                    self.sessions[*idx_b]
-                        .created_at
-                        .cmp(&self.sessions[*idx_a].created_at)
-                })
-        });
+                .collect();
 
-        self.filtered_indices = ranked.into_iter().map(|(_, idx)| idx).collect();
+            ranked.sort_by(|(score_a, idx_a), (score_b, idx_b)| {
+                score_b.cmp(score_a).then_with(|| {
+                    compare_session_recency(&self.sessions[*idx_a], &self.sessions[*idx_b])
+                })
+            });
+
+            self.filtered_indices = ranked.into_iter().map(|(_, idx)| idx).collect();
+        }
 
         if self.selected >= self.filtered_indices.len() {
             self.selected = self.filtered_indices.len().saturating_sub(1);
@@ -358,6 +358,12 @@ fn render_session_preview(
         let rendered = Line::from(Span::styled(line.clone(), style));
         buf.set_line(inner.x, inner.y + i as u16, &rendered, inner.width);
     }
+}
+
+fn compare_session_recency(a: &SessionInfo, b: &SessionInfo) -> Ordering {
+    b.updated_at
+        .cmp(&a.updated_at)
+        .then_with(|| b.created_at.cmp(&a.created_at))
 }
 
 fn session_score(session: &SessionInfo, needle: &str, preferred_cwd: Option<&str>) -> Option<i64> {
@@ -610,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn preferred_cwd_sessions_rank_first() {
+    fn default_order_is_most_recent_first() {
         let sessions = vec![
             make_session(
                 "old-local",
@@ -631,6 +637,34 @@ mod tests {
         ];
 
         let state = SessionPickerState::new(sessions, Some(Path::new("/tmp/tower/imp")));
+        assert_eq!(state.selected_session().unwrap().id, "new-remote");
+    }
+
+    #[test]
+    fn preferred_cwd_ranks_filtered_matches_first() {
+        let sessions = vec![
+            make_session(
+                "old-local",
+                Some("local"),
+                Some("older local session"),
+                "/tmp/tower/imp",
+                "prompt",
+                10,
+            ),
+            make_session(
+                "new-remote",
+                Some("remote"),
+                Some("newer remote session"),
+                "/tmp/tower/wizard",
+                "prompt",
+                99,
+            ),
+        ];
+
+        let mut state = SessionPickerState::new(sessions, Some(Path::new("/tmp/tower/imp")));
+        for c in "prompt".chars() {
+            state.push_filter(c);
+        }
         assert_eq!(state.selected_session().unwrap().id, "old-local");
     }
 }
