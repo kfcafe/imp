@@ -994,7 +994,7 @@ fn mana_bash_equivalent_hint(command: &str) -> Option<&'static str> {
     match action {
         "status" | "list" | "ls" | "show" | "read" | "create" | "close" | "update" | "run"
         | "run_state" | "evaluate" | "agents" | "logs" | "next" | "claim" | "release" | "tree" => {
-            Some("Use the native mana tool instead of `bash` for this mana command.")
+            Some("Use the native mana tool instead of `bash` for this mana command. For orchestration, the native tool supports canonical target selection (`id`, `targets`, or all ready work) plus background run tracking.")
         }
         _ => None,
     }

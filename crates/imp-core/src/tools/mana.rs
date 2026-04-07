@@ -371,12 +371,19 @@ impl ManaRunStore {
 
     fn trim_history(&mut self) {
         while self.runs.len() > 8 {
+            let newest_index = self.runs.len().saturating_sub(1);
             if let Some(index) = self
                 .runs
                 .iter()
-                .position(|run| run.status != "starting" && run.status != "running")
+                .enumerate()
+                .take(newest_index)
+                .find_map(|(index, run)| {
+                    ((run.status != "starting" && run.status != "running")).then_some(index)
+                })
             {
                 self.runs.remove(index);
+            } else if !self.runs.is_empty() {
+                self.runs.remove(0);
             } else {
                 break;
             }
@@ -735,8 +742,23 @@ fn spawn_background_run(
                     "mana: {scope} finished · {} done · {} failed",
                     view.summary.total_closed, view.summary.total_failed
                 );
+                let runtime_detail = view
+                    .runtime
+                    .as_ref()
+                    .map(|runtime| {
+                        let agent = runtime
+                            .direct_agent
+                            .as_deref()
+                            .unwrap_or("unknown-agent");
+                        let model = runtime.model.as_deref().unwrap_or("default-model");
+                        format!("{scope} · {agent} · {model}")
+                    })
+                    .unwrap_or_else(|| scope.clone());
                 ui.set_status("mana", Some(&summary)).await;
-                ui.set_widget("mana", Some(mana_widget_lines(summary.clone(), None)))
+                ui.set_widget(
+                    "mana",
+                    Some(mana_widget_lines(summary.clone(), Some(runtime_detail))),
+                )
                     .await;
                 ui.notify(&summary, NotifyLevel::Info).await;
                 let ui_clear = ui.clone();
@@ -789,6 +811,11 @@ fn run_state_output(state: &NativeRunState) -> ToolOutput {
         "Mana run {}: {} · {}",
         state.run_id, state.scope, state.status
     )];
+    if let Some(runtime) = &state.runtime {
+        let agent = runtime["direct_agent"].as_str().unwrap_or("unknown-agent");
+        let model = runtime["model"].as_str().unwrap_or("default-model");
+        lines.push(format!("Runtime: {agent} · {model}"));
+    }
     lines.push(format!(
         "{} total · {} done · {} failed · {} awaiting verify · {} skipped",
         state.summary.total_units,
@@ -826,6 +853,18 @@ fn evaluate_run_output(state: &NativeRunState) -> ToolOutput {
         ),
     };
 
+    let runtime = state
+        .runtime
+        .as_ref()
+        .map(|runtime| {
+            format!(
+                "Runtime: {} · {}",
+                runtime["direct_agent"].as_str().unwrap_or("unknown-agent"),
+                runtime["model"].as_str().unwrap_or("default-model")
+            )
+        })
+        .unwrap_or_else(|| "Runtime: unknown".to_string());
+
     let latest = state
         .log_lines
         .last()
@@ -833,7 +872,7 @@ fn evaluate_run_output(state: &NativeRunState) -> ToolOutput {
         .unwrap_or_else(|| "Latest: (no stream events captured yet)".to_string());
 
     text_output(
-        format!("{headline}\n{latest}"),
+        format!("{headline}\n{runtime}\n{latest}"),
         serde_json::to_value(state).unwrap_or(serde_json::Value::Null),
     )
 }
@@ -962,7 +1001,7 @@ impl Tool for ManaTool {
         "Mana"
     }
     fn description(&self) -> &str {
-        "Work coordination substrate. Prefer this over bash for equivalent mana operations: inspect/create/update/claim/release units, inspect orchestration logs/agents/next/tree, and run orchestration natively with background runs plus in-session run state. Use it for complex tasks or delegation. Load the `mana` skill when coordinating multi-step work or delegation to learn the workflow."
+        "Work coordination substrate. Prefer this over bash for equivalent mana operations: inspect/create/update/claim/release units, inspect orchestration logs/agents/next/tree, and run orchestration natively with canonical target selection (`id`, `targets`, or all ready work), background runs, and in-session run state. Use it for complex tasks or delegation. Load the `mana` skill when coordinating multi-step work or delegation to learn the workflow."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
@@ -1100,6 +1139,7 @@ impl Tool for ManaTool {
                     on_fail: None,
                     fail_first: false,
                     feature: false,
+                    kind: None,
                     verify_timeout: None,
                     decisions: Vec::new(),
                     force: true,
@@ -1878,12 +1918,18 @@ mod tests {
         let state = tool
             .execute(
                 "call_state",
-                json!({ "action": "run_state", "run_id": run_id }),
+                json!({ "action": "run_state", "run_id": run_id.as_str() }),
                 ctx2,
             )
             .await
             .unwrap();
-        assert!(state.text_content().unwrap_or("").contains("Mana run run-"));
+        let state_text = state.text_content().unwrap_or("");
+        assert!(state_text.contains("Mana run "), "state_text was: {state_text}");
+        assert!(state_text.contains("Runtime:"), "state_text was: {state_text}");
+        assert!(
+            state_text.contains("all ready units") || state_text.contains("unit"),
+            "state_text was: {state_text}"
+        );
 
         let dir3 = tempfile::tempdir().unwrap();
         let (ctx3, _keep3) = ctx_with_mode(dir3.path(), crate::config::AgentMode::Full);
@@ -1896,7 +1942,11 @@ mod tests {
             .await
             .unwrap();
         let eval_text = evaluation.text_content().unwrap_or("");
-        assert!(eval_text.contains("Run run-") && eval_text.contains("finished"));
+        assert!(
+            eval_text.contains("Run ") && eval_text.contains("finished"),
+            "eval_text was: {eval_text}"
+        );
+        assert!(eval_text.contains("Runtime:"), "eval_text was: {eval_text}");
     }
 
     #[test]
