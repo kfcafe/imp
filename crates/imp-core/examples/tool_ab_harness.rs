@@ -8,7 +8,9 @@ use futures_core::Stream;
 use imp_core::agent::{Agent, AgentEvent, AgentHandle};
 use imp_core::builder::AgentBuilder;
 use imp_core::config::Config;
-use imp_core::tools::{bash::BashTool, edit::EditTool, read::ReadTool, scan::ScanTool, write::WriteTool};
+use imp_core::tools::{
+    bash::BashTool, edit::EditTool, read::ReadTool, scan::ScanTool, write::WriteTool,
+};
 use imp_llm::auth::{ApiKey, AuthStore};
 use imp_llm::model::{Capabilities, ModelMeta, ModelPricing, ModelRegistry};
 use imp_llm::provider::Provider;

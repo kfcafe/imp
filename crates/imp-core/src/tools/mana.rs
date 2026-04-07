@@ -8,6 +8,7 @@ use mana::commands::next::ScoredUnit;
 use mana::commands::run::{NativeRunParams, RunSummary, RunTarget, RunUnitStatus, RunView};
 use mana::stream::StreamEvent;
 use mana_core::ops::claim::ClaimParams;
+use mana_core::unit::{OnFailAction, UnitKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -372,14 +373,14 @@ impl ManaRunStore {
     fn trim_history(&mut self) {
         while self.runs.len() > 8 {
             let newest_index = self.runs.len().saturating_sub(1);
-            if let Some(index) = self
-                .runs
-                .iter()
-                .enumerate()
-                .take(newest_index)
-                .find_map(|(index, run)| {
-                    ((run.status != "starting" && run.status != "running")).then_some(index)
-                })
+            if let Some(index) =
+                self.runs
+                    .iter()
+                    .enumerate()
+                    .take(newest_index)
+                    .find_map(|(index, run)| {
+                        (run.status != "starting" && run.status != "running").then_some(index)
+                    })
             {
                 self.runs.remove(index);
             } else if !self.runs.is_empty() {
@@ -681,8 +682,7 @@ fn make_follow_up_summary(scope: &str, view: &RunView) -> String {
     } else if view.summary.total_awaiting_verify > 0 {
         format!(
             "mana run finished for {scope}: {} done, {} awaiting verify.",
-            view.summary.total_closed,
-            view.summary.total_awaiting_verify
+            view.summary.total_closed, view.summary.total_awaiting_verify
         )
     } else {
         format!(
@@ -699,6 +699,100 @@ fn make_follow_up_summary(scope: &str, view: &RunView) -> String {
 
     summary.push_str(" Inspect with mana(action=\"run_state\") or mana(action=\"evaluate\").");
     summary
+}
+
+fn parse_csv_strings(value: &serde_json::Value, field_name: &str) -> Result<Vec<String>> {
+    if let Some(values) = value.as_array() {
+        let parsed = values
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .collect();
+        return Ok(parsed);
+    }
+
+    if let Some(raw) = value.as_str() {
+        return Ok(raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect());
+    }
+
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+
+    Err(crate::error::Error::Tool(format!(
+        "{field_name} must be a comma-separated string or array of strings"
+    )))
+}
+
+fn parse_optional_string(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn parse_on_fail(value: &serde_json::Value) -> Result<Option<OnFailAction>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    if let Some(raw) = value.as_str() {
+        return mana_core::ops::create::parse_on_fail(raw)
+            .map(Some)
+            .map_err(|e| crate::error::Error::Tool(e.to_string()));
+    }
+
+    let Some(obj) = value.as_object() else {
+        return Err(crate::error::Error::Tool(
+            "on_fail must be a string like 'retry:3'/'escalate:P1' or an object".into(),
+        ));
+    };
+
+    let action = obj
+        .get("action")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| crate::error::Error::Tool("on_fail object requires 'action'".into()))?;
+
+    match action {
+        "retry" => Ok(Some(OnFailAction::Retry {
+            max: obj.get("max").and_then(|v| v.as_u64()).map(|v| v as u32),
+            delay_secs: obj.get("delay_secs").and_then(|v| v.as_u64()),
+        })),
+        "escalate" => Ok(Some(OnFailAction::Escalate {
+            priority: obj
+                .get("priority")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u8),
+            message: obj
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        })),
+        other => Err(crate::error::Error::Tool(format!(
+            "unsupported on_fail action: {other}"
+        ))),
+    }
+}
+
+fn parse_unit_kind(value: &serde_json::Value) -> Result<Option<UnitKind>> {
+    let Some(raw) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+
+    match raw {
+        "epic" => Ok(Some(UnitKind::Epic)),
+        "job" => Ok(Some(UnitKind::Job)),
+        "fact" => Ok(Some(UnitKind::Fact)),
+        other => Err(crate::error::Error::Tool(format!(
+            "kind must be one of: epic, job, fact (got {other})"
+        ))),
+    }
 }
 
 fn background_run_started_output(
@@ -778,10 +872,7 @@ fn spawn_background_run(
                     .runtime
                     .as_ref()
                     .map(|runtime| {
-                        let agent = runtime
-                            .direct_agent
-                            .as_deref()
-                            .unwrap_or("unknown-agent");
+                        let agent = runtime.direct_agent.as_deref().unwrap_or("unknown-agent");
                         let model = runtime.model.as_deref().unwrap_or("default-model");
                         format!("{scope} · {agent} · {model}")
                     })
@@ -791,12 +882,12 @@ fn spawn_background_run(
                     "mana",
                     Some(mana_widget_lines(summary.clone(), Some(runtime_detail))),
                 )
-                    .await;
+                .await;
                 ui.notify(&summary, NotifyLevel::Info).await;
                 let _ = command_tx
-                    .send(crate::agent::AgentCommand::FollowUp(make_follow_up_summary(
-                        &scope, &view,
-                    )))
+                    .send(crate::agent::AgentCommand::FollowUp(
+                        make_follow_up_summary(&scope, &view),
+                    ))
                     .await;
                 let ui_clear = ui.clone();
                 tokio::spawn(async move {
@@ -1072,18 +1163,33 @@ impl Tool for ManaTool {
                 "title": { "type": "string" },
                 "verify": { "type": "string", "description": "Shell command, must exit 0" },
                 "description": { "type": "string" },
+                "acceptance": { "type": "string", "description": "Concrete acceptance criteria for the unit" },
+                "notes": { "type": "string", "description": "Progress log or authoring notes" },
+                "design": { "type": "string", "description": "Supplemental design context for the unit" },
+                "assignee": { "type": "string", "description": "Assignee or owner for the unit" },
                 "parent": { "type": "string" },
-                "deps": { "type": "string", "description": "Comma-separated IDs" },
+                "deps": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Dependency unit IDs as a comma-separated string or array" },
+                "produces": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Artifacts this unit produces" },
+                "requires": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Artifacts this unit requires" },
+                "paths": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Relevant file paths for context/relevance" },
+                "decisions": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Blocking decisions to record on the unit" },
+                "resolve_decisions": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Decision entries or indexes to resolve during update" },
                 "status": { "type": "string" },
-                "notes": { "type": "string", "description": "Progress log (update)" },
                 "priority": { "type": "integer" },
-                "labels": { "type": "string" },
+                "labels": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Labels as a comma-separated string or array" },
+                "add_label": { "type": "string", "description": "Single label to add during update" },
+                "remove_label": { "type": "string", "description": "Single label to remove during update" },
+                "kind": { "type": "string", "enum": ["epic", "job", "fact"], "description": "Explicit mana unit kind" },
+                "feature": { "type": "boolean", "description": "Whether the unit is a feature-level goal" },
+                "fail_first": { "type": "boolean", "description": "Require verify to fail first at creation time" },
+                "verify_timeout": { "type": "integer", "description": "Timeout in seconds for verify" },
+                "on_fail": { "description": "On-fail policy as a string like retry:3 / escalate:P1 or an object" },
                 "force": { "type": "boolean" },
                 "reason": { "type": "string" },
                 "all": { "type": "boolean" },
                 "by": { "type": "string", "description": "Who is claiming the unit" },
                 "count": { "type": "integer", "description": "Number of next recommendations to return" },
-            "background": { "type": "boolean", "description": "Run mana orchestration in the background and return immediately (default true unless dry_run=true)" },
+                "background": { "type": "boolean", "description": "Run mana orchestration in the background and return immediately (default true unless dry_run=true)" },
                 "targets": { "type": "array", "items": { "type": "string" }, "description": "Explicit target unit IDs to run as a canonical target set" },
                 "jobs": { "type": "integer" },
                 "dry_run": { "type": "boolean" },
@@ -1161,47 +1267,37 @@ impl Tool for ManaTool {
                 let title = params["title"]
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("create requires 'title'".into()))?;
-                let deps: Vec<String> = params["deps"]
-                    .as_str()
-                    .map(|s| {
-                        s.split(',')
-                            .map(|d| d.trim().to_string())
-                            .filter(|d| !d.is_empty())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let labels: Vec<String> = params["labels"]
-                    .as_str()
-                    .map(|s| {
-                        s.split(',')
-                            .map(|l| l.trim().to_string())
-                            .filter(|l| !l.is_empty())
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let dependencies = parse_csv_strings(&params["deps"], "deps")?;
+                let labels = parse_csv_strings(&params["labels"], "labels")?;
+                let produces = parse_csv_strings(&params["produces"], "produces")?;
+                let requires = parse_csv_strings(&params["requires"], "requires")?;
+                let paths = parse_csv_strings(&params["paths"], "paths")?;
+                let decisions = parse_csv_strings(&params["decisions"], "decisions")?;
+                let on_fail = parse_on_fail(&params["on_fail"])?;
+                let kind = parse_unit_kind(&params["kind"])?;
 
                 let create_params = mana_core::ops::create::CreateParams {
                     title: title.to_string(),
-                    description: params["description"].as_str().map(|s| s.to_string()),
-                    acceptance: None,
-                    notes: None,
-                    design: None,
-                    verify: params["verify"].as_str().map(|s| s.to_string()),
+                    description: parse_optional_string(&params["description"]),
+                    acceptance: parse_optional_string(&params["acceptance"]),
+                    notes: parse_optional_string(&params["notes"]),
+                    design: parse_optional_string(&params["design"]),
+                    verify: parse_optional_string(&params["verify"]),
                     priority: params["priority"].as_u64().map(|p| p as u8),
                     labels,
-                    assignee: None,
-                    dependencies: deps,
-                    parent: params["parent"].as_str().map(|s| s.to_string()),
-                    produces: Vec::new(),
-                    requires: Vec::new(),
-                    paths: Vec::new(),
-                    on_fail: None,
-                    fail_first: false,
-                    feature: false,
-                    kind: None,
-                    verify_timeout: None,
-                    decisions: Vec::new(),
-                    force: true,
+                    assignee: parse_optional_string(&params["assignee"]),
+                    dependencies,
+                    parent: parse_optional_string(&params["parent"]),
+                    produces,
+                    requires,
+                    paths,
+                    on_fail,
+                    fail_first: params["fail_first"].as_bool().unwrap_or(false),
+                    feature: params["feature"].as_bool().unwrap_or(false),
+                    kind,
+                    verify_timeout: params["verify_timeout"].as_u64(),
+                    decisions,
+                    force: params["force"].as_bool().unwrap_or(false),
                 };
                 match mana_core::api::create_unit(&mana_dir, create_params) {
                     Ok(result) => Ok(json_output(&result)),
@@ -1248,19 +1344,22 @@ impl Tool for ManaTool {
                 let id = params["id"]
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("update requires 'id'".into()))?;
+                let decisions = parse_csv_strings(&params["decisions"], "decisions")?;
+                let resolve_decisions =
+                    parse_csv_strings(&params["resolve_decisions"], "resolve_decisions")?;
                 let update_params = mana_core::ops::update::UpdateParams {
-                    title: params["title"].as_str().map(|s| s.to_string()),
-                    description: params["description"].as_str().map(|s| s.to_string()),
-                    acceptance: None,
-                    notes: params["notes"].as_str().map(|s| s.to_string()),
-                    design: None,
-                    status: params["status"].as_str().map(|s| s.to_string()),
+                    title: parse_optional_string(&params["title"]),
+                    description: parse_optional_string(&params["description"]),
+                    acceptance: parse_optional_string(&params["acceptance"]),
+                    notes: parse_optional_string(&params["notes"]),
+                    design: parse_optional_string(&params["design"]),
+                    status: parse_optional_string(&params["status"]),
                     priority: params["priority"].as_u64().map(|p| p as u8),
-                    assignee: None,
-                    add_label: None,
-                    remove_label: None,
-                    decisions: Vec::new(),
-                    resolve_decisions: Vec::new(),
+                    assignee: parse_optional_string(&params["assignee"]),
+                    add_label: parse_optional_string(&params["add_label"]),
+                    remove_label: parse_optional_string(&params["remove_label"]),
+                    decisions,
+                    resolve_decisions,
                 };
                 match mana_core::api::update_unit(&mana_dir, id, update_params) {
                     Ok(result) => Ok(json_output(&result)),
@@ -1984,7 +2083,10 @@ mod tests {
         match follow_up {
             crate::agent::AgentCommand::FollowUp(text) => {
                 assert!(text.contains("mana run finished"), "text was: {text}");
-                assert!(text.contains("Inspect with mana(action=\"run_state\")"), "text was: {text}");
+                assert!(
+                    text.contains("Inspect with mana(action=\"run_state\")"),
+                    "text was: {text}"
+                );
             }
             other => panic!("expected follow-up, got {other:?}"),
         }
@@ -2038,8 +2140,14 @@ mod tests {
             .await
             .unwrap();
         let state_text = state.text_content().unwrap_or("");
-        assert!(state_text.contains("Mana run "), "state_text was: {state_text}");
-        assert!(state_text.contains("Runtime:"), "state_text was: {state_text}");
+        assert!(
+            state_text.contains("Mana run "),
+            "state_text was: {state_text}"
+        );
+        assert!(
+            state_text.contains("Runtime:"),
+            "state_text was: {state_text}"
+        );
         assert!(
             state_text.contains("Units:") || state_text.contains("Latest: Dry run:"),
             "state_text was: {state_text}"

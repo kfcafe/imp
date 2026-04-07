@@ -886,14 +886,20 @@ fn push_mana_detail_line(lines: &mut Vec<String>, key: &str, value: Option<&Valu
             .collect::<Vec<_>>()
             .join(", "),
         Value::Object(map) => {
-            if let (Some(kind), Some(ids)) = (map.get("kind").and_then(Value::as_str), map.get("ids").and_then(Value::as_array)) {
+            if let (Some(kind), Some(ids)) = (
+                map.get("kind").and_then(Value::as_str),
+                map.get("ids").and_then(Value::as_array),
+            ) {
                 let ids = ids
                     .iter()
                     .filter_map(Value::as_str)
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("{kind}: {ids}")
-            } else if let (Some(kind), Some(id)) = (map.get("kind").and_then(Value::as_str), map.get("id").and_then(Value::as_str)) {
+            } else if let (Some(kind), Some(id)) = (
+                map.get("kind").and_then(Value::as_str),
+                map.get("id").and_then(Value::as_str),
+            ) {
                 format!("{kind}: {id}")
             } else if let (Some(agent), Some(model)) = (
                 map.get("direct_agent").and_then(Value::as_str),

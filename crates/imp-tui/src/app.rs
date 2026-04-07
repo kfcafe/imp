@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures::FutureExt;
 use imp_core::ui::WidgetContent;
 
 use imp_lua::LuaRuntime;
