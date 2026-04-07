@@ -670,6 +670,37 @@ fn scope_from_target(target: &RunTarget) -> String {
     }
 }
 
+fn make_follow_up_summary(scope: &str, view: &RunView) -> String {
+    let mut summary = if view.summary.total_failed > 0 {
+        format!(
+            "mana run finished for {scope}: {} done, {} failed, {} awaiting verify.",
+            view.summary.total_closed,
+            view.summary.total_failed,
+            view.summary.total_awaiting_verify
+        )
+    } else if view.summary.total_awaiting_verify > 0 {
+        format!(
+            "mana run finished for {scope}: {} done, {} awaiting verify.",
+            view.summary.total_closed,
+            view.summary.total_awaiting_verify
+        )
+    } else {
+        format!(
+            "mana run finished for {scope}: {} done, 0 failed.",
+            view.summary.total_closed
+        )
+    };
+
+    if let Some(runtime) = &view.runtime {
+        let agent = runtime.direct_agent.as_deref().unwrap_or("unknown-agent");
+        let model = runtime.model.as_deref().unwrap_or("default-model");
+        summary.push_str(&format!(" Runtime: {agent} · {model}."));
+    }
+
+    summary.push_str(" Inspect with mana(action=\"run_state\") or mana(action=\"evaluate\").");
+    summary
+}
+
 fn background_run_started_output(
     scope: &str,
     run_id: &str,
@@ -706,6 +737,7 @@ fn spawn_background_run(
     run_id: String,
 ) {
     let ui = ctx.ui.clone();
+    let command_tx = ctx.command_tx.clone();
     let scope = scope_from_target(&run_args.target);
 
     tokio::spawn(async move {
@@ -761,6 +793,11 @@ fn spawn_background_run(
                 )
                     .await;
                 ui.notify(&summary, NotifyLevel::Info).await;
+                let _ = command_tx
+                    .send(crate::agent::AgentCommand::FollowUp(make_follow_up_summary(
+                        &scope, &view,
+                    )))
+                    .await;
                 let ui_clear = ui.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(12)).await;
@@ -775,6 +812,11 @@ fn spawn_background_run(
                 ui.set_widget("mana", Some(mana_widget_lines(message.clone(), None)))
                     .await;
                 ui.notify(&message, NotifyLevel::Error).await;
+                let _ = command_tx
+                    .send(crate::agent::AgentCommand::FollowUp(format!(
+                        "mana run failed for {scope}: {err}. Inspect with mana(action=\"run_state\") or mana(action=\"logs\", run_id=\"{run_id}\")."
+                    )))
+                    .await;
             }
             Err(join_err) => {
                 let message = format!("mana: {scope} task failed: {join_err}");
@@ -783,6 +825,11 @@ fn spawn_background_run(
                 ui.set_widget("mana", Some(mana_widget_lines(message.clone(), None)))
                     .await;
                 ui.notify(&message, NotifyLevel::Error).await;
+                let _ = command_tx
+                    .send(crate::agent::AgentCommand::FollowUp(format!(
+                        "mana background task failed for {scope}: {join_err}. Inspect with mana(action=\"run_state\") or mana(action=\"logs\", run_id=\"{run_id}\")."
+                    )))
+                    .await;
             }
         }
     });
@@ -824,6 +871,18 @@ fn run_state_output(state: &NativeRunState) -> ToolOutput {
         state.summary.total_awaiting_verify,
         state.summary.total_skipped
     ));
+
+    if !state.units.is_empty() {
+        let preview = state
+            .units
+            .iter()
+            .take(3)
+            .map(|unit| format!("{}:{}", unit.id, unit.status))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("Units: {preview}"));
+    }
+
     if let Some(last) = state.log_lines.last() {
         lines.push(format!("Latest: {last}"));
     }
@@ -1575,10 +1634,12 @@ mod tests {
         )
         .unwrap();
         let (tx, _rx) = mpsc::channel::<ToolUpdate>(1);
+        let (cmd_tx, _cmd_rx) = mpsc::channel(16);
         let ctx = ToolContext {
             cwd: dir.path().to_path_buf(),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_tx: tx,
+            command_tx: cmd_tx,
             ui: Arc::new(NullInterface),
             file_cache: Arc::new(FileCache::new()),
             checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
@@ -1635,10 +1696,12 @@ mod tests {
         )
         .unwrap();
         let (tx, _rx) = mpsc::channel::<ToolUpdate>(1);
+        let (cmd_tx, _cmd_rx) = mpsc::channel(16);
         let ctx = ToolContext {
             cwd: dir.to_path_buf(),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_tx: tx,
+            command_tx: cmd_tx,
             ui: Arc::new(NullInterface),
             file_cache: Arc::new(FileCache::new()),
             checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
@@ -1877,6 +1940,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_run_enqueues_follow_up_on_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let mana_dir = dir.path().join(".mana");
+        std::fs::create_dir_all(&mana_dir).unwrap();
+        std::fs::write(mana_dir.join("config.yaml"), "project: test\nnext_id: 2\n").unwrap();
+        std::fs::write(
+            mana_dir.join("1-test-unit.md"),
+            "---\nid: '1'\ntitle: Test unit\nstatus: open\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let (tx, _rx) = mpsc::channel::<ToolUpdate>(8);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let ctx = ToolContext {
+            cwd: dir.path().to_path_buf(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            command_tx: cmd_tx,
+            ui: Arc::new(NullInterface),
+            file_cache: Arc::new(FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
+            mode: crate::config::AgentMode::Full,
+            read_max_lines: 500,
+        };
+
+        let tool = ManaTool::default();
+        let _ = tool
+            .execute(
+                "call_bg_follow_up",
+                json!({ "action": "run", "background": true, "dry_run": true }),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        let follow_up = tokio::time::timeout(std::time::Duration::from_secs(2), cmd_rx.recv())
+            .await
+            .expect("follow-up timeout")
+            .expect("follow-up message");
+
+        match follow_up {
+            crate::agent::AgentCommand::FollowUp(text) => {
+                assert!(text.contains("mana run finished"), "text was: {text}");
+                assert!(text.contains("Inspect with mana(action=\"run_state\")"), "text was: {text}");
+            }
+            other => panic!("expected follow-up, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn background_run_supports_explicit_targets() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
@@ -1926,6 +2040,10 @@ mod tests {
         let state_text = state.text_content().unwrap_or("");
         assert!(state_text.contains("Mana run "), "state_text was: {state_text}");
         assert!(state_text.contains("Runtime:"), "state_text was: {state_text}");
+        assert!(
+            state_text.contains("Units:") || state_text.contains("Latest: Dry run:"),
+            "state_text was: {state_text}"
+        );
         assert!(
             state_text.contains("all ready units") || state_text.contains("unit"),
             "state_text was: {state_text}"

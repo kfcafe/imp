@@ -81,10 +81,12 @@ mod tests {
 
     fn test_ctx() -> ToolContext {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
         ToolContext {
             cwd: PathBuf::from("/tmp/lua-tools"),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_tx: tx,
+            command_tx: cmd_tx,
             ui: Arc::new(NullInterface),
             file_cache: Arc::new(imp_core::tools::FileCache::new()),
             checkpoint_state: Arc::new(imp_core::tools::CheckpointState::new()),
@@ -879,10 +881,12 @@ mod tests {
 
     fn make_call_context() -> sandbox::LuaCallContext {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
         sandbox::LuaCallContext {
             cwd: PathBuf::from("/tmp/lua-test"),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_tx: tx,
+            command_tx: cmd_tx,
             ui: Arc::new(NullInterface),
             file_cache: Arc::new(imp_core::tools::FileCache::new()),
             checkpoint_state: Arc::new(imp_core::tools::CheckpointState::new()),

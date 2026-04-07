@@ -5115,7 +5115,7 @@ mod session_lifecycle {
                 ),
             })
             .unwrap();
-        assert_eq!(app.terminal_title(), "imp — adjust top bar layout");
+        assert_eq!(app.terminal_title(), "imp — adjust top bar");
     }
 
     #[test]
@@ -5699,6 +5699,14 @@ mod session_lifecycle {
     #[test]
     fn tui_integration_model_switch_via_cycle() {
         let mut app = make_app();
+        app.config.enabled_models = Some(
+            app.model_registry
+                .list()
+                .iter()
+                .take(3)
+                .map(|m| m.id.clone())
+                .collect(),
+        );
 
         // The default "sonnet" alias isn't a canonical ID, so cycle_model
         // starts from index 0.  After cycling forward, the model changes.
@@ -5728,6 +5736,14 @@ mod session_lifecycle {
     #[test]
     fn tui_integration_model_switch_updates_context_window() {
         let mut app = make_app();
+        app.config.enabled_models = Some(
+            app.model_registry
+                .list()
+                .iter()
+                .take(2)
+                .map(|m| m.id.clone())
+                .collect(),
+        );
         let original_ctx = app.context_window;
 
         // Cycle to a different model and check context_window updated

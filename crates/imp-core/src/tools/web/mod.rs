@@ -293,10 +293,12 @@ mod tests {
         std::env::set_var("IMP_WEB_PROVIDER", "tavily");
 
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
         let ctx = ToolContext {
             cwd: dir.path().to_path_buf(),
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_tx: tx,
+            command_tx: cmd_tx,
             ui: std::sync::Arc::new(crate::ui::NullInterface),
             file_cache: std::sync::Arc::new(crate::tools::FileCache::new()),
             checkpoint_state: std::sync::Arc::new(crate::tools::CheckpointState::new()),

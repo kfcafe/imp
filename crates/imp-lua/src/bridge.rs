@@ -66,6 +66,7 @@ impl Tool for LuaTool {
             cwd: ctx.cwd,
             cancelled: ctx.cancelled,
             update_tx: ctx.update_tx,
+            command_tx: ctx.command_tx,
             ui: ctx.ui,
             file_cache: ctx.file_cache,
             checkpoint_state: ctx.checkpoint_state,

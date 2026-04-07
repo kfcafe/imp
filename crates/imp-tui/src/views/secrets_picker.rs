@@ -17,23 +17,40 @@ pub struct SecretProviderOption {
 }
 
 pub fn secret_providers(registry: &ProviderRegistry) -> Vec<SecretProviderOption> {
-    let mut providers: Vec<SecretProviderOption> = registry
-        .list()
-        .iter()
-        .filter(|provider| !matches!(provider.id, "anthropic" | "openai" | "openai-codex"))
-        .map(|provider| SecretProviderOption {
-            id: provider.id.to_string(),
-            label: provider.name.to_string(),
-            description: if provider.docs_url.is_empty() {
-                "Secure API/service secrets".into()
-            } else {
-                format!("Secure API/service secrets · {}", provider.docs_url)
-            },
+    let mut providers: Vec<SecretProviderOption> = vec![
+        SecretProviderOption {
+            id: "exa".to_string(),
+            label: "Exa".to_string(),
+            description: "Secure API/service secrets · dashboard.exa.ai/api-keys".to_string(),
             configured: false,
-        })
-        .collect();
+        },
+        SecretProviderOption {
+            id: "tavily".to_string(),
+            label: "Tavily".to_string(),
+            description: "Secure API/service secrets · app.tavily.com/home".to_string(),
+            configured: false,
+        },
+    ];
+
+    providers.extend(
+        registry
+            .list()
+            .iter()
+            .filter(|provider| !matches!(provider.id, "anthropic" | "openai" | "openai-codex"))
+            .map(|provider| SecretProviderOption {
+                id: provider.id.to_string(),
+                label: provider.name.to_string(),
+                description: if provider.docs_url.is_empty() {
+                    "Secure API/service secrets".into()
+                } else {
+                    format!("Secure API/service secrets · {}", provider.docs_url)
+                },
+                configured: false,
+            }),
+    );
 
     providers.sort_by(|a, b| a.label.cmp(&b.label));
+    providers.dedup_by(|a, b| a.id == b.id);
     providers
 }
 

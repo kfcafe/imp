@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use imp_llm::provider::ToolDefinition;
 use imp_llm::{ContentBlock, ToolResultMessage};
 
+use crate::agent::AgentCommand;
 use crate::config::AgentMode;
 use crate::error::Result;
 use crate::ui::UserInterface;
@@ -124,6 +125,7 @@ pub struct ToolContext {
     pub cwd: PathBuf,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
     pub update_tx: tokio::sync::mpsc::Sender<ToolUpdate>,
+    pub command_tx: tokio::sync::mpsc::Sender<AgentCommand>,
     pub ui: Arc<dyn UserInterface>,
     pub file_cache: Arc<FileCache>,
     /// Shared checkpoint/file-history state for destructive tool operations.

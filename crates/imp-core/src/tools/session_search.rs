@@ -156,10 +156,12 @@ mod tests {
 
     fn test_ctx() -> ToolContext {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
         ToolContext {
             cwd: std::env::temp_dir(),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_tx: tx,
+            command_tx: cmd_tx,
             ui: Arc::new(crate::ui::NullInterface),
             file_cache: Arc::new(crate::tools::FileCache::new()),
             checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),

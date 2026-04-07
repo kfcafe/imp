@@ -150,6 +150,7 @@ pub struct Agent {
     last_tool_call: std::sync::Arc<std::sync::Mutex<Option<RepeatedToolCallState>>>,
 
     event_tx: mpsc::Sender<AgentEvent>,
+    command_tx: mpsc::Sender<AgentCommand>,
     command_rx: mpsc::Receiver<AgentCommand>,
 }
 
@@ -214,6 +215,7 @@ impl Agent {
             last_tool_call: Arc::new(std::sync::Mutex::new(None)),
 
             event_tx,
+            command_tx: command_tx.clone(),
             command_rx,
         };
 
@@ -809,6 +811,7 @@ impl Agent {
                     cwd: self.cwd.clone(),
                     cancelled: Arc::clone(&cancel_token),
                     update_tx,
+                    command_tx: self.command_tx.clone(),
                     ui: self.ui.clone(),
                     file_cache: self.file_cache.clone(),
                     checkpoint_state: self.checkpoint_state.clone(),

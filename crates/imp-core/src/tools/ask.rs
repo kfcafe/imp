@@ -167,10 +167,12 @@ mod tests {
 
     fn test_ctx() -> ToolContext {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
         ToolContext {
             cwd: std::path::PathBuf::from("/tmp"),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_tx: tx,
+            command_tx: cmd_tx,
             ui: Arc::new(NullInterface),
             file_cache: Arc::new(crate::tools::FileCache::new()),
             checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
@@ -217,10 +219,12 @@ mod tests {
     async fn ask_missing_question_returns_error() {
         // Use a mock UI that has_ui=true to bypass the first check
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
         let ctx = ToolContext {
             cwd: std::path::PathBuf::from("/tmp"),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_tx: tx,
+            command_tx: cmd_tx,
             ui: Arc::new(MockUi),
             file_cache: Arc::new(crate::tools::FileCache::new()),
             checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),

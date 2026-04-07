@@ -59,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             system_prompt: "You are imp.".to_string(),
             tools: Vec::new(),
             cache_options: Default::default(),
+            effort: None,
         };
 
         let started = Instant::now();

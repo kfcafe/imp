@@ -757,12 +757,17 @@ fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
             }
             "run" => {
                 push_mana_detail_line(&mut lines, "id", tc.details.get("id"));
+                push_mana_detail_line(&mut lines, "scope", tc.details.get("scope"));
+                push_mana_detail_line(&mut lines, "target", tc.details.get("target"));
                 push_mana_detail_line(&mut lines, "jobs", tc.details.get("jobs"));
                 push_mana_detail_line(&mut lines, "background", tc.details.get("background"));
                 push_mana_detail_line(&mut lines, "dry_run", tc.details.get("dry_run"));
                 push_mana_detail_line(&mut lines, "review", tc.details.get("review"));
                 push_mana_detail_line(&mut lines, "timeout", tc.details.get("timeout"));
                 push_mana_detail_line(&mut lines, "idle_timeout", tc.details.get("idle_timeout"));
+                if let Some(runtime) = tc.details.get("runtime") {
+                    push_mana_detail_line(&mut lines, "runtime", Some(runtime));
+                }
             }
             _ => {
                 for key in ["id", "run_id", "reason", "by", "status", "count"] {
@@ -880,7 +885,25 @@ fn push_mana_detail_line(lines: &mut Vec<String>, key: &str, value: Option<&Valu
             })
             .collect::<Vec<_>>()
             .join(", "),
-        Value::Object(_) => serde_json::to_string(value).unwrap_or_default(),
+        Value::Object(map) => {
+            if let (Some(kind), Some(ids)) = (map.get("kind").and_then(Value::as_str), map.get("ids").and_then(Value::as_array)) {
+                let ids = ids
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{kind}: {ids}")
+            } else if let (Some(kind), Some(id)) = (map.get("kind").and_then(Value::as_str), map.get("id").and_then(Value::as_str)) {
+                format!("{kind}: {id}")
+            } else if let (Some(agent), Some(model)) = (
+                map.get("direct_agent").and_then(Value::as_str),
+                map.get("model").and_then(Value::as_str),
+            ) {
+                format!("{agent} · {model}")
+            } else {
+                serde_json::to_string(value).unwrap_or_default()
+            }
+        }
     };
     if !rendered.is_empty() {
         lines.push(format!("{key}: {rendered}"));
@@ -1079,6 +1102,42 @@ mod tests {
             .any(|l| l.contains("status=done  wave=1  duration=8s")));
         assert!(lines.iter().any(|l| l.contains("✗ 1.2  Second")));
         assert!(lines.iter().any(|l| l.contains("status=failed  wave=1")));
+    }
+
+    #[test]
+    fn format_mana_output_renders_scope_target_and_runtime() {
+        let tc = DisplayToolCall {
+            id: "run-1".into(),
+            name: "mana".into(),
+            args_summary: "run".into(),
+            output: None,
+            details: serde_json::json!({
+                "action": "run",
+                "scope": "targets 1, 2",
+                "target": {"kind": "explicit", "ids": ["1", "2"]},
+                "runtime": {"direct_agent": "imp", "model": "sonnet"},
+                "background": true,
+                "view": {
+                    "summary": {
+                        "total_units": 2,
+                        "total_closed": 2,
+                        "total_failed": 0,
+                        "total_awaiting_verify": 0,
+                        "total_skipped": 0
+                    },
+                    "units": []
+                }
+            }),
+            is_error: false,
+            expanded: false,
+            streaming_lines: Vec::new(),
+            streaming_output: String::new(),
+        };
+
+        let lines = format_mana_output(&tc);
+        assert!(lines.iter().any(|l| l == "scope: targets 1, 2"));
+        assert!(lines.iter().any(|l| l == "target: explicit: 1, 2"));
+        assert!(lines.iter().any(|l| l == "runtime: imp · sonnet"));
     }
 
     #[test]

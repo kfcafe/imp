@@ -506,10 +506,12 @@ mod tests {
     fn test_ctx(dir: &std::path::Path) -> (ToolContext, tokio::sync::mpsc::Receiver<ToolUpdate>) {
         ensure_sh();
         let (tx, rx) = tokio::sync::mpsc::channel(1024);
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
         let ctx = ToolContext {
             cwd: dir.to_path_buf(),
             cancelled: Arc::new(AtomicBool::new(false)),
             update_tx: tx,
+            command_tx: cmd_tx,
             ui: Arc::new(NullInterface),
             file_cache: Arc::new(crate::tools::FileCache::new()),
             checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),

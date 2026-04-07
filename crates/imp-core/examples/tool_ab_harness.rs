@@ -8,17 +8,7 @@ use futures_core::Stream;
 use imp_core::agent::{Agent, AgentEvent, AgentHandle};
 use imp_core::builder::AgentBuilder;
 use imp_core::config::Config;
-use imp_core::tools::{
-    bash::BashTool,
-    diff::{DiffApplyTool, DiffShowTool, DiffTool},
-    edit::EditTool,
-    find::FindTool,
-    grep::GrepTool,
-    ls::LsTool,
-    read::ReadTool,
-    scan::ScanTool,
-    write::WriteTool,
-};
+use imp_core::tools::{bash::BashTool, edit::EditTool, read::ReadTool, scan::ScanTool, write::WriteTool};
 use imp_llm::auth::{ApiKey, AuthStore};
 use imp_llm::model::{Capabilities, ModelMeta, ModelPricing, ModelRegistry};
 use imp_llm::provider::Provider;
@@ -175,12 +165,6 @@ fn create_agent_legacy(provider: Arc<dyn Provider>, cwd: PathBuf) -> (Agent, Age
     agent.tools.register(Arc::new(WriteTool));
     agent.tools.register(Arc::new(ReadTool));
     agent.tools.register(Arc::new(EditTool));
-    agent.tools.register(Arc::new(GrepTool));
-    agent.tools.register(Arc::new(FindTool));
-    agent.tools.register(Arc::new(LsTool));
-    agent.tools.register(Arc::new(DiffTool));
-    agent.tools.register(Arc::new(DiffShowTool));
-    agent.tools.register(Arc::new(DiffApplyTool));
     agent.tools.register(Arc::new(ScanTool));
     agent.tools.register(Arc::new(BashTool));
     (agent, handle)
@@ -356,12 +340,6 @@ async fn run_live_variant(
             tools.register(Arc::new(WriteTool));
             tools.register(Arc::new(ReadTool));
             tools.register(Arc::new(EditTool));
-            tools.register(Arc::new(GrepTool));
-            tools.register(Arc::new(FindTool));
-            tools.register(Arc::new(LsTool));
-            tools.register(Arc::new(DiffTool));
-            tools.register(Arc::new(DiffShowTool));
-            tools.register(Arc::new(DiffApplyTool));
             tools.register(Arc::new(ScanTool));
             tools.register(Arc::new(BashTool));
         });
