@@ -658,11 +658,10 @@ impl App {
             .is_some_and(tokio::task::JoinHandle::is_finished);
         if agent_task_finished {
             if let Some(task) = self.agent_task.take() {
-                let outcome = match task.now_or_never() {
-                    Some(Ok(Ok(()))) | Some(Ok(Err(ImpCoreError::Cancelled))) => Ok(()),
-                    Some(Ok(Err(error))) => Err(error.to_string()),
-                    Some(Err(error)) => Err(format!("Internal agent task failure: {error}")),
-                    None => return signals,
+                let outcome = match task.await {
+                    Ok(Ok(())) | Ok(Err(ImpCoreError::Cancelled)) => Ok(()),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(error) => Err(format!("Internal agent task failure: {error}")),
                 };
 
                 // Drain one more time after confirmed completion. The agent can finish with final
@@ -687,17 +686,16 @@ impl App {
             .is_some_and(tokio::task::JoinHandle::is_finished);
         if login_task_finished {
             if let Some(task) = self.login_task.take() {
-                match task.now_or_never() {
-                    Some(Ok(LoginTaskExit::Success(message))) => {
+                match task.await {
+                    Ok(LoginTaskExit::Success(message)) => {
                         signals.push(RuntimeSignal::LoginTaskSucceeded(message));
                     }
-                    Some(Ok(LoginTaskExit::Failed(message))) => {
+                    Ok(LoginTaskExit::Failed(message)) => {
                         signals.push(RuntimeSignal::LoginTaskFailed(message));
                     }
-                    Some(Err(error)) => signals.push(RuntimeSignal::LoginTaskFailed(format!(
+                    Err(error) => signals.push(RuntimeSignal::LoginTaskFailed(format!(
                         "Login task failure: {error}"
                     ))),
-                    None => return signals,
                 }
             }
         }
