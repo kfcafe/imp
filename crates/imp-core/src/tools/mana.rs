@@ -1166,9 +1166,11 @@ impl Tool for ManaTool {
         let mut properties = serde_json::Map::new();
         properties.insert(
             "action".into(),
-            json!({ "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "run_state", "evaluate", "claim", "release", "logs", "agents", "next", "tree"] }),
+            json!({ "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "run_state", "evaluate", "claim", "release", "logs", "agents", "next", "tree", "reopen", "verify", "fail", "delete", "dep_add", "dep_remove", "fact_create", "fact_verify"] }),
         );
         properties.insert("id".into(), json!({ "type": "string" }));
+        properties.insert("from_id".into(), json!({ "type": "string", "description": "Source unit ID for dependency updates" }));
+        properties.insert("dep_id".into(), json!({ "type": "string", "description": "Dependency unit ID to add or remove" }));
         properties.insert(
             "run_id".into(),
             json!({ "type": "string", "description": "Native in-session mana run ID, returned by action=run" }),
@@ -1246,6 +1248,22 @@ impl Tool for ManaTool {
         properties.insert(
             "on_fail".into(),
             json!({ "description": "On-fail policy as a string like retry:3 / escalate:P1 or an object" }),
+        );
+        properties.insert(
+            "fact_title".into(),
+            json!({ "type": "string", "description": "Title for fact_create; falls back to title" }),
+        );
+        properties.insert(
+            "paths_csv".into(),
+            json!({ "type": "string", "description": "Comma-separated paths for fact_create convenience" }),
+        );
+        properties.insert(
+            "ttl_days".into(),
+            json!({ "type": "integer", "description": "TTL in days for fact_create" }),
+        );
+        properties.insert(
+            "pass_ok".into(),
+            json!({ "type": "boolean", "description": "Permit fact creation even if verify currently passes" }),
         );
         properties.insert("force".into(), json!({ "type": "boolean" }));
         properties.insert("reason".into(), json!({ "type": "string" }));
@@ -1444,6 +1462,95 @@ impl Tool for ManaTool {
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
+            "reopen" => {
+                let id = params["id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("reopen requires 'id'".into()))?;
+                match mana_core::api::reopen_unit(&mana_dir, id) {
+                    Ok(result) => Ok(json_output(&result)),
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
+            "verify" => {
+                let id = params["id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("verify requires 'id'".into()))?;
+                match mana_core::api::run_verify(&mana_dir, id) {
+                    Ok(Some(result)) => Ok(json_output(&result)),
+                    Ok(None) => Ok(ToolOutput::text(format!("Unit {id} has no verify command."))),
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
+            "fail" => {
+                let id = params["id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("fail requires 'id'".into()))?;
+                match mana_core::api::fail_unit(&mana_dir, id, parse_optional_string(&params["reason"])) {
+                    Ok(unit) => Ok(json_output(&unit)),
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
+            "delete" => {
+                let id = params["id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("delete requires 'id'".into()))?;
+                match mana_core::api::delete_unit(&mana_dir, id) {
+                    Ok(result) => Ok(json_output(&result)),
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
+            "dep_add" => {
+                let from_id = params["from_id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("dep_add requires 'from_id'".into()))?;
+                let dep_id = params["dep_id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("dep_add requires 'dep_id'".into()))?;
+                match mana_core::api::add_dep(&mana_dir, from_id, dep_id) {
+                    Ok(result) => Ok(json_output(&result)),
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
+            "dep_remove" => {
+                let from_id = params["from_id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("dep_remove requires 'from_id'".into()))?;
+                let dep_id = params["dep_id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("dep_remove requires 'dep_id'".into()))?;
+                match mana_core::api::remove_dep(&mana_dir, from_id, dep_id) {
+                    Ok(result) => Ok(json_output(&result)),
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
+            "fact_create" => {
+                let title = parse_optional_string(&params["fact_title"])
+                    .or_else(|| parse_optional_string(&params["title"]))
+                    .ok_or_else(|| crate::error::Error::Tool("fact_create requires 'fact_title' or 'title'".into()))?;
+                let verify = parse_optional_string(&params["verify"])
+                    .ok_or_else(|| crate::error::Error::Tool("fact_create requires 'verify'".into()))?;
+                let paths_csv = parse_optional_string(&params["paths_csv"])
+                    .or_else(|| {
+                        let paths = parse_csv_strings(&params["paths"], "paths").ok()?;
+                        if paths.is_empty() { None } else { Some(paths.join(",")) }
+                    });
+                let fact_params = mana_core::ops::fact::FactParams {
+                    title,
+                    verify,
+                    description: parse_optional_string(&params["description"]),
+                    paths: paths_csv,
+                    ttl_days: params["ttl_days"].as_i64(),
+                    pass_ok: params["pass_ok"].as_bool().unwrap_or(true),
+                };
+                match mana_core::api::create_fact(&mana_dir, fact_params) {
+                    Ok(result) => Ok(json_output(&result)),
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
+            "fact_verify" => match mana_core::api::verify_facts(&mana_dir) {
+                Ok(result) => Ok(json_output(&result)),
+                Err(e) => Ok(ToolOutput::error(e.to_string())),
+            },
             "logs" => {
                 if let Some(run_id) = params["run_id"].as_str() {
                     if let Some(state) = run_state_snapshot(&self.run_store, Some(run_id)) {
