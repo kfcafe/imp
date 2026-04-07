@@ -1925,6 +1925,28 @@ impl App {
                     self.mode = UiMode::Normal;
                 }
             }
+            KeyCode::Char('f') => {
+                let selected_id = if let UiMode::TreeView(ref state) = self.mode {
+                    state.selected_id().map(String::from)
+                } else {
+                    None
+                };
+                if let Some(id) = selected_id {
+                    let path = Config::session_dir().join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+                    match self.session.fork(&id, &path) {
+                        Ok(forked) => {
+                            self.session = forked;
+                            self.load_session_messages();
+                            self.mode = UiMode::Normal;
+                            self.push_system_msg("Forked from selected tree node. You're on a new branch.");
+                        }
+                        Err(e) => {
+                            self.mode = UiMode::Normal;
+                            self.push_system_msg(&format!("Fork failed: {e}"));
+                        }
+                    }
+                }
+            }
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let UiMode::TreeView(ref mut state) = self.mode {
                     state.cycle_filter();
