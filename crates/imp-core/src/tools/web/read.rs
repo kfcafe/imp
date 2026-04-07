@@ -209,7 +209,8 @@ pub fn diagnose(page: &PageContent, raw_html: &str) -> Vec<String> {
     .iter()
     .any(|needle| text_lower.contains(needle));
     if page.status_code == 200 && very_short_text && has_soft_404_indicator {
-        warnings.push("Page appears to be a soft 404 (HTTP 200 but error page content).".to_string());
+        warnings
+            .push("Page appears to be a soft 404 (HTTP 200 but error page content).".to_string());
     }
 
     if page.raw_body_bytes > 20 * 1024 && page.content_length < 2 * 1024 {
@@ -259,9 +260,7 @@ fn detect_content_format(content_type: &str) -> ContentFormat {
 
     if content_type.contains("text/markdown") || content_type.contains("text/x-markdown") {
         ContentFormat::Markdown
-    } else if content_type.contains("text/html")
-        || content_type.contains("application/xhtml+xml")
-    {
+    } else if content_type.contains("text/html") || content_type.contains("application/xhtml+xml") {
         ContentFormat::Html
     } else {
         ContentFormat::PlainText
@@ -326,7 +325,10 @@ mod tests {
             detect_content_format("text/plain; charset=utf-8"),
             ContentFormat::PlainText
         );
-        assert_eq!(detect_content_format("application/json"), ContentFormat::PlainText);
+        assert_eq!(
+            detect_content_format("application/json"),
+            ContentFormat::PlainText
+        );
     }
 
     #[test]
@@ -334,12 +336,18 @@ mod tests {
         let markdown = "# Title\n\n\nParagraph";
         let cleaned_markdown = clean_text(markdown);
         assert_eq!(cleaned_markdown, "# Title\n\n\nParagraph");
-        assert_eq!(detect_content_format("text/markdown"), ContentFormat::Markdown);
+        assert_eq!(
+            detect_content_format("text/markdown"),
+            ContentFormat::Markdown
+        );
 
         let plain = "  hello  \n\n\nworld  ";
         let cleaned_plain = clean_text(plain);
         assert_eq!(cleaned_plain, "hello\n\n\nworld");
-        assert_eq!(detect_content_format("text/plain"), ContentFormat::PlainText);
+        assert_eq!(
+            detect_content_format("text/plain"),
+            ContentFormat::PlainText
+        );
     }
 
     #[test]
@@ -427,7 +435,10 @@ mod tests {
         assert_eq!(page.url, "https://example.com/final");
         assert_eq!(page.requested_url, "https://example.com/start");
         assert_eq!(page.status_code, 200);
-        assert_eq!(page.content_type.as_deref(), Some("text/html; charset=utf-8"));
+        assert_eq!(
+            page.content_type.as_deref(),
+            Some("text/html; charset=utf-8")
+        );
         assert!(page.was_redirected);
         assert_eq!(page.raw_body_bytes, html.len());
     }
@@ -448,7 +459,10 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let warnings = diagnose(&page, "<html><body><noscript>Enable JS</noscript></body></html>");
+        let warnings = diagnose(
+            &page,
+            "<html><body><noscript>Enable JS</noscript></body></html>",
+        );
         assert!(warnings.iter().any(|w| w.contains("client-rendered shell")));
     }
 
@@ -490,7 +504,10 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let warnings = diagnose(&page, "<html><body><article>real docs</article></body></html>");
+        let warnings = diagnose(
+            &page,
+            "<html><body><article>real docs</article></body></html>",
+        );
         assert!(warnings.is_empty());
     }
 
@@ -513,6 +530,8 @@ mod tests {
 
         let warnings = diagnose(&page, "<html></html>");
         assert!(warnings.iter().any(|w| w.contains("Large page")));
-        assert!(warnings.iter().any(|w| w.contains("Significant content may have been lost")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("Significant content may have been lost")));
     }
 }

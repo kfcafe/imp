@@ -371,7 +371,12 @@ fn run_state_file() -> std::path::PathBuf {
     }
 
     let dir = std::env::var("HOME")
-        .map(|h| std::path::PathBuf::from(h).join(".local").join("share").join("units"))
+        .map(|h| {
+            std::path::PathBuf::from(h)
+                .join(".local")
+                .join("share")
+                .join("units")
+        })
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp").join("mana"));
     std::fs::create_dir_all(&dir).ok();
     dir.join("run_state.json")
@@ -652,7 +657,7 @@ fn spawn_background_run(
         let result = tokio::task::spawn_blocking(move || {
             mana::commands::run::run_with_stream_capture_and_sink(
                 &mana_dir,
-                run_args,
+                run_args.into(),
                 Some(Arc::new(move |event| {
                     update_run_store_with_event(&run_store_for_sink, &run_id_for_sink, &event);
                 })),
@@ -1378,7 +1383,7 @@ impl Tool for ManaTool {
                 let update_tx = ctx.update_tx.clone();
                 match mana::commands::run::run_with_stream_capture_and_sink(
                     &mana_dir,
-                    run_args,
+                    run_args.into(),
                     Some(Arc::new(move |event| {
                         update_run_store_with_event(&run_store, &run_id_for_sink, &event);
                         if let Some(line) = stream_event_line(&event) {

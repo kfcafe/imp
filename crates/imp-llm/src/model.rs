@@ -452,7 +452,6 @@ fn builtin_models() -> Vec<ModelMeta> {
         },
     ];
 
-
     let openai_insert_at = models
         .iter()
         .take_while(|model| model.provider == "anthropic")

@@ -297,7 +297,10 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert_eq!(checkpoint_state.original(&file).as_deref(), Some("foo\nbar\n"));
+        assert_eq!(
+            checkpoint_state.original(&file).as_deref(),
+            Some("foo\nbar\n")
+        );
         assert_eq!(checkpoint_state.checkpoints().len(), 1);
     }
 

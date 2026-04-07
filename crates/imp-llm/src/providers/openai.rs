@@ -211,7 +211,9 @@ fn build_request(model: &Model, context: Context, options: RequestOptions) -> Ap
         options.temperature
     };
 
-    let max_output_tokens = options.max_tokens.or(Some(default_max_output_tokens(model)));
+    let max_output_tokens = options
+        .max_tokens
+        .or(Some(default_max_output_tokens(model)));
 
     ApiRequest {
         model: model.meta.id.clone(),

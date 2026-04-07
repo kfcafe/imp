@@ -63,7 +63,10 @@ pub fn discover_soul(cwd: &Path, user_config_dir: &Path) -> Option<SoulDoc> {
     let global = user_config_dir.join("soul.md");
     std::fs::read_to_string(&global)
         .ok()
-        .map(|content| SoulDoc { path: global, content })
+        .map(|content| SoulDoc {
+            path: global,
+            content,
+        })
 }
 
 /// Discover all AGENTS.md files by walking up from cwd.
@@ -216,7 +219,11 @@ mod tests {
         fs::create_dir_all(project.join(".imp")).unwrap();
         fs::create_dir_all(&nested).unwrap();
         fs::write(user_dir.join("soul.md"), "# Soul\n\nglobal soul").unwrap();
-        fs::write(project.join(".imp").join("soul.md"), "# Soul\n\nproject soul").unwrap();
+        fs::write(
+            project.join(".imp").join("soul.md"),
+            "# Soul\n\nproject soul",
+        )
+        .unwrap();
 
         let soul = discover_soul(&nested, &user_dir).expect("project soul should load");
         assert!(soul.content.contains("project soul"));
@@ -410,7 +417,11 @@ mod tests {
         let project = dir.path().join("project");
         let project_skill = project.join(".imp").join("skills").join("mana");
         fs::create_dir_all(&project_skill).unwrap();
-        fs::write(project_skill.join("SKILL.md"), "# Mana\n\nProject version.\n").unwrap();
+        fs::write(
+            project_skill.join("SKILL.md"),
+            "# Mana\n\nProject version.\n",
+        )
+        .unwrap();
 
         let skills = discover_skills(&project, &user_dir);
         assert_eq!(skills.len(), 1);

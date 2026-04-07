@@ -290,7 +290,13 @@ impl Widget for SidebarView<'_> {
 
                 let selected_tc = self.selected.and_then(|i| self.tool_calls.get(i)).copied();
                 if let Some(lines) = self.precomputed_detail_lines {
-                    render_detail_from_lines(lines, self.theme, self.detail_scroll, detail_area, buf);
+                    render_detail_from_lines(
+                        lines,
+                        self.theme,
+                        self.detail_scroll,
+                        detail_area,
+                        buf,
+                    );
                 } else {
                     render_detail(
                         selected_tc,
@@ -562,7 +568,10 @@ fn render_detail(
     }
 
     let Some(tc) = tc else {
-        let lines = vec![Line::from(Span::styled("Select a tool call", theme.muted_style()))];
+        let lines = vec![Line::from(Span::styled(
+            "Select a tool call",
+            theme.muted_style(),
+        ))];
         render_detail_from_lines(&lines, theme, scroll, area, buf);
         return;
     };
@@ -712,7 +721,10 @@ fn indent_line(line: Line<'static>) -> Line<'static> {
 }
 
 fn line_to_plain_text(line: &Line<'_>) -> String {
-    line.spans.iter().map(|span| span.content.as_ref()).collect()
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
 }
 fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
     let mut lines = Vec::new();

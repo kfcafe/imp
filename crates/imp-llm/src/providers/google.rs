@@ -295,9 +295,10 @@ fn build_request(model: &Model, context: Context, options: RequestOptions) -> Ap
         system_instruction: build_system_instruction(&options.system_prompt),
         tools: build_tools(&options.tools),
         generation_config: ApiGenerationConfig {
-            max_output_tokens: options
-                .max_tokens
-                .or(Some(default_max_output_tokens(model, thinking_budget(model, options.thinking_level)))),
+            max_output_tokens: options.max_tokens.or(Some(default_max_output_tokens(
+                model,
+                thinking_budget(model, options.thinking_level),
+            ))),
             temperature: options.temperature,
             thinking_config,
         },

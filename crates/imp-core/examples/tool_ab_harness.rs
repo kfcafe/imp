@@ -6,17 +6,26 @@ use std::time::Instant;
 use async_trait::async_trait;
 use futures_core::Stream;
 use imp_core::agent::{Agent, AgentEvent, AgentHandle};
-use imp_core::config::Config;
 use imp_core::builder::AgentBuilder;
+use imp_core::config::Config;
 use imp_core::tools::{
-    bash::BashTool, diff::{DiffApplyTool, DiffShowTool, DiffTool}, edit::EditTool,
-    find::FindTool, grep::GrepTool, ls::LsTool, read::ReadTool, scan::ScanTool, write::WriteTool,
+    bash::BashTool,
+    diff::{DiffApplyTool, DiffShowTool, DiffTool},
+    edit::EditTool,
+    find::FindTool,
+    grep::GrepTool,
+    ls::LsTool,
+    read::ReadTool,
+    scan::ScanTool,
+    write::WriteTool,
 };
 use imp_llm::auth::{ApiKey, AuthStore};
 use imp_llm::model::{Capabilities, ModelMeta, ModelPricing, ModelRegistry};
 use imp_llm::provider::Provider;
 use imp_llm::providers::create_provider;
-use imp_llm::{AssistantMessage, ContentBlock, Context, Model, RequestOptions, StopReason, StreamEvent, Usage};
+use imp_llm::{
+    AssistantMessage, ContentBlock, Context, Model, RequestOptions, StopReason, StreamEvent, Usage,
+};
 use serde::Serialize;
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -212,7 +221,10 @@ fn summarize_events(
     events: &[AgentEvent],
     wall_ms: u128,
 ) -> RunSummary {
-    let turns = events.iter().filter(|e| matches!(e, AgentEvent::TurnStart { .. })).count();
+    let turns = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::TurnStart { .. }))
+        .count();
     let tool_names: Vec<String> = events
         .iter()
         .filter_map(|e| match e {
@@ -381,14 +393,26 @@ fn setup_search(path: &std::path::Path) {
 
 fn responses_search_legacy() -> Vec<Vec<StreamEvent>> {
     vec![
-        tool_call_response("call_1", "grep", json!({"pattern": "unique_pattern_xyz", "path": "."}), 100, 20),
+        tool_call_response(
+            "call_1",
+            "grep",
+            json!({"pattern": "unique_pattern_xyz", "path": "."}),
+            100,
+            20,
+        ),
         text_response("Found it", 100, 20),
     ]
 }
 
 fn responses_search_reduced() -> Vec<Vec<StreamEvent>> {
     vec![
-        tool_call_response("call_1", "bash", json!({"command": "grep --no-color -rn 'unique_pattern_xyz' ."}), 100, 20),
+        tool_call_response(
+            "call_1",
+            "bash",
+            json!({"command": "grep --no-color -rn 'unique_pattern_xyz' ."}),
+            100,
+            20,
+        ),
         text_response("Found it", 100, 20),
     ]
 }
@@ -421,14 +445,26 @@ fn setup_find(path: &std::path::Path) {
 
 fn responses_find_legacy() -> Vec<Vec<StreamEvent>> {
     vec![
-        tool_call_response("call_1", "find", json!({"pattern": "*.rs", "path": "."}), 100, 20),
+        tool_call_response(
+            "call_1",
+            "find",
+            json!({"pattern": "*.rs", "path": "."}),
+            100,
+            20,
+        ),
         text_response("Found rust files", 100, 20),
     ]
 }
 
 fn responses_find_reduced() -> Vec<Vec<StreamEvent>> {
     vec![
-        tool_call_response("call_1", "bash", json!({"command": "find . -name '*.rs'"}), 100, 20),
+        tool_call_response(
+            "call_1",
+            "bash",
+            json!({"command": "find . -name '*.rs'"}),
+            100,
+            20,
+        ),
         text_response("Found rust files", 100, 20),
     ]
 }
@@ -444,14 +480,26 @@ fn setup_scan_extract(path: &std::path::Path) {
 
 fn responses_scan_extract_legacy() -> Vec<Vec<StreamEvent>> {
     vec![
-        tool_call_response("call_1", "grep", json!({"extract": ["src/lib.rs#load_user"]}), 100, 20),
+        tool_call_response(
+            "call_1",
+            "grep",
+            json!({"extract": ["src/lib.rs#load_user"]}),
+            100,
+            20,
+        ),
         text_response("Extracted symbol", 100, 20),
     ]
 }
 
 fn responses_scan_extract_reduced() -> Vec<Vec<StreamEvent>> {
     vec![
-        tool_call_response("call_1", "scan", json!({"action": "extract", "files": ["src/lib.rs#load_user"]}), 100, 20),
+        tool_call_response(
+            "call_1",
+            "scan",
+            json!({"action": "extract", "files": ["src/lib.rs#load_user"]}),
+            100,
+            20,
+        ),
         text_response("Extracted symbol", 100, 20),
     ]
 }
@@ -466,7 +514,13 @@ fn setup_search_then_read(path: &std::path::Path) {
 
 fn responses_search_then_read_legacy() -> Vec<Vec<StreamEvent>> {
     vec![
-        tool_call_response("call_1", "grep", json!({"pattern": "important", "path": "."}), 100, 20),
+        tool_call_response(
+            "call_1",
+            "grep",
+            json!({"pattern": "important", "path": "."}),
+            100,
+            20,
+        ),
         tool_call_response("call_2", "read", json!({"path": "module.rs"}), 100, 20),
         text_response("Inspected important function", 100, 20),
     ]
@@ -474,7 +528,13 @@ fn responses_search_then_read_legacy() -> Vec<Vec<StreamEvent>> {
 
 fn responses_search_then_read_reduced() -> Vec<Vec<StreamEvent>> {
     vec![
-        tool_call_response("call_1", "bash", json!({"command": "grep --no-color -rn 'important' ."}), 100, 20),
+        tool_call_response(
+            "call_1",
+            "bash",
+            json!({"command": "grep --no-color -rn 'important' ."}),
+            100,
+            20,
+        ),
         tool_call_response("call_2", "read", json!({"path": "module.rs"}), 100, 20),
         text_response("Inspected important function", 100, 20),
     ]
@@ -490,7 +550,13 @@ fn setup_search_then_edit(path: &std::path::Path) {
 
 fn responses_search_then_edit_legacy() -> Vec<Vec<StreamEvent>> {
     vec![
-        tool_call_response("call_1", "grep", json!({"pattern": "old_name", "path": "."}), 100, 20),
+        tool_call_response(
+            "call_1",
+            "grep",
+            json!({"pattern": "old_name", "path": "."}),
+            100,
+            20,
+        ),
         tool_call_response(
             "call_2",
             "edit",
@@ -504,7 +570,13 @@ fn responses_search_then_edit_legacy() -> Vec<Vec<StreamEvent>> {
 
 fn responses_search_then_edit_reduced() -> Vec<Vec<StreamEvent>> {
     vec![
-        tool_call_response("call_1", "bash", json!({"command": "grep --no-color -rn 'old_name' ."}), 100, 20),
+        tool_call_response(
+            "call_1",
+            "bash",
+            json!({"command": "grep --no-color -rn 'old_name' ."}),
+            100,
+            20,
+        ),
         tool_call_response(
             "call_2",
             "edit",
@@ -536,8 +608,12 @@ fn responses_repeat_reduced() -> Vec<Vec<StreamEvent>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let variant = std::env::args().nth(1).unwrap_or_else(|| "both".to_string());
-    let mode = std::env::args().nth(2).unwrap_or_else(|| "mock".to_string());
+    let variant = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "both".to_string());
+    let mode = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "mock".to_string());
 
     let scenarios = vec![
         (
@@ -597,32 +673,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if variant == "both" || variant == "legacy" {
             match mode.as_str() {
                 "live" => run_live_variant(&mut summaries, "legacy", name, prompt, setup).await?,
-                _ => run_mock_variant(
-                    &mut summaries,
-                    "legacy",
-                    name,
-                    prompt,
-                    setup,
-                    legacy_responses,
-                    create_agent_legacy,
-                )
-                .await?,
+                _ => {
+                    run_mock_variant(
+                        &mut summaries,
+                        "legacy",
+                        name,
+                        prompt,
+                        setup,
+                        legacy_responses,
+                        create_agent_legacy,
+                    )
+                    .await?
+                }
             }
         }
 
         if variant == "both" || variant == "reduced" {
             match mode.as_str() {
                 "live" => run_live_variant(&mut summaries, "reduced", name, prompt, setup).await?,
-                _ => run_mock_variant(
-                    &mut summaries,
-                    "reduced",
-                    name,
-                    prompt,
-                    setup,
-                    reduced_responses,
-                    create_agent_reduced,
-                )
-                .await?,
+                _ => {
+                    run_mock_variant(
+                        &mut summaries,
+                        "reduced",
+                        name,
+                        prompt,
+                        setup,
+                        reduced_responses,
+                        create_agent_reduced,
+                    )
+                    .await?
+                }
             }
         }
     }

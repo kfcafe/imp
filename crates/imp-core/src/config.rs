@@ -48,36 +48,10 @@ impl AgentMode {
                 "memory",
                 "ask",
             ],
-            AgentMode::Orchestrator => &[
-                "read",
-                "scan",
-                "web",
-                "session_search",
-                "mana",
-                "ask",
-            ],
-            AgentMode::Planner => &[
-                "read",
-                "scan",
-                "web",
-                "session_search",
-                "mana",
-                "ask",
-            ],
-            AgentMode::Reviewer => &[
-                "read",
-                "scan",
-                "web",
-                "session_search",
-                "ask",
-            ],
-            AgentMode::Auditor => &[
-                "read",
-                "scan",
-                "web",
-                "session_search",
-                "mana",
-            ],
+            AgentMode::Orchestrator => &["read", "scan", "web", "session_search", "mana", "ask"],
+            AgentMode::Planner => &["read", "scan", "web", "session_search", "mana", "ask"],
+            AgentMode::Reviewer => &["read", "scan", "web", "session_search", "ask"],
+            AgentMode::Auditor => &["read", "scan", "web", "session_search", "mana"],
         }
     }
 
@@ -147,29 +121,35 @@ impl AgentMode {
             AgentMode::Full => None,
             AgentMode::Worker => Some(
                 "You are a worker agent. Your job is to implement the assigned unit as specified and stay within its scope. \
-                You may read files, write files, and run shell commands. Use fast scoped checks for local feedback while implementing, \
-                and record meaningful progress or failure context with `mana update`. \
+                You may read files, write files, and run shell commands. Inspect the relevant files before making claims or changes, \
+                use fast scoped checks for local feedback while implementing, and record meaningful progress or failure context with `mana update`. \
+                Do not declare success if commands or checks fail; report the exact blocker and the next useful action. \
                 You may not create, run, or close mana units — final verification and closure belong to the orchestrator workflow.",
             ),
             AgentMode::Orchestrator => Some(
                 "You are an orchestrator agent. Use mana as your primary execution substrate for non-trivial work. \
-                Write detailed units, split larger efforts into child units with dependencies, dispatch workers through mana, \
+                Inspect mana state before making claims about work status, write detailed units, split larger efforts into child units with dependencies, dispatch workers through mana, \
                 and own the final verification, retry, and closure workflow. \
                 You may not read or write files directly — delegate all file work to worker agents via mana. \
+                Update units with concrete failure context and do not retry unchanged failed plans. \
                 You are responsible for unit structure, completeness, and verify quality.",
             ),
             AgentMode::Planner => Some(
                 "You are a planner agent. Your job is to decompose work into mana units. \
+                Read enough code and context to ground the plan, cite concrete files or constraints when they matter, \
+                and make dependencies, sequencing, and verify commands explicit. \
                 You may read files and create units, but you may not run them — \
                 a human or orchestrator will approve execution.",
             ),
             AgentMode::Reviewer => Some(
                 "You are a reviewer agent. Your job is to read code and report findings. \
+                Ground findings in inspected code, cite exact files or symbols when useful, and distinguish confirmed issues from possible concerns. \
                 You may not write files, run commands, or use mana.",
             ),
             AgentMode::Auditor => Some(
                 "You are an auditor agent. Your job is to inspect code and mana state \
-                and produce structured reports. You may read files and mana status, \
+                and produce structured reports. Ground conclusions in inspected evidence, cite the relevant files or mana objects, \
+                and clearly separate facts, risks, and open questions. You may read files and mana status, \
                 but you may not modify anything.",
             ),
         }
@@ -1288,7 +1268,9 @@ model = "sonnet"
         let worker = AgentMode::Worker.instructions().unwrap();
         assert!(worker.contains("worker"));
         assert!(worker.contains("implement the assigned unit as specified"));
-        assert!(worker.contains("final verification and closure belong to the orchestrator workflow"));
+        assert!(
+            worker.contains("final verification and closure belong to the orchestrator workflow")
+        );
 
         let orchestrator = AgentMode::Orchestrator.instructions().unwrap();
         assert!(orchestrator.contains("orchestrator agent"));

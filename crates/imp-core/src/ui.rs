@@ -20,7 +20,12 @@ pub trait UserInterface: Send + Sync {
     }
 
     /// Select from options with context. Returns None if no UI or cancelled.
-    async fn select_with_context(&self, title: &str, context: &str, options: &[SelectOption]) -> Option<usize>;
+    async fn select_with_context(
+        &self,
+        title: &str,
+        context: &str,
+        options: &[SelectOption],
+    ) -> Option<usize>;
 
     /// Text input. Returns None if no UI or cancelled.
     async fn input(&self, title: &str, placeholder: &str) -> Option<String> {
@@ -28,7 +33,12 @@ pub trait UserInterface: Send + Sync {
     }
 
     /// Text input with context. Returns None if no UI or cancelled.
-    async fn input_with_context(&self, title: &str, context: &str, placeholder: &str) -> Option<String>;
+    async fn input_with_context(
+        &self,
+        title: &str,
+        context: &str,
+        placeholder: &str,
+    ) -> Option<String>;
 
     /// Persistent status in footer.
     async fn set_status(&self, key: &str, text: Option<&str>);
@@ -79,10 +89,20 @@ impl UserInterface for NullInterface {
     async fn confirm(&self, _title: &str, _message: &str) -> Option<bool> {
         None
     }
-    async fn select_with_context(&self, _title: &str, _context: &str, _options: &[SelectOption]) -> Option<usize> {
+    async fn select_with_context(
+        &self,
+        _title: &str,
+        _context: &str,
+        _options: &[SelectOption],
+    ) -> Option<usize> {
         None
     }
-    async fn input_with_context(&self, _title: &str, _context: &str, _placeholder: &str) -> Option<String> {
+    async fn input_with_context(
+        &self,
+        _title: &str,
+        _context: &str,
+        _placeholder: &str,
+    ) -> Option<String> {
         None
     }
     async fn set_status(&self, _key: &str, _text: Option<&str>) {}

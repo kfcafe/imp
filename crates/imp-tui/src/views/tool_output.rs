@@ -423,5 +423,4 @@ mod tests {
         assert_eq!(plain[0], "src/main.rs: 42 bytes created");
         assert!(plain.iter().any(|line| line.contains("fn main()")));
     }
-
 }

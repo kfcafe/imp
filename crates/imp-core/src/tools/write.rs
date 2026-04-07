@@ -239,7 +239,10 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        assert_eq!(checkpoint_state.original(&file).as_deref(), Some("original"));
+        assert_eq!(
+            checkpoint_state.original(&file).as_deref(),
+            Some("original")
+        );
         let checkpoints = checkpoint_state.checkpoints();
         assert_eq!(checkpoints.len(), 1);
         assert!(checkpoints[0].files.contains(&file));

@@ -44,7 +44,12 @@ impl Widget for TopBar<'_> {
         let right = self
             .info
             .turn_elapsed
-            .map(|elapsed| vec![Span::styled(format_elapsed(elapsed), self.theme.muted_style())])
+            .map(|elapsed| {
+                vec![Span::styled(
+                    format_elapsed(elapsed),
+                    self.theme.muted_style(),
+                )]
+            })
             .unwrap_or_default();
 
         let left_width: usize = left.iter().map(|span| span.content.chars().count()).sum();

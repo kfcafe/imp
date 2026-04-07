@@ -43,9 +43,7 @@ use crate::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use crate::builder::AgentBuilder;
 use crate::config::{AgentMode, Config};
 use crate::error::{Error, Result};
-use crate::session::{
-    SessionCheckpointRecord, SessionEntry, SessionManager,
-};
+use crate::session::{SessionCheckpointRecord, SessionEntry, SessionManager};
 use crate::system_prompt::TaskContext;
 use crate::ui::UserInterface;
 
@@ -352,8 +350,7 @@ impl ImpSession {
             .take()
             .ok_or_else(|| Error::Config("Agent already consumed".into()))?;
 
-        let mut history: Vec<imp_llm::Message> =
-            self.session_mgr.get_active_messages();
+        let mut history: Vec<imp_llm::Message> = self.session_mgr.get_active_messages();
 
         // The prompt was already appended to session history so resume/tree state
         // is correct, but Agent::run() will push the active prompt itself. Remove
@@ -606,7 +603,8 @@ impl ImpSession {
         };
 
         if let Some(agent) = self.agent.as_ref() {
-            if let Err(error) = persist_checkpoint_records(&mut self.session_mgr, &agent.checkpoint_state)
+            if let Err(error) =
+                persist_checkpoint_records(&mut self.session_mgr, &agent.checkpoint_state)
             {
                 self.push_persistence_error(
                     persisted.clone(),
@@ -1185,7 +1183,10 @@ mod tests {
         std::fs::write(&file, "original").unwrap();
         let checkpoint = agent
             .checkpoint_state
-            .snapshot_paths(std::slice::from_ref(&file), Some("before tool result".into()))
+            .snapshot_paths(
+                std::slice::from_ref(&file),
+                Some("before tool result".into()),
+            )
             .unwrap()
             .unwrap();
         std::fs::write(&file, "modified").unwrap();

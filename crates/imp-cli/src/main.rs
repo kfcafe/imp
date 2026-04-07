@@ -820,7 +820,11 @@ async fn run_web_login(provider_name: &str) -> Result<(), Box<dyn std::error::Er
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
 
     let _env_key = provider.env_key_name();
-    let fields = prompt_for_secret_fields(provider.name(), provider.name(), search_provider_docs_url(provider))?;
+    let fields = prompt_for_secret_fields(
+        provider.name(),
+        provider.name(),
+        search_provider_docs_url(provider),
+    )?;
 
     auth_store.store_secret_fields(provider.name(), fields)?;
     eprintln!(
@@ -1838,7 +1842,12 @@ impl UserInterface for RpcUi {
         .as_bool()
     }
 
-    async fn select_with_context(&self, title: &str, context: &str, options: &[SelectOption]) -> Option<usize> {
+    async fn select_with_context(
+        &self,
+        title: &str,
+        context: &str,
+        options: &[SelectOption],
+    ) -> Option<usize> {
         let result = self
             .request(
                 "select",
@@ -1853,7 +1862,12 @@ impl UserInterface for RpcUi {
         result.as_u64().map(|index| index as usize)
     }
 
-    async fn input_with_context(&self, title: &str, context: &str, placeholder: &str) -> Option<String> {
+    async fn input_with_context(
+        &self,
+        title: &str,
+        context: &str,
+        placeholder: &str,
+    ) -> Option<String> {
         self.request(
             "input",
             json!({

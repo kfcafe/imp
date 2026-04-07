@@ -24,7 +24,6 @@ pub const SOUL_TUNABLE_SPECS: &[SoulTunableSpec] = &[
     SoulTunableSpec { label: "Planning" },
 ];
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum PersonaFocus {
@@ -718,7 +717,10 @@ pub fn replace_tunable_line(content: &str, label: &str, new_line: &str) -> Strin
             out.push(line.to_string());
             continue;
         }
-        if in_tunables && trimmed.starts_with("- ") && trimmed[2..].starts_with(&format!("{label}:")) {
+        if in_tunables
+            && trimmed.starts_with("- ")
+            && trimmed[2..].starts_with(&format!("{label}:"))
+        {
             if !replaced {
                 out.push(new_line.to_string());
                 replaced = true;
@@ -801,7 +803,6 @@ pub fn soul_prompt_block(soul: &SoulDoc) -> String {
     s
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -833,20 +834,32 @@ mod tests {
         let parsed = parse_tunables_section(&soul);
         assert!(parsed.contains_key("Autonomy"));
         assert!(parsed.contains_key("Brevity"));
-        assert_eq!(tunable_state_for_label(&soul, "Autonomy"), SoulTunableState::Preset(3));
-        assert_eq!(tunable_state_for_label(&soul, "Brevity"), SoulTunableState::Preset(1));
+        assert_eq!(
+            tunable_state_for_label(&soul, "Autonomy"),
+            SoulTunableState::Preset(3)
+        );
+        assert_eq!(
+            tunable_state_for_label(&soul, "Brevity"),
+            SoulTunableState::Preset(1)
+        );
     }
 
     #[test]
     fn soul_tunables_report_edited_when_line_changes() {
         let soul = "# Soul\n\nYou are imp.\n\n## Tunables\n\n- Autonomy: Do your own thing in a custom way.\n";
-        assert_eq!(tunable_state_for_label(soul, "Autonomy"), SoulTunableState::Edited);
+        assert_eq!(
+            tunable_state_for_label(soul, "Autonomy"),
+            SoulTunableState::Edited
+        );
     }
 
     #[test]
     fn soul_tunables_report_missing_when_absent() {
         let soul = "# Soul\n\nHello\n";
-        assert_eq!(tunable_state_for_label(soul, "Autonomy"), SoulTunableState::Missing);
+        assert_eq!(
+            tunable_state_for_label(soul, "Autonomy"),
+            SoulTunableState::Missing
+        );
     }
 
     #[test]
@@ -855,7 +868,10 @@ mod tests {
         let replacement = generated_tunable_line("Warmth", 4).unwrap();
         let updated = replace_tunable_line(&soul, "Warmth", &replacement);
         assert!(updated.contains(&replacement));
-        assert_eq!(tunable_state_for_label(&updated, "Warmth"), SoulTunableState::Preset(4));
+        assert_eq!(
+            tunable_state_for_label(&updated, "Warmth"),
+            SoulTunableState::Preset(4)
+        );
     }
 
     #[test]

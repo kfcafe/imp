@@ -3,7 +3,9 @@ use std::time::Instant;
 use futures::StreamExt;
 use imp_core::builder::AgentBuilder;
 use imp_core::config::Config;
-use imp_core::tools::{bash::BashTool, edit::EditTool, read::ReadTool, scan::ScanTool, write::WriteTool};
+use imp_core::tools::{
+    bash::BashTool, edit::EditTool, read::ReadTool, scan::ScanTool, write::WriteTool,
+};
 use imp_llm::auth::AuthStore;
 use imp_llm::model::ModelRegistry;
 use imp_llm::providers::create_provider;
@@ -49,7 +51,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
 
             let config = Config::default();
-            let mut builder = AgentBuilder::new(config, cwd.path().to_path_buf(), model, api_key.clone());
+            let mut builder =
+                AgentBuilder::new(config, cwd.path().to_path_buf(), model, api_key.clone());
             if variant == "legacy" {
                 builder = builder.extra_tools(|tools| {
                     tools.register(std::sync::Arc::new(WriteTool));

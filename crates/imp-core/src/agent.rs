@@ -638,21 +638,19 @@ impl Agent {
             }
         }
 
-        let mut results = join_all(readonly.into_iter().map(
-            |(index, id, name, args)| {
-                let cancel_token = Arc::clone(&cancel_token);
-                async move {
-                    let result = self
-                        .execute_one_tool(&id, &name, args, cancel_token)
-                        .await;
-                    (index, result)
-                }
-            },
-        ))
+        let mut results = join_all(readonly.into_iter().map(|(index, id, name, args)| {
+            let cancel_token = Arc::clone(&cancel_token);
+            async move {
+                let result = self.execute_one_tool(&id, &name, args, cancel_token).await;
+                (index, result)
+            }
+        }))
         .await;
 
         for (index, id, name, args) in mutable {
-            let result = self.execute_one_tool(&id, &name, args, Arc::clone(&cancel_token)).await;
+            let result = self
+                .execute_one_tool(&id, &name, args, Arc::clone(&cancel_token))
+                .await;
             results.push((index, result));
         }
 
@@ -1544,7 +1542,8 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            agent.run("Please split this into units for workers".to_string())
+            agent
+                .run("Please split this into units for workers".to_string())
                 .await
                 .unwrap();
         });
@@ -1578,7 +1577,8 @@ mod tests {
         agent.has_mana_basics_skill = true;
         agent.mode = AgentMode::Worker;
 
-        agent.run("Check mana status and logs for my unit".to_string())
+        agent
+            .run("Check mana status and logs for my unit".to_string())
             .await
             .unwrap();
 
@@ -1608,7 +1608,8 @@ mod tests {
         agent.has_mana_skill = true;
         agent.mode = AgentMode::Planner;
 
-        agent.run("Explain how this parser works".to_string())
+        agent
+            .run("Explain how this parser works".to_string())
             .await
             .unwrap();
 
@@ -1624,7 +1625,10 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(user_texts, vec!["Explain how this parser works".to_string()]);
+        assert_eq!(
+            user_texts,
+            vec!["Explain how this parser works".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -2514,11 +2518,7 @@ mod tests {
                 "read",
                 serde_json::json!({"path": format!("src/file_{index}.rs")}),
             ));
-            seeded_messages.push(make_tool_result(
-                &call_id,
-                "read",
-                &"x".repeat(400),
-            ));
+            seeded_messages.push(make_tool_result(&call_id, "read", &"x".repeat(400)));
         }
 
         let mut usage_messages = seeded_messages.clone();
@@ -3197,7 +3197,8 @@ mod integration {
             text_response("Found it!", 100, 20),
         ]));
 
-        let (mut agent, handle) = create_agent_with_reduced_tools(provider, tmp.path().to_path_buf());
+        let (mut agent, handle) =
+            create_agent_with_reduced_tools(provider, tmp.path().to_path_buf());
         drop(handle);
 
         agent.run("Search for a pattern".to_string()).await.unwrap();
@@ -3218,7 +3219,10 @@ mod integration {
                 _ => None,
             })
             .unwrap();
-        assert!(!bash_text.trim().is_empty(), "bash grep output should not be empty");
+        assert!(
+            !bash_text.trim().is_empty(),
+            "bash grep output should not be empty"
+        );
     }
 
     // ── Test 3b: repeated identical tool calls warn and then block ────────
@@ -3260,10 +3264,14 @@ mod integration {
             text_response("Done", 100, 20),
         ]));
 
-        let (mut agent, handle) = create_agent_with_reduced_tools(provider, tmp.path().to_path_buf());
+        let (mut agent, handle) =
+            create_agent_with_reduced_tools(provider, tmp.path().to_path_buf());
         drop(handle);
 
-        agent.run("Read the same file repeatedly".to_string()).await.unwrap();
+        agent
+            .run("Read the same file repeatedly".to_string())
+            .await
+            .unwrap();
 
         let third = agent
             .messages

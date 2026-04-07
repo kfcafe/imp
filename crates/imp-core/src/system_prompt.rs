@@ -74,9 +74,11 @@ pub struct AssembleParams<'a> {
     pub guardrail_profile: Option<GuardrailProfile>,
 }
 
-/// Assemble the system prompt from six layers.
+/// Assemble the system prompt from seven layers.
 ///
 /// - Layer 1: Identity + tool descriptions (+ role instructions if any)
+/// - Layer 1.25: Execution policy
+/// - Layer 1.5: Environment context
 /// - Layer 2: Project context from AGENTS.md files
 /// - Layer 3: Skills index
 /// - Layer 4: Mana facts (skipped if empty)
@@ -98,6 +100,9 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
         p.personality,
         p.soul,
     ));
+
+    // Layer 1.25: Execution policy
+    parts.push(execution_policy_layer());
 
     // Layer 1.5: Environment context
     parts.push(environment_layer(p.cwd));
@@ -230,6 +235,17 @@ fn identity_layer(
         s.push('\n');
     }
 
+    s
+}
+
+fn execution_policy_layer() -> String {
+    let mut s = String::from("Execution discipline:\n");
+    s.push_str("- Re-evaluate the user's intent on every new message before acting. Distinguish analysis, implementation, planning, review, and orchestration.\n");
+    s.push_str("- Never claim repository facts that you have not inspected in this session. Ground important claims in opened files, tool output, or explicit user-provided evidence.\n");
+    s.push_str("- If the user references a specific file, symbol, command, or error, inspect it before explaining or proposing changes.\n");
+    s.push_str("- For analysis-only requests, stay read-only unless the user asks for changes.\n");
+    s.push_str("- For implementation, prefer small, reversible changes and verify them with the smallest relevant checks before declaring success.\n");
+    s.push_str("- Do not treat failed commands, failed checks, or missing evidence as success. If blocked, report the exact blocker and the next useful action.\n");
     s
 }
 
@@ -434,10 +450,12 @@ fn task_layer(task: &TaskContext) -> String {
     s.push_str(&format!("Description: {}\n", task.description));
     if let Some(ref verify) = task.verify {
         s.push_str(&format!("Verify: {}\n", verify));
+        s.push_str("Treat the verify command as the primary completion check for this task.\n");
     }
 
     if !task.attempts.is_empty() {
         s.push_str("\n## Previous attempts\n");
+        s.push_str("Do not repeat a failed approach unchanged; use the attempt history to adjust your plan.\n");
         for attempt in &task.attempts {
             s.push_str(&format!(
                 "Attempt {} ({}): {}\n",
@@ -448,6 +466,7 @@ fn task_layer(task: &TaskContext) -> String {
 
     if !task.dependencies.is_empty() {
         s.push_str("\n## Dependencies\n");
+        s.push_str("Respect dependency state when sequencing work; unresolved dependencies are potential blockers.\n");
         for dep in &task.dependencies {
             s.push_str(&format!(
                 "- {} ({}): {}\n",
@@ -624,6 +643,19 @@ mod tests {
     // -- Layer 1: Identity --
 
     #[test]
+    fn system_prompt_includes_execution_policy_layer() {
+        let reg = make_registry();
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
+        assert!(result.text.contains("Execution discipline:"));
+        assert!(result.text.contains(
+            "Never claim repository facts that you have not inspected in this session."
+        ));
+        assert!(result.text.contains(
+            "For analysis-only requests, stay read-only unless the user asks for changes."
+        ));
+    }
+
+    #[test]
     fn system_prompt_identity_includes_all_tools() {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
@@ -633,9 +665,7 @@ mod tests {
         assert!(result
             .text
             .contains("- edit: Edit a file by replacing exact text"));
-        assert!(result
-            .text
-            .contains("- bash: Run shell commands"));
+        assert!(result.text.contains("- bash: Run shell commands"));
     }
 
     #[test]
@@ -758,7 +788,9 @@ mod tests {
             learning_enabled: false,
             guardrail_profile: None,
         });
-        assert!(result.text.contains("You are Sol, a tuned and reflective collaborator."));
+        assert!(result
+            .text
+            .contains("You are Sol, a tuned and reflective collaborator."));
         assert!(result.text.contains("Soul:"));
         assert!(result.text.contains("## Tunables"));
         assert!(!result.text.contains("Working style:"));
@@ -859,9 +891,9 @@ mod tests {
         });
 
         assert!(result.text.contains("- Trigger:"));
-        assert!(result
-            .text
-            .contains("Load `mana` before writing or restructuring mana units for non-trivial work."));
+        assert!(result.text.contains(
+            "Load `mana` before writing or restructuring mana units for non-trivial work."
+        ));
     }
 
     #[test]
@@ -1045,6 +1077,9 @@ mod tests {
             .text
             .contains("Description: The JWT validation test panics"));
         assert!(result.text.contains("Verify: cargo test auth::jwt_test"));
+        assert!(result.text.contains(
+            "Treat the verify command as the primary completion check for this task."
+        ));
     }
 
     #[test]
@@ -1070,6 +1105,9 @@ mod tests {
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Previous attempts"));
+        assert!(result.text.contains(
+            "Do not repeat a failed approach unchanged; use the attempt history to adjust your plan."
+        ));
         assert!(result
             .text
             .contains("Attempt 1 (failed): Tried X, got error Y"));
@@ -1094,6 +1132,9 @@ mod tests {
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Dependencies"));
+        assert!(result.text.contains(
+            "Respect dependency state when sequencing work; unresolved dependencies are potential blockers."
+        ));
         assert!(result
             .text
             .contains("- Schema types (completed): defined in src/schema.rs"));
@@ -1246,12 +1287,14 @@ mod tests {
 
         // All layers present in order
         let identity_pos = result.text.find("You are imp").unwrap();
+        let policy_pos = result.text.find("Execution discipline").unwrap();
         let context_pos = result.text.find("# Project Context").unwrap();
         let skills_pos = result.text.find("Available skills").unwrap();
         let facts_pos = result.text.find("Project facts").unwrap();
         let task_pos = result.text.find("## Task").unwrap();
 
-        assert!(identity_pos < context_pos, "identity before context");
+        assert!(identity_pos < policy_pos, "identity before policy");
+        assert!(policy_pos < context_pos, "policy before context");
         assert!(context_pos < skills_pos, "context before skills");
         assert!(skills_pos < facts_pos, "skills before facts");
         assert!(facts_pos < task_pos, "facts before task");

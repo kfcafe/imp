@@ -93,9 +93,8 @@ fn detect_shell() -> String {
 
 fn sanitize_output_text(text: &str) -> String {
     static ANSI_RE: OnceLock<Regex> = OnceLock::new();
-    let re = ANSI_RE.get_or_init(|| {
-        Regex::new(r"\x1B\[[0-9;?]*[ -/]*[@-~]").expect("valid ansi regex")
-    });
+    let re =
+        ANSI_RE.get_or_init(|| Regex::new(r"\x1B\[[0-9;?]*[ -/]*[@-~]").expect("valid ansi regex"));
     re.replace_all(text, "").replace('\r', "")
 }
 
@@ -137,7 +136,10 @@ fn parse_json_lines_to_text(command: &str, output: &str) -> Option<String> {
     for item in items {
         if is_grep {
             let file = item.get("file").and_then(|v| v.as_str()).unwrap_or("");
-            let line = item.get("line_number").and_then(|v| v.as_u64()).unwrap_or(0);
+            let line = item
+                .get("line_number")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let full_line = item
                 .get("full_line")
                 .and_then(|v| v.as_str())
@@ -591,7 +593,8 @@ mod tests {
         let (ctx, _rx) = test_ctx(tmp.path());
         let cancelled = Arc::clone(&ctx.cancelled);
 
-        let task = tokio::spawn(async move { run_command("sleep 60", DEFAULT_TIMEOUT_SECS, &ctx).await });
+        let task =
+            tokio::spawn(async move { run_command("sleep 60", DEFAULT_TIMEOUT_SECS, &ctx).await });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
 
@@ -691,9 +694,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, _rx) = test_ctx(tmp.path());
 
-        let result = run_command("printf '\\033[1;31mred\\033[0m\\n'", DEFAULT_TIMEOUT_SECS, &ctx)
-            .await
-            .unwrap();
+        let result = run_command(
+            "printf '\\033[1;31mred\\033[0m\\n'",
+            DEFAULT_TIMEOUT_SECS,
+            &ctx,
+        )
+        .await
+        .unwrap();
 
         assert!(!result.is_error);
         let text = match &result.content[0] {
@@ -754,7 +761,6 @@ mod tests {
         assert!(text.contains("workdir not found"));
     }
 
-
     // ── rush backend tests ──────────────────────────────────────────
     //
     // Call run_via_rush directly to avoid env-var races between
@@ -779,8 +785,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("afile.txt"), "content").unwrap();
 
-        let (output, exit_code, _, _) =
-            run_via_rush("ls", DEFAULT_TIMEOUT_SECS, tmp.path(), false).expect("rush should succeed");
+        let (output, exit_code, _, _) = run_via_rush("ls", DEFAULT_TIMEOUT_SECS, tmp.path(), false)
+            .expect("rush should succeed");
 
         assert_eq!(exit_code, 0);
         assert!(
@@ -795,8 +801,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("afile.txt"), "content").unwrap();
 
-        let (output, exit_code, _, _) =
-            run_via_rush("ls", DEFAULT_TIMEOUT_SECS, tmp.path(), true).expect("rush should succeed");
+        let (output, exit_code, _, _) = run_via_rush("ls", DEFAULT_TIMEOUT_SECS, tmp.path(), true)
+            .expect("rush should succeed");
         let text = parse_json_lines_to_text("ls", &output).expect("json should transform");
 
         assert_eq!(exit_code, 0);
@@ -809,18 +815,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("afile.txt"), "hello needle world\n").unwrap();
 
-        let (output, exit_code, _, _) = run_via_rush(
-            "grep -r needle .",
-            DEFAULT_TIMEOUT_SECS,
-            tmp.path(),
-            true,
-        )
-        .expect("rush should succeed");
-        let text = parse_json_lines_to_text("grep -r needle .", &output).expect("json should transform");
+        let (output, exit_code, _, _) =
+            run_via_rush("grep -r needle .", DEFAULT_TIMEOUT_SECS, tmp.path(), true)
+                .expect("rush should succeed");
+        let text =
+            parse_json_lines_to_text("grep -r needle .", &output).expect("json should transform");
 
         assert_eq!(exit_code, 0);
         assert!(text.contains("needle"));
-        assert!(text.contains("afile.txt") || text.contains(":1:"), "unexpected grep text: {text}");
+        assert!(
+            text.contains("afile.txt") || text.contains(":1:"),
+            "unexpected grep text: {text}"
+        );
     }
 
     #[test]
@@ -836,7 +842,8 @@ mod tests {
             true,
         )
         .expect("rush should succeed");
-        let text = parse_json_lines_to_text("find . -name afile.txt", &output).expect("json should transform");
+        let text = parse_json_lines_to_text("find . -name afile.txt", &output)
+            .expect("json should transform");
 
         assert_eq!(exit_code, 0);
         assert!(text.contains("afile.txt"));

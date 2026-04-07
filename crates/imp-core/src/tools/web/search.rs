@@ -4,12 +4,12 @@
 //! `SearchResponse` type. Credentials can come from environment variables
 //! or imp's persisted auth store (`~/.config/imp/auth.json`).
 
+use imp_llm::auth::AuthStore;
 #[cfg(test)]
 use imp_llm::auth::StoredCredential;
-use std::path::Path;
-use imp_llm::auth::AuthStore;
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::path::Path;
 
 use super::types::{SearchProvider, SearchResponse, SearchResult};
 

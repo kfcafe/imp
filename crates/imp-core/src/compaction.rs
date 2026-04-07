@@ -48,7 +48,10 @@ pub struct CompactionCapabilities<'a> {
 /// provider-specific branching throughout the rest of the codebase.
 pub fn select_compaction_strategy(capabilities: &CompactionCapabilities<'_>) -> CompactionStrategy {
     if capabilities.allow_provider_native
-        && matches!(capabilities.provider_id, "openai" | "openai-codex" | "anthropic")
+        && matches!(
+            capabilities.provider_id,
+            "openai" | "openai-codex" | "anthropic"
+        )
     {
         return CompactionStrategy::ProviderNative;
     }
@@ -200,8 +203,7 @@ pub fn prepare_messages_for_compaction(
 
 /// Prefix prepended to the summary in the compaction entry so that later
 /// context assembly can mark it clearly for the model.
-pub const COMPACTION_SUMMARY_PREFIX: &str =
-    "[CONTEXT COMPACTION] Earlier turns were compacted. \
+pub const COMPACTION_SUMMARY_PREFIX: &str = "[CONTEXT COMPACTION] Earlier turns were compacted. \
 Use the summary below plus the preserved recent messages to continue. \
 Avoid repeating completed work:\n";
 
@@ -220,7 +222,10 @@ fn build_summary_prompt(messages: &[Message]) -> String {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                serialized.push_str(&format!("[USER]: {}\n\n", truncate_for_display(&text, 3000)));
+                serialized.push_str(&format!(
+                    "[USER]: {}\n\n",
+                    truncate_for_display(&text, 3000)
+                ));
             }
             Message::Assistant(assistant) => {
                 let mut parts = Vec::new();
@@ -240,10 +245,7 @@ fn build_summary_prompt(messages: &[Message]) -> String {
                             ));
                         }
                         ContentBlock::Thinking { text } => {
-                            parts.push(format!(
-                                "[thinking: {}]",
-                                truncate_for_display(text, 500)
-                            ));
+                            parts.push(format!("[thinking: {}]", truncate_for_display(text, 500)));
                         }
                         _ => {}
                     }
@@ -494,7 +496,11 @@ mod tests {
         Message::user(text)
     }
 
-    fn make_assistant_tool_call(call_id: &str, tool_name: &str, args: serde_json::Value) -> Message {
+    fn make_assistant_tool_call(
+        call_id: &str,
+        tool_name: &str,
+        args: serde_json::Value,
+    ) -> Message {
         Message::Assistant(AssistantMessage {
             content: vec![ContentBlock::ToolCall {
                 id: call_id.into(),
@@ -520,7 +526,9 @@ mod tests {
         Message::ToolResult(ToolResultMessage {
             tool_call_id: call_id.into(),
             tool_name: tool_name.into(),
-            content: vec![ContentBlock::Text { text: output.into() }],
+            content: vec![ContentBlock::Text {
+                text: output.into(),
+            }],
             is_error: false,
             details: serde_json::Value::Null,
             timestamp: 1000,
@@ -583,7 +591,9 @@ mod tests {
 
         let original_bytes: usize = serde_json::to_string(&messages[..3]).unwrap().len();
         let prepared = prepare_messages_for_compaction(&messages, 1);
-        let shrunk_bytes: usize = serde_json::to_string(&prepared.summary_input).unwrap().len();
+        let shrunk_bytes: usize = serde_json::to_string(&prepared.summary_input)
+            .unwrap()
+            .len();
 
         assert_eq!(prepared.shrunk_tool_results, 1);
         assert!(shrunk_bytes < original_bytes);
@@ -702,11 +712,8 @@ mod tests {
         let mut mgr = SessionManager::in_memory();
         mgr.append(make_session_entry("u1", make_user("only prompt")))
             .unwrap();
-        mgr.append(make_session_entry(
-            "a1",
-            make_assistant_text("only answer"),
-        ))
-        .unwrap();
+        mgr.append(make_session_entry("a1", make_assistant_text("only answer")))
+            .unwrap();
 
         let result = execute_manual_compaction(&mut mgr, 4, |_| Some("summary".into())).unwrap();
         assert!(result.is_none());
@@ -720,12 +727,14 @@ mod tests {
             let aid = format!("a{i}");
             mgr.append(make_session_entry(&uid, make_user(&format!("prompt {i}"))))
                 .unwrap();
-            mgr.append(make_session_entry(&aid, make_assistant_text(&format!("answer {i}"))))
-                .unwrap();
+            mgr.append(make_session_entry(
+                &aid,
+                make_assistant_text(&format!("answer {i}")),
+            ))
+            .unwrap();
         }
 
-        let result =
-            execute_manual_compaction(&mut mgr, 2, |_prompt| None).unwrap();
+        let result = execute_manual_compaction(&mut mgr, 2, |_prompt| None).unwrap();
 
         assert!(result.is_some());
         let result = result.unwrap();

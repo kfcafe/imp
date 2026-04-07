@@ -821,11 +821,8 @@ mod tests {
             pricing: ModelPricing::default(),
             capabilities: Capabilities::default(),
         };
-        let provider = OpenAiCompatProvider::new(
-            "deepseek",
-            "https://api.deepseek.com",
-            vec![meta.clone()],
-        );
+        let provider =
+            OpenAiCompatProvider::new("deepseek", "https://api.deepseek.com", vec![meta.clone()]);
         let model = Model {
             meta,
             provider: Arc::new(provider),
@@ -846,11 +843,8 @@ mod tests {
             pricing: ModelPricing::default(),
             capabilities: Capabilities::default(),
         };
-        let provider = OpenAiCompatProvider::new(
-            "deepseek",
-            "https://api.deepseek.com",
-            vec![meta.clone()],
-        );
+        let provider =
+            OpenAiCompatProvider::new("deepseek", "https://api.deepseek.com", vec![meta.clone()]);
         let model = Model {
             meta,
             provider: Arc::new(provider),

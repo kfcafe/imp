@@ -110,9 +110,11 @@ impl AskState {
         let inner_y = area.y.saturating_add(1);
         let inner_width = area.width.saturating_sub(2).max(1);
 
-        let mut input_row = inner_y.saturating_add(wrapped_lines_for_width(&self.question, inner_width).len() as u16);
+        let mut input_row = inner_y
+            .saturating_add(wrapped_lines_for_width(&self.question, inner_width).len() as u16);
         if !self.context.is_empty() {
-            input_row = input_row.saturating_add(wrapped_lines_for_width(&self.context, inner_width).len() as u16);
+            input_row = input_row
+                .saturating_add(wrapped_lines_for_width(&self.context, inner_width).len() as u16);
         }
         if !self.options.is_empty() {
             input_row = input_row
@@ -120,8 +122,11 @@ impl AskState {
                 .saturating_add(1);
         }
 
-        let (visual_row, visual_col) =
-            cursor_visual_position_for_text(&self.input, self.editor_cursor, inner_width.saturating_sub(2));
+        let (visual_row, visual_col) = cursor_visual_position_for_text(
+            &self.input,
+            self.editor_cursor,
+            inner_width.saturating_sub(2),
+        );
 
         let max_x = area.x + area.width.saturating_sub(2);
         let max_y = area.y + area.height.saturating_sub(2);
@@ -310,7 +315,12 @@ impl Widget for AskBar<'_> {
                 if y >= inner.y + inner.height {
                     return;
                 }
-                buf.set_line(inner.x, y, &Line::from(Span::styled(cl.clone(), dim)), inner.width);
+                buf.set_line(
+                    inner.x,
+                    y,
+                    &Line::from(Span::styled(cl.clone(), dim)),
+                    inner.width,
+                );
                 y += 1;
             }
         }
@@ -363,7 +373,11 @@ impl Widget for AskBar<'_> {
                 }
                 // Right-align the number hint
                 let content_len: usize = spans.iter().map(|s| s.content.len()).sum();
-                let num_hint_style = if s.input_active { dim } else { theme.muted_style() };
+                let num_hint_style = if s.input_active {
+                    dim
+                } else {
+                    theme.muted_style()
+                };
                 if content_len + num.len() + 1 < w {
                     let padding = w - content_len - num.len();
                     spans.push(Span::raw(" ".repeat(padding)));
@@ -400,11 +414,8 @@ impl Widget for AskBar<'_> {
                 rendered_any = true;
             } else {
                 let lines = wrapped_lines_for_width(&s.input, available_width);
-                let (visual_row, visual_col) = cursor_visual_position_for_text(
-                    &s.input,
-                    s.editor_cursor,
-                    available_width,
-                );
+                let (visual_row, visual_col) =
+                    cursor_visual_position_for_text(&s.input, s.editor_cursor, available_width);
                 for (idx, input_line) in lines.iter().enumerate() {
                     if y >= inner.y + inner.height {
                         break;
@@ -446,7 +457,12 @@ impl Widget for AskBar<'_> {
                     "↑↓: navigate  Space: toggle  Tab: edit  Enter: confirm  Esc: skip"
                 }
             };
-            buf.set_line(inner.x, y, &Line::from(Span::styled(hints, dim)), inner.width);
+            buf.set_line(
+                inner.x,
+                y,
+                &Line::from(Span::styled(hints, dim)),
+                inner.width,
+            );
         }
     }
 }
@@ -457,8 +473,6 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
         .map(|(idx, _)| idx)
         .unwrap_or(s.len())
 }
-
-
 
 #[cfg(test)]
 mod tests {

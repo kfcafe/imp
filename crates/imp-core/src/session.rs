@@ -23,7 +23,6 @@ pub struct SessionCheckpointRecord {
     pub files: Vec<String>,
 }
 
-
 const SESSION_META_VERSION: u32 = 1;
 
 /// A single entry in the session JSONL file.
@@ -128,7 +127,6 @@ pub fn checkpoint_record_entry(
         data: serde_json::to_value(record)?,
     })
 }
-
 
 impl SessionInfo {
     /// A short, single-line chat title derived from persisted session metadata or message history.
@@ -543,10 +541,7 @@ impl SessionManager {
         usage_records_from_session(self)
     }
 
-    pub fn append_checkpoint_record(
-        &mut self,
-        record: SessionCheckpointRecord,
-    ) -> Result<String> {
+    pub fn append_checkpoint_record(&mut self, record: SessionCheckpointRecord) -> Result<String> {
         let entry_id = uuid::Uuid::new_v4().to_string();
         let entry = checkpoint_record_entry(entry_id.clone(), record)?;
         self.append(entry)?;
@@ -575,8 +570,7 @@ impl SessionManager {
 
     pub fn find_checkpoint_record(&self, needle: &str) -> Option<SessionCheckpointRecord> {
         self.checkpoint_records().into_iter().find(|record| {
-            record.checkpoint_id == needle
-                || record.label.as_deref() == Some(needle)
+            record.checkpoint_id == needle || record.label.as_deref() == Some(needle)
         })
     }
 
@@ -702,9 +696,10 @@ impl SessionManager {
 
     /// Return the latest compaction entry on the active branch, if any.
     pub fn latest_compaction(&self) -> Option<&SessionEntry> {
-        self.get_branch().into_iter().rev().find(|entry| {
-            matches!(entry, SessionEntry::Compaction { .. })
-        })
+        self.get_branch()
+            .into_iter()
+            .rev()
+            .find(|entry| matches!(entry, SessionEntry::Compaction { .. }))
     }
 
     /// Build the model-visible message history for the active branch.
@@ -2324,7 +2319,9 @@ mod tests {
         })
         .unwrap();
 
-        let restored = mgr.restore_checkpoint(&checkpoint_state, "before edits").unwrap();
+        let restored = mgr
+            .restore_checkpoint(&checkpoint_state, "before edits")
+            .unwrap();
         assert_eq!(restored, vec![file.clone()]);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
     }

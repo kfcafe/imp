@@ -294,7 +294,9 @@ impl AuthStore {
         field_names.dedup();
         self.stored.insert(
             provider.to_string(),
-            StoredCredential::SecretFields { fields: field_names },
+            StoredCredential::SecretFields {
+                fields: field_names,
+            },
         );
         self.save()
     }
@@ -545,10 +547,10 @@ mod tests {
         }
 
         fn set(&self, provider: &str, field: &str, value: &str) -> Result<()> {
-            self.values.lock().unwrap().insert(
-                (provider.to_string(), field.to_string()),
-                value.to_string(),
-            );
+            self.values
+                .lock()
+                .unwrap()
+                .insert((provider.to_string(), field.to_string()), value.to_string());
             Ok(())
         }
 
@@ -565,11 +567,17 @@ mod tests {
         AuthStore::new_with_backend(path, Arc::new(MockSecretBackend::default()))
     }
 
-    fn test_store_with_backend(path: std::path::PathBuf, backend: Arc<dyn SecretBackend>) -> AuthStore {
+    fn test_store_with_backend(
+        path: std::path::PathBuf,
+        backend: Arc<dyn SecretBackend>,
+    ) -> AuthStore {
         AuthStore::new_with_backend(path, backend)
     }
 
-    fn test_load_with_backend(path: &std::path::Path, backend: Arc<dyn SecretBackend>) -> AuthStore {
+    fn test_load_with_backend(
+        path: &std::path::Path,
+        backend: Arc<dyn SecretBackend>,
+    ) -> AuthStore {
         AuthStore::load_with_backend(path, backend).unwrap()
     }
 
@@ -640,11 +648,15 @@ mod tests {
         assert!(!data.contains("test-api"));
         assert!(!data.contains("test-secret"));
         assert_eq!(
-            store.resolve_secret_field("test-service", "api_key").unwrap(),
+            store
+                .resolve_secret_field("test-service", "api_key")
+                .unwrap(),
             "test-api"
         );
         assert_eq!(
-            store.resolve_secret_field("test-service", "secret_key").unwrap(),
+            store
+                .resolve_secret_field("test-service", "secret_key")
+                .unwrap(),
             "test-secret"
         );
     }
@@ -667,7 +679,10 @@ mod tests {
 
         let loaded = test_load_with_backend(&path, backend);
         let resolved = loaded.resolve_secret_fields("test-service").unwrap();
-        assert_eq!(resolved.get("api_key").map(String::as_str), Some("test-api"));
+        assert_eq!(
+            resolved.get("api_key").map(String::as_str),
+            Some("test-api")
+        );
         assert_eq!(
             resolved.get("secret_key").map(String::as_str),
             Some("test-secret")
@@ -691,7 +706,9 @@ mod tests {
             .unwrap();
 
         store.remove("test-service").unwrap();
-        assert!(store.resolve_secret_field("test-service", "api_key").is_err());
+        assert!(store
+            .resolve_secret_field("test-service", "api_key")
+            .is_err());
         assert!(backend.get("test-service", "api_key").unwrap().is_none());
     }
 

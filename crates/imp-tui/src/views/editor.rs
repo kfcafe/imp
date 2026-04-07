@@ -202,7 +202,9 @@ impl EditorState {
     }
 
     pub fn visual_line_count(&self, inner_width: u16) -> usize {
-        wrapped_lines_for_width(&self.content, inner_width).len().max(1)
+        wrapped_lines_for_width(&self.content, inner_width)
+            .len()
+            .max(1)
     }
 
     pub fn push_history(&mut self) {

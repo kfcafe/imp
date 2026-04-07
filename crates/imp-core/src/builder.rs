@@ -182,9 +182,8 @@ impl AgentBuilder {
             let skills = resources::discover_skills(&self.cwd, &user_config_dir);
             agent.has_mana_skill = skills.iter().any(|skill| skill.name == "mana");
             agent.has_mana_basics_skill = skills.iter().any(|skill| skill.name == "mana-basics");
-            agent.has_mana_delegation_skill = skills
-                .iter()
-                .any(|skill| skill.name == "mana-delegation");
+            agent.has_mana_delegation_skill =
+                skills.iter().any(|skill| skill.name == "mana-delegation");
 
             // Layer 6: Load agent memory if learning is enabled
             let (memory_block, user_block) = if self.config.learning.enabled {
@@ -235,9 +234,9 @@ impl AgentBuilder {
 /// This is the canonical list — update here when adding or removing tools.
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
-        ask::AskTool, bash::BashTool, edit::EditTool, extend::ExtendTool,
-        mana::ManaTool, memory::MemoryTool, multi_edit::MultiEditTool, read::ReadTool,
-        scan::ScanTool, session_search::SessionSearchTool, web::WebTool, write::WriteTool,
+        ask::AskTool, bash::BashTool, edit::EditTool, extend::ExtendTool, mana::ManaTool,
+        memory::MemoryTool, multi_edit::MultiEditTool, read::ReadTool, scan::ScanTool,
+        session_search::SessionSearchTool, web::WebTool, write::WriteTool,
     };
 
     tools.register(Arc::new(AskTool));

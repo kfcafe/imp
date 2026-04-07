@@ -86,7 +86,12 @@ impl UserInterface for TuiInterface {
         reply_rx.await.ok().flatten()
     }
 
-    async fn select_with_context(&self, title: &str, context: &str, options: &[SelectOption]) -> Option<usize> {
+    async fn select_with_context(
+        &self,
+        title: &str,
+        context: &str,
+        options: &[SelectOption],
+    ) -> Option<usize> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx
@@ -100,7 +105,12 @@ impl UserInterface for TuiInterface {
         reply_rx.await.ok().flatten()
     }
 
-    async fn input_with_context(&self, title: &str, context: &str, placeholder: &str) -> Option<String> {
+    async fn input_with_context(
+        &self,
+        title: &str,
+        context: &str,
+        placeholder: &str,
+    ) -> Option<String> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .tx

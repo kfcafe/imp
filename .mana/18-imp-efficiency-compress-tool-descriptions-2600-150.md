@@ -2,10 +2,10 @@
 id: '18'
 title: 'imp efficiency: compress tool descriptions (~2600 → ~1500 tokens)'
 slug: imp-efficiency-compress-tool-descriptions-2600-150
-status: open
+status: in_progress
 priority: 1
 created_at: '2026-03-22T23:59:18.310303Z'
-updated_at: '2026-03-24T06:26:55.923499Z'
+updated_at: '2026-04-06T22:38:54.941995Z'
 notes: |2
 
   ## Attempt 1 — 2026-03-24T06:26:55Z
@@ -40,7 +40,11 @@ verify: |-
   assert total < 4000, f'Total tool def size {total} >= 4000'
   print(f'Tool def size: {total} chars (target: <4000)')
   "
+checkpoint: a846e944534744ae687283dced47e94faf379f10
+verify_hash: '6116ddc7bd6225e3615db21273fd0aa396aeb49662344e5c1aea71e258fb6d55'
 attempts: 1
+claimed_by: imp
+claimed_at: '2026-04-06T22:38:54.941995Z'
 history:
 - attempt: 1
   started_at: '2026-03-24T06:26:55.815588Z'
@@ -54,6 +58,12 @@ history:
         assert total < 4000, f'Total tool def size {total} >= 4000'
                ^^^^^^^^^^^^
     AssertionError: Total tool def size 8140 >= 4000
+kind: job
+attempt_log:
+- num: 1
+  outcome: abandoned
+  agent: imp
+  started_at: '2026-04-06T22:38:54.941995Z'
 ---
 
 ## Problem

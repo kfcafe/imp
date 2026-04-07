@@ -122,11 +122,7 @@ impl Tool for ScanTool {
             "build" => {
                 let files = match params["files"].as_array() {
                     Some(f) if !f.is_empty() => f,
-                    _ => {
-                        return Ok(ToolOutput::error(
-                            "'files' array required for build action",
-                        ))
-                    }
+                    _ => return Ok(ToolOutput::error("'files' array required for build action")),
                 };
                 let mut resolved = Vec::with_capacity(files.len());
                 for file in files {

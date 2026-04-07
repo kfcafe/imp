@@ -153,7 +153,10 @@ mod tests {
     fn secrets_picker_excludes_oauth_providers() {
         let registry = ProviderRegistry::with_builtins();
         let providers = secret_providers(&registry);
-        let ids: Vec<&str> = providers.iter().map(|provider| provider.id.as_str()).collect();
+        let ids: Vec<&str> = providers
+            .iter()
+            .map(|provider| provider.id.as_str())
+            .collect();
         assert!(ids.contains(&"exa"));
         assert!(!ids.contains(&"anthropic"));
         assert!(!ids.contains(&"openai"));

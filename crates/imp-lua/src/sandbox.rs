@@ -173,7 +173,8 @@ impl LuaRuntime {
 
     /// Set whether `imp.tool()` calls are permitted for the current runtime.
     pub fn set_allow_native_tool_calls(&self, allowed: bool) {
-        self.allow_native_tool_calls.store(allowed, Ordering::Relaxed);
+        self.allow_native_tool_calls
+            .store(allowed, Ordering::Relaxed);
     }
 
     /// Register a tool handle (called from bridge).

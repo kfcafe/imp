@@ -812,13 +812,7 @@ impl App {
                 reply,
             } => {
                 self.begin_ask(
-                    AskState::with_placeholder(
-                        title,
-                        context,
-                        vec![],
-                        false,
-                        placeholder,
-                    ),
+                    AskState::with_placeholder(title, context, vec![], false, placeholder),
                     AskReply::Input(reply),
                 );
             }
@@ -841,13 +835,7 @@ impl App {
                 ];
                 let (bool_tx, bool_rx) = tokio::sync::oneshot::channel();
                 self.begin_ask(
-                    AskState::with_placeholder(
-                        title,
-                        message,
-                        options,
-                        false,
-                        String::new(),
-                    ),
+                    AskState::with_placeholder(title, message, options, false, String::new()),
                     AskReply::Select(bool_tx),
                 );
                 let confirm_reply = reply;
@@ -973,12 +961,8 @@ impl App {
         chat_tool_display: imp_core::config::ChatToolDisplay,
         activity_state: AnimationState,
     ) -> &crate::views::chat::ChatRenderData {
-        let key = self.chat_render_cache_key(
-            width,
-            chat_tool_focus,
-            chat_tool_display,
-            activity_state,
-        );
+        let key =
+            self.chat_render_cache_key(width, chat_tool_focus, chat_tool_display, activity_state);
         let cache_hit = self
             .chat_render_cache
             .as_ref()
@@ -1001,7 +985,8 @@ impl App {
             self.chat_render_cache = Some(ChatRenderCache { key, render });
         }
 
-        &self.chat_render_cache
+        &self
+            .chat_render_cache
             .as_ref()
             .expect("chat render cache set")
             .render
@@ -1052,7 +1037,11 @@ impl App {
             );
             self.sidebar_stream_cache = Some(SidebarStreamCache { key, lines });
         }
-        &self.sidebar_stream_cache.as_ref().expect("sidebar stream cache set").lines
+        &self
+            .sidebar_stream_cache
+            .as_ref()
+            .expect("sidebar stream cache set")
+            .lines
     }
 
     fn sidebar_detail_cache_key(
@@ -1091,7 +1080,11 @@ impl App {
             );
             self.sidebar_detail_cache = Some(SidebarDetailCache { key, render });
         }
-        &self.sidebar_detail_cache.as_ref().expect("sidebar detail cache set").render
+        &self
+            .sidebar_detail_cache
+            .as_ref()
+            .expect("sidebar detail cache set")
+            .render
     }
 
     fn render_widget_tray(&self, frame: &mut Frame, area: Rect) {
@@ -1159,12 +1152,8 @@ impl App {
             .constraints(constraints)
             .split(area);
 
-        let (top_bar_area, widget_area, chat_area, editor_area) = (
-            chunks[0],
-            Some(chunks[1]),
-            chunks[2],
-            chunks[3],
-        );
+        let (top_bar_area, widget_area, chat_area, editor_area) =
+            (chunks[0], Some(chunks[1]), chunks[2], chunks[3]);
 
         // Split chat area for sidebar when open
         let (chat_area, sidebar_area) = if self.sidebar.open && chat_area.width >= 60 {
@@ -1215,11 +1204,8 @@ impl App {
             );
             chat_render.lines.len()
         };
-        self.scroll_offset = clamped_scroll_offset_for_total_lines(
-            total_chat_lines,
-            chat_area,
-            self.scroll_offset,
-        );
+        self.scroll_offset =
+            clamped_scroll_offset_for_total_lines(total_chat_lines, chat_area, self.scroll_offset);
         if self.scroll_offset == 0 {
             self.auto_scroll = true;
         }
@@ -1250,26 +1236,28 @@ impl App {
             let sub = sidebar_sub_areas(sidebar_area, tc_count, self.config.ui.sidebar_style);
             let selected_tc_index = self.tool_focus;
 
-            let stream_lines = if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Stream {
-                Some(self.cached_sidebar_stream_lines(sub.0.width).clone())
-            } else {
-                None
-            };
-            let detail_render = if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Split {
-                let selected_tc_owned = selected_tc_index.and_then(|i| {
-                    self.messages
-                        .iter()
-                        .flat_map(|m| m.tool_calls.iter())
-                        .nth(i)
-                        .cloned()
-                });
-                Some(
-                    self.cached_sidebar_detail_render(sub.1.width, selected_tc_owned.as_ref())
-                        .clone(),
-                )
-            } else {
-                None
-            };
+            let stream_lines =
+                if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Stream {
+                    Some(self.cached_sidebar_stream_lines(sub.0.width).clone())
+                } else {
+                    None
+                };
+            let detail_render =
+                if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Split {
+                    let selected_tc_owned = selected_tc_index.and_then(|i| {
+                        self.messages
+                            .iter()
+                            .flat_map(|m| m.tool_calls.iter())
+                            .nth(i)
+                            .cloned()
+                    });
+                    Some(
+                        self.cached_sidebar_detail_render(sub.1.width, selected_tc_owned.as_ref())
+                            .clone(),
+                    )
+                } else {
+                    None
+                };
 
             let all_tool_calls: Vec<&DisplayToolCall> = self
                 .messages
@@ -1932,13 +1920,16 @@ impl App {
                     None
                 };
                 if let Some(id) = selected_id {
-                    let path = Config::session_dir().join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+                    let path =
+                        Config::session_dir().join(format!("{}.jsonl", uuid::Uuid::new_v4()));
                     match self.session.fork(&id, &path) {
                         Ok(forked) => {
                             self.session = forked;
                             self.load_session_messages();
                             self.mode = UiMode::Normal;
-                            self.push_system_msg("Forked from selected tree node. You're on a new branch.");
+                            self.push_system_msg(
+                                "Forked from selected tree node. You're on a new branch.",
+                            );
                         }
                         Err(e) => {
                             self.mode = UiMode::Normal;
@@ -2848,10 +2839,7 @@ impl App {
                 }
             }
             "restore-checkpoint" => {
-                let needle = cmd
-                    .strip_prefix("restore-checkpoint")
-                    .unwrap_or("")
-                    .trim();
+                let needle = cmd.strip_prefix("restore-checkpoint").unwrap_or("").trim();
                 if needle.is_empty() {
                     self.push_system_msg("Usage: /restore-checkpoint <checkpoint id or label>");
                 } else {
@@ -3660,7 +3648,10 @@ impl App {
                     return;
                 };
 
-                let field = fields.get(current).cloned().unwrap_or_else(|| "api_key".into());
+                let field = fields
+                    .get(current)
+                    .cloned()
+                    .unwrap_or_else(|| "api_key".into());
                 values.insert(field, value.trim().to_string());
 
                 if current + 1 < fields.len() {
@@ -3685,11 +3676,15 @@ impl App {
                 }
 
                 let auth_path = Config::user_config_dir().join("auth.json");
-                let mut auth_store =
-                    AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+                let mut auth_store = AuthStore::load(&auth_path)
+                    .unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
                 match auth_store.store_secret_fields(&provider, values) {
-                    Ok(()) => self.push_system_msg(&format!("Saved secure secrets for {provider}.")),
-                    Err(e) => self.push_error_msg(&format!("Failed to save secrets for {provider}: {e}")),
+                    Ok(()) => {
+                        self.push_system_msg(&format!("Saved secure secrets for {provider}."))
+                    }
+                    Err(e) => {
+                        self.push_error_msg(&format!("Failed to save secrets for {provider}: {e}"))
+                    }
                 }
             }
         }
@@ -3812,7 +3807,9 @@ impl App {
             KeyCode::Left => {
                 if let UiMode::Personality(ref mut state) = self.mode {
                     match state.tab {
-                        crate::views::personality::PersonalityTab::Builder => state.cycle_backward(),
+                        crate::views::personality::PersonalityTab::Builder => {
+                            state.cycle_backward()
+                        }
                         crate::views::personality::PersonalityTab::Source => state.move_left(),
                     }
                 }
@@ -3834,15 +3831,21 @@ impl App {
                         state.confirm_overwrite();
                     } else {
                         match state.tab {
-                            crate::views::personality::PersonalityTab::Builder => state.cycle_forward(),
-                            crate::views::personality::PersonalityTab::Source => state.insert_newline(),
+                            crate::views::personality::PersonalityTab::Builder => {
+                                state.cycle_forward()
+                            }
+                            crate::views::personality::PersonalityTab::Source => {
+                                state.insert_newline()
+                            }
                         }
                     }
                 }
             }
             KeyCode::Backspace => {
                 if let UiMode::Personality(ref mut state) = self.mode {
-                    if state.pending_overwrite.is_none() && matches!(state.tab, crate::views::personality::PersonalityTab::Source) {
+                    if state.pending_overwrite.is_none()
+                        && matches!(state.tab, crate::views::personality::PersonalityTab::Source)
+                    {
                         state.pop_char();
                     }
                 }
@@ -3851,8 +3854,11 @@ impl App {
                 if let UiMode::Personality(ref mut state) = self.mode {
                     if state.pending_overwrite.is_some() {
                         state.confirm_overwrite();
-                    } else if matches!(state.tab, crate::views::personality::PersonalityTab::Source) {
-                        if let KeyCode::Char(c) = key.code { state.insert_char(c); }
+                    } else if matches!(state.tab, crate::views::personality::PersonalityTab::Source)
+                    {
+                        if let KeyCode::Char(c) = key.code {
+                            state.insert_char(c);
+                        }
                     }
                 }
             }
@@ -3860,8 +3866,11 @@ impl App {
                 if let UiMode::Personality(ref mut state) = self.mode {
                     if state.pending_overwrite.is_some() {
                         state.cancel_overwrite();
-                    } else if matches!(state.tab, crate::views::personality::PersonalityTab::Source) {
-                        if let KeyCode::Char(c) = key.code { state.insert_char(c); }
+                    } else if matches!(state.tab, crate::views::personality::PersonalityTab::Source)
+                    {
+                        if let KeyCode::Char(c) = key.code {
+                            state.insert_char(c);
+                        }
                     }
                 }
             }
@@ -3870,7 +3879,9 @@ impl App {
             }
             KeyCode::Char(c) => {
                 if let UiMode::Personality(ref mut state) = self.mode {
-                    if state.pending_overwrite.is_none() && matches!(state.tab, crate::views::personality::PersonalityTab::Source) {
+                    if state.pending_overwrite.is_none()
+                        && matches!(state.tab, crate::views::personality::PersonalityTab::Source)
+                    {
                         state.insert_char(c);
                     }
                 }
@@ -4297,8 +4308,7 @@ impl App {
 
         // Load auth store to check which providers have credentials
         let auth_path = Config::user_config_dir().join("auth.json");
-        let auth_store =
-            AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
+        let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
 
         match &self.config.enabled_models {
             Some(enabled) if !enabled.is_empty() => {
@@ -4545,7 +4555,14 @@ impl App {
                         };
 
                         let mut stream = imp_core::retry::stream_with_retry(
-                            move || model.provider.stream(&model, context.clone(), options.clone(), &api_key),
+                            move || {
+                                model.provider.stream(
+                                    &model,
+                                    context.clone(),
+                                    options.clone(),
+                                    &api_key,
+                                )
+                            },
                             retry_policy,
                         );
 
@@ -4557,7 +4574,9 @@ impl App {
                                         .content
                                         .iter()
                                         .filter_map(|block| match block {
-                                            imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                                            imp_llm::ContentBlock::Text { text } => {
+                                                Some(text.as_str())
+                                            }
                                             _ => None,
                                         })
                                         .collect::<Vec<_>>()
@@ -4589,7 +4608,9 @@ impl App {
                     role: MessageRole::Compaction,
                     content: format!(
                         "Context compacted. Saved ~{} tokens. Preserved recent working context.",
-                        compaction.tokens_before.saturating_sub(compaction.tokens_after)
+                        compaction
+                            .tokens_before
+                            .saturating_sub(compaction.tokens_after)
                     ),
                     thinking: None,
                     tool_calls: Vec::new(),
@@ -5036,9 +5057,9 @@ mod session_lifecycle {
     use super::*;
     use imp_core::config::Config;
     use imp_core::session::{SessionEntry, SessionManager};
-    use imp_llm::{AssistantMessage, ContentBlock, StopReason};
     use imp_llm::model::ModelRegistry;
     use imp_llm::ThinkingLevel;
+    use imp_llm::{AssistantMessage, ContentBlock, StopReason};
     use tempfile::TempDir;
 
     /// Helper: build an App with defaults and an in-memory session.
@@ -5253,7 +5274,10 @@ mod session_lifecycle {
 
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].role, MessageRole::System);
-        assert_eq!(app.messages[0].content, "Not enough history to compact yet.");
+        assert_eq!(
+            app.messages[0].content,
+            "Not enough history to compact yet."
+        );
     }
 
     #[test]

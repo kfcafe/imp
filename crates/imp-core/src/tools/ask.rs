@@ -132,7 +132,11 @@ impl Tool for AskTool {
             }
             _ => {
                 // Free text input
-                match ctx.ui.input_with_context(&title, context, placeholder).await {
+                match ctx
+                    .ui
+                    .input_with_context(&title, context, placeholder)
+                    .await
+                {
                     Some(text) => Ok(ToolOutput::text(text)),
                     None => Ok(ToolOutput::text("User skipped")),
                 }

@@ -72,8 +72,10 @@ impl PersonalityState {
     pub fn new(cwd: PathBuf, scope: PersonalityScope) -> Self {
         let global_path = imp_core::config::Config::user_config_dir().join("soul.md");
         let project_path = cwd.join(".imp").join("soul.md");
-        let global_source = std::fs::read_to_string(&global_path).unwrap_or_else(|_| default_soul_markdown());
-        let project_source = std::fs::read_to_string(&project_path).unwrap_or_else(|_| default_soul_markdown());
+        let global_source =
+            std::fs::read_to_string(&global_path).unwrap_or_else(|_| default_soul_markdown());
+        let project_source =
+            std::fs::read_to_string(&project_path).unwrap_or_else(|_| default_soul_markdown());
         let mut editor = EditorState::new();
         editor.set_content(match scope {
             PersonalityScope::Global => &global_source,
@@ -185,13 +187,25 @@ impl PersonalityState {
         let state = tunable_state_for_label(self.editor.content(), label);
         let next_idx = match state {
             SoulTunableState::Preset(idx) => {
-                if forward { (idx + 1) % 5 } else { (idx + 4) % 5 }
+                if forward {
+                    (idx + 1) % 5
+                } else {
+                    (idx + 4) % 5
+                }
             }
             SoulTunableState::Missing => {
-                if forward { 0 } else { 4 }
+                if forward {
+                    0
+                } else {
+                    4
+                }
             }
             SoulTunableState::Edited => {
-                if forward { 0 } else { 4 }
+                if forward {
+                    0
+                } else {
+                    4
+                }
             }
         };
         let Some(new_line) = generated_tunable_line(label, next_idx) else {
@@ -251,7 +265,11 @@ impl PersonalityState {
         let Some(pending) = self.pending_overwrite.take() else {
             return;
         };
-        let updated = replace_tunable_line(self.editor.content(), pending.label, &pending.replacement_line);
+        let updated = replace_tunable_line(
+            self.editor.content(),
+            pending.label,
+            &pending.replacement_line,
+        );
         self.editor.set_content(&updated);
         self.sync_editor_to_scope_store();
         self.set_dirty(true);
@@ -345,7 +363,11 @@ impl Widget for PersonalityView<'_> {
         Paragraph::new(format!(
             "Scope: {scope}  •  Tab: {tab}  •  Path: {}{}",
             self.state.current_path().display(),
-            if self.state.is_dirty() { "  • unsaved" } else { "" }
+            if self.state.is_dirty() {
+                "  • unsaved"
+            } else {
+                ""
+            }
         ))
         .style(self.theme.muted_style())
         .render(rows[1], buf);
@@ -375,7 +397,11 @@ impl Widget for PersonalityView<'_> {
             let modal = centered_rect(70, 40, area);
             Clear.render(modal, buf);
             Paragraph::new(pending.diff_preview.clone())
-                .block(Block::default().title(" Confirm overwrite ").borders(Borders::ALL))
+                .block(
+                    Block::default()
+                        .title(" Confirm overwrite ")
+                        .borders(Borders::ALL),
+                )
                 .wrap(Wrap { trim: false })
                 .render(modal, buf);
         }
@@ -384,16 +410,58 @@ impl Widget for PersonalityView<'_> {
 
 fn render_builder(area: Rect, buf: &mut Buffer, state: &PersonalityState) {
     let mut lines = Vec::new();
-    push_field_line(lines.as_mut(), state, PersonalityField::Scope, "scope", match state.scope {
-        PersonalityScope::Global => "global",
-        PersonalityScope::Project => "project",
-    });
-    push_field_line(lines.as_mut(), state, PersonalityField::Autonomy, "autonomy", state.tunable_display("Autonomy"));
-    push_field_line(lines.as_mut(), state, PersonalityField::Brevity, "brevity", state.tunable_display("Brevity"));
-    push_field_line(lines.as_mut(), state, PersonalityField::Caution, "caution", state.tunable_display("Caution"));
-    push_field_line(lines.as_mut(), state, PersonalityField::Warmth, "warmth", state.tunable_display("Warmth"));
-    push_field_line(lines.as_mut(), state, PersonalityField::Planning, "planning", state.tunable_display("Planning"));
-    push_field_line(lines.as_mut(), state, PersonalityField::Save, "save", "write soul.md");
+    push_field_line(
+        lines.as_mut(),
+        state,
+        PersonalityField::Scope,
+        "scope",
+        match state.scope {
+            PersonalityScope::Global => "global",
+            PersonalityScope::Project => "project",
+        },
+    );
+    push_field_line(
+        lines.as_mut(),
+        state,
+        PersonalityField::Autonomy,
+        "autonomy",
+        state.tunable_display("Autonomy"),
+    );
+    push_field_line(
+        lines.as_mut(),
+        state,
+        PersonalityField::Brevity,
+        "brevity",
+        state.tunable_display("Brevity"),
+    );
+    push_field_line(
+        lines.as_mut(),
+        state,
+        PersonalityField::Caution,
+        "caution",
+        state.tunable_display("Caution"),
+    );
+    push_field_line(
+        lines.as_mut(),
+        state,
+        PersonalityField::Warmth,
+        "warmth",
+        state.tunable_display("Warmth"),
+    );
+    push_field_line(
+        lines.as_mut(),
+        state,
+        PersonalityField::Planning,
+        "planning",
+        state.tunable_display("Planning"),
+    );
+    push_field_line(
+        lines.as_mut(),
+        state,
+        PersonalityField::Save,
+        "save",
+        "write soul.md",
+    );
 
     Paragraph::new(lines)
         .block(Block::default().title(" Builder ").borders(Borders::ALL))
@@ -463,7 +531,9 @@ mod tests {
     fn personality_state_marks_custom_lines_as_edited() {
         let tmp = tempfile::tempdir().unwrap();
         let mut state = PersonalityState::new(tmp.path().to_path_buf(), PersonalityScope::Global);
-        state.editor.set_content("# Soul\n\nYou are imp.\n\n## Tunables\n\n- Autonomy: custom autonomy line\n");
+        state.editor.set_content(
+            "# Soul\n\nYou are imp.\n\n## Tunables\n\n- Autonomy: custom autonomy line\n",
+        );
         assert_eq!(state.tunable_display("Autonomy"), "edited");
     }
 }
