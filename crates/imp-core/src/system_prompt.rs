@@ -36,9 +36,11 @@ pub struct Dependency {
 pub struct TaskContext {
     pub title: String,
     pub description: String,
+    pub acceptance: Option<String>,
     pub verify: Option<String>,
     pub attempts: Vec<Attempt>,
     pub dependencies: Vec<Dependency>,
+    pub decisions: Vec<String>,
 }
 
 /// Result of system prompt assembly, including size tracking.
@@ -130,6 +132,7 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
     // Layer 5: Task context (headless mode only)
     if let Some(task) = p.task {
         parts.push(task_layer(task));
+        parts.push(headless_execution_layer(task));
     }
 
     // Layer 6: Agent memory
@@ -246,6 +249,17 @@ fn execution_policy_layer() -> String {
     s.push_str("- For analysis-only requests, stay read-only unless the user asks for changes.\n");
     s.push_str("- For implementation, prefer small, reversible changes and verify them with the smallest relevant checks before declaring success.\n");
     s.push_str("- Do not treat failed commands, failed checks, or missing evidence as success. If blocked, report the exact blocker and the next useful action.\n");
+    s.push_str("- Before changing code, make sure you understand the relevant local context: inspect the files you will modify, nearby patterns, and any task-specific constraints already present in the repo.\n");
+    s.push_str("- Match the completion mode to the request. For diagnosis, provide findings, root cause, and concrete next-step options without making changes. For implementation, make the change, verify it, and summarize the evidence.\n");
+    s.push_str("- Treat task verify commands, failing tests, compiler errors, and tool errors as first-class evidence. Either resolve them or explain precisely why they remain blocked.\n");
+    s.push_str("- Prefer the smallest check that proves the work: targeted tests, focused builds, existence checks, or narrow validation commands before broad project-wide verification.\n");
+    s.push_str("- When uncertainty is consequential, ask one concise question instead of guessing. When uncertainty is local and low-risk, proceed and state the assumption briefly.\n");
+    s.push_str("- If prior attempts failed, do not retry the same plan unchanged. Use the new evidence to adapt the approach first.\n");
+    s.push_str("- Keep user-facing updates concise and evidence-oriented: what you inspected, what you changed, what you verified, and what remains.\n");
+    s.push_str("- When working from a mana unit, treat the unit as an execution contract: use its scope, verify gate, dependencies, and embedded context before broadening the search.\n");
+    s.push_str("- Prefer mana-native inspection and progress recording over ad hoc shell workflows when mana already models the work state.\n");
+    s.push_str("- For worker-style execution, keep planning lightweight and execution direct; use `mana update` to record discoveries and blockers instead of carrying them only in transient chat.\n");
+    s.push_str("- If a mana unit is underspecified, identify the exact missing context and either inspect the relevant artifacts or report the gap precisely rather than inventing missing requirements.\n");
     s
 }
 
@@ -448,6 +462,11 @@ fn task_layer(task: &TaskContext) -> String {
     let mut s = String::from("## Task\n");
     s.push_str(&format!("Title: {}\n", task.title));
     s.push_str(&format!("Description: {}\n", task.description));
+    if let Some(ref acceptance) = task.acceptance {
+        s.push_str("Acceptance:\n");
+        s.push_str(acceptance);
+        s.push('\n');
+    }
     if let Some(ref verify) = task.verify {
         s.push_str(&format!("Verify: {}\n", verify));
         s.push_str("Treat the verify command as the primary completion check for this task.\n");
@@ -475,6 +494,31 @@ fn task_layer(task: &TaskContext) -> String {
         }
     }
 
+    if !task.decisions.is_empty() {
+        s.push_str("\n## Unresolved decisions\n");
+        s.push_str("These decisions block fully autonomous execution; resolve them or surface them clearly instead of guessing.\n");
+        for decision in &task.decisions {
+            s.push_str(&format!("- {}\n", decision));
+        }
+    }
+
+    s
+}
+
+fn headless_execution_layer(task: &TaskContext) -> String {
+    let mut s = String::from("## Headless execution contract\n");
+    s.push_str("- You are executing an explicit mana unit, not exploring broadly.\n");
+    s.push_str("- Treat the unit title, description, notes, acceptance criteria, and verify gate as the source of truth for scope and success.\n");
+    s.push_str("- Execute the assigned outcome before expanding into adjacent cleanup, refactors, or unrelated improvements.\n");
+    s.push_str("- Use explicit file references and prefilled context first before searching more broadly.\n");
+    s.push_str("- If the unit includes prior failed attempts, do not retry the same plan unchanged.\n");
+    s.push_str("- If dependency state or prerequisite decisions are unresolved, treat that as a blocker rather than improvising around it.\n");
+    s.push_str("- Keep progress updates concise and useful. Record meaningful discoveries, blockers, and revised plans with `mana update`.\n");
+    if task.verify.is_some() {
+        s.push_str("- If the verify command fails, either fix the issue or report the exact blocker. Do not claim completion anyway.\n");
+    }
+    s.push_str("- In batch-verify flows, treat your goal as leaving the unit ready for verify rather than assuming verify already passed.\n");
+    s.push_str("- Respect parent/child structure: finish this unit's outcome, not the whole feature.\n");
     s
 }
 
@@ -1066,9 +1110,11 @@ mod tests {
         let task = TaskContext {
             title: "Fix the failing auth test".into(),
             description: "The JWT validation test panics on expired tokens".into(),
+            acceptance: None,
             verify: Some("cargo test auth::jwt_test".into()),
             attempts: vec![],
             dependencies: vec![],
+            decisions: vec![],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Task"));
@@ -1088,6 +1134,7 @@ mod tests {
         let task = TaskContext {
             title: "Fix bug".into(),
             description: "Something is broken".into(),
+            acceptance: None,
             verify: None,
             attempts: vec![
                 Attempt {
@@ -1102,6 +1149,7 @@ mod tests {
                 },
             ],
             dependencies: vec![],
+            decisions: vec![],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Previous attempts"));
@@ -1122,6 +1170,7 @@ mod tests {
         let task = TaskContext {
             title: "Implement feature".into(),
             description: "New feature".into(),
+            acceptance: None,
             verify: None,
             attempts: vec![],
             dependencies: vec![Dependency {
@@ -1129,6 +1178,7 @@ mod tests {
                 status: "completed".into(),
                 detail: "defined in src/schema.rs".into(),
             }],
+            decisions: vec![],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Dependencies"));
@@ -1153,9 +1203,11 @@ mod tests {
         let task = TaskContext {
             title: "Do something".into(),
             description: "Details here".into(),
+            acceptance: None,
             verify: None,
             attempts: vec![],
             dependencies: vec![],
+            decisions: vec![],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("Title: Do something"));
@@ -1270,6 +1322,7 @@ mod tests {
         let task = TaskContext {
             title: "Add caching".into(),
             description: "Add Redis caching layer".into(),
+            acceptance: None,
             verify: Some("cargo test cache".into()),
             attempts: vec![Attempt {
                 number: 1,
@@ -1281,6 +1334,7 @@ mod tests {
                 status: "done".into(),
                 detail: "src/config.rs".into(),
             }],
+            decisions: vec![],
         };
 
         let result = test_assemble(&reg, &agents, &skills, &facts, None, Some(&task), None);
@@ -1394,9 +1448,11 @@ mod tests {
         let task = TaskContext {
             title: "Fix bug".into(),
             description: "Broken".into(),
+            acceptance: None,
             verify: None,
             attempts: vec![],
             dependencies: vec![],
+            decisions: vec![],
         };
         let mem = "══════\nMEMORY [50%]\n══════\nSome fact";
         let result = assemble(&AssembleParams {

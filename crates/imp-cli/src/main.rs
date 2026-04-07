@@ -94,7 +94,7 @@ use imp_core::tools::web::types::SearchProvider;
 
 use imp_core::imp_session::{ImpSession, SessionChoice, SessionOptions};
 use imp_core::session::SessionManager;
-use imp_core::system_prompt::{Attempt as TaskAttempt, TaskContext};
+use imp_core::system_prompt::{Attempt as TaskAttempt, Dependency as TaskDependency, TaskContext};
 use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
 use imp_core::usage::{UsageCostBreakdown, UsageRecordSource, UsageTokens};
 use imp_core::TimingEvent;
@@ -329,8 +329,16 @@ struct UnitFrontmatter {
     id: Option<String>,
     title: String,
     description: Option<String>,
+    acceptance: Option<String>,
     verify: Option<String>,
     notes: Option<String>,
+    parent: Option<String>,
+    #[serde(default)]
+    dependencies: Vec<String>,
+    #[serde(default)]
+    decisions: Vec<String>,
+    #[serde(default)]
+    paths: Vec<String>,
     #[serde(default)]
     attempt_log: Vec<UnitAttempt>,
     /// Files to preload into the agent's cached context prefix.
@@ -352,12 +360,18 @@ struct ManaUnit {
     id: Option<String>,
     title: String,
     description: String,
+    acceptance: Option<String>,
     verify: Option<String>,
     notes: Option<String>,
+    parent: Option<String>,
+    dependencies: Vec<String>,
+    decisions: Vec<String>,
     attempts: Vec<UnitAttempt>,
     workspace_root: PathBuf,
     /// Explicit file references from frontmatter, or empty for auto-detect.
     files: Vec<String>,
+    /// Additional relevant file paths from mana unit metadata.
+    paths: Vec<String>,
 }
 
 impl ManaUnit {
@@ -420,9 +434,49 @@ impl ManaUnit {
             description.push_str(notes);
         }
 
+        let dependencies = if self.dependencies.is_empty() {
+            Vec::new()
+        } else {
+            match mana_core::api::load_index(&self.workspace_root.join(".mana")) {
+                Ok(index) => self
+                    .dependencies
+                    .iter()
+                    .map(|dep_id| {
+                        let detail = index
+                            .units
+                            .iter()
+                            .find(|entry| entry.id == *dep_id)
+                            .map(|entry| entry.title.clone())
+                            .unwrap_or_else(|| "dependency not found in active index".to_string());
+                        let status = index
+                            .units
+                            .iter()
+                            .find(|entry| entry.id == *dep_id)
+                            .map(|entry| entry.status.to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        TaskDependency {
+                            name: dep_id.clone(),
+                            status,
+                            detail,
+                        }
+                    })
+                    .collect(),
+                Err(_) => self
+                    .dependencies
+                    .iter()
+                    .map(|dep_id| TaskDependency {
+                        name: dep_id.clone(),
+                        status: "unknown".to_string(),
+                        detail: "dependency status unavailable".to_string(),
+                    })
+                    .collect(),
+            }
+        };
+
         TaskContext {
             title: self.title.clone(),
             description,
+            acceptance: self.acceptance.clone(),
             verify: self.verify.clone(),
             attempts: self
                 .attempts
@@ -440,7 +494,8 @@ impl ManaUnit {
                         .unwrap_or_else(|| format_attempt(attempt)),
                 })
                 .collect(),
-            dependencies: Vec::new(),
+            dependencies,
+            decisions: self.decisions.clone(),
         }
     }
 }
@@ -1213,6 +1268,11 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
             .iter()
             .filter_map(|s| parse_file_spec_str(s))
             .collect()
+    } else if !unit.paths.is_empty() {
+        unit.paths
+            .iter()
+            .filter_map(|s| parse_file_spec_str(s))
+            .collect()
     } else {
         imp_core::context_prefill::detect_file_paths(&unit.description)
     };
@@ -1440,11 +1500,16 @@ fn parse_mana_unit(
         id: frontmatter.id,
         title: frontmatter.title,
         description,
+        acceptance: frontmatter.acceptance,
         verify: frontmatter.verify,
         notes: frontmatter.notes,
+        parent: frontmatter.parent,
+        dependencies: frontmatter.dependencies,
+        decisions: frontmatter.decisions,
         attempts: frontmatter.attempt_log,
         workspace_root,
         files: frontmatter.files,
+        paths: frontmatter.paths,
     })
 }
 

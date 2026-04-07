@@ -3905,8 +3905,10 @@ mod mode_tests {
             "Full mode should not mention orchestrator"
         );
         assert!(
-            !full_result.text.contains("worker"),
-            "Full mode should not mention worker"
+            !full_result
+                .text
+                .contains("You are a worker agent."),
+            "Full mode should not include worker mode instructions"
         );
 
         // Orchestrator mode — should include mode instructions

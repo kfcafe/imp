@@ -1154,53 +1154,131 @@ impl Tool for ManaTool {
         "Work coordination substrate. Prefer this over bash for equivalent mana operations: inspect/create/update/claim/release units, inspect orchestration logs/agents/next/tree, and run orchestration natively with canonical target selection (`id`, `targets`, or all ready work), background runs, and in-session run state. Use it for complex tasks or delegation. Load the `mana` skill when coordinating multi-step work or delegation to learn the workflow."
     }
     fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "action": { "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "run_state", "evaluate", "claim", "release", "logs", "agents", "next", "tree"] },
-                "id": { "type": "string" },
-                "run_id": { "type": "string", "description": "Native in-session mana run ID, returned by action=run" },
-                "title": { "type": "string" },
-                "verify": { "type": "string", "description": "Shell command, must exit 0" },
-                "description": { "type": "string" },
-                "acceptance": { "type": "string", "description": "Concrete acceptance criteria for the unit" },
-                "notes": { "type": "string", "description": "Progress log or authoring notes" },
-                "design": { "type": "string", "description": "Supplemental design context for the unit" },
-                "assignee": { "type": "string", "description": "Assignee or owner for the unit" },
-                "parent": { "type": "string" },
-                "deps": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Dependency unit IDs as a comma-separated string or array" },
-                "produces": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Artifacts this unit produces" },
-                "requires": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Artifacts this unit requires" },
-                "paths": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Relevant file paths for context/relevance" },
-                "decisions": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Blocking decisions to record on the unit" },
-                "resolve_decisions": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Decision entries or indexes to resolve during update" },
-                "status": { "type": "string" },
-                "priority": { "type": "integer" },
-                "labels": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Labels as a comma-separated string or array" },
-                "add_label": { "type": "string", "description": "Single label to add during update" },
-                "remove_label": { "type": "string", "description": "Single label to remove during update" },
-                "kind": { "type": "string", "enum": ["epic", "job", "fact"], "description": "Explicit mana unit kind" },
-                "feature": { "type": "boolean", "description": "Whether the unit is a feature-level goal" },
-                "fail_first": { "type": "boolean", "description": "Require verify to fail first at creation time" },
-                "verify_timeout": { "type": "integer", "description": "Timeout in seconds for verify" },
-                "on_fail": { "description": "On-fail policy as a string like retry:3 / escalate:P1 or an object" },
-                "force": { "type": "boolean" },
-                "reason": { "type": "string" },
-                "all": { "type": "boolean" },
-                "by": { "type": "string", "description": "Who is claiming the unit" },
-                "count": { "type": "integer", "description": "Number of next recommendations to return" },
-                "background": { "type": "boolean", "description": "Run mana orchestration in the background and return immediately (default true unless dry_run=true)" },
-                "targets": { "type": "array", "items": { "type": "string" }, "description": "Explicit target unit IDs to run as a canonical target set" },
-                "jobs": { "type": "integer" },
-                "dry_run": { "type": "boolean" },
-                "loop": { "type": "boolean" },
-                "keep_going": { "type": "boolean" },
-                "timeout": { "type": "integer" },
-                "idle_timeout": { "type": "integer" },
-                "review": { "type": "boolean" }
-            },
-            "required": ["action"],
-        })
+        let string_or_array = || {
+            json!({
+                "oneOf": [
+                    { "type": "string" },
+                    { "type": "array", "items": { "type": "string" } }
+                ]
+            })
+        };
+
+        let mut properties = serde_json::Map::new();
+        properties.insert(
+            "action".into(),
+            json!({ "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "run_state", "evaluate", "claim", "release", "logs", "agents", "next", "tree"] }),
+        );
+        properties.insert("id".into(), json!({ "type": "string" }));
+        properties.insert(
+            "run_id".into(),
+            json!({ "type": "string", "description": "Native in-session mana run ID, returned by action=run" }),
+        );
+        properties.insert("title".into(), json!({ "type": "string" }));
+        properties.insert(
+            "verify".into(),
+            json!({ "type": "string", "description": "Shell command, must exit 0" }),
+        );
+        properties.insert("description".into(), json!({ "type": "string" }));
+        properties.insert(
+            "acceptance".into(),
+            json!({ "type": "string", "description": "Concrete acceptance criteria for the unit" }),
+        );
+        properties.insert(
+            "notes".into(),
+            json!({ "type": "string", "description": "Progress log or authoring notes" }),
+        );
+        properties.insert(
+            "design".into(),
+            json!({ "type": "string", "description": "Supplemental design context for the unit" }),
+        );
+        properties.insert(
+            "assignee".into(),
+            json!({ "type": "string", "description": "Assignee or owner for the unit" }),
+        );
+        properties.insert("parent".into(), json!({ "type": "string" }));
+        let mut deps = string_or_array();
+        deps["description"] = json!("Dependency unit IDs as a comma-separated string or array");
+        properties.insert("deps".into(), deps);
+        let mut produces = string_or_array();
+        produces["description"] = json!("Artifacts this unit produces");
+        properties.insert("produces".into(), produces);
+        let mut requires = string_or_array();
+        requires["description"] = json!("Artifacts this unit requires");
+        properties.insert("requires".into(), requires);
+        let mut paths = string_or_array();
+        paths["description"] = json!("Relevant file paths for context/relevance");
+        properties.insert("paths".into(), paths);
+        let mut decisions = string_or_array();
+        decisions["description"] = json!("Blocking decisions to record on the unit");
+        properties.insert("decisions".into(), decisions);
+        let mut resolve_decisions = string_or_array();
+        resolve_decisions["description"] = json!("Decision entries or indexes to resolve during update");
+        properties.insert("resolve_decisions".into(), resolve_decisions);
+        properties.insert("status".into(), json!({ "type": "string" }));
+        properties.insert("priority".into(), json!({ "type": "integer" }));
+        let mut labels = string_or_array();
+        labels["description"] = json!("Labels as a comma-separated string or array");
+        properties.insert("labels".into(), labels);
+        properties.insert(
+            "add_label".into(),
+            json!({ "type": "string", "description": "Single label to add during update" }),
+        );
+        properties.insert(
+            "remove_label".into(),
+            json!({ "type": "string", "description": "Single label to remove during update" }),
+        );
+        properties.insert(
+            "kind".into(),
+            json!({ "type": "string", "enum": ["epic", "job", "fact"], "description": "Explicit mana unit kind" }),
+        );
+        properties.insert(
+            "feature".into(),
+            json!({ "type": "boolean", "description": "Whether the unit is a feature-level goal" }),
+        );
+        properties.insert(
+            "fail_first".into(),
+            json!({ "type": "boolean", "description": "Require verify to fail first at creation time" }),
+        );
+        properties.insert(
+            "verify_timeout".into(),
+            json!({ "type": "integer", "description": "Timeout in seconds for verify" }),
+        );
+        properties.insert(
+            "on_fail".into(),
+            json!({ "description": "On-fail policy as a string like retry:3 / escalate:P1 or an object" }),
+        );
+        properties.insert("force".into(), json!({ "type": "boolean" }));
+        properties.insert("reason".into(), json!({ "type": "string" }));
+        properties.insert("all".into(), json!({ "type": "boolean" }));
+        properties.insert(
+            "by".into(),
+            json!({ "type": "string", "description": "Who is claiming the unit" }),
+        );
+        properties.insert(
+            "count".into(),
+            json!({ "type": "integer", "description": "Number of next recommendations to return" }),
+        );
+        properties.insert(
+            "background".into(),
+            json!({ "type": "boolean", "description": "Run mana orchestration in the background and return immediately (default true unless dry_run=true)" }),
+        );
+        properties.insert(
+            "targets".into(),
+            json!({ "type": "array", "items": { "type": "string" }, "description": "Explicit target unit IDs to run as a canonical target set" }),
+        );
+        properties.insert("jobs".into(), json!({ "type": "integer" }));
+        properties.insert("dry_run".into(), json!({ "type": "boolean" }));
+        properties.insert("loop".into(), json!({ "type": "boolean" }));
+        properties.insert("keep_going".into(), json!({ "type": "boolean" }));
+        properties.insert("timeout".into(), json!({ "type": "integer" }));
+        properties.insert("idle_timeout".into(), json!({ "type": "integer" }));
+        properties.insert("review".into(), json!({ "type": "boolean" }));
+
+        serde_json::Value::Object(serde_json::Map::from_iter([
+            ("type".into(), json!("object")),
+            ("properties".into(), serde_json::Value::Object(properties)),
+            ("required".into(), json!(["action"])),
+        ]))
     }
     fn is_readonly(&self) -> bool {
         false

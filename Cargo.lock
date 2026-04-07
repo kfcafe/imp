@@ -1500,6 +1500,7 @@ dependencies = [
  "imp-llm",
  "imp-lua",
  "imp-tui",
+ "mana-core",
  "serde",
  "serde_json",
  "serde_yaml",
