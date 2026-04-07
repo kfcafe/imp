@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use futures::FutureExt;
 use imp_core::ui::WidgetContent;
 
 use imp_lua::LuaRuntime;
@@ -609,7 +610,7 @@ impl App {
             }
 
             // Drain agent events and UI requests (non-blocking)
-            self.pump_runtime_signals();
+            self.pump_runtime_signals().await;
 
             // Tick + periodic redraw for streaming/spinner
             self.tick = self.tick.wrapping_add(1);
@@ -635,14 +636,14 @@ impl App {
         self.last_terminal_title = Some(title);
     }
 
-    fn pump_runtime_signals(&mut self) {
-        let signals = self.collect_runtime_signals();
+    async fn pump_runtime_signals(&mut self) {
+        let signals = self.collect_runtime_signals().await;
         for signal in signals {
             self.handle_runtime_signal(signal);
         }
     }
 
-    fn collect_runtime_signals(&mut self) -> Vec<RuntimeSignal> {
+    async fn collect_runtime_signals(&mut self) -> Vec<RuntimeSignal> {
         let mut signals = Vec::new();
 
         if let Some(handle) = self.agent_handle.as_mut() {
@@ -657,15 +658,14 @@ impl App {
             .is_some_and(tokio::task::JoinHandle::is_finished);
         if agent_task_finished {
             if let Some(task) = self.agent_task.take() {
-                let outcome = match tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(task)
-                }) {
-                    Ok(Ok(())) | Ok(Err(ImpCoreError::Cancelled)) => Ok(()),
-                    Ok(Err(error)) => Err(error.to_string()),
-                    Err(error) => Err(format!("Internal agent task failure: {error}")),
+                let outcome = match task.now_or_never() {
+                    Some(Ok(Ok(()))) | Some(Ok(Err(ImpCoreError::Cancelled))) => Ok(()),
+                    Some(Ok(Err(error))) => Err(error.to_string()),
+                    Some(Err(error)) => Err(format!("Internal agent task failure: {error}")),
+                    None => return signals,
                 };
 
-                // Drain one more time after join. The agent can finish with final
+                // Drain one more time after confirmed completion. The agent can finish with final
                 // events already queued in event_rx; if we clear the handle first,
                 // those late ToolExecutionEnd / TurnEnd / AgentEnd events are lost.
                 if let Some(handle) = self.agent_handle.as_mut() {
@@ -687,18 +687,17 @@ impl App {
             .is_some_and(tokio::task::JoinHandle::is_finished);
         if login_task_finished {
             if let Some(task) = self.login_task.take() {
-                match tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(task)
-                }) {
-                    Ok(LoginTaskExit::Success(message)) => {
+                match task.now_or_never() {
+                    Some(Ok(LoginTaskExit::Success(message))) => {
                         signals.push(RuntimeSignal::LoginTaskSucceeded(message));
                     }
-                    Ok(LoginTaskExit::Failed(message)) => {
+                    Some(Ok(LoginTaskExit::Failed(message))) => {
                         signals.push(RuntimeSignal::LoginTaskFailed(message));
                     }
-                    Err(error) => signals.push(RuntimeSignal::LoginTaskFailed(format!(
+                    Some(Err(error)) => signals.push(RuntimeSignal::LoginTaskFailed(format!(
                         "Login task failure: {error}"
                     ))),
+                    None => return signals,
                 }
             }
         }
