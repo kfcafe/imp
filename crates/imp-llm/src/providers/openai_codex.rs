@@ -57,7 +57,27 @@ fn extract_account_id(token: &str) -> Result<String> {
         .ok_or_else(|| Error::Auth("ChatGPT OAuth token is missing chatgpt_account_id".into()))
 }
 
+fn strip_unsupported_codex_fields(request: &mut Value) {
+    let Some(object) = request.as_object_mut() else {
+        return;
+    };
+
+    for field in [
+        "context_management",
+        "max_completion_tokens",
+        "max_output_tokens",
+        "max_tokens",
+        "metadata",
+        "temperature",
+        "user",
+    ] {
+        object.remove(field);
+    }
+}
+
 fn add_codex_request_fields(request: &mut Value, session_id: Option<&str>) {
+    strip_unsupported_codex_fields(request);
+
     let Some(object) = request.as_object_mut() else {
         return;
     };
@@ -164,16 +184,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_request_preserves_max_output_tokens() {
+    fn codex_request_strips_unsupported_fields() {
         let mut request = serde_json::json!({
             "model": "gpt-5.4",
             "max_output_tokens": 1234,
+            "temperature": 0.2,
+            "metadata": {"source": "test"},
         });
 
         add_codex_request_fields(&mut request, None);
 
         let object = request.as_object().expect("request object");
-        assert_eq!(object.get("max_output_tokens"), Some(&Value::from(1234)));
+        assert!(!object.contains_key("max_output_tokens"));
+        assert!(!object.contains_key("temperature"));
+        assert!(!object.contains_key("metadata"));
         assert_eq!(object.get("store"), Some(&Value::Bool(false)));
         assert_eq!(
             object.get("tool_choice"),
