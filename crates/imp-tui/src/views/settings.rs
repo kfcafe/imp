@@ -1,6 +1,6 @@
 use imp_core::config::{
-    AnimationLevel, ChatToolDisplay, Config, ContextConfig, ShellBackend, ShellConfig,
-    SidebarStyle, ToolOutputDisplay,
+    AnimationLevel, ChatToolDisplay, Config, ContextConfig, ContinuePolicy, ShellBackend,
+    ShellConfig, SidebarStyle, ToolOutputDisplay,
 };
 use imp_core::tools::web::types::SearchProvider;
 use imp_llm::auth::AuthStore;
@@ -43,6 +43,7 @@ pub enum SettingsField {
     ShowCost,
     ShowContextUsage,
     NotifyOnAgentComplete,
+    ContinuePolicy,
     WebSearchProvider,
     TavilyApiKey,
     ExaApiKey,
@@ -76,6 +77,7 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::ShowCost,
     SettingsField::ShowContextUsage,
     SettingsField::NotifyOnAgentComplete,
+    SettingsField::ContinuePolicy,
     SettingsField::WebSearchProvider,
     SettingsField::TavilyApiKey,
     SettingsField::ExaApiKey,
@@ -114,6 +116,7 @@ pub struct SettingsState {
     pub show_cost: bool,
     pub show_context_usage: bool,
     pub notify_on_agent_complete: bool,
+    pub continue_policy: ContinuePolicy,
     pub web_search_provider: Option<SearchProvider>,
     pub tavily_api_key: String,
     pub exa_api_key: String,
@@ -161,6 +164,7 @@ impl SettingsState {
             show_cost: config.ui.show_cost,
             show_context_usage: config.ui.show_context_usage,
             notify_on_agent_complete: config.ui.notify_on_agent_complete,
+            continue_policy: config.ui.continue_policy,
             web_search_provider: config.web.search_provider,
             tavily_api_key: String::new(),
             exa_api_key: String::new(),
@@ -299,6 +303,14 @@ impl SettingsState {
             SettingsField::NotifyOnAgentComplete => {
                 self.notify_on_agent_complete = !self.notify_on_agent_complete;
             }
+            SettingsField::ContinuePolicy => {
+                self.continue_policy = match self.continue_policy {
+                    ContinuePolicy::Disabled => ContinuePolicy::Conservative,
+                    ContinuePolicy::Conservative => ContinuePolicy::Balanced,
+                    ContinuePolicy::Balanced => ContinuePolicy::Aggressive,
+                    ContinuePolicy::Aggressive => ContinuePolicy::Disabled,
+                };
+            }
             SettingsField::WebSearchProvider => {
                 self.web_search_provider = match self.web_search_provider {
                     None => Some(SearchProvider::Tavily),
@@ -429,6 +441,14 @@ impl SettingsState {
             }
             SettingsField::NotifyOnAgentComplete => {
                 self.notify_on_agent_complete = !self.notify_on_agent_complete;
+            }
+            SettingsField::ContinuePolicy => {
+                self.continue_policy = match self.continue_policy {
+                    ContinuePolicy::Disabled => ContinuePolicy::Aggressive,
+                    ContinuePolicy::Conservative => ContinuePolicy::Disabled,
+                    ContinuePolicy::Balanced => ContinuePolicy::Conservative,
+                    ContinuePolicy::Aggressive => ContinuePolicy::Balanced,
+                };
             }
             SettingsField::WebSearchProvider => {
                 self.web_search_provider = match self.web_search_provider {
@@ -622,6 +642,7 @@ impl SettingsState {
             show_cost: self.show_cost,
             show_context_usage: self.show_context_usage,
             notify_on_agent_complete: self.notify_on_agent_complete,
+            continue_policy: self.continue_policy,
         };
         config.web = imp_core::tools::web::types::WebConfig {
             search_provider: self.web_search_provider,
@@ -1200,6 +1221,23 @@ impl Widget for SettingsView<'_> {
             inner,
             &mut row,
             26,
+            "Auto-continue",
+            match self.state.continue_policy {
+                ContinuePolicy::Disabled => "disabled",
+                ContinuePolicy::Conservative => "conservative",
+                ContinuePolicy::Balanced => "balanced",
+                ContinuePolicy::Aggressive => "aggressive",
+            },
+            "← →",
+        );
+
+        render_field(
+            self.state,
+            self.theme,
+            buf,
+            inner,
+            &mut row,
+            27,
             "Web provider",
             match self.state.web_search_provider {
                 None => "auto",
@@ -1229,7 +1267,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            27,
+            28,
             "Tavily API key",
             &tavily_val,
             "Enter to edit",
@@ -1253,7 +1291,7 @@ impl Widget for SettingsView<'_> {
             buf,
             inner,
             &mut row,
-            28,
+            29,
             "Exa API key",
             &exa_val,
             "Enter to edit",
@@ -1367,6 +1405,21 @@ mod tests {
 
         state.apply_to_config(&mut config);
         assert!(!config.ui.notify_on_agent_complete);
+    }
+
+    #[test]
+    fn continue_policy_round_trips_into_config() {
+        let registry = ModelRegistry::with_builtins();
+        let models = registry.list().to_vec();
+        let auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
+        let mut config = Config::default();
+        let state = SettingsState {
+            continue_policy: ContinuePolicy::Balanced,
+            ..SettingsState::new(&config, &models[0].id, &models, &auth_store)
+        };
+
+        state.apply_to_config(&mut config);
+        assert_eq!(config.ui.continue_policy, ContinuePolicy::Balanced);
     }
 
     #[test]

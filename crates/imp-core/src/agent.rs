@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use imp_llm::provider::RetryPolicy;
 
-use crate::config::{AgentMode, ContextConfig};
+use crate::config::{AgentMode, ContextConfig, ContinuePolicy};
 use crate::error::Result;
 use crate::guardrails::{self, GuardrailConfig, GuardrailLevel, GuardrailProfile};
 use crate::hooks::{HookEvent, HookRunner};
@@ -150,6 +150,10 @@ pub struct Agent {
     last_tool_call: std::sync::Arc<std::sync::Mutex<Option<RepeatedToolCallState>>>,
     /// Prevent repeated self-nudges for mana externalization in a single run.
     queued_mana_externalization_nudge: bool,
+    /// Policy for imp-local visible auto-continuation after high-confidence turns.
+    pub continue_policy: ContinuePolicy,
+    /// Prevent repeated confidence-based auto-continue nudges in a single run.
+    queued_confidence_continue_nudge: bool,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_tx: mpsc::Sender<AgentCommand>,
@@ -216,6 +220,8 @@ impl Agent {
             },
             last_tool_call: Arc::new(std::sync::Mutex::new(None)),
             queued_mana_externalization_nudge: false,
+            continue_policy: ContinuePolicy::Disabled,
+            queued_confidence_continue_nudge: false,
 
             event_tx,
             command_tx: command_tx.clone(),
@@ -552,6 +558,15 @@ impl Agent {
                     queued_follow_ups.push_back(mana_externalization_follow_up_text().to_string());
                     self.queued_mana_externalization_nudge = true;
                 }
+                if should_queue_confidence_continue_follow_up(
+                    &msg,
+                    self.mode,
+                    self.continue_policy,
+                    self.queued_confidence_continue_nudge,
+                ) {
+                    queued_follow_ups.push_back(confidence_continue_follow_up_text().to_string());
+                    self.queued_confidence_continue_nudge = true;
+                }
                 if let Some(follow_up) = queued_follow_ups.pop_front() {
                     self.messages.push(Message::user(&follow_up));
                     turn += 1;
@@ -569,9 +584,19 @@ impl Agent {
 
             self.emit(AgentEvent::TurnEnd {
                 index: turn,
-                message: msg,
+                message: msg.clone(),
             })
             .await;
+
+            if should_queue_confidence_continue_follow_up(
+                &msg,
+                self.mode,
+                self.continue_policy,
+                self.queued_confidence_continue_nudge,
+            ) {
+                queued_follow_ups.push_back(confidence_continue_follow_up_text().to_string());
+                self.queued_confidence_continue_nudge = true;
+            }
 
             if let Some(follow_up) = queued_follow_ups.pop_front() {
                 self.messages.push(Message::user(&follow_up));
@@ -1024,6 +1049,68 @@ fn should_queue_mana_externalization_follow_up(
 
 fn mana_externalization_follow_up_text() -> &'static str {
     "Before you continue: externalize the durable plan or decomposition you just described into mana now. Create or update the relevant unit(s) with native mana actions, prefer root scope for cross-project work, and keep the delta visible."
+}
+
+fn should_queue_confidence_continue_follow_up(
+    message: &AssistantMessage,
+    mode: AgentMode,
+    continue_policy: ContinuePolicy,
+    already_queued: bool,
+) -> bool {
+    if already_queued || matches!(continue_policy, ContinuePolicy::Disabled) {
+        return false;
+    }
+
+    if !matches!(mode, AgentMode::Full | AgentMode::Planner | AgentMode::Orchestrator) {
+        return false;
+    }
+
+    if !assistant_message_contains_mana_tool_call(message) {
+        return false;
+    }
+
+    let text = assistant_message_text(message);
+    if text.trim().is_empty() {
+        return false;
+    }
+
+    let lower = text.to_ascii_lowercase();
+    let positive_signal = [
+        "done",
+        "completed",
+        "finished",
+        "updated",
+        "created",
+        "next",
+        "continue",
+        "proceed",
+        "follow-up",
+        "follow up",
+    ]
+    .iter()
+    .filter(|needle| lower.contains(**needle))
+    .count();
+
+    let blocker_signal = ["blocked", "unclear", "need your input", "which should", "approval"]
+        .iter()
+        .any(|needle| lower.contains(needle));
+
+    if blocker_signal {
+        return false;
+    }
+
+    let threshold = match continue_policy {
+        ContinuePolicy::Disabled => return false,
+        ContinuePolicy::Conservative => 3,
+        ContinuePolicy::Balanced => 2,
+        ContinuePolicy::Aggressive => 1,
+    };
+
+    positive_signal >= threshold
+}
+
+fn confidence_continue_follow_up_text() -> &'static str {
+    "Confidence is high and the mana delta is already visible. Continue to the next small, well-bounded step now using native mana-backed workflow, unless a consequential decision or blocker appears."
 }
 
 /// Build an AssistantMessage from accumulated stream parts while preserving
@@ -1682,6 +1769,141 @@ mod tests {
         assert_eq!(user_texts.len(), 2);
         assert_eq!(user_texts[0], "Plan the rollout");
         assert!(user_texts[1].contains("externalize the durable plan"));
+    }
+
+    #[tokio::test]
+    async fn agent_queues_confidence_continue_follow_up_after_visible_mana_turn() {
+        let provider = Arc::new(MockProvider::new(vec![
+            vec![
+                StreamEvent::MessageStart {
+                    model: "test-model".to_string(),
+                },
+                StreamEvent::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "mana".to_string(),
+                    arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
+                },
+                StreamEvent::TextDelta {
+                    text: "Done. Updated mana and next step is ready to continue.".to_string(),
+                },
+                StreamEvent::MessageEnd {
+                    message: AssistantMessage {
+                        content: vec![
+                            ContentBlock::ToolCall {
+                                id: "call_1".to_string(),
+                                name: "mana".to_string(),
+                                arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
+                            },
+                            ContentBlock::Text {
+                                text: "Done. Updated mana and next step is ready to continue.".to_string(),
+                            },
+                        ],
+                        usage: Some(Usage {
+                            input_tokens: 100,
+                            output_tokens: 20,
+                            cache_read_tokens: 0,
+                            cache_write_tokens: 0,
+                        }),
+                        stop_reason: StopReason::ToolUse,
+                        timestamp: 1000,
+                    },
+                },
+            ],
+            text_response("Continuing.", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Planner;
+        agent.continue_policy = ContinuePolicy::Balanced;
+        agent.tools.register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        agent
+            .run("Do the next thing".to_string())
+            .await
+            .unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts.len(), 2);
+        assert!(user_texts[1].contains("Confidence is high"));
+    }
+
+    #[tokio::test]
+    async fn agent_does_not_queue_confidence_continue_when_policy_disabled() {
+        let provider = Arc::new(MockProvider::new(vec![
+            vec![
+                StreamEvent::MessageStart {
+                    model: "test-model".to_string(),
+                },
+                StreamEvent::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "mana".to_string(),
+                    arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
+                },
+                StreamEvent::TextDelta {
+                    text: "Done. Updated mana and next step is ready to continue.".to_string(),
+                },
+                StreamEvent::MessageEnd {
+                    message: AssistantMessage {
+                        content: vec![
+                            ContentBlock::ToolCall {
+                                id: "call_1".to_string(),
+                                name: "mana".to_string(),
+                                arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
+                            },
+                            ContentBlock::Text {
+                                text: "Done. Updated mana and next step is ready to continue.".to_string(),
+                            },
+                        ],
+                        usage: Some(Usage {
+                            input_tokens: 100,
+                            output_tokens: 20,
+                            cache_read_tokens: 0,
+                            cache_write_tokens: 0,
+                        }),
+                        stop_reason: StopReason::ToolUse,
+                        timestamp: 1000,
+                    },
+                },
+            ],
+            text_response("Stopped after visible mana turn.", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Planner;
+        agent.continue_policy = ContinuePolicy::Disabled;
+        agent.tools.register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        agent
+            .run("Do the next thing".to_string())
+            .await
+            .unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts, vec!["Do the next thing".to_string()]);
     }
 
     #[tokio::test]

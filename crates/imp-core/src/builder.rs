@@ -151,6 +151,7 @@ impl AgentBuilder {
 
         // Wire read tool truncation from config
         agent.read_max_lines = self.config.ui.read_max_lines;
+        agent.continue_policy = self.config.ui.continue_policy;
 
         // Register native tools
         register_native_tools(&mut agent.tools);

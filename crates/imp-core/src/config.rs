@@ -361,6 +361,21 @@ pub enum AnimationLevel {
     Minimal,
 }
 
+/// Auto-continue policy for imp-local follow-on work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContinuePolicy {
+    /// Never auto-continue on imp's own.
+    #[default]
+    Disabled,
+    /// Only auto-continue when the runtime evidence is especially strong.
+    Conservative,
+    /// Auto-continue on clear, visible, mana-backed next steps.
+    Balanced,
+    /// More willing to auto-continue when the local heuristic says confidence is high.
+    Aggressive,
+}
+
 /// UI display configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UiConfig {
@@ -447,6 +462,11 @@ pub struct UiConfig {
     /// Default: true.
     #[serde(default = "default_true")]
     pub notify_on_agent_complete: bool,
+
+    /// Policy for imp-local automatic continuation after a visible, high-confidence turn.
+    /// Default: disabled.
+    #[serde(default)]
+    pub continue_policy: ContinuePolicy,
 }
 
 fn default_tool_output_lines() -> usize {
@@ -497,6 +517,7 @@ impl Default for UiConfig {
             show_cost: true,
             show_context_usage: true,
             notify_on_agent_complete: true,
+            continue_policy: ContinuePolicy::Disabled,
         }
     }
 }
