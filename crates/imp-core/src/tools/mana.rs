@@ -1467,7 +1467,17 @@ impl Tool for ManaTool {
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("reopen requires 'id'".into()))?;
                 match mana_core::api::reopen_unit(&mana_dir, id) {
-                    Ok(result) => Ok(json_output(&result)),
+                    Ok(result) => Ok(text_output(
+                        format!("Reopened unit {} ({})", result.unit.id, result.unit.title),
+                        json!({
+                            "unit": {
+                                "id": result.unit.id,
+                                "title": result.unit.title,
+                                "status": result.unit.status,
+                            },
+                            "path": result.path,
+                        }),
+                    )),
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1476,7 +1486,26 @@ impl Tool for ManaTool {
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("verify requires 'id'".into()))?;
                 match mana_core::api::run_verify(&mana_dir, id) {
-                    Ok(Some(result)) => Ok(json_output(&result)),
+                    Ok(Some(result)) => Ok(text_output(
+                        format!(
+                            "Verify {} for unit {id}{}",
+                            if result.passed { "passed" } else { "failed" },
+                            result
+                                .exit_code
+                                .map(|code| format!(" (exit {code})"))
+                                .unwrap_or_default()
+                        ),
+                        json!({
+                            "passed": result.passed,
+                            "exit_code": result.exit_code,
+                            "stdout": result.stdout,
+                            "stderr": result.stderr,
+                            "timed_out": result.timed_out,
+                            "command": result.command,
+                            "timeout_secs": result.timeout_secs,
+                            "unit_id": id,
+                        }),
+                    )),
                     Ok(None) => Ok(ToolOutput::text(format!("Unit {id} has no verify command."))),
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
@@ -1495,7 +1524,10 @@ impl Tool for ManaTool {
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("delete requires 'id'".into()))?;
                 match mana_core::api::delete_unit(&mana_dir, id) {
-                    Ok(result) => Ok(json_output(&result)),
+                    Ok(result) => Ok(text_output(
+                        format!("Deleted unit {} ({})", result.id, result.title),
+                        json!({ "id": result.id, "title": result.title }),
+                    )),
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1507,7 +1539,10 @@ impl Tool for ManaTool {
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("dep_add requires 'dep_id'".into()))?;
                 match mana_core::api::add_dep(&mana_dir, from_id, dep_id) {
-                    Ok(result) => Ok(json_output(&result)),
+                    Ok(result) => Ok(text_output(
+                        format!("Added dependency: {} depends on {}", result.from_id, result.to_id),
+                        json!({ "from_id": result.from_id, "dep_id": result.to_id }),
+                    )),
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1519,7 +1554,10 @@ impl Tool for ManaTool {
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("dep_remove requires 'dep_id'".into()))?;
                 match mana_core::api::remove_dep(&mana_dir, from_id, dep_id) {
-                    Ok(result) => Ok(json_output(&result)),
+                    Ok(result) => Ok(text_output(
+                        format!("Removed dependency: {} no longer depends on {}", result.from_id, result.to_id),
+                        json!({ "from_id": result.from_id, "dep_id": result.to_id }),
+                    )),
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1543,12 +1581,41 @@ impl Tool for ManaTool {
                     pass_ok: params["pass_ok"].as_bool().unwrap_or(true),
                 };
                 match mana_core::api::create_fact(&mana_dir, fact_params) {
-                    Ok(result) => Ok(json_output(&result)),
+                    Ok(result) => Ok(text_output(
+                        format!("Created fact {} ({})", result.unit_id, result.unit.title),
+                        json!({
+                            "unit_id": result.unit_id,
+                            "unit": {
+                                "id": result.unit.id,
+                                "title": result.unit.title,
+                                "unit_type": result.unit.unit_type,
+                                "verify": result.unit.verify,
+                                "paths": result.unit.paths,
+                                "stale_after": result.unit.stale_after,
+                            }
+                        }),
+                    )),
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
             "fact_verify" => match mana_core::api::verify_facts(&mana_dir) {
-                Ok(result) => Ok(json_output(&result)),
+                Ok(result) => Ok(text_output(
+                    format!(
+                        "Verified {}/{} facts · {} stale · {} failing · {} suspect",
+                        result.verified_count,
+                        result.total_facts,
+                        result.stale_count,
+                        result.failing_count,
+                        result.suspect_count
+                    ),
+                    json!({
+                        "total_facts": result.total_facts,
+                        "verified_count": result.verified_count,
+                        "stale_count": result.stale_count,
+                        "failing_count": result.failing_count,
+                        "suspect_count": result.suspect_count,
+                    }),
+                )),
                 Err(e) => Ok(ToolOutput::error(e.to_string())),
             },
             "logs" => {
@@ -1876,7 +1943,7 @@ impl Tool for ManaTool {
                 }
             }
             other => Ok(ToolOutput::error(format!(
-                "Unknown action: {other}. Use: status, list, show, create, close, update, run, run_state, evaluate, claim, release, logs, agents, next, tree"
+                "Unknown action: {other}. Use: status, list, show, create, close, update, run, run_state, evaluate, claim, release, logs, agents, next, tree, reopen, verify, fail, delete, dep_add, dep_remove, fact_create, fact_verify"
             ))),
         }
     }
@@ -2035,24 +2102,212 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn planner_allows_create() {
-        match run_with_mode("planner", "create").await {
+    async fn create_supports_rich_unit_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
+        let tool = ManaTool::default();
+        let result = tool
+            .execute(
+                "call_create_rich",
+                json!({
+                    "action": "create",
+                    "title": "Rich unit",
+                    "description": "Implement the thing",
+                    "acceptance": "- works\n- tested",
+                    "notes": "start here",
+                    "design": "follow existing pattern",
+                    "verify": "test -n ok",
+                    "labels": ["feature", "backend"],
+                    "deps": ["1"],
+                    "paths": ["src/lib.rs", "src/auth.rs"],
+                    "requires": ["auth-api"],
+                    "produces": ["auth-fix"],
+                    "decisions": ["Confirm whether auth should stay sync"],
+                    "feature": true,
+                    "fail_first": true,
+                    "verify_timeout": 12,
+                    "force": false
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let unit = &result.details["unit"];
+        assert_eq!(unit["acceptance"], "- works\n- tested");
+        assert_eq!(unit["labels"][0], "feature");
+        assert_eq!(unit["dependencies"][0], "1");
+        assert_eq!(unit["paths"][0], "src/lib.rs");
+        assert_eq!(unit["requires"][0], "auth-api");
+        assert_eq!(unit["produces"][0], "auth-fix");
+        assert_eq!(unit["decisions"][0], "Confirm whether auth should stay sync");
+        assert_eq!(unit["feature"], true);
+        assert_eq!(unit["fail_first"], true);
+        assert_eq!(unit["verify_timeout"], 12);
+    }
+
+    #[tokio::test]
+    async fn update_supports_acceptance_labels_and_decisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
+        let tool = ManaTool::default();
+        let _created = tool
+            .execute(
+                "call_create_update_target",
+                json!({ "action": "create", "title": "Update target", "verify": "test -n ok" }),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let (ctx2, _keep2) = ctx_with_mode(dir2.path(), crate::config::AgentMode::Full);
+        std::fs::write(
+            dir2.path().join(".mana").join("1-test-unit.md"),
+            "---\nid: '1'\ntitle: Test unit\nstatus: open\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\n---\n\nbody\n",
+        ).unwrap();
+        let result = tool
+            .execute(
+                "call_update_rich",
+                json!({
+                    "action": "update",
+                    "id": "1",
+                    "acceptance": "must pass auth flow",
+                    "add_label": "backend",
+                    "decisions": ["Choose retry limit"],
+                    "resolve_decisions": []
+                }),
+                ctx2,
+            )
+            .await
+            .unwrap();
+        let unit = &result.details["unit"];
+        assert_eq!(unit["acceptance"], "must pass auth flow");
+        assert_eq!(unit["labels"][0], "backend");
+        assert_eq!(unit["decisions"][0], "Choose retry limit");
+    }
+
+    #[tokio::test]
+    async fn create_respects_verify_lint_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
+        let tool = ManaTool::default();
+        let result = tool
+            .execute(
+                "call_create_lint",
+                json!({ "action": "create", "title": "Weak verify", "verify": "echo done" }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error, "weak verify should be rejected by default");
+        let text = result.text_content().unwrap_or("");
+        assert!(text.contains("Verify command has lint errors") || text.contains("verify"));
+    }
+
+    #[tokio::test]
+    async fn native_verify_reopen_and_fact_actions_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let mana_dir = dir.path().join(".mana");
+        std::fs::create_dir_all(&mana_dir).unwrap();
+        std::fs::write(mana_dir.join("config.yaml"), "project: test\nnext_id: 2\n").unwrap();
+        std::fs::write(
+            mana_dir.join("1-test-unit.md"),
+            "---\nid: '1'\ntitle: Test unit\nstatus: closed\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\nclosed_at: '2026-03-28T00:00:00Z'\nclose_reason: done\n---\n\nbody\n",
+        ).unwrap();
+        let (tx, _rx) = mpsc::channel::<ToolUpdate>(1);
+        let (cmd_tx, _cmd_rx) = mpsc::channel(16);
+        let ctx = ToolContext {
+            cwd: dir.path().to_path_buf(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            command_tx: cmd_tx,
+            ui: Arc::new(NullInterface),
+            file_cache: Arc::new(FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
+            mode: crate::config::AgentMode::Full,
+            read_max_lines: 500,
+        };
+        let tool = ManaTool::default();
+        let reopened = tool.execute("call_reopen", json!({ "action": "reopen", "id": "1" }), ctx).await.unwrap();
+        assert_eq!(reopened.details["unit"]["status"], "open");
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let mana_dir2 = dir2.path().join(".mana");
+        std::fs::create_dir_all(&mana_dir2).unwrap();
+        std::fs::write(mana_dir2.join("config.yaml"), "project: test\nnext_id: 2\n").unwrap();
+        std::fs::write(
+            mana_dir2.join("1-test-unit.md"),
+            "---\nid: '1'\ntitle: Test unit\nstatus: open\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\n---\n\nbody\n",
+        ).unwrap();
+        let (tx2, _rx2) = mpsc::channel::<ToolUpdate>(1);
+        let (cmd_tx2, _cmd_rx2) = mpsc::channel(16);
+        let ctx2 = ToolContext {
+            cwd: dir2.path().to_path_buf(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx2,
+            command_tx: cmd_tx2,
+            ui: Arc::new(NullInterface),
+            file_cache: Arc::new(FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
+            mode: crate::config::AgentMode::Full,
+            read_max_lines: 500,
+        };
+        let verify = tool.execute("call_verify", json!({ "action": "verify", "id": "1" }), ctx2).await.unwrap();
+        assert_eq!(verify.details["passed"], true);
+
+        let dir3 = tempfile::tempdir().unwrap();
+        let mana_dir3 = dir3.path().join(".mana");
+        std::fs::create_dir_all(&mana_dir3).unwrap();
+        std::fs::write(mana_dir3.join("config.yaml"), "project: test\nnext_id: 1\n").unwrap();
+        let (tx3, _rx3) = mpsc::channel::<ToolUpdate>(1);
+        let (cmd_tx3, _cmd_rx3) = mpsc::channel(16);
+        let ctx3 = ToolContext {
+            cwd: dir3.path().to_path_buf(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx3,
+            command_tx: cmd_tx3,
+            ui: Arc::new(NullInterface),
+            file_cache: Arc::new(FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
+            mode: crate::config::AgentMode::Full,
+            read_max_lines: 500,
+        };
+        let fact = tool.execute("call_fact", json!({ "action": "fact_create", "fact_title": "Auth fact", "verify": "test -d .mana", "description": "fact body", "ttl_days": 7 }), ctx3).await.unwrap();
+        assert_eq!(fact.details["unit"]["unit_type"], "fact");
+    }
+
+    #[tokio::test]
+    async fn planner_allows_fact_create() {
+        match run_with_mode("planner", "fact_create").await {
             ManaResult::Attempted(_) => {}
             ManaResult::ModeBlocked(msg) => {
-                panic!("planner should allow 'create' but was blocked: {msg}")
+                panic!("planner should allow 'fact_create' but was blocked: {msg}")
             }
         }
     }
 
     #[tokio::test]
-    async fn planner_blocks_close() {
-        match run_with_mode("planner", "close").await {
+    async fn worker_blocks_fact_create() {
+        match run_with_mode("worker", "fact_create").await {
             ManaResult::ModeBlocked(_) => {}
             ManaResult::Attempted(out) => {
                 panic!(
-                    "planner should block 'close', got: {:?}",
+                    "worker should block 'fact_create', got: {:?}",
                     out.text_content()
                 )
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_allows_verify() {
+        match run_with_mode("worker", "verify").await {
+            ManaResult::Attempted(_) => {}
+            ManaResult::ModeBlocked(msg) => {
+                panic!("worker should allow 'verify' but was blocked: {msg}")
             }
         }
     }
