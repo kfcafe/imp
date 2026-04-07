@@ -680,6 +680,25 @@ fn mana_widget_lines(summary: impl Into<String>, detail: Option<String>) -> Widg
     WidgetContent::Lines(lines)
 }
 
+async fn set_mana_delta_widget(
+    ctx: &ToolContext,
+    summary: impl Into<String>,
+    detail: Option<String>,
+) {
+    ctx.ui
+        .set_widget("mana", Some(mana_widget_lines(summary, detail)))
+        .await;
+}
+
+fn unit_delta_label(unit: &serde_json::Value) -> Option<String> {
+    let id = unit.get("id").and_then(|v| v.as_str())?;
+    let title = unit
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(untitled)");
+    Some(format!("{id} · {title}"))
+}
+
 fn target_from_params(params: &serde_json::Value) -> Result<RunTarget> {
     if let Some(values) = params["targets"].as_array() {
         let ids: Vec<String> = values
@@ -1442,7 +1461,31 @@ impl Tool for ManaTool {
                     force: params["force"].as_bool().unwrap_or(false),
                 };
                 match mana_core::api::create_unit(&mana_dir, create_params) {
-                    Ok(result) => Ok(json_output(&result)),
+                    Ok(result) => {
+                        let unit_value = serde_json::to_value(&result.unit)
+                            .unwrap_or(serde_json::Value::Null);
+                        let summary = unit_delta_label(&unit_value)
+                            .map(|label| format!("mana delta: created {label}"))
+                            .unwrap_or_else(|| "mana delta: created unit".to_string());
+                        let detail = parse_optional_string(&params["parent"])
+                            .map(|parent| format!("parent {parent}"));
+                        set_mana_delta_widget(&ctx, summary.clone(), detail).await;
+                        Ok(text_output(
+                            summary,
+                            json!({
+                                "action": "create",
+                                "title": title,
+                                "description": params["description"],
+                                "verify": params["verify"],
+                                "priority": params["priority"],
+                                "parent": params["parent"],
+                                "deps": params["deps"],
+                                "labels": params["labels"],
+                                "unit": unit_value,
+                                "path": result.path,
+                            }),
+                        ))
+                    }
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1478,7 +1521,29 @@ impl Tool for ManaTool {
                     defer_verify: false,
                 };
                 match mana_core::api::close_unit(&mana_dir, id, opts) {
-                    Ok(outcome) => Ok(json_output(&outcome)),
+                    Ok(outcome) => {
+                        let details = serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null);
+                        if let Some(unit) = details.get("unit") {
+                            let summary = unit_delta_label(unit)
+                                .map(|label| format!("mana delta: closed {label}"))
+                                .unwrap_or_else(|| format!("mana delta: closed {id}"));
+                            set_mana_delta_widget(
+                                &ctx,
+                                summary,
+                                params["reason"].as_str().map(|s| s.to_string()),
+                            )
+                            .await;
+                        }
+                        let mut details_obj = details.as_object().cloned().unwrap_or_default();
+                        details_obj.insert("action".into(), json!("close"));
+                        if let Some(reason) = params["reason"].as_str() {
+                            details_obj.insert("reason".into(), json!(reason));
+                        }
+                        Ok(text_output(
+                            format!("Closed unit {id}"),
+                            serde_json::Value::Object(details_obj),
+                        ))
+                    }
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1504,7 +1569,33 @@ impl Tool for ManaTool {
                     resolve_decisions,
                 };
                 match mana_core::api::update_unit(&mana_dir, id, update_params) {
-                    Ok(result) => Ok(json_output(&result)),
+                    Ok(result) => {
+                        let unit_value = serde_json::to_value(&result.unit)
+                            .unwrap_or(serde_json::Value::Null);
+                        let summary = unit_delta_label(&unit_value)
+                            .map(|label| format!("mana delta: updated {label}"))
+                            .unwrap_or_else(|| format!("mana delta: updated {id}"));
+                        set_mana_delta_widget(&ctx, summary.clone(), None).await;
+                        Ok(text_output(
+                            summary,
+                            json!({
+                                "action": "update",
+                                "id": id,
+                                "status": params["status"],
+                                "title": params["title"],
+                                "description": params["description"],
+                                "priority": params["priority"],
+                                "notes": params["notes"],
+                                "acceptance": params["acceptance"],
+                                "add_label": params["add_label"],
+                                "remove_label": params["remove_label"],
+                                "decisions": params["decisions"],
+                                "resolve_decisions": params["resolve_decisions"],
+                                "unit": unit_value,
+                                "path": result.path,
+                            }),
+                        ))
+                    }
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1529,7 +1620,24 @@ impl Tool for ManaTool {
                     resolve_decisions: Vec::new(),
                 };
                 match mana_core::api::update_unit(&mana_dir, id, update_params) {
-                    Ok(result) => Ok(json_output(&result)),
+                    Ok(result) => {
+                        let unit_value = serde_json::to_value(&result.unit)
+                            .unwrap_or(serde_json::Value::Null);
+                        let summary = unit_delta_label(&unit_value)
+                            .map(|label| format!("mana delta: notes appended on {label}"))
+                            .unwrap_or_else(|| format!("mana delta: notes appended on {id}"));
+                        set_mana_delta_widget(&ctx, summary.clone(), Some("notes appended".into())).await;
+                        Ok(text_output(
+                            summary,
+                            json!({
+                                "action": "notes_append",
+                                "id": id,
+                                "notes": params["notes"],
+                                "unit": unit_value,
+                                "path": result.path,
+                            }),
+                        ))
+                    }
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1555,7 +1663,24 @@ impl Tool for ManaTool {
                     resolve_decisions: Vec::new(),
                 };
                 match mana_core::api::update_unit(&mana_dir, id, update_params) {
-                    Ok(result) => Ok(json_output(&result)),
+                    Ok(result) => {
+                        let unit_value = serde_json::to_value(&result.unit)
+                            .unwrap_or(serde_json::Value::Null);
+                        let summary = unit_delta_label(&unit_value)
+                            .map(|label| format!("mana delta: decision added on {label}"))
+                            .unwrap_or_else(|| format!("mana delta: decision added on {id}"));
+                        set_mana_delta_widget(&ctx, summary.clone(), Some("decision added".into())).await;
+                        Ok(text_output(
+                            summary,
+                            json!({
+                                "action": "decision_add",
+                                "id": id,
+                                "description": params["description"],
+                                "unit": unit_value,
+                                "path": result.path,
+                            }),
+                        ))
+                    }
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1584,7 +1709,24 @@ impl Tool for ManaTool {
                     resolve_decisions,
                 };
                 match mana_core::api::update_unit(&mana_dir, id, update_params) {
-                    Ok(result) => Ok(json_output(&result)),
+                    Ok(result) => {
+                        let unit_value = serde_json::to_value(&result.unit)
+                            .unwrap_or(serde_json::Value::Null);
+                        let summary = unit_delta_label(&unit_value)
+                            .map(|label| format!("mana delta: decision resolved on {label}"))
+                            .unwrap_or_else(|| format!("mana delta: decision resolved on {id}"));
+                        set_mana_delta_widget(&ctx, summary.clone(), Some("decision resolved".into())).await;
+                        Ok(text_output(
+                            summary,
+                            json!({
+                                "action": "decision_resolve",
+                                "id": id,
+                                "resolve_decisions": params["resolve_decisions"],
+                                "unit": unit_value,
+                                "path": result.path,
+                            }),
+                        ))
+                    }
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1593,17 +1735,22 @@ impl Tool for ManaTool {
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("reopen requires 'id'".into()))?;
                 match mana_core::api::reopen_unit(&mana_dir, id) {
-                    Ok(result) => Ok(text_output(
-                        format!("Reopened unit {} ({})", result.unit.id, result.unit.title),
-                        json!({
-                            "unit": {
-                                "id": result.unit.id,
-                                "title": result.unit.title,
-                                "status": result.unit.status,
-                            },
-                            "path": result.path,
-                        }),
-                    )),
+                    Ok(result) => {
+                        let summary = format!("mana delta: reopened {} ({})", result.unit.id, result.unit.title);
+                        set_mana_delta_widget(&ctx, summary, Some("status=open".into())).await;
+                        Ok(text_output(
+                            format!("Reopened unit {} ({})", result.unit.id, result.unit.title),
+                            json!({
+                                "action": "reopen",
+                                "unit": {
+                                    "id": result.unit.id,
+                                    "title": result.unit.title,
+                                    "status": result.unit.status,
+                                },
+                                "path": result.path,
+                            }),
+                        ))
+                    }
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1641,7 +1788,28 @@ impl Tool for ManaTool {
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("fail requires 'id'".into()))?;
                 match mana_core::api::fail_unit(&mana_dir, id, parse_optional_string(&params["reason"])) {
-                    Ok(unit) => Ok(json_output(&unit)),
+                    Ok(unit) => {
+                        let unit_value = serde_json::to_value(&unit)
+                            .unwrap_or(serde_json::Value::Null);
+                        let summary = unit_delta_label(&unit_value)
+                            .map(|label| format!("mana delta: marked failed {label}"))
+                            .unwrap_or_else(|| format!("mana delta: marked failed {id}"));
+                        set_mana_delta_widget(
+                            &ctx,
+                            summary,
+                            params["reason"].as_str().map(|s| s.to_string()),
+                        )
+                        .await;
+                        Ok(text_output(
+                            format!("Marked unit {id} as failed"),
+                            json!({
+                                "action": "fail",
+                                "id": id,
+                                "reason": params["reason"],
+                                "unit": unit_value,
+                            }),
+                        ))
+                    }
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1650,10 +1818,14 @@ impl Tool for ManaTool {
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("delete requires 'id'".into()))?;
                 match mana_core::api::delete_unit(&mana_dir, id) {
-                    Ok(result) => Ok(text_output(
-                        format!("Deleted unit {} ({})", result.id, result.title),
-                        json!({ "id": result.id, "title": result.title }),
-                    )),
+                    Ok(result) => {
+                        let summary = format!("mana delta: deleted {} ({})", result.id, result.title);
+                        set_mana_delta_widget(&ctx, summary.clone(), None).await;
+                        Ok(text_output(
+                            format!("Deleted unit {} ({})", result.id, result.title),
+                            json!({ "action": "delete", "id": result.id, "title": result.title }),
+                        ))
+                    }
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1665,10 +1837,14 @@ impl Tool for ManaTool {
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("dep_add requires 'dep_id'".into()))?;
                 match mana_core::api::add_dep(&mana_dir, from_id, dep_id) {
-                    Ok(result) => Ok(text_output(
-                        format!("Added dependency: {} depends on {}", result.from_id, result.to_id),
-                        json!({ "from_id": result.from_id, "dep_id": result.to_id }),
-                    )),
+                    Ok(result) => {
+                        let summary = format!("mana delta: dependency added {} -> {}", result.from_id, result.to_id);
+                        set_mana_delta_widget(&ctx, summary.clone(), None).await;
+                        Ok(text_output(
+                            format!("Added dependency: {} depends on {}", result.from_id, result.to_id),
+                            json!({ "action": "dep_add", "from_id": result.from_id, "dep_id": result.to_id }),
+                        ))
+                    }
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1680,10 +1856,14 @@ impl Tool for ManaTool {
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("dep_remove requires 'dep_id'".into()))?;
                 match mana_core::api::remove_dep(&mana_dir, from_id, dep_id) {
-                    Ok(result) => Ok(text_output(
-                        format!("Removed dependency: {} no longer depends on {}", result.from_id, result.to_id),
-                        json!({ "from_id": result.from_id, "dep_id": result.to_id }),
-                    )),
+                    Ok(result) => {
+                        let summary = format!("mana delta: dependency removed {} -> {}", result.from_id, result.to_id);
+                        set_mana_delta_widget(&ctx, summary.clone(), None).await;
+                        Ok(text_output(
+                            format!("Removed dependency: {} no longer depends on {}", result.from_id, result.to_id),
+                            json!({ "action": "dep_remove", "from_id": result.from_id, "dep_id": result.to_id }),
+                        ))
+                    }
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1707,20 +1887,25 @@ impl Tool for ManaTool {
                     pass_ok: params["pass_ok"].as_bool().unwrap_or(true),
                 };
                 match mana_core::api::create_fact(&mana_dir, fact_params) {
-                    Ok(result) => Ok(text_output(
-                        format!("Created fact {} ({})", result.unit_id, result.unit.title),
-                        json!({
-                            "unit_id": result.unit_id,
-                            "unit": {
-                                "id": result.unit.id,
-                                "title": result.unit.title,
-                                "unit_type": result.unit.unit_type,
-                                "verify": result.unit.verify,
-                                "paths": result.unit.paths,
-                                "stale_after": result.unit.stale_after,
-                            }
-                        }),
-                    )),
+                    Ok(result) => {
+                        let summary = format!("mana delta: created fact {} ({})", result.unit_id, result.unit.title);
+                        set_mana_delta_widget(&ctx, summary.clone(), Some("fact".into())).await;
+                        Ok(text_output(
+                            format!("Created fact {} ({})", result.unit_id, result.unit.title),
+                            json!({
+                                "action": "fact_create",
+                                "unit_id": result.unit_id,
+                                "unit": {
+                                    "id": result.unit.id,
+                                    "title": result.unit.title,
+                                    "unit_type": result.unit.unit_type,
+                                    "verify": result.unit.verify,
+                                    "paths": result.unit.paths,
+                                    "stale_after": result.unit.stale_after,
+                                }
+                            }),
+                        ))
+                    }
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -2079,12 +2264,13 @@ impl Tool for ManaTool {
 mod tests {
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use serde_json::json;
     use tokio::sync::mpsc;
 
     use super::{evaluate_run_output, stream_event_line, ManaRunStore, ManaTool, NativeRunState};
     use crate::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
-    use crate::ui::NullInterface;
+    use crate::ui::{NullInterface, NotifyLevel, WidgetContent};
 
     enum ManaResult {
         ModeBlocked(String),
@@ -2092,6 +2278,54 @@ mod tests {
     }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct TestUi {
+        widgets: Arc<std::sync::Mutex<Vec<(String, Option<WidgetContent>)>>>,
+    }
+
+    #[async_trait]
+    impl crate::ui::UserInterface for TestUi {
+        fn has_ui(&self) -> bool {
+            true
+        }
+
+        async fn notify(&self, _message: &str, _level: NotifyLevel) {}
+
+        async fn confirm(&self, _title: &str, _message: &str) -> Option<bool> {
+            None
+        }
+
+        async fn select_with_context(
+            &self,
+            _title: &str,
+            _context: &str,
+            _options: &[crate::ui::SelectOption],
+        ) -> Option<usize> {
+            None
+        }
+
+        async fn input_with_context(
+            &self,
+            _title: &str,
+            _context: &str,
+            _placeholder: &str,
+        ) -> Option<String> {
+            None
+        }
+
+        async fn set_status(&self, _key: &str, _text: Option<&str>) {}
+
+        async fn set_widget(&self, key: &str, content: Option<WidgetContent>) {
+            self.widgets
+                .lock()
+                .unwrap()
+                .push((key.to_string(), content));
+        }
+
+        async fn custom(&self, _component: crate::ui::ComponentSpec) -> Option<serde_json::Value> {
+            None
+        }
+    }
 
     async fn run_with_mode(mode_name: &str, action: &str) -> ManaResult {
         let prev = {
@@ -2189,6 +2423,42 @@ mod tests {
         (ctx, tempfile::tempdir().unwrap())
     }
 
+    fn ctx_with_ui(
+        dir: &std::path::Path,
+        mode: crate::config::AgentMode,
+    ) -> (
+        ToolContext,
+        tempfile::TempDir,
+        Arc<std::sync::Mutex<Vec<(String, Option<WidgetContent>)>>>,
+    ) {
+        let mana_dir = dir.join(".mana");
+        std::fs::create_dir_all(&mana_dir).unwrap();
+        std::fs::write(mana_dir.join("config.yaml"), "project: test\nnext_id: 2\n").unwrap();
+        std::fs::write(
+            mana_dir.join("1-test-unit.md"),
+            "---\nid: '1'\ntitle: Test unit\nstatus: open\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\n---\n\nbody\n",
+        )
+        .unwrap();
+        let widgets = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (tx, _rx) = mpsc::channel::<ToolUpdate>(1);
+        let (cmd_tx, _cmd_rx) = mpsc::channel(16);
+        let ctx = ToolContext {
+            cwd: dir.to_path_buf(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            command_tx: cmd_tx,
+            ui: Arc::new(TestUi {
+                widgets: widgets.clone(),
+            }),
+            file_cache: Arc::new(FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
+            mode,
+            read_max_lines: 500,
+        };
+        (ctx, tempfile::tempdir().unwrap(), widgets)
+    }
+
     async fn run_with_ctx_mode(mode: crate::config::AgentMode, action: &str) -> ManaResult {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _keep) = ctx_with_mode(dir.path(), mode);
@@ -2212,6 +2482,52 @@ mod tests {
                 ManaResult::Attempted(output)
             }
         }
+    }
+
+    #[tokio::test]
+    async fn create_sets_mana_delta_widget_and_action_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep, widgets) = ctx_with_ui(dir.path(), crate::config::AgentMode::Full);
+        let tool = ManaTool::default();
+        let result = tool
+            .execute(
+                "call_create_widget",
+                json!({ "action": "create", "title": "Widget unit", "verify": "test -n ok" }),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.details["action"], "create");
+        assert_eq!(result.details["unit"]["title"], "Widget unit");
+        let widgets = widgets.lock().unwrap();
+        assert!(widgets.iter().any(|(key, content)| {
+            key == "mana"
+                && matches!(content, Some(WidgetContent::Lines(lines)) if lines.iter().any(|line| line.contains("mana delta: created 2 · Widget unit")))
+        }));
+    }
+
+    #[tokio::test]
+    async fn decision_add_sets_mana_delta_widget_and_action_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep, widgets) = ctx_with_ui(dir.path(), crate::config::AgentMode::Full);
+        let tool = ManaTool::default();
+        let result = tool
+            .execute(
+                "call_decision_widget",
+                json!({ "action": "decision_add", "id": "1", "description": "Choose retry limit" }),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.details["action"], "decision_add");
+        assert_eq!(result.details["unit"]["decisions"][0], "Choose retry limit");
+        let widgets = widgets.lock().unwrap();
+        assert!(widgets.iter().any(|(key, content)| {
+            key == "mana"
+                && matches!(content, Some(WidgetContent::Lines(lines)) if lines.iter().any(|line| line.contains("mana delta: decision added on 1 · Test unit")))
+        }));
     }
 
     #[tokio::test]

@@ -769,6 +769,36 @@ fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
                     push_mana_detail_line(&mut lines, "runtime", Some(runtime));
                 }
             }
+            "close" | "reopen" | "fail" => {
+                push_mana_detail_line(&mut lines, "id", tc.details.get("id"));
+                push_mana_detail_line(&mut lines, "reason", tc.details.get("reason"));
+                if let Some(unit) = tc.details.get("unit") {
+                    push_mana_detail_line(&mut lines, "unit", Some(unit));
+                }
+            }
+            "notes_append" | "decision_add" | "decision_resolve" => {
+                push_mana_detail_line(&mut lines, "id", tc.details.get("id"));
+                push_mana_detail_line(&mut lines, "notes", tc.details.get("notes"));
+                push_mana_detail_line(&mut lines, "description", tc.details.get("description"));
+                push_mana_detail_line(&mut lines, "resolve_decisions", tc.details.get("resolve_decisions"));
+                if let Some(unit) = tc.details.get("unit") {
+                    push_mana_detail_line(&mut lines, "unit", Some(unit));
+                }
+            }
+            "dep_add" | "dep_remove" => {
+                push_mana_detail_line(&mut lines, "from_id", tc.details.get("from_id"));
+                push_mana_detail_line(&mut lines, "dep_id", tc.details.get("dep_id"));
+            }
+            "delete" => {
+                push_mana_detail_line(&mut lines, "id", tc.details.get("id"));
+                push_mana_detail_line(&mut lines, "title", tc.details.get("title"));
+            }
+            "fact_create" => {
+                push_mana_detail_line(&mut lines, "unit_id", tc.details.get("unit_id"));
+                if let Some(unit) = tc.details.get("unit") {
+                    push_mana_detail_line(&mut lines, "unit", Some(unit));
+                }
+            }
             _ => {
                 for key in ["id", "run_id", "reason", "by", "status", "count"] {
                     push_mana_detail_line(&mut lines, key, tc.details.get(key));
@@ -906,6 +936,16 @@ fn push_mana_detail_line(lines: &mut Vec<String>, key: &str, value: Option<&Valu
                 map.get("model").and_then(Value::as_str),
             ) {
                 format!("{agent} · {model}")
+            } else if let (Some(id), Some(title)) = (
+                map.get("id").and_then(Value::as_str),
+                map.get("title").and_then(Value::as_str),
+            ) {
+                let status = map
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(|s| format!(" · {s}"))
+                    .unwrap_or_default();
+                format!("{id} · {title}{status}")
             } else {
                 serde_json::to_string(value).unwrap_or_default()
             }
@@ -1144,6 +1184,38 @@ mod tests {
         assert!(lines.iter().any(|l| l == "scope: targets 1, 2"));
         assert!(lines.iter().any(|l| l == "target: explicit: 1, 2"));
         assert!(lines.iter().any(|l| l == "runtime: imp · sonnet"));
+    }
+
+    #[test]
+    fn format_mana_output_renders_delta_actions() {
+        let tc = DisplayToolCall {
+            id: "delta-1".into(),
+            name: "mana".into(),
+            args_summary: "decision_add".into(),
+            output: Some("mana delta: decision added on 1 · Test unit".into()),
+            details: serde_json::json!({
+                "action": "decision_add",
+                "id": "1",
+                "description": "Choose retry limit",
+                "unit": {
+                    "id": "1",
+                    "title": "Test unit",
+                    "status": "open",
+                    "decisions": ["Choose retry limit"]
+                }
+            }),
+            is_error: false,
+            expanded: false,
+            streaming_lines: Vec::new(),
+            streaming_output: String::new(),
+        };
+
+        let lines = format_mana_output(&tc);
+        assert!(lines.iter().any(|l| l == "action: decision_add"));
+        assert!(lines.iter().any(|l| l == "id: 1"));
+        assert!(lines.iter().any(|l| l == "description: Choose retry limit"));
+        assert!(lines.iter().any(|l| l == "unit: 1 · Test unit · open"));
+        assert!(lines.iter().any(|l| l.contains("mana delta: decision added on 1 · Test unit")));
     }
 
     #[test]
