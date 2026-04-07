@@ -148,6 +148,8 @@ pub struct Agent {
     pub cache_options: imp_llm::CacheOptions,
     /// Tracks identical consecutive tool calls to detect loops.
     last_tool_call: std::sync::Arc<std::sync::Mutex<Option<RepeatedToolCallState>>>,
+    /// Prevent repeated self-nudges for mana externalization in a single run.
+    queued_mana_externalization_nudge: bool,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_tx: mpsc::Sender<AgentCommand>,
@@ -213,6 +215,7 @@ impl Agent {
                 global_scope: false,
             },
             last_tool_call: Arc::new(std::sync::Mutex::new(None)),
+            queued_mana_externalization_nudge: false,
 
             event_tx,
             command_tx: command_tx.clone(),
@@ -537,9 +540,18 @@ impl Agent {
                 // No tool calls — the model is done unless a queued follow-up exists.
                 self.emit(AgentEvent::TurnEnd {
                     index: turn,
-                    message: msg,
+                    message: msg.clone(),
                 })
                 .await;
+                if should_queue_mana_externalization_follow_up(
+                    &msg,
+                    self.mode,
+                    self.has_mana_skill,
+                    self.queued_mana_externalization_nudge,
+                ) {
+                    queued_follow_ups.push_back(mana_externalization_follow_up_text().to_string());
+                    self.queued_mana_externalization_nudge = true;
+                }
                 if let Some(follow_up) = queued_follow_ups.pop_front() {
                     self.messages.push(Message::user(&follow_up));
                     turn += 1;
@@ -942,6 +954,76 @@ fn push_stream_thinking_block(content: &mut Vec<ContentBlock>, text: String) {
     } else {
         content.push(ContentBlock::Thinking { text });
     }
+}
+
+fn assistant_message_text(message: &AssistantMessage) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn assistant_message_contains_mana_tool_call(message: &AssistantMessage) -> bool {
+    message.content.iter().any(|block| match block {
+        ContentBlock::ToolCall { name, .. } => name == "mana",
+        _ => false,
+    })
+}
+
+fn should_queue_mana_externalization_follow_up(
+    message: &AssistantMessage,
+    mode: AgentMode,
+    has_mana_skill: bool,
+    already_queued: bool,
+) -> bool {
+    if already_queued || !has_mana_skill {
+        return false;
+    }
+
+    if !matches!(mode, AgentMode::Full | AgentMode::Planner | AgentMode::Orchestrator) {
+        return false;
+    }
+
+    if assistant_message_contains_mana_tool_call(message) {
+        return false;
+    }
+
+    let text = assistant_message_text(message);
+    if text.trim().is_empty() {
+        return false;
+    }
+
+    let lower = text.to_ascii_lowercase();
+    let planning_signal = [
+        "plan",
+        "phase",
+        "rollout",
+        "decompose",
+        "break",
+        "split",
+        "architecture",
+        "migration",
+        "follow-up",
+        "next step",
+        "next steps",
+        "dependency",
+        "dependencies",
+        "verify",
+        "acceptance",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+
+    planning_signal
+}
+
+fn mana_externalization_follow_up_text() -> &'static str {
+    "Before you continue: externalize the durable plan or decomposition you just described into mana now. Create or update the relevant unit(s) with native mana actions, prefer root scope for cross-project work, and keep the delta visible."
 }
 
 /// Build an AssistantMessage from accumulated stream parts while preserving
@@ -1566,6 +1648,73 @@ mod tests {
         assert_eq!(user_texts.len(), 2);
         assert_eq!(user_texts[0], "Please split this into units for workers");
         assert!(user_texts[1].contains("load `mana`"));
+    }
+
+    #[tokio::test]
+    async fn agent_queues_mana_externalization_follow_up_after_planning_turn() {
+        let provider = Arc::new(MockProvider::new(vec![
+            text_response("Here is the plan: split this into phases, add dependencies, and define verify steps.", 100, 20),
+            text_response("Externalized into mana.", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.has_mana_skill = true;
+        agent.mode = AgentMode::Planner;
+
+        agent
+            .run("Plan the rollout".to_string())
+            .await
+            .unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts.len(), 2);
+        assert_eq!(user_texts[0], "Plan the rollout");
+        assert!(user_texts[1].contains("externalize the durable plan"));
+    }
+
+    #[tokio::test]
+    async fn agent_does_not_queue_externalization_follow_up_after_mana_tool_turn() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response("call_1", "mana", serde_json::json!({"action": "status"}), 100, 20),
+            text_response("Done after mana", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.has_mana_skill = true;
+        agent.mode = AgentMode::Planner;
+        agent.tools.register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        agent
+            .run("Plan the rollout".to_string())
+            .await
+            .unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts, vec!["Plan the rollout".to_string()]);
     }
 
     #[tokio::test]
