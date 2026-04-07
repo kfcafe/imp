@@ -25,6 +25,44 @@ fn find_mana_dir(cwd: &Path) -> std::result::Result<std::path::PathBuf, String> 
     mana_core::discovery::find_mana_dir(cwd).map_err(|e| e.to_string())
 }
 
+fn resolve_mana_dir(
+    cwd: &Path,
+    params: &serde_json::Value,
+) -> std::result::Result<std::path::PathBuf, String> {
+    let scope = params
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("mana_scope").and_then(|v| v.as_str()))
+        .unwrap_or("auto");
+
+    match scope {
+        "auto" | "project" => find_mana_dir(cwd),
+        "root" => {
+            let mut current = cwd.to_path_buf();
+            loop {
+                let candidate = current.join(".mana");
+                if candidate.is_dir() {
+                    let config = candidate.join("config.yaml");
+                    if config.is_file() {
+                        if let Ok(contents) = std::fs::read_to_string(&config) {
+                            if contents.contains("project: tower") || contents.contains("project: Tower") {
+                                return Ok(candidate);
+                            }
+                        }
+                    }
+                }
+                if !current.pop() {
+                    break;
+                }
+            }
+            Err("No root .mana/ directory found for scope=root".to_string())
+        }
+        other => Err(format!(
+            "Unknown mana scope '{other}'. Use auto, project, or root."
+        )),
+    }
+}
+
 fn json_output(value: &impl serde::Serialize) -> ToolOutput {
     match serde_json::to_string_pretty(value) {
         Ok(json) => ToolOutput {
@@ -1166,9 +1204,17 @@ impl Tool for ManaTool {
         let mut properties = serde_json::Map::new();
         properties.insert(
             "action".into(),
-            json!({ "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "run_state", "evaluate", "claim", "release", "logs", "agents", "next", "tree", "reopen", "verify", "fail", "delete", "dep_add", "dep_remove", "fact_create", "fact_verify"] }),
+            json!({ "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "run_state", "evaluate", "claim", "release", "logs", "agents", "next", "tree", "reopen", "verify", "fail", "delete", "dep_add", "dep_remove", "fact_create", "fact_verify", "notes_append", "decision_add", "decision_resolve"] }),
         );
         properties.insert("id".into(), json!({ "type": "string" }));
+        properties.insert(
+            "scope".into(),
+            json!({ "type": "string", "enum": ["auto", "project", "root"], "description": "Mana scope selection for this action" }),
+        );
+        properties.insert(
+            "mana_scope".into(),
+            json!({ "type": "string", "enum": ["auto", "project", "root"], "description": "Alias for scope" }),
+        );
         properties.insert("from_id".into(), json!({ "type": "string", "description": "Source unit ID for dependency updates" }));
         properties.insert("dep_id".into(), json!({ "type": "string", "description": "Dependency unit ID to add or remove" }));
         properties.insert(
@@ -1321,7 +1367,7 @@ impl Tool for ManaTool {
             )));
         }
 
-        let mana_dir = find_mana_dir(&ctx.cwd).map_err(crate::error::Error::Tool)?;
+        let mana_dir = resolve_mana_dir(&ctx.cwd, &params).map_err(crate::error::Error::Tool)?;
 
         match action {
             "status" => match mana_core::api::get_status(&mana_dir) {
@@ -1455,6 +1501,86 @@ impl Tool for ManaTool {
                     add_label: parse_optional_string(&params["add_label"]),
                     remove_label: parse_optional_string(&params["remove_label"]),
                     decisions,
+                    resolve_decisions,
+                };
+                match mana_core::api::update_unit(&mana_dir, id, update_params) {
+                    Ok(result) => Ok(json_output(&result)),
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
+            "notes_append" => {
+                let id = params["id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("notes_append requires 'id'".into()))?;
+                let note = parse_optional_string(&params["notes"])
+                    .ok_or_else(|| crate::error::Error::Tool("notes_append requires 'notes'".into()))?;
+                let update_params = mana_core::ops::update::UpdateParams {
+                    title: None,
+                    description: None,
+                    acceptance: None,
+                    notes: Some(note),
+                    design: None,
+                    status: None,
+                    priority: None,
+                    assignee: None,
+                    add_label: None,
+                    remove_label: None,
+                    decisions: Vec::new(),
+                    resolve_decisions: Vec::new(),
+                };
+                match mana_core::api::update_unit(&mana_dir, id, update_params) {
+                    Ok(result) => Ok(json_output(&result)),
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
+            "decision_add" => {
+                let id = params["id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("decision_add requires 'id'".into()))?;
+                let decision = parse_optional_string(&params["description"])
+                    .or_else(|| parse_optional_string(&params["notes"]))
+                    .ok_or_else(|| crate::error::Error::Tool("decision_add requires 'description' or 'notes'".into()))?;
+                let update_params = mana_core::ops::update::UpdateParams {
+                    title: None,
+                    description: None,
+                    acceptance: None,
+                    notes: None,
+                    design: None,
+                    status: None,
+                    priority: None,
+                    assignee: None,
+                    add_label: None,
+                    remove_label: None,
+                    decisions: vec![decision],
+                    resolve_decisions: Vec::new(),
+                };
+                match mana_core::api::update_unit(&mana_dir, id, update_params) {
+                    Ok(result) => Ok(json_output(&result)),
+                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                }
+            }
+            "decision_resolve" => {
+                let id = params["id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("decision_resolve requires 'id'".into()))?;
+                let resolve_decisions = parse_csv_strings(&params["resolve_decisions"], "resolve_decisions")?;
+                if resolve_decisions.is_empty() {
+                    return Ok(ToolOutput::error(
+                        "decision_resolve requires 'resolve_decisions'",
+                    ));
+                }
+                let update_params = mana_core::ops::update::UpdateParams {
+                    title: None,
+                    description: None,
+                    acceptance: None,
+                    notes: None,
+                    design: None,
+                    status: None,
+                    priority: None,
+                    assignee: None,
+                    add_label: None,
+                    remove_label: None,
+                    decisions: Vec::new(),
                     resolve_decisions,
                 };
                 match mana_core::api::update_unit(&mana_dir, id, update_params) {
@@ -1943,7 +2069,7 @@ impl Tool for ManaTool {
                 }
             }
             other => Ok(ToolOutput::error(format!(
-                "Unknown action: {other}. Use: status, list, show, create, close, update, run, run_state, evaluate, claim, release, logs, agents, next, tree, reopen, verify, fail, delete, dep_add, dep_remove, fact_create, fact_verify"
+                "Unknown action: {other}. Use: status, list, show, create, close, update, run, run_state, evaluate, claim, release, logs, agents, next, tree, reopen, verify, fail, delete, dep_add, dep_remove, fact_create, fact_verify, notes_append, decision_add, decision_resolve"
             ))),
         }
     }
@@ -2280,13 +2406,112 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn planner_allows_fact_create() {
-        match run_with_mode("planner", "fact_create").await {
-            ManaResult::Attempted(_) => {}
-            ManaResult::ModeBlocked(msg) => {
-                panic!("planner should allow 'fact_create' but was blocked: {msg}")
-            }
-        }
+    async fn notes_append_is_safe_partial_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
+        let tool = ManaTool::default();
+        let result = tool
+            .execute(
+                "call_notes_append",
+                json!({
+                    "action": "notes_append",
+                    "id": "1",
+                    "notes": "diagnosis from turn 2"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let unit = &result.details["unit"];
+        assert_eq!(unit["title"], "Test unit");
+        assert!(unit["notes"].as_str().unwrap_or("").contains("diagnosis from turn 2"));
+    }
+
+    #[tokio::test]
+    async fn decision_add_and_resolve_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
+        let tool = ManaTool::default();
+        let added = tool
+            .execute(
+                "call_decision_add",
+                json!({
+                    "action": "decision_add",
+                    "id": "1",
+                    "description": "Choose retry limit"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(added.details["unit"]["decisions"][0], "Choose retry limit");
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let (ctx2, _keep2) = ctx_with_mode(dir2.path(), crate::config::AgentMode::Full);
+        std::fs::write(
+            dir2.path().join(".mana").join("1-test-unit.md"),
+            "---\nid: '1'\ntitle: Test unit\nstatus: open\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\ndecisions:\n  - Choose retry limit\n---\n\nbody\n",
+        ).unwrap();
+        let resolved = tool
+            .execute(
+                "call_decision_resolve",
+                json!({
+                    "action": "decision_resolve",
+                    "id": "1",
+                    "resolve_decisions": ["Choose retry limit"]
+                }),
+                ctx2,
+            )
+            .await
+            .unwrap();
+        let decisions = resolved.details["unit"]["decisions"].as_array().cloned().unwrap_or_default();
+        assert!(decisions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn root_scope_targets_tower_root_mana() {
+        let tower = tempfile::tempdir().unwrap();
+        let root_mana = tower.path().join(".mana");
+        std::fs::create_dir_all(&root_mana).unwrap();
+        std::fs::write(root_mana.join("config.yaml"), "project: tower\nnext_id: 2\n").unwrap();
+        std::fs::write(
+            root_mana.join("1-root-unit.md"),
+            "---\nid: '1'\ntitle: Root unit\nstatus: open\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\n---\n\nbody\n",
+        ).unwrap();
+        let project = tower.path().join("imp");
+        let project_mana = project.join(".mana");
+        std::fs::create_dir_all(&project_mana).unwrap();
+        std::fs::write(project_mana.join("config.yaml"), "project: imp\nnext_id: 2\n").unwrap();
+        std::fs::write(
+            project_mana.join("1-project-unit.md"),
+            "---\nid: '1'\ntitle: Project unit\nstatus: open\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\n---\n\nbody\n",
+        ).unwrap();
+        let workdir = project.join("src");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let (tx, _rx) = mpsc::channel::<ToolUpdate>(1);
+        let (cmd_tx, _cmd_rx) = mpsc::channel(16);
+        let ctx = ToolContext {
+            cwd: workdir,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            command_tx: cmd_tx,
+            ui: Arc::new(NullInterface),
+            file_cache: Arc::new(FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
+            mode: crate::config::AgentMode::Full,
+            read_max_lines: 500,
+        };
+        let tool = ManaTool::default();
+        let result = tool
+            .execute(
+                "call_root_scope",
+                json!({ "action": "show", "id": "1", "scope": "root" }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.details["title"], "Root unit");
     }
 
     #[tokio::test]

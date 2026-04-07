@@ -75,6 +75,7 @@ impl AgentMode {
                 "logs",
                 "next",
                 "verify",
+                "notes_append",
             ],
             AgentMode::Orchestrator => &[
                 "status",
@@ -100,6 +101,9 @@ impl AgentMode {
                 "dep_remove",
                 "fact_create",
                 "fact_verify",
+                "notes_append",
+                "decision_add",
+                "decision_resolve",
             ],
             AgentMode::Planner => &[
                 "status",
@@ -112,6 +116,9 @@ impl AgentMode {
                 "dep_add",
                 "dep_remove",
                 "fact_create",
+                "notes_append",
+                "decision_add",
+                "decision_resolve",
             ],
             AgentMode::Reviewer => &[],
             AgentMode::Auditor => &[
@@ -171,6 +178,8 @@ impl AgentMode {
                 Write detailed units, split larger efforts into child units with dependencies, dispatch workers through mana, and own the final verification, retry, and closure workflow. \
                 Use the full mana unit vocabulary when it helps: acceptance criteria, labels, dependencies, paths, requires, produces, decisions, and feature boundaries. \
                 Encode unresolved questions as decisions instead of burying ambiguity in prose. \
+                When the conversation itself is producing durable plans, architecture, migrations, or implementation structure, externalize that structure into mana during the conversation rather than waiting until the end. \
+                Prefer native mana actions, including scope-aware and append-style updates, over shell or direct file edits for maintaining the work graph. \
                 You may not read or write files directly — delegate all file work to worker agents via mana. \
                 Update units with concrete failure context and do not retry unchanged failed plans. \
                 You are responsible for unit structure, completeness, and verify quality.",
@@ -181,6 +190,8 @@ impl AgentMode {
                 and make dependencies, sequencing, acceptance criteria, and verify commands explicit. \
                 Write worker-ready unit descriptions that include current state, concrete steps, file paths with intent, embedded context, scope boundaries, and what not to do. \
                 Record unresolved questions as decisions when autonomous execution would otherwise require guessing. \
+                Externalize durable planning structure into mana during the conversation, not only after the plan is complete. \
+                Prefer append-style mana updates to keep the graph current as ideas sharpen. \
                 You may read files and create units, but you may not run them — \
                 a human or orchestrator will approve execution.",
             ),

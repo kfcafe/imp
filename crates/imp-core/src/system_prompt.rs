@@ -260,6 +260,10 @@ fn execution_policy_layer() -> String {
     s.push_str("- Prefer mana-native inspection and progress recording over ad hoc shell workflows when mana already models the work state.\n");
     s.push_str("- For worker-style execution, keep planning lightweight and execution direct; use `mana update` to record discoveries and blockers instead of carrying them only in transient chat.\n");
     s.push_str("- If a mana unit is underspecified, identify the exact missing context and either inspect the relevant artifacts or report the gap precisely rather than inventing missing requirements.\n");
+    s.push_str("- Treat chat as discussion and mana as the persistent external work and idea graph. When a conversation produces durable structure — plans, architecture, decomposition, migrations, blockers, dependencies, or follow-up work — represent that structure in mana during the conversation, not after it.\n");
+    s.push_str("- Do not use mana only when work is large; use it whenever externalizing the plan is likely to improve execution quality, correctness, scope clarity, reviewability, or future continuation.\n");
+    s.push_str("- Prefer native mana actions over shell or direct file mutation for durable planning/work structure. Use append-style mana updates to keep the graph current during conversation.\n");
+    s.push_str("- If work spans more than one project or clearly belongs at the ecosystem layer, target root mana explicitly rather than relying on the nearest project scope.\n");
     s
 }
 
