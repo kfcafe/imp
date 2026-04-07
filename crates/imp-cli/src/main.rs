@@ -332,7 +332,6 @@ struct UnitFrontmatter {
     acceptance: Option<String>,
     verify: Option<String>,
     notes: Option<String>,
-    parent: Option<String>,
     #[serde(default)]
     dependencies: Vec<String>,
     #[serde(default)]
