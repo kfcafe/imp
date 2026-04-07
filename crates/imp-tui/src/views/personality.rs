@@ -1,9 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use imp_core::personality::{
     default_soul_markdown, generated_tunable_line, replace_tunable_line, soul_identity_text,
     tunable_state_for_label, SoulTunableState,
 };
+use imp_core::resources::{discover_project_soul, suggested_project_soul_path};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -46,6 +47,12 @@ const FIELDS: &[PersonalityField] = &[
     PersonalityField::Save,
 ];
 
+fn resolve_project_soul_path(cwd: &Path) -> PathBuf {
+    discover_project_soul(cwd)
+        .map(|soul| soul.path)
+        .unwrap_or_else(|| suggested_project_soul_path(cwd))
+}
+
 #[derive(Debug, Clone)]
 pub struct PendingOverwrite {
     pub label: &'static str,
@@ -70,8 +77,18 @@ pub struct PersonalityState {
 
 impl PersonalityState {
     pub fn new(cwd: PathBuf, scope: PersonalityScope) -> Self {
-        let global_path = imp_core::config::Config::user_config_dir().join("soul.md");
-        let project_path = cwd.join(".imp").join("soul.md");
+        Self::from_paths(
+            imp_core::config::Config::user_config_dir().join("soul.md"),
+            resolve_project_soul_path(&cwd),
+            scope,
+        )
+    }
+
+    pub fn from_paths(
+        global_path: PathBuf,
+        project_path: PathBuf,
+        scope: PersonalityScope,
+    ) -> Self {
         let global_source =
             std::fs::read_to_string(&global_path).unwrap_or_else(|_| default_soul_markdown());
         let project_source =
@@ -522,7 +539,11 @@ mod tests {
     #[test]
     fn personality_state_defaults_to_generated_soul() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = PersonalityState::new(tmp.path().to_path_buf(), PersonalityScope::Global);
+        let state = PersonalityState::from_paths(
+            tmp.path().join("global-soul.md"),
+            tmp.path().join("project-soul.md"),
+            PersonalityScope::Global,
+        );
         assert!(state.sentence().contains("You are imp"));
         assert_eq!(state.tunable_display("Autonomy"), "high");
     }
@@ -530,10 +551,28 @@ mod tests {
     #[test]
     fn personality_state_marks_custom_lines_as_edited() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut state = PersonalityState::new(tmp.path().to_path_buf(), PersonalityScope::Global);
+        let mut state = PersonalityState::from_paths(
+            tmp.path().join("global-soul.md"),
+            tmp.path().join("project-soul.md"),
+            PersonalityScope::Global,
+        );
         state.editor.set_content(
             "# Soul\n\nYou are imp.\n\n## Tunables\n\n- Autonomy: custom autonomy line\n",
         );
         assert_eq!(state.tunable_display("Autonomy"), "edited");
+    }
+
+    #[test]
+    fn personality_state_prefers_ancestor_project_soul_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let nested = project.join("src").join("deep");
+        std::fs::create_dir_all(project.join(".imp")).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        let project_soul = project.join(".imp").join("soul.md");
+        std::fs::write(&project_soul, "# Soul\n\nproject soul\n").unwrap();
+
+        let state = PersonalityState::new(nested, PersonalityScope::Project);
+        assert_eq!(state.current_path(), &project_soul);
     }
 }

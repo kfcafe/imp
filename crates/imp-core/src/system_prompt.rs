@@ -647,9 +647,9 @@ mod tests {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(result.text.contains("Execution discipline:"));
-        assert!(result.text.contains(
-            "Never claim repository facts that you have not inspected in this session."
-        ));
+        assert!(result
+            .text
+            .contains("Never claim repository facts that you have not inspected in this session."));
         assert!(result.text.contains(
             "For analysis-only requests, stay read-only unless the user asks for changes."
         ));
@@ -1077,9 +1077,9 @@ mod tests {
             .text
             .contains("Description: The JWT validation test panics"));
         assert!(result.text.contains("Verify: cargo test auth::jwt_test"));
-        assert!(result.text.contains(
-            "Treat the verify command as the primary completion check for this task."
-        ));
+        assert!(result
+            .text
+            .contains("Treat the verify command as the primary completion check for this task."));
     }
 
     #[test]

@@ -45,12 +45,8 @@ pub struct SoulDoc {
     pub content: String,
 }
 
-/// Discover the active soul document.
-///
-/// Precedence:
-/// 1. nearest project `.imp/soul.md` while walking up from cwd
-/// 2. global `<user_config_dir>/soul.md`
-pub fn discover_soul(cwd: &Path, user_config_dir: &Path) -> Option<SoulDoc> {
+/// Discover the nearest project soul document by walking up from cwd.
+pub fn discover_project_soul(cwd: &Path) -> Option<SoulDoc> {
     let mut dir = Some(cwd);
     while let Some(d) = dir {
         let path = d.join(".imp").join("soul.md");
@@ -58,6 +54,41 @@ pub fn discover_soul(cwd: &Path, user_config_dir: &Path) -> Option<SoulDoc> {
             return Some(SoulDoc { path, content });
         }
         dir = d.parent();
+    }
+    None
+}
+
+/// Suggest where a new project soul should be created.
+///
+/// Prefers the nearest ancestor that looks like a project root. Falls back to `cwd/.imp/soul.md`.
+pub fn suggested_project_soul_path(cwd: &Path) -> PathBuf {
+    let mut dir = Some(cwd);
+    while let Some(d) = dir {
+        let looks_like_project_root = d.join(".imp").exists()
+            || d.join(".git").exists()
+            || d.join("Cargo.toml").exists()
+            || d.join("package.json").exists()
+            || d.join("pyproject.toml").exists()
+            || d.join("go.mod").exists()
+            || d.join("AGENTS.md").exists()
+            || d.join("CLAUDE.md").exists();
+        if looks_like_project_root {
+            return d.join(".imp").join("soul.md");
+        }
+        dir = d.parent();
+    }
+
+    cwd.join(".imp").join("soul.md")
+}
+
+/// Discover the active soul document.
+///
+/// Precedence:
+/// 1. nearest project `.imp/soul.md` while walking up from cwd
+/// 2. global `<user_config_dir>/soul.md`
+pub fn discover_soul(cwd: &Path, user_config_dir: &Path) -> Option<SoulDoc> {
+    if let Some(project) = discover_project_soul(cwd) {
+        return Some(project);
     }
 
     let global = user_config_dir.join("soul.md");
@@ -228,6 +259,36 @@ mod tests {
         let soul = discover_soul(&nested, &user_dir).expect("project soul should load");
         assert!(soul.content.contains("project soul"));
         assert_eq!(soul.path, project.join(".imp").join("soul.md"));
+    }
+
+    #[test]
+    fn resource_discover_project_soul_walks_up_from_cwd() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("project");
+        let nested = project.join("src").join("deep");
+        fs::create_dir_all(project.join(".imp")).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            project.join(".imp").join("soul.md"),
+            "# Soul\n\nproject soul",
+        )
+        .unwrap();
+
+        let soul = discover_project_soul(&nested).expect("project soul should load");
+        assert!(soul.content.contains("project soul"));
+        assert_eq!(soul.path, project.join(".imp").join("soul.md"));
+    }
+
+    #[test]
+    fn resource_suggested_project_soul_path_prefers_nearest_projectish_ancestor() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("project");
+        let nested = project.join("src").join("deep");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(project.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+
+        let path = suggested_project_soul_path(&nested);
+        assert_eq!(path, project.join(".imp").join("soul.md"));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use mana::commands::agents::{agents_file_path, load_agents};
 use mana::commands::logs::find_all_logs;
 use mana::commands::next::ScoredUnit;
-use mana::commands::run::{RunArgs, RunSummary, RunUnitStatus, RunView};
+use mana::commands::run::{NativeRunParams, RunSummary, RunTarget, RunUnitStatus, RunView};
 use mana::stream::StreamEvent;
 use mana_core::ops::claim::ClaimParams;
 use serde::{Deserialize, Serialize};
@@ -43,8 +43,8 @@ fn send_update(ctx: &ToolContext, text: impl Into<String>, details: serde_json::
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct NativeRunArgsView {
-    id: Option<String>,
+struct NativeRunParamsView {
+    target: serde_json::Value,
     jobs: u32,
     dry_run: bool,
     loop_mode: bool,
@@ -54,10 +54,15 @@ struct NativeRunArgsView {
     review: bool,
 }
 
-impl From<&RunArgs> for NativeRunArgsView {
-    fn from(args: &RunArgs) -> Self {
+impl From<&NativeRunParams> for NativeRunParamsView {
+    fn from(args: &NativeRunParams) -> Self {
+        let target = match &args.target {
+            RunTarget::AllReady => json!({"kind": "all_ready"}),
+            RunTarget::Unit(id) => json!({"kind": "unit", "id": id}),
+            RunTarget::Explicit(ids) => json!({"kind": "explicit", "ids": ids}),
+        };
         Self {
-            id: args.id.clone(),
+            target,
             jobs: args.jobs,
             dry_run: args.dry_run,
             loop_mode: args.loop_mode,
@@ -78,7 +83,8 @@ struct NativeRunState {
     error: Option<String>,
     started_at_ms: u128,
     finished_at_ms: Option<u128>,
-    args: NativeRunArgsView,
+    args: NativeRunParamsView,
+    runtime: Option<serde_json::Value>,
     summary: RunSummary,
     units: Vec<RunUnitStatus>,
     log_lines: Vec<String>,
@@ -86,7 +92,7 @@ struct NativeRunState {
 }
 
 impl NativeRunState {
-    fn new(run_id: String, scope: String, background: bool, args: &RunArgs) -> Self {
+    fn new(run_id: String, scope: String, background: bool, args: &NativeRunParams) -> Self {
         Self {
             run_id,
             scope,
@@ -95,7 +101,8 @@ impl NativeRunState {
             error: None,
             started_at_ms: unix_time_ms(),
             finished_at_ms: None,
-            args: NativeRunArgsView::from(args),
+            args: NativeRunParamsView::from(args),
+            runtime: None,
             summary: RunSummary {
                 total_units: 0,
                 total_rounds: 0,
@@ -124,11 +131,15 @@ impl NativeRunState {
                 total_units,
                 total_rounds,
                 units,
+                runtime,
                 ..
             } => {
                 self.status = "running".to_string();
                 self.summary.total_units = *total_units;
                 self.summary.total_rounds = *total_rounds;
+                self.runtime = runtime
+                    .as_ref()
+                    .and_then(|value| serde_json::to_value(value).ok());
                 self.units = units
                     .iter()
                     .map(|info| RunUnitStatus {
@@ -147,9 +158,18 @@ impl NativeRunState {
                     .collect();
                 self.units.sort_by(|a, b| a.id.cmp(&b.id));
             }
-            StreamEvent::RunPlan { total_units, .. } => {
+            StreamEvent::RunPlan {
+                total_units,
+                runtime,
+                ..
+            } => {
                 self.status = "running".to_string();
                 self.summary.total_units = (*total_units).max(self.summary.total_units);
+                if runtime.is_some() {
+                    self.runtime = runtime
+                        .as_ref()
+                        .and_then(|value| serde_json::to_value(value).ok());
+                }
             }
             StreamEvent::RoundStart { total_rounds, .. } => {
                 self.status = "running".to_string();
@@ -214,8 +234,13 @@ impl NativeRunState {
                 self.status = "finished".to_string();
                 self.finished_at_ms = Some(unix_time_ms());
             }
-            StreamEvent::DryRun { .. } => {
+            StreamEvent::DryRun { runtime, .. } => {
                 self.status = "finished".to_string();
+                if runtime.is_some() {
+                    self.runtime = runtime
+                        .as_ref()
+                        .and_then(|value| serde_json::to_value(value).ok());
+                }
                 self.finished_at_ms = Some(unix_time_ms());
             }
             StreamEvent::Error { message } => {
@@ -230,6 +255,10 @@ impl NativeRunState {
     fn finish_with_view(&mut self, view: &RunView) {
         self.summary = view.summary.clone();
         self.units = view.units.clone();
+        self.runtime = view
+            .runtime
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok());
         self.status = "finished".to_string();
         self.error = None;
         self.finished_at_ms = Some(unix_time_ms());
@@ -257,7 +286,7 @@ struct ManaRunStore {
 }
 
 impl ManaRunStore {
-    fn start_run(&mut self, scope: String, background: bool, args: &RunArgs) -> String {
+    fn start_run(&mut self, scope: String, background: bool, args: &NativeRunParams) -> String {
         self.next_id += 1;
         let run_id = format!("run-{}", self.next_id);
         self.runs
@@ -605,7 +634,40 @@ fn mana_widget_lines(summary: impl Into<String>, detail: Option<String>) -> Widg
     WidgetContent::Lines(lines)
 }
 
-fn background_run_started_output(scope: &str, run_id: &str, run_args: &RunArgs) -> ToolOutput {
+fn target_from_params(params: &serde_json::Value) -> Result<RunTarget> {
+    if let Some(values) = params["targets"].as_array() {
+        let ids: Vec<String> = values
+            .iter()
+            .filter_map(|value| value.as_str().map(|s| s.to_string()))
+            .collect();
+        if ids.is_empty() {
+            return Err(crate::error::Error::Tool(
+                "mana run targets must contain at least one string id".into(),
+            ));
+        }
+        return Ok(RunTarget::Explicit(ids));
+    }
+
+    if let Some(id) = params["id"].as_str() {
+        return Ok(RunTarget::Unit(id.to_string()));
+    }
+
+    Ok(RunTarget::AllReady)
+}
+
+fn scope_from_target(target: &RunTarget) -> String {
+    match target {
+        RunTarget::AllReady => "all ready units".to_string(),
+        RunTarget::Unit(id) => format!("unit {id}"),
+        RunTarget::Explicit(ids) => format!("targets {}", ids.join(", ")),
+    }
+}
+
+fn background_run_started_output(
+    scope: &str,
+    run_id: &str,
+    run_args: &NativeRunParams,
+) -> ToolOutput {
     let text = format!(
         "Started mana run in background for {scope} as {run_id}. Use mana(action=\"run_state\", run_id=\"{run_id}\") for native status, mana(action=\"logs\", run_id=\"{run_id}\") for recent native events, and mana(action=\"agents\") / mana(action=\"logs\", id=...) for worker output."
     );
@@ -615,6 +677,11 @@ fn background_run_started_output(scope: &str, run_id: &str, run_args: &RunArgs) 
             "background": true,
             "run_id": run_id,
             "scope": scope,
+            "target": match &run_args.target {
+                RunTarget::AllReady => json!({"kind": "all_ready"}),
+                RunTarget::Unit(id) => json!({"kind": "unit", "id": id}),
+                RunTarget::Explicit(ids) => json!({"kind": "explicit", "ids": ids}),
+            },
             "jobs": run_args.jobs,
             "loop": run_args.loop_mode,
             "dry_run": run_args.dry_run,
@@ -626,17 +693,13 @@ fn background_run_started_output(scope: &str, run_id: &str, run_args: &RunArgs) 
 
 fn spawn_background_run(
     mana_dir: std::path::PathBuf,
-    run_args: RunArgs,
+    run_args: NativeRunParams,
     ctx: ToolContext,
     run_store: Arc<std::sync::Mutex<ManaRunStore>>,
     run_id: String,
 ) {
     let ui = ctx.ui.clone();
-    let scope = run_args
-        .id
-        .as_deref()
-        .map(|id| format!("unit {id}"))
-        .unwrap_or_else(|| "all ready units".to_string());
+    let scope = scope_from_target(&run_args.target);
 
     tokio::spawn(async move {
         ui.set_status("mana", Some(&format!("mana: running {scope}")))
@@ -657,7 +720,7 @@ fn spawn_background_run(
         let result = tokio::task::spawn_blocking(move || {
             mana::commands::run::run_with_stream_capture_and_sink(
                 &mana_dir,
-                run_args.into(),
+                run_args,
                 Some(Arc::new(move |event| {
                     update_run_store_with_event(&run_store_for_sink, &run_id_for_sink, &event);
                 })),
@@ -922,7 +985,8 @@ impl Tool for ManaTool {
                 "all": { "type": "boolean" },
                 "by": { "type": "string", "description": "Who is claiming the unit" },
                 "count": { "type": "integer", "description": "Number of next recommendations to return" },
-                "background": { "type": "boolean", "description": "Run mana orchestration in the background and return immediately (default true unless dry_run=true)" },
+            "background": { "type": "boolean", "description": "Run mana orchestration in the background and return immediately (default true unless dry_run=true)" },
+                "targets": { "type": "array", "items": { "type": "string" }, "description": "Explicit target unit IDs to run as a canonical target set" },
                 "jobs": { "type": "integer" },
                 "dry_run": { "type": "boolean" },
                 "loop": { "type": "boolean" },
@@ -1324,8 +1388,8 @@ impl Tool for ManaTool {
                 Ok(text_output(text, json!({ "root": id })))
             }
             "run" => {
-                let run_args = RunArgs {
-                    id: params["id"].as_str().map(|s| s.to_string()),
+                let run_params = NativeRunParams {
+                    target: target_from_params(&params)?,
                     jobs: params["jobs"].as_u64().unwrap_or(4) as u32,
                     dry_run: params["dry_run"].as_bool().unwrap_or(false),
                     loop_mode: params["loop"].as_bool().unwrap_or(false),
@@ -1335,26 +1399,22 @@ impl Tool for ManaTool {
                     json_stream: true,
                     review: params["review"].as_bool().unwrap_or(false),
                 };
-                let background = params["background"].as_bool().unwrap_or(!run_args.dry_run);
-                let scope = run_args
-                    .id
-                    .as_deref()
-                    .map(|id| format!("unit {id}"))
-                    .unwrap_or_else(|| "all ready units".to_string());
+                let background = params["background"].as_bool().unwrap_or(!run_params.dry_run);
+                let scope = scope_from_target(&run_params.target);
                 let run_id = {
                     let mut store = self.run_store.lock().map_err(|_| {
                         crate::error::Error::Tool("mana run state lock poisoned".into())
                     })?;
-                    let run_id = store.start_run(scope.clone(), background, &run_args);
+                    let run_id = store.start_run(scope.clone(), background, &run_params);
                     store.persist();
                     run_id
                 };
 
                 if background {
-                    let started = background_run_started_output(&scope, &run_id, &run_args);
+                    let started = background_run_started_output(&scope, &run_id, &run_params);
                     spawn_background_run(
                         mana_dir.clone(),
-                        run_args,
+                        run_params,
                         ctx,
                         self.run_store.clone(),
                         run_id,
@@ -1365,14 +1425,14 @@ impl Tool for ManaTool {
                 send_update(
                     &ctx,
                     format!("Starting mana run {run_id}..."),
-                    json!({"kind": "mana_run_status", "status": "starting", "run_id": run_id}),
+                    json!({"kind": "mana_run_status", "status": "starting", "run_id": run_id, "scope": scope}),
                 );
                 ctx.ui
                     .set_widget(
                         "mana",
                         Some(mana_widget_lines(
                             format!("running mana ({run_id})"),
-                            Some("native foreground orchestration".to_string()),
+                            Some(format!("native foreground orchestration · {scope}")),
                         )),
                     )
                     .await;
@@ -1383,7 +1443,7 @@ impl Tool for ManaTool {
                 let update_tx = ctx.update_tx.clone();
                 match mana::commands::run::run_with_stream_capture_and_sink(
                     &mana_dir,
-                    run_args.into(),
+                    run_params,
                     Some(Arc::new(move |event| {
                         update_run_store_with_event(&run_store, &run_id_for_sink, &event);
                         if let Some(line) = stream_event_line(&event) {
@@ -1401,7 +1461,7 @@ impl Tool for ManaTool {
                             send_update(
                                 &ctx,
                                 line,
-                                json!({"kind": "mana_run_view", "run_id": run_id, "view": view}),
+                                json!({"kind": "mana_run_view", "run_id": run_id, "scope": scope, "view": view}),
                             );
                         }
                         let summary = format!(
@@ -1409,7 +1469,7 @@ impl Tool for ManaTool {
                             view.summary.total_closed, view.summary.total_failed
                         );
                         ctx.ui
-                            .set_widget("mana", Some(mana_widget_lines(summary.clone(), None)))
+                            .set_widget("mana", Some(mana_widget_lines(summary.clone(), Some(scope.clone()))))
                             .await;
                         ctx.ui.set_status("mana", Some(&summary)).await;
                         Ok(ToolOutput {
@@ -1419,6 +1479,8 @@ impl Tool for ManaTool {
                                 .collect(),
                             details: json!({
                                 "run_id": run_id,
+                                "scope": scope,
+                                "runtime": view.runtime,
                                 "view": serde_json::to_value(&view).unwrap_or(serde_json::Value::Null)
                             }),
                             is_error: false,
@@ -1775,6 +1837,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_run_supports_explicit_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
+        let tool = ManaTool::default();
+        let result = tool
+            .execute(
+                "call_bg_targets",
+                json!({ "action": "run", "background": true, "dry_run": true, "targets": ["1", "2"] }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.details["target"]["kind"], "explicit");
+        assert_eq!(result.details["target"]["ids"][0], "1");
+        assert_eq!(result.details["target"]["ids"][1], "2");
+    }
+
+    #[tokio::test]
     async fn run_state_and_evaluate_report_native_run() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
@@ -1825,8 +1905,8 @@ mod tests {
         let active_id = store.start_run(
             "all ready units".to_string(),
             true,
-            &mana::commands::run::RunArgs {
-                id: None,
+            &mana::commands::run::NativeRunParams {
+                target: mana::commands::run::RunTarget::AllReady,
                 jobs: 2,
                 dry_run: false,
                 loop_mode: false,
@@ -1840,8 +1920,8 @@ mod tests {
         let finished_id = store.start_run(
             "unit 1".to_string(),
             false,
-            &mana::commands::run::RunArgs {
-                id: Some("1".to_string()),
+            &mana::commands::run::NativeRunParams {
+                target: mana::commands::run::RunTarget::Unit("1".to_string()),
                 jobs: 1,
                 dry_run: true,
                 loop_mode: false,
@@ -1878,8 +1958,8 @@ mod tests {
             "run-7".to_string(),
             "unit 7".to_string(),
             false,
-            &mana::commands::run::RunArgs {
-                id: Some("7".to_string()),
+            &mana::commands::run::NativeRunParams {
+                target: mana::commands::run::RunTarget::Unit("7".to_string()),
                 jobs: 1,
                 dry_run: false,
                 loop_mode: false,

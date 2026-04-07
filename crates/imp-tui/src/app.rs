@@ -3334,13 +3334,19 @@ impl App {
     }
 
     fn open_personality(&mut self) {
-        let project_soul = self.cwd.join(".imp").join("soul.md");
-        let scope = if project_soul.exists() {
+        let user_config_dir = Config::user_config_dir();
+        let global_path = user_config_dir.join("soul.md");
+        let project_soul = imp_core::resources::discover_project_soul(&self.cwd);
+        let project_path = project_soul
+            .as_ref()
+            .map(|soul| soul.path.clone())
+            .unwrap_or_else(|| imp_core::resources::suggested_project_soul_path(&self.cwd));
+        let scope = if project_soul.is_some() {
             PersonalityScope::Project
         } else {
             PersonalityScope::Global
         };
-        let state = PersonalityState::new(self.cwd.clone(), scope);
+        let state = PersonalityState::from_paths(global_path, project_path, scope);
         self.mode = UiMode::Personality(state);
     }
 
@@ -5506,6 +5512,33 @@ mod session_lifecycle {
         let mut app = make_app();
         app.execute_command("personality");
         assert!(matches!(app.mode, UiMode::Personality(_)));
+    }
+
+    #[test]
+    fn tui_personality_prefers_ancestor_project_soul_when_opening() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let nested = project.join("src").join("deep");
+        let session_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(project.join(".imp")).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            project.join(".imp").join("soul.md"),
+            "# Soul\n\nproject soul\n",
+        )
+        .unwrap();
+
+        let session = SessionManager::new(&nested, &session_dir).unwrap();
+        let mut app = make_app_with_session(session, nested.clone());
+        app.execute_command("personality");
+
+        match &app.mode {
+            UiMode::Personality(state) => {
+                assert_eq!(state.current_path(), &project.join(".imp").join("soul.md"));
+                assert!(matches!(state.scope, PersonalityScope::Project));
+            }
+            _ => panic!("expected personality mode"),
+        }
     }
 
     #[test]
