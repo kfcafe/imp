@@ -214,6 +214,9 @@ fn identity_layer(
     s.push_str("- Treat each unit description as an execution prompt.\n");
     s.push_str("- Include current state, concrete steps, file paths with intent, edge cases, and a targeted verify command.\n");
     s.push_str("- Update units with new context after failures; do not retry unchanged.\n");
+    s.push_str("- Mana is the durable project context — session memory is ephemeral, personal memory is global preferences; project plans, architecture decisions, verified facts, and implementation structure belong in mana, not in session history or memory.md.\n");
+    s.push_str("- When a conversation produces durable plans or architecture, externalize them into mana during the conversation — do not wait until the end or let them exist only in the transcript.\n");
+    s.push_str("- A future wiki layer at `.mana/wiki/` will hold synthesized project knowledge; for now, use mana facts for verifiable claims and mana units/notes for everything else that should survive the session.\n");
 
     // Append role instructions after identity layer
     if let Some(role) = role {
