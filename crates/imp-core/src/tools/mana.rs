@@ -731,30 +731,34 @@ fn scope_from_target(target: &RunTarget) -> String {
 fn make_follow_up_summary(scope: &str, view: &RunView) -> String {
     let mut summary = if view.summary.total_failed > 0 {
         format!(
-            "mana run finished for {scope}: {} done, {} failed, {} awaiting verify.",
+            "Native mana orchestration finished for {scope}: {} done, {} failed, {} awaiting verify.",
             view.summary.total_closed,
             view.summary.total_failed,
             view.summary.total_awaiting_verify
         )
     } else if view.summary.total_awaiting_verify > 0 {
         format!(
-            "mana run finished for {scope}: {} done, {} awaiting verify.",
+            "Native mana orchestration finished for {scope}: {} done, {} awaiting verify.",
             view.summary.total_closed, view.summary.total_awaiting_verify
         )
     } else {
         format!(
-            "mana run finished for {scope}: {} done, 0 failed.",
+            "Native mana orchestration finished for {scope}: {} done, 0 failed.",
             view.summary.total_closed
         )
     };
 
     if let Some(runtime) = &view.runtime {
-        let agent = runtime.direct_agent.as_deref().unwrap_or("unknown-agent");
+        let agent = runtime.direct_agent.as_deref().unwrap_or("imp-worker");
         let model = runtime.model.as_deref().unwrap_or("default-model");
-        summary.push_str(&format!(" Runtime: {agent} · {model}."));
+        summary.push_str(&format!(
+            " Orchestration ran through mana; worker runtime: {agent} · {model}."
+        ));
     }
 
-    summary.push_str(" Inspect with mana(action=\"run_state\") or mana(action=\"evaluate\").");
+    summary.push_str(
+        " Inspect with mana(action=\"run_state\") or mana(action=\"evaluate\").",
+    );
     summary
 }
 
@@ -858,7 +862,7 @@ fn background_run_started_output(
     run_args: &NativeRunParams,
 ) -> ToolOutput {
     let text = format!(
-        "Started mana run in background for {scope} as {run_id}. Use mana(action=\"run_state\", run_id=\"{run_id}\") for native status, mana(action=\"logs\", run_id=\"{run_id}\") for recent native events, and mana(action=\"agents\") / mana(action=\"logs\", id=...) for worker output."
+        "Started native mana orchestration in background for {scope} as {run_id}. Mana will coordinate the run and dispatch imp workers underneath. Use mana(action=\"run_state\", run_id=\"{run_id}\") for orchestration status, mana(action=\"logs\", run_id=\"{run_id}\") for recent native events, and mana(action=\"agents\") / mana(action=\"logs\", id=...) for worker output."
     );
     ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text }],
@@ -892,14 +896,14 @@ fn spawn_background_run(
     let scope = scope_from_target(&run_args.target);
 
     tokio::spawn(async move {
-        ui.set_status("mana", Some(&format!("mana: running {scope}")))
+        ui.set_status("mana", Some(&format!("mana orchestration: running {scope}")))
             .await;
         ui.set_widget(
             "mana",
             Some(mana_widget_lines(
-                format!("running {scope}"),
+                format!("orchestrating {scope}"),
                 Some(format!(
-                    "inspect with mana run_state/logs (run_id={run_id})"
+                    "native mana tool → mana orchestration → imp workers · inspect with mana run_state/logs (run_id={run_id})"
                 )),
             )),
         )
@@ -922,16 +926,18 @@ fn spawn_background_run(
             Ok(Ok(view)) => {
                 finish_run_in_store(&run_store, &run_id, &view);
                 let summary = format!(
-                    "mana: {scope} finished · {} done · {} failed",
+                    "mana orchestration: {scope} finished · {} done · {} failed",
                     view.summary.total_closed, view.summary.total_failed
                 );
                 let runtime_detail = view
                     .runtime
                     .as_ref()
                     .map(|runtime| {
-                        let agent = runtime.direct_agent.as_deref().unwrap_or("unknown-agent");
+                        let agent = runtime.direct_agent.as_deref().unwrap_or("imp-worker");
                         let model = runtime.model.as_deref().unwrap_or("default-model");
-                        format!("{scope} · {agent} · {model}")
+                        format!(
+                            "native mana tool → mana orchestration → {agent} workers · {scope} · {model}"
+                        )
                     })
                     .unwrap_or_else(|| scope.clone());
                 ui.set_status("mana", Some(&summary)).await;
@@ -954,7 +960,7 @@ fn spawn_background_run(
                 });
             }
             Ok(Err(err)) => {
-                let message = format!("mana: {scope} failed: {err}");
+                let message = format!("mana orchestration: {scope} failed: {err}");
                 fail_run_in_store(&run_store, &run_id, message.clone());
                 ui.set_status("mana", Some(&message)).await;
                 ui.set_widget("mana", Some(mana_widget_lines(message.clone(), None)))
@@ -962,12 +968,12 @@ fn spawn_background_run(
                 ui.notify(&message, NotifyLevel::Error).await;
                 let _ = command_tx
                     .send(crate::agent::AgentCommand::FollowUp(format!(
-                        "mana run failed for {scope}: {err}. Inspect with mana(action=\"run_state\") or mana(action=\"logs\", run_id=\"{run_id}\")."
+                        "Native mana orchestration failed for {scope}: {err}. Inspect with mana(action=\"run_state\") or mana(action=\"logs\", run_id=\"{run_id}\")."
                     )))
                     .await;
             }
             Err(join_err) => {
-                let message = format!("mana: {scope} task failed: {join_err}");
+                let message = format!("mana orchestration: {scope} task failed: {join_err}");
                 fail_run_in_store(&run_store, &run_id, message.clone());
                 ui.set_status("mana", Some(&message)).await;
                 ui.set_widget("mana", Some(mana_widget_lines(message.clone(), None)))
@@ -975,7 +981,7 @@ fn spawn_background_run(
                 ui.notify(&message, NotifyLevel::Error).await;
                 let _ = command_tx
                     .send(crate::agent::AgentCommand::FollowUp(format!(
-                        "mana background task failed for {scope}: {join_err}. Inspect with mana(action=\"run_state\") or mana(action=\"logs\", run_id=\"{run_id}\")."
+                        "Native mana orchestration background task failed for {scope}: {join_err}. Inspect with mana(action=\"run_state\") or mana(action=\"logs\", run_id=\"{run_id}\")."
                     )))
                     .await;
             }
@@ -1003,13 +1009,13 @@ fn run_state_snapshot(
 
 fn run_state_output(state: &NativeRunState) -> ToolOutput {
     let mut lines = vec![format!(
-        "Mana run {}: {} · {}",
+        "Native mana orchestration {}: {} · {}",
         state.run_id, state.scope, state.status
     )];
     if let Some(runtime) = &state.runtime {
-        let agent = runtime["direct_agent"].as_str().unwrap_or("unknown-agent");
+        let agent = runtime["direct_agent"].as_str().unwrap_or("imp-worker");
         let model = runtime["model"].as_str().unwrap_or("default-model");
-        lines.push(format!("Runtime: {agent} · {model}"));
+        lines.push(format!("Worker runtime: {agent} · {model}"));
     }
     lines.push(format!(
         "{} total · {} done · {} failed · {} awaiting verify · {} skipped",
@@ -1043,19 +1049,19 @@ fn run_state_output(state: &NativeRunState) -> ToolOutput {
 fn evaluate_run_output(state: &NativeRunState) -> ToolOutput {
     let headline = match state.status.as_str() {
         "starting" | "running" => {
-            format!("Run {} is still running for {}.", state.run_id, state.scope)
+            format!("Native mana orchestration run {} is still running for {}.", state.run_id, state.scope)
         }
-        "failed" => format!("Run {} failed for {}.", state.run_id, state.scope),
+        "failed" => format!("Native mana orchestration run {} failed for {}.", state.run_id, state.scope),
         _ if state.summary.total_failed > 0 => format!(
-            "Run {} finished with {} failed unit(s).",
+            "Native mana orchestration run {} finished with {} failed unit(s).",
             state.run_id, state.summary.total_failed
         ),
         _ if state.summary.total_awaiting_verify > 0 => format!(
-            "Run {} finished with {} unit(s) awaiting verify.",
+            "Native mana orchestration run {} finished with {} unit(s) awaiting verify.",
             state.run_id, state.summary.total_awaiting_verify
         ),
         _ => format!(
-            "Run {} finished successfully: {} unit(s) done.",
+            "Native mana orchestration run {} finished successfully: {} unit(s) done.",
             state.run_id, state.summary.total_closed
         ),
     };
@@ -1065,8 +1071,8 @@ fn evaluate_run_output(state: &NativeRunState) -> ToolOutput {
         .as_ref()
         .map(|runtime| {
             format!(
-                "Runtime: {} · {}",
-                runtime["direct_agent"].as_str().unwrap_or("unknown-agent"),
+                "Worker runtime: {} · {}",
+                runtime["direct_agent"].as_str().unwrap_or("imp-worker"),
                 runtime["model"].as_str().unwrap_or("default-model")
             )
         })
@@ -3014,7 +3020,7 @@ mod tests {
             .await
             .unwrap();
         let text = result.text_content().unwrap_or("");
-        assert!(text.contains("Started mana run in background"));
+        assert!(text.contains("Started native mana orchestration in background"));
         assert_eq!(result.details["background"], true);
         assert!(result.details["run_id"].as_str().is_some());
     }
@@ -3063,7 +3069,7 @@ mod tests {
 
         match follow_up {
             crate::agent::AgentCommand::FollowUp(text) => {
-                assert!(text.contains("mana run finished"), "text was: {text}");
+                assert!(text.contains("Native mana orchestration finished"), "text was: {text}");
                 assert!(
                     text.contains("Inspect with mana(action=\"run_state\")"),
                     "text was: {text}"
@@ -3122,11 +3128,11 @@ mod tests {
             .unwrap();
         let state_text = state.text_content().unwrap_or("");
         assert!(
-            state_text.contains("Mana run "),
+            state_text.contains("Native mana orchestration "),
             "state_text was: {state_text}"
         );
         assert!(
-            state_text.contains("Runtime:"),
+            state_text.contains("Worker runtime:"),
             "state_text was: {state_text}"
         );
         assert!(
@@ -3150,10 +3156,10 @@ mod tests {
             .unwrap();
         let eval_text = evaluation.text_content().unwrap_or("");
         assert!(
-            eval_text.contains("Run ") && eval_text.contains("finished"),
+            eval_text.contains("Native mana orchestration run ") && eval_text.contains("finished"),
             "eval_text was: {eval_text}"
         );
-        assert!(eval_text.contains("Runtime:"), "eval_text was: {eval_text}");
+        assert!(eval_text.contains("Worker runtime:"), "eval_text was: {eval_text}");
     }
 
     #[test]
