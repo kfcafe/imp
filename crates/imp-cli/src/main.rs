@@ -1249,7 +1249,9 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
     emit_startup_timing(&mut startup_timer, StartupStage::ProcessStart);
     let cwd = std::env::current_dir()?;
     emit_startup_timing(&mut startup_timer, StartupStage::CwdResolved);
-    let unit = load_mana_unit(&cwd, unit_id)?;
+
+    // Load the unit via canonical mana-core APIs instead of ad hoc markdown scanning.
+    let assignment = imp_core::mana_worker::load_assignment(&cwd, unit_id)?;
     let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
     emit_startup_timing(&mut startup_timer, StartupStage::ConfigResolved);
     emit_startup_timing(&mut startup_timer, StartupStage::ModelRegistryReady);
@@ -1258,44 +1260,25 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
     emit_startup_timing(&mut startup_timer, StartupStage::ProviderReady);
     emit_startup_timing(&mut startup_timer, StartupStage::ApiKeyResolved);
 
-    // Assemble file context from unit references. If the unit declares
-    // explicit `files:` in frontmatter, use those; otherwise auto-detect
-    // file paths from the description text.
-    let file_specs = if !unit.files.is_empty() {
-        unit.files
-            .iter()
-            .filter_map(|s| parse_file_spec_str(s))
-            .collect()
-    } else if !unit.paths.is_empty() {
-        unit.paths
-            .iter()
-            .filter_map(|s| parse_file_spec_str(s))
-            .collect()
-    } else {
-        imp_core::context_prefill::detect_file_paths(&unit.description)
-    };
-    let context_prefill = if file_specs.is_empty() {
-        Vec::new()
-    } else {
-        let prefill_config = imp_core::context_prefill::PrefillConfig::default();
-        let assembled =
-            imp_core::context_prefill::assemble_context(&file_specs, &cwd, &prefill_config);
-        for warning in &assembled.warnings {
-            eprintln!("[imp] context prefill: {warning}");
-        }
-        if !assembled.included_files.is_empty() {
-            eprintln!(
-                "[imp] prefilled {} files (~{} tokens)",
-                assembled.included_files.len(),
-                assembled.estimated_tokens
-            );
-        }
-        assembled.messages
-    };
+    // Assemble context prefill from the assignment's file references.
+    let assembled = imp_core::mana_worker::assemble_prefill(&assignment, &cwd);
+    for warning in &assembled.warnings {
+        eprintln!("[imp] context prefill: {warning}");
+    }
+    if !assembled.included_files.is_empty() {
+        eprintln!(
+            "[imp] prefilled {} files (~{} tokens)",
+            assembled.included_files.len(),
+            assembled.estimated_tokens
+        );
+    }
+    let context_prefill = assembled.messages;
+
+    let task_context = imp_core::mana_worker::build_task_context(&assignment);
 
     let mut options = SessionOptions {
         cwd: cwd.clone(),
-        model: cli.model.clone(),
+        model: cli.model.clone().or_else(|| assignment.model.clone()),
         provider: cli.provider.clone(),
         api_key: cli.api_key.clone(),
         thinking: cli
@@ -1307,7 +1290,7 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
         system_prompt: cli.system_prompt.clone(),
         no_tools: cli.no_tools,
         session: SessionChoice::InMemory,
-        task: Some(unit.task_context()),
+        task: Some(task_context),
         context_prefill,
         ..Default::default()
     };
@@ -1325,7 +1308,7 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
     emit_startup_timing(&mut startup_timer, StartupStage::AgentBuilt);
 
-    let prompt = unit.task_prompt();
+    let prompt = imp_core::mana_worker::build_task_prompt(&assignment);
     emit_startup_timing(&mut startup_timer, StartupStage::PromptReady);
     session
         .prompt(&prompt)
@@ -1358,27 +1341,25 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
     // the shared verify commands once per unique command string.
     let batch_verify = std::env::var("MANA_BATCH_VERIFY").is_ok();
     if !batch_verify {
-        if let Some(verify) = unit
+        if let Some(verify) = assignment
             .verify
             .as_deref()
             .map(str::trim)
             .filter(|verify| !verify.is_empty())
         {
-            let passed = run_verify_command(verify, &unit.workspace_root).await?;
+            let passed = run_verify_command(verify, &assignment.workspace_root).await?;
             if passed {
                 // Auto-close the unit on verify pass
-                if let Some(ref id) = unit.id {
-                    let close_result = std::process::Command::new("mana")
-                        .args(["close", id])
-                        .current_dir(&unit.workspace_root)
-                        .output();
-                    match close_result {
-                        Ok(output) if output.status.success() => {
-                            eprintln!("[imp] Unit {id} closed (verify passed)");
-                        }
-                        _ => {
-                            eprintln!("[imp] Verify passed but failed to close unit {id}");
-                        }
+                let close_result = std::process::Command::new("mana")
+                    .args(["close", &assignment.id])
+                    .current_dir(&assignment.workspace_root)
+                    .output();
+                match close_result {
+                    Ok(output) if output.status.success() => {
+                        eprintln!("[imp] Unit {} closed (verify passed)", assignment.id);
+                    }
+                    _ => {
+                        eprintln!("[imp] Verify passed but failed to close unit {}", assignment.id);
                     }
                 }
             }

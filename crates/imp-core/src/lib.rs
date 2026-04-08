@@ -12,6 +12,7 @@ pub mod hooks;
 pub mod imp_session;
 pub mod import;
 pub mod learning;
+pub mod mana_worker;
 pub mod memory;
 pub mod personality;
 pub mod resources;
