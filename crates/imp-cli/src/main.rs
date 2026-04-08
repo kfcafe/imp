@@ -215,6 +215,12 @@ enum Commands {
     Run {
         /// Unit ID to run
         unit_id: String,
+        /// Explicit path to the .mana directory for canonical unit loading
+        #[arg(long)]
+        mana_dir: Option<PathBuf>,
+        /// Defer verify/close to the orchestrator instead of verifying inline
+        #[arg(long)]
+        defer_verify: bool,
     },
     /// Usage reporting and export
     Usage {
@@ -644,7 +650,11 @@ async fn main() {
                 println!("{}", config_path.display());
                 return;
             }
-            Commands::Run { unit_id } => match run_headless_mode(&cli, unit_id).await {
+            Commands::Run {
+                unit_id,
+                mana_dir,
+                defer_verify,
+            } => match run_headless_mode(&cli, unit_id, mana_dir.as_deref(), *defer_verify).await {
                 Ok(true) => return,
                 Ok(false) => std::process::exit(1),
                 Err(e) => {
@@ -1244,14 +1254,19 @@ async fn resolve_provider_api_key(
     }
 }
 
-async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std::error::Error>> {
+async fn run_headless_mode(
+    cli: &Cli,
+    unit_id: &str,
+    mana_dir_override: Option<&Path>,
+    defer_verify: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let mut startup_timer = StartupTimer::new(cli.verbose);
     emit_startup_timing(&mut startup_timer, StartupStage::ProcessStart);
     let cwd = std::env::current_dir()?;
     emit_startup_timing(&mut startup_timer, StartupStage::CwdResolved);
 
     // Load the unit via canonical mana-core APIs instead of ad hoc markdown scanning.
-    let assignment = imp_core::mana_worker::load_assignment(&cwd, unit_id)?;
+    let assignment = imp_core::mana_worker::load_assignment_with_mana_dir(&cwd, unit_id, mana_dir_override)?;
     let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
     emit_startup_timing(&mut startup_timer, StartupStage::ConfigResolved);
     emit_startup_timing(&mut startup_timer, StartupStage::ModelRegistryReady);
@@ -1339,7 +1354,7 @@ async fn run_headless_mode(cli: &Cli, unit_id: &str) -> Result<bool, Box<dyn std
     // When MANA_BATCH_VERIFY is set the runner handles verification after all
     // agents complete.  Skip inline verify and exit 0 so the runner can batch
     // the shared verify commands once per unique command string.
-    let batch_verify = std::env::var("MANA_BATCH_VERIFY").is_ok();
+    let batch_verify = defer_verify || std::env::var("MANA_BATCH_VERIFY").is_ok();
     if !batch_verify {
         if let Some(verify) = assignment
             .verify
