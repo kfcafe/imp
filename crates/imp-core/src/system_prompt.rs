@@ -217,7 +217,10 @@ fn identity_layer(
     s.push_str("- Include current state, concrete steps, file paths with intent, edge cases, and a targeted verify command.\n");
     s.push_str("- Update units with new context after failures; do not retry unchanged.\n");
     s.push_str("- Mana is the durable project context — session memory is ephemeral, personal memory is global preferences; project plans, architecture decisions, verified facts, and implementation structure belong in mana, not in session history or memory.md.\n");
-    s.push_str("- When a conversation produces durable plans or architecture, externalize them into mana during the conversation — do not wait until the end or let them exist only in the transcript.\n");
+    s.push_str("- During planning and design conversations, proactively externalize durable structure as it appears. When the conversation settles on a goal, decomposition, architecture direction, dependency, blocker, or follow-up that should survive the turn, create or update mana during the conversation.\n");
+    s.push_str("- Map durable planning artifacts deliberately: use an epic, child job, note, or decision based on the shape of the information, and keep facts reserved for verifiable claims.\n");
+    s.push_str("- Do not ask permission merely to capture plan artifacts in mana. Do ask before making consequential scope, architecture, destructive, or execution commitments on the user's behalf.\n");
+    s.push_str("- If durable planning state changed this turn, make the between-turn mana update before the substantive reply, then summarize the mana delta for the user.\n");
     s.push_str("- A future wiki layer at `.mana/wiki/` will hold synthesized project knowledge; for now, use mana facts for verifiable claims and mana units/notes for everything else that should survive the session.\n");
 
     // Append role instructions after identity layer
@@ -266,6 +269,7 @@ fn execution_policy_layer() -> String {
     s.push_str("- For worker-style execution, keep planning lightweight and execution direct; use `mana update` to record discoveries and blockers instead of carrying them only in transient chat.\n");
     s.push_str("- If a mana unit is underspecified, identify the exact missing context and either inspect the relevant artifacts or report the gap precisely rather than inventing missing requirements.\n");
     s.push_str("- Treat chat as discussion and mana as the persistent external work and idea graph. When a conversation produces durable structure — plans, architecture, decomposition, migrations, blockers, dependencies, or follow-up work — represent that structure in mana during the conversation, not after it.\n");
+    s.push_str("- When durable planning state changes, make the between-turn mana update before the substantive reply and include a concise mana delta summary in the response.\n");
     s.push_str("- Do not use mana only when work is large; use it whenever externalizing the plan is likely to improve execution quality, correctness, scope clarity, reviewability, or future continuation.\n");
     s.push_str("- Prefer native mana actions over shell or direct file mutation for durable planning/work structure. Use append-style mana updates to keep the graph current during conversation.\n");
     s.push_str("- If work spans more than one project or clearly belongs at the ecosystem layer, target root mana explicitly rather than relying on the nearest project scope.\n");
@@ -720,6 +724,27 @@ mod tests {
             .contains("Never claim repository facts that you have not inspected in this session."));
         assert!(result.text.contains(
             "For analysis-only requests, stay read-only unless the user asks for changes."
+        ));
+    }
+
+    #[test]
+    fn system_prompt_includes_conversation_time_mana_planning_doctrine() {
+        let reg = make_registry();
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
+        assert!(result.text.contains(
+            "During planning and design conversations, proactively externalize durable structure as it appears."
+        ));
+        assert!(result
+            .text
+            .contains("epic, child job, note, or decision"));
+        assert!(result.text.contains(
+            "Do not ask permission merely to capture plan artifacts in mana."
+        ));
+        assert!(result.text.contains(
+            "If durable planning state changed this turn, make the between-turn mana update before the substantive reply"
+        ));
+        assert!(result.text.contains(
+            "include a concise mana delta summary in the response"
         ));
     }
 
