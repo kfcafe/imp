@@ -36,11 +36,13 @@ Notable slash commands:
 
 imp is an agent engine — not a wrapper around an LLM API. It runs a full ReAct loop (think → act → observe → repeat), manages context intelligently, and gives the model real tools to work with.
 
+imp is the native worker/runtime designed to use mana well. In the happy path, mana is the cross-agent durable substrate, imp picks up mana-shaped work natively, executes it live, and writes a rich durable result back so future workers can inherit selectively from mana instead of reconstructing everything from transcripts.
+
 **Tools** — File I/O, shell execution, code search (grep, find, AST scan), web search, diff preview/apply, user prompts, mana unit management, persistent memory, session search across past conversations, and built-in multi-edit for coordinated file changes. Readonly tools run in parallel. Prefer native tools over shell wrappers when available; for mana operations, use the built-in `mana` tool instead of `bash` for equivalent actions.
 
-**Context management** — As conversations grow, imp first masks old tool outputs and can now compact older history behind an explicit branch-local compaction boundary. `/compact` preserves recent working turns verbatim, summarizes older work into a structured handoff, and makes future turns use the compacted active history rather than the full raw transcript. Raw session entries remain on disk for replay/fork/export.
+**Context management** — As conversations grow, imp first masks old tool outputs and can now compact older history behind an explicit branch-local compaction boundary. `/compact` preserves recent working turns verbatim, summarizes older work into a structured handoff, and makes future turns use the compacted active history rather than the full raw transcript. Raw session entries remain on disk for replay/fork/export. This complements the mana happy path: keep durable handoff rich when cheap to capture, but reveal context selectively rather than flooding future workers with unnecessary raw history.
 
-**Modes** — Control what the agent can do. `full` for interactive use, `worker` for scoped tasks, `orchestrator` for planning and delegation, `reviewer` for read-only analysis. Enforced at both tool registration and execution time — disallowed tools never appear in the prompt. When delegating, imp should use mana child jobs as the worker substrate rather than inventing a separate subtask model.
+**Modes** — Control what the agent can do. `full` for interactive use, `worker` for scoped tasks, `orchestrator` for planning and delegation, `reviewer` for read-only analysis. Enforced at both tool registration and execution time — disallowed tools never appear in the prompt. When delegating, imp should use mana child jobs as the worker substrate rather than inventing a separate subtask model. In worker mode especially, imp should behave like a native runtime for mana-shaped work rather than a generic chat assistant.
 
 **Sessions** — Every message, tool call, and result is persisted to append-only JSONL. Resume any session, fork from any point, navigate between branches.
 
