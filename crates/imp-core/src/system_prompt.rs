@@ -43,6 +43,7 @@ pub struct TaskContext {
     pub dependencies: Vec<Dependency>,
     pub decisions: Vec<String>,
     pub context_paths: Vec<String>,
+    pub constraints: Vec<String>,
 }
 
 /// Result of system prompt assembly, including size tracking.
@@ -497,6 +498,13 @@ fn task_layer(task: &TaskContext) -> String {
         s.push_str("Use these declared file/path hints before broadening the search.\n");
         for path in &task.context_paths {
             s.push_str(&format!("- {}\n", path));
+        }
+    }
+
+    if !task.constraints.is_empty() {
+        s.push_str("\n## Constraints\n");
+        for constraint in &task.constraints {
+            s.push_str(&format!("- {}\n", constraint));
         }
     }
 

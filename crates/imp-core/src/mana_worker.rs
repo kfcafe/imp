@@ -144,6 +144,45 @@ pub fn load_assignment_with_mana_dir(
 // ---------------------------------------------------------------------------
 
 /// Build a `TaskContext` from a worker assignment for system prompt Layer 5.
+fn derive_task_constraints(assignment: &WorkerAssignment) -> Vec<String> {
+    let mut constraints = Vec::new();
+
+    if !assignment.paths.is_empty() || !assignment.files.is_empty() {
+        constraints.push(
+            "Scope changes to the declared file/path hints unless a clear dependency forces broader edits."
+                .to_string(),
+        );
+    }
+
+    if assignment.verify.is_some() {
+        constraints.push(
+            "Treat the verify command as the primary completion gate for this task."
+                .to_string(),
+        );
+    } else {
+        constraints.push(
+            "Do not claim completion until the acceptance criteria are concretely satisfied."
+                .to_string(),
+        );
+    }
+
+    if !assignment.dependencies.is_empty() {
+        constraints.push(
+            "Respect dependency context and avoid reworking already-completed dependency work unless required."
+                .to_string(),
+        );
+    }
+
+    if !assignment.decisions.is_empty() {
+        constraints.push(
+            "Treat unresolved decisions as real constraints; either resolve them explicitly or work around them honestly."
+                .to_string(),
+        );
+    }
+
+    constraints
+}
+
 pub fn build_task_context(
     assignment: &WorkerAssignment,
 ) -> TaskContext {
@@ -215,6 +254,7 @@ pub fn build_task_context(
         dependencies,
         decisions: assignment.decisions.clone(),
         context_paths,
+        constraints: derive_task_constraints(assignment),
     }
 }
 
@@ -455,6 +495,11 @@ mod tests {
         assert_eq!(ctx.notes.as_deref(), Some("Prefer touching parser and module wiring first"));
         assert_eq!(ctx.decisions, vec!["Use mod.rs or inline?"]);
         assert_eq!(ctx.context_paths, vec!["src/lib.rs", "src/parser.rs"]);
+        assert!(ctx.constraints.iter().any(|c| c.contains("Scope changes")));
+        assert!(ctx
+            .constraints
+            .iter()
+            .any(|c| c.contains("verify command")));
     }
 
     #[test]
