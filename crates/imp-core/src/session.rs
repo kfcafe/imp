@@ -471,7 +471,11 @@ impl SessionManager {
                 self.append_tool_result_message(result.clone())?;
                 persisted.push("tool result");
             }
-            AgentEvent::TurnEnd { index, message } => {
+            AgentEvent::TurnEnd {
+                index,
+                message,
+                ..
+            } => {
                 let (_assistant_id, usage_entry_id) = self.append_assistant_turn_with_model_meta(
                     model_meta,
                     *index,

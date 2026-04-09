@@ -645,7 +645,11 @@ impl Agent {
                     })
                     .await;
             }
-            AgentEvent::TurnEnd { index, message } => {
+            AgentEvent::TurnEnd {
+                index,
+                message,
+                ..
+            } => {
                 self.hooks
                     .fire(&HookEvent::OnTurnEnd {
                         index: *index,
@@ -871,6 +875,7 @@ impl Agent {
                     file_tracker: self.file_tracker.clone(),
                     mode: self.mode,
                     read_max_lines: self.read_max_lines,
+                    turn_mana_review: self.turn_mana_review.clone(),
                 };
 
                 // Forward tool output deltas to event stream
@@ -971,8 +976,21 @@ impl Agent {
 
         result
     }
-}
 
+    fn finish_turn_mana_review(&self, turn: u32) -> TurnManaReview {
+        match self.turn_mana_review.lock() {
+            Ok(review) => {
+                let review = review.finalize();
+                if review.turn_index == turn {
+                    review
+                } else {
+                    TurnManaReview::no_change(turn)
+                }
+            }
+            Err(_) => TurnManaReview::no_change(turn),
+        }
+    }
+}
 fn push_stream_text_block(content: &mut Vec<ContentBlock>, text: String) {
     if text.is_empty() {
         return;
