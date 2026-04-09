@@ -502,6 +502,68 @@ mod tests {
     }
 
     #[test]
+    fn builder_filters_tower_memory_outside_tower_projects() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", temp.path());
+
+        let imp_dir = temp.path().join("imp");
+        std::fs::create_dir_all(&imp_dir).unwrap();
+        std::fs::write(
+            imp_dir.join("memory.md"),
+            "Project lives at /Users/asher/tower and uses root mana.",
+        )
+        .unwrap();
+        std::fs::write(
+            imp_dir.join("user.md"),
+            "User prefers root mana in /tower for Tower work.",
+        )
+        .unwrap();
+
+        let mut config = Config::default();
+        config.learning.enabled = true;
+
+        let (agent, _handle) = AgentBuilder::new(
+            config,
+            PathBuf::from("/tmp/not-tower/project"),
+            test_model(),
+            "key".into(),
+        )
+        .build()
+        .unwrap();
+
+        assert!(!agent.system_prompt.contains("/Users/asher/tower"));
+        assert!(!agent.system_prompt.contains("/tower for Tower work"));
+    }
+
+    #[test]
+    fn builder_keeps_tower_memory_inside_tower_projects() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", temp.path());
+
+        let imp_dir = temp.path().join("imp");
+        std::fs::create_dir_all(&imp_dir).unwrap();
+        std::fs::write(
+            imp_dir.join("memory.md"),
+            "Project lives at /Users/asher/tower and uses root mana.",
+        )
+        .unwrap();
+
+        let mut config = Config::default();
+        config.learning.enabled = true;
+
+        let (agent, _handle) = AgentBuilder::new(
+            config,
+            PathBuf::from("/Users/asher/tower/imp"),
+            test_model(),
+            "key".into(),
+        )
+        .build()
+        .unwrap();
+
+        assert!(agent.system_prompt.contains("/Users/asher/tower"));
+    }
+
+    #[test]
     fn builder_hooks_loaded_from_config() {
         use crate::hooks::HookDef;
 
