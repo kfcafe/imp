@@ -65,6 +65,7 @@ pub struct AssembleParams<'a> {
     pub agents_md: &'a [AgentsMd],
     pub skills: &'a [Skill],
     pub facts: &'a [Fact],
+    pub project_memory_status: Option<&'a str>,
     pub personality: Option<&'a PersonalityProfile>,
     pub soul: Option<&'a SoulDoc>,
     pub task: Option<&'a TaskContext>,
@@ -87,6 +88,7 @@ pub struct AssembleParams<'a> {
 /// - Layer 2: Project context from AGENTS.md files
 /// - Layer 3: Skills index
 /// - Layer 4: Mana facts (skipped if empty)
+/// - Layer 4.25: Compact project memory status (skipped if empty)
 /// - Layer 5: Task context (only in headless/task mode)
 /// - Layer 6: Agent memory (if present)
 pub fn assemble(params: &AssembleParams<'_>) -> AssembledPrompt {
@@ -125,6 +127,13 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
     // Layer 4: Mana facts
     if !p.facts.is_empty() {
         parts.push(facts_layer(p.facts));
+    }
+
+    // Layer 4.25: Compact project memory status
+    if let Some(status) = p.project_memory_status {
+        if !status.is_empty() {
+            parts.push(status.to_string());
+        }
     }
 
     // Layer 4.5: Engineering guardrails (when enabled)
@@ -707,6 +716,7 @@ mod tests {
             agents_md,
             skills,
             facts,
+            project_memory_status: None,
             personality,
             soul: None,
             task,
@@ -878,6 +888,7 @@ mod tests {
             agents_md: &[],
             skills: &[],
             facts: &[],
+            project_memory_status: None,
             personality: Some(&personality),
             soul: Some(&soul),
             task: None,
@@ -979,6 +990,7 @@ mod tests {
             agents_md: &[],
             skills: &skills,
             facts: &[],
+            project_memory_status: None,
             personality: None,
             soul: None,
             task: None,
@@ -1010,6 +1022,7 @@ mod tests {
             agents_md: &[],
             skills: &skills,
             facts: &[],
+            project_memory_status: None,
             personality: None,
             soul: None,
             task: None,
@@ -1047,6 +1060,7 @@ mod tests {
             agents_md: &[],
             skills: &skills,
             facts: &[],
+            project_memory_status: None,
             personality: None,
             soul: None,
             task: None,
@@ -1077,6 +1091,7 @@ mod tests {
             agents_md: &[],
             skills: &skills,
             facts: &[],
+            project_memory_status: None,
             personality: None,
             soul: None,
             task: None,
@@ -1105,6 +1120,7 @@ mod tests {
             agents_md: &[],
             skills: &skills,
             facts: &[],
+            project_memory_status: None,
             personality: None,
             soul: None,
             task: None,
@@ -1472,6 +1488,7 @@ mod tests {
             agents_md: &[],
             skills: &[],
             facts: &[],
+            project_memory_status: None,
             personality: None,
             soul: None,
             task: None,
@@ -1497,6 +1514,7 @@ mod tests {
             agents_md: &[],
             skills: &[],
             facts: &[],
+            project_memory_status: None,
             personality: None,
             soul: None,
             task: None,
@@ -1520,6 +1538,7 @@ mod tests {
             agents_md: &[],
             skills: &[],
             facts: &[],
+            project_memory_status: None,
             personality: None,
             soul: None,
             task: None,
@@ -1562,6 +1581,7 @@ mod tests {
             agents_md: &agents,
             skills: &skills,
             facts: &facts,
+            project_memory_status: None,
             personality: None,
             soul: None,
             task: Some(&task),

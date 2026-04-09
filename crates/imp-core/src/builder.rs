@@ -252,6 +252,7 @@ impl AgentBuilder {
             } else {
                 mana_prompt_context::SessionPromptContext {
                     facts: self.facts.clone(),
+                    project_memory_status: None,
                 }
             };
 
@@ -260,6 +261,7 @@ impl AgentBuilder {
                 agents_md: &agents_md,
                 skills: &skills,
                 facts: &prompt_context.facts,
+                project_memory_status: prompt_context.project_memory_status.as_deref(),
                 personality: Some(&self.config.personality.profile),
                 soul: soul.as_ref(),
                 task: self.task.as_ref(),

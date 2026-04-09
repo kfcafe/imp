@@ -6,15 +6,20 @@ use crate::system_prompt::Fact;
 
 const MAX_RELEVANT_FACTS: usize = 8;
 const MAX_FACT_TEXT_CHARS: usize = 160;
+const MAX_STATUS_WARNINGS: usize = 3;
+const MAX_STATUS_WORKING_ON: usize = 3;
+const MAX_STATUS_RECENT_WORK: usize = 3;
+const MAX_STATUS_TITLE_CHARS: usize = 80;
+const MAX_WARNING_TEXT_CHARS: usize = 120;
 
 /// Session-start mana-backed prompt context owned by imp runtime assembly.
 ///
-/// This currently injects only bounded project facts. A future follow-up can add
-/// a compact textual project-memory block for warnings / working-on / recent work
-/// without changing builder call sites again.
+/// Facts remain a distinct verified-fact seam. Dynamic status-like project
+/// memory is carried separately as a compact optional text block.
 #[derive(Debug, Default)]
 pub struct SessionPromptContext {
     pub facts: Vec<Fact>,
+    pub project_memory_status: Option<String>,
 }
 
 pub fn load_session_prompt_context(cwd: &Path) -> SessionPromptContext {
@@ -43,7 +48,8 @@ fn load_session_prompt_context_from_mana_dir(
         .map_err(|err| err.to_string())?;
 
     Ok(SessionPromptContext {
-        facts: map_relevant_facts(memory),
+        facts: map_relevant_facts(&memory),
+        project_memory_status: format_project_memory_status(&memory),
     })
 }
 
@@ -55,14 +61,15 @@ fn load_task_prompt_context_from_mana_dir(
         .map_err(|err| err.to_string())?;
 
     Ok(SessionPromptContext {
-        facts: map_task_relevant_facts(memory, task_paths),
+        facts: map_task_relevant_facts(&memory, task_paths),
+        project_memory_status: None,
     })
 }
 
-fn map_relevant_facts(memory: mana_core::ops::memory_context::MemoryContext) -> Vec<Fact> {
+fn map_relevant_facts(memory: &mana_core::ops::memory_context::MemoryContext) -> Vec<Fact> {
     memory
         .relevant_facts
-        .into_iter()
+        .iter()
         .take(MAX_RELEVANT_FACTS)
         .map(|relevant| Fact {
             text: truncate_for_prompt(&relevant.unit.title, MAX_FACT_TEXT_CHARS),
@@ -72,16 +79,17 @@ fn map_relevant_facts(memory: mana_core::ops::memory_context::MemoryContext) -> 
 }
 
 fn map_task_relevant_facts(
-    memory: mana_core::ops::memory_context::MemoryContext,
+    memory: &mana_core::ops::memory_context::MemoryContext,
     task_paths: &[String],
 ) -> Vec<Fact> {
-    let mut relevant = memory.relevant_facts;
+    let mut relevant: Vec<_> = memory.relevant_facts.iter().collect();
     if !task_paths.is_empty() {
         relevant.retain(|fact| {
-            fact.unit
-                .paths
-                .iter()
-                .any(|fact_path| task_paths.iter().any(|task_path| path_overlap(fact_path, task_path)))
+            fact.unit.paths.iter().any(|fact_path| {
+                task_paths
+                    .iter()
+                    .any(|task_path| path_overlap(fact_path, task_path))
+            })
         });
     }
 
@@ -97,6 +105,93 @@ fn map_task_relevant_facts(
 
 fn path_overlap(a: &str, b: &str) -> bool {
     a.starts_with(b) || b.starts_with(a) || a == b
+}
+
+fn format_project_memory_status(
+    memory: &mana_core::ops::memory_context::MemoryContext,
+) -> Option<String> {
+    let warnings = format_warning_lines(memory);
+    let working_on = format_working_on_lines(memory);
+    let recent_work = format_recent_work_lines(memory);
+
+    if warnings.is_empty() && working_on.is_empty() && recent_work.is_empty() {
+        return None;
+    }
+
+    let mut sections = Vec::new();
+
+    if !warnings.is_empty() {
+        sections.push(format!("Warnings:\n{}", warnings.join("\n")));
+    }
+
+    if !working_on.is_empty() {
+        sections.push(format!("Working on:\n{}", working_on.join("\n")));
+    }
+
+    if !recent_work.is_empty() {
+        sections.push(format!("Recent work:\n{}", recent_work.join("\n")));
+    }
+
+    Some(format!(
+        "Project memory status:\n{}",
+        sections.join("\n\n")
+    ))
+}
+
+fn format_warning_lines(memory: &mana_core::ops::memory_context::MemoryContext) -> Vec<String> {
+    memory
+        .warnings
+        .iter()
+        .take(MAX_STATUS_WARNINGS)
+        .map(|warning| format!("- {}", truncate_for_prompt(warning, MAX_WARNING_TEXT_CHARS)))
+        .collect()
+}
+
+fn format_working_on_lines(memory: &mana_core::ops::memory_context::MemoryContext) -> Vec<String> {
+    memory
+        .working_on
+        .iter()
+        .take(MAX_STATUS_WORKING_ON)
+        .map(|working| {
+            let mut parts = vec![format!(
+                "[{}] {}",
+                working.unit.id,
+                truncate_for_prompt(&working.unit.title, MAX_STATUS_TITLE_CHARS)
+            )];
+
+            if working.failed_attempts > 0 {
+                parts.push(format!("{} failed attempt(s)", working.failed_attempts));
+            }
+
+            if let Some(claimed_by) = working.unit.claimed_by.as_deref() {
+                parts.push(format!("claimed by {}", claimed_by));
+            }
+
+            format!("- {}", parts.join(" — "))
+        })
+        .collect()
+}
+
+fn format_recent_work_lines(memory: &mana_core::ops::memory_context::MemoryContext) -> Vec<String> {
+    memory
+        .recent_work
+        .iter()
+        .take(MAX_STATUS_RECENT_WORK)
+        .map(|recent| {
+            let closed = recent
+                .unit
+                .closed_at
+                .map(|closed_at| format_verified_ago(Some(closed_at)))
+                .unwrap_or_else(|| "recently".to_string());
+
+            format!(
+                "- [{}] {} — closed {}",
+                recent.unit.id,
+                truncate_for_prompt(&recent.unit.title, MAX_STATUS_TITLE_CHARS),
+                closed
+            )
+        })
+        .collect()
 }
 
 fn truncate_for_prompt(text: &str, max_chars: usize) -> String {
