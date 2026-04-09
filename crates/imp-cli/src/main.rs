@@ -1,6 +1,4 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-#[cfg(test)]
-use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -101,8 +99,6 @@ use imp_core::personality::{
 };
 use imp_core::resources::{discover_project_soul, suggested_project_soul_path};
 use imp_core::session::{SessionEntry, SessionManager};
-#[cfg(test)]
-use imp_core::system_prompt::{Attempt as TaskAttempt, Dependency as TaskDependency, TaskContext};
 use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
 use imp_core::usage::{UsageCostBreakdown, UsageRecordSource, UsageTokens};
 use imp_core::TimingEvent;
@@ -114,8 +110,6 @@ use imp_llm::provider::ThinkingLevel;
 use imp_llm::providers::create_provider;
 use imp_llm::{truncate_chars_with_suffix, Message, Model, StreamEvent};
 use serde::Serialize;
-#[cfg(test)]
-use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::Command as TokioCommand;
@@ -353,188 +347,6 @@ struct UsageExportArgs {
     /// Export format
     #[arg(long, value_enum, default_value_t = UsageExportFormat::Json)]
     format: UsageExportFormat,
-}
-
-#[cfg(test)]
-#[derive(Debug, Deserialize)]
-struct UnitFrontmatter {
-    id: Option<String>,
-    title: String,
-    description: Option<String>,
-    acceptance: Option<String>,
-    verify: Option<String>,
-    notes: Option<String>,
-    #[serde(default)]
-    dependencies: Vec<String>,
-    #[serde(default)]
-    decisions: Vec<String>,
-    #[serde(default)]
-    paths: Vec<String>,
-    #[serde(default)]
-    attempt_log: Vec<UnitAttempt>,
-    /// Files to preload into the agent's cached context prefix.
-    #[serde(default)]
-    files: Vec<String>,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Deserialize)]
-struct UnitAttempt {
-    num: Option<u32>,
-    outcome: Option<String>,
-    agent: Option<String>,
-    started_at: Option<String>,
-    summary: Option<String>,
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-struct ManaUnit {
-    id: Option<String>,
-    title: String,
-    description: String,
-    acceptance: Option<String>,
-    verify: Option<String>,
-    notes: Option<String>,
-    dependencies: Vec<String>,
-    decisions: Vec<String>,
-    attempts: Vec<UnitAttempt>,
-    workspace_root: PathBuf,
-    /// Explicit file references from frontmatter, or empty for auto-detect.
-    files: Vec<String>,
-    /// Additional relevant file paths from mana unit metadata.
-    paths: Vec<String>,
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-impl ManaUnit {
-    fn task_prompt(&self) -> String {
-        let mut prompt = format!("Task: {}", self.title);
-
-        if !self.description.trim().is_empty() {
-            prompt.push_str("\n\n");
-            prompt.push_str(self.description.trim());
-        }
-
-        if let Some(notes) = self
-            .notes
-            .as_deref()
-            .map(str::trim)
-            .filter(|notes| !notes.is_empty())
-        {
-            prompt.push_str("\n\nNotes:\n");
-            prompt.push_str(notes);
-        }
-
-        if !self.attempts.is_empty() {
-            prompt.push_str("\n\nPrevious attempts:\n");
-            for attempt in &self.attempts {
-                prompt.push_str("- ");
-                prompt.push_str(&format_attempt(attempt));
-                prompt.push('\n');
-            }
-            while prompt.ends_with('\n') {
-                prompt.pop();
-            }
-        }
-
-        if let Some(verify) = self
-            .verify
-            .as_deref()
-            .map(str::trim)
-            .filter(|verify| !verify.is_empty())
-        {
-            prompt.push_str("\n\nVerify command: ");
-            prompt.push_str(verify);
-        }
-
-        prompt
-    }
-
-    fn task_context(&self) -> TaskContext {
-        let mut description = self.description.trim().to_string();
-
-        if let Some(notes) = self
-            .notes
-            .as_deref()
-            .map(str::trim)
-            .filter(|notes| !notes.is_empty())
-        {
-            if !description.is_empty() {
-                description.push_str("\n\n");
-            }
-            description.push_str("Notes:\n");
-            description.push_str(notes);
-        }
-
-        let dependencies = if self.dependencies.is_empty() {
-            Vec::new()
-        } else {
-            match mana_core::api::load_index(&self.workspace_root.join(".mana")) {
-                Ok(index) => self
-                    .dependencies
-                    .iter()
-                    .map(|dep_id| {
-                        let detail = index
-                            .units
-                            .iter()
-                            .find(|entry| entry.id == *dep_id)
-                            .map(|entry| entry.title.clone())
-                            .unwrap_or_else(|| "dependency not found in active index".to_string());
-                        let status = index
-                            .units
-                            .iter()
-                            .find(|entry| entry.id == *dep_id)
-                            .map(|entry| entry.status.to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        TaskDependency {
-                            name: dep_id.clone(),
-                            status,
-                            detail,
-                        }
-                    })
-                    .collect(),
-                Err(_) => self
-                    .dependencies
-                    .iter()
-                    .map(|dep_id| TaskDependency {
-                        name: dep_id.clone(),
-                        status: "unknown".to_string(),
-                        detail: "dependency status unavailable".to_string(),
-                    })
-                    .collect(),
-            }
-        };
-
-        TaskContext {
-            title: self.title.clone(),
-            description,
-            acceptance: self.acceptance.clone(),
-            verify: self.verify.clone(),
-            notes: self.notes.clone(),
-            attempts: self
-                .attempts
-                .iter()
-                .enumerate()
-                .map(|(index, attempt)| TaskAttempt {
-                    number: attempt.num.unwrap_or((index + 1) as u32),
-                    outcome: attempt
-                        .outcome
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    summary: attempt
-                        .summary
-                        .clone()
-                        .unwrap_or_else(|| format_attempt(attempt)),
-                })
-                .collect(),
-            dependencies,
-            decisions: self.decisions.clone(),
-            context_paths: self.paths.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1641,247 +1453,6 @@ async fn run_headless_mode(
     }
 
     Ok(true)
-}
-
-/// Legacy ad hoc markdown loader retained only for test/reference coverage.
-/// Canonical single-unit execution uses
-/// `imp_core::mana_worker::load_assignment_with_mana_dir()` instead.
-#[cfg(test)]
-#[allow(dead_code)]
-fn load_mana_unit(cwd: &Path, unit_id: &str) -> Result<ManaUnit, Box<dyn std::error::Error>> {
-    let mana_dir = find_mana_dir(cwd).ok_or_else(|| {
-        io::Error::other(format!(
-            "Could not find .mana directory while walking up from {}",
-            cwd.display()
-        ))
-    })?;
-
-    let workspace_root = mana_dir
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| cwd.to_path_buf());
-
-    let mut candidates = Vec::new();
-
-    for entry in fs::read_dir(&mana_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("md") {
-            continue;
-        }
-
-        let file_name = match path.file_name().and_then(|name| name.to_str()) {
-            Some(file_name) => file_name,
-            None => continue,
-        };
-
-        if !file_name.contains(unit_id) {
-            continue;
-        }
-
-        candidates.push(parse_mana_unit(&path, workspace_root.clone())?);
-    }
-
-    if candidates.is_empty() {
-        return Err(io::Error::other(format!(
-            "Mana unit {unit_id} not found in {}",
-            mana_dir.display()
-        ))
-        .into());
-    }
-
-    if let Some(unit) = candidates
-        .iter()
-        .position(|unit| unit.id.as_deref() == Some(unit_id))
-        .map(|index| candidates.remove(index))
-    {
-        return Ok(unit);
-    }
-
-    if candidates.len() == 1 {
-        return Ok(candidates.remove(0));
-    }
-
-    let titles = candidates
-        .into_iter()
-        .map(|unit| unit.title)
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    Err(io::Error::other(format!(
-        "Mana unit lookup for {unit_id} is ambiguous: {titles}"
-    ))
-    .into())
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn find_mana_dir(start: &Path) -> Option<PathBuf> {
-    let mut current = Some(start);
-
-    while let Some(dir) = current {
-        let candidate = dir.join(".mana");
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-        current = dir.parent();
-    }
-
-    None
-}
-
-#[cfg(test)]
-fn parse_mana_unit(
-    path: &Path,
-    workspace_root: PathBuf,
-) -> Result<ManaUnit, Box<dyn std::error::Error>> {
-    let content = fs::read_to_string(path)?;
-    let (frontmatter, body) = split_frontmatter(&content)?;
-    let frontmatter: UnitFrontmatter = serde_yaml::from_str(&frontmatter).map_err(|error| {
-        io::Error::other(format!("Failed to parse {}: {error}", path.display()))
-    })?;
-
-    let frontmatter_description = frontmatter
-        .description
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or("");
-    let body = body.trim();
-    let description = if !frontmatter_description.is_empty() && !body.is_empty() {
-        format!("{frontmatter_description}\n\n{body}")
-    } else if !frontmatter_description.is_empty() {
-        frontmatter_description.to_string()
-    } else {
-        body.to_string()
-    };
-
-    Ok(ManaUnit {
-        id: frontmatter.id,
-        title: frontmatter.title,
-        description,
-        acceptance: frontmatter.acceptance,
-        verify: frontmatter.verify,
-        notes: frontmatter.notes,
-        dependencies: frontmatter.dependencies,
-        decisions: frontmatter.decisions,
-        attempts: frontmatter.attempt_log,
-        workspace_root,
-        files: frontmatter.files,
-        paths: frontmatter.paths,
-    })
-}
-
-#[cfg(test)]
-fn split_frontmatter(content: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let lines: Vec<&str> = content.lines().collect();
-
-    if lines.first().copied() != Some("---") {
-        return Err(io::Error::other("Mana unit is missing YAML frontmatter").into());
-    }
-
-    let end = lines
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find_map(|(index, line)| (*line == "---").then_some(index))
-        .ok_or_else(|| io::Error::other("Mana unit frontmatter is not closed"))?;
-
-    let yaml = lines[1..end].join("\n");
-    let body = lines[end + 1..].join("\n");
-    Ok((yaml, body))
-}
-
-/// Parse a file spec string like "src/foo.rs" or "src/foo.rs:tail:50" into a FileSpec.
-#[cfg(test)]
-#[allow(dead_code)]
-fn parse_file_spec_str(s: &str) -> Option<imp_core::context_prefill::FileSpec> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    // Split on first colon that follows the extension
-    // e.g., "src/foo.rs:tail:50" → path="src/foo.rs", suffix="tail:50"
-    let (path_str, suffix) = if let Some(dot_pos) = s.rfind('.') {
-        // Find the first colon after the extension
-        let after_ext = &s[dot_pos..];
-        if let Some(colon_pos) = after_ext.find(':') {
-            let split_at = dot_pos + colon_pos;
-            (&s[..split_at], Some(&s[split_at + 1..]))
-        } else {
-            (s, None)
-        }
-    } else {
-        (s, None)
-    };
-
-    let mode = match suffix {
-        Some(suf) if suf.starts_with("tail:") => suf[5..]
-            .parse::<usize>()
-            .ok()
-            .map(imp_core::context_prefill::FileMode::Tail)
-            .unwrap_or(imp_core::context_prefill::FileMode::Full),
-        Some(suf) if suf.contains('-') => {
-            let parts: Vec<&str> = suf.splitn(2, '-').collect();
-            match (
-                parts[0].parse::<usize>(),
-                parts.get(1).and_then(|s| s.parse::<usize>().ok()),
-            ) {
-                (Ok(start), Some(end)) => imp_core::context_prefill::FileMode::Range(start, end),
-                _ => imp_core::context_prefill::FileMode::Full,
-            }
-        }
-        _ => imp_core::context_prefill::FileMode::Full,
-    };
-
-    Some(imp_core::context_prefill::FileSpec {
-        path: std::path::PathBuf::from(path_str),
-        mode,
-    })
-}
-
-#[cfg(test)]
-fn format_attempt(attempt: &UnitAttempt) -> String {
-    let number = attempt
-        .num
-        .map(|num| format!("Attempt {num}"))
-        .unwrap_or_else(|| "Attempt".to_string());
-    let outcome = attempt.outcome.as_deref().unwrap_or("unknown");
-
-    if let Some(summary) = attempt
-        .summary
-        .as_deref()
-        .map(str::trim)
-        .filter(|summary| !summary.is_empty())
-    {
-        return format!("{number} ({outcome}): {summary}");
-    }
-
-    let mut details = Vec::new();
-
-    if let Some(agent) = attempt
-        .agent
-        .as_deref()
-        .map(str::trim)
-        .filter(|agent| !agent.is_empty())
-    {
-        details.push(format!("agent {agent}"));
-    }
-
-    if let Some(started_at) = attempt
-        .started_at
-        .as_deref()
-        .map(str::trim)
-        .filter(|started_at| !started_at.is_empty())
-    {
-        details.push(format!("started {started_at}"));
-    }
-
-    if details.is_empty() {
-        format!("{number} ({outcome})")
-    } else {
-        format!("{number} ({outcome}): {}", details.join(", "))
-    }
 }
 
 fn emit_startup_timing(timer: &mut StartupTimer, stage: StartupStage) {
@@ -4604,31 +4175,6 @@ mod tests {
         assert_eq!(provider, "openai");
     }
 
-    // ── split_frontmatter ──────────────────────────────────────────
-
-    #[test]
-    fn split_frontmatter_valid() {
-        let content = "---\ntitle: Test\nverify: echo ok\n---\n\nBody text here.";
-        let (yaml, body) = split_frontmatter(content).unwrap();
-        assert!(yaml.contains("title: Test"));
-        assert!(yaml.contains("verify: echo ok"));
-        assert!(body.trim() == "Body text here.");
-    }
-
-    #[test]
-    fn split_frontmatter_missing_opener() {
-        let content = "title: Test\n---\nBody";
-        let result = split_frontmatter(content);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn split_frontmatter_missing_closer() {
-        let content = "---\ntitle: Test\nno closing delimiter";
-        let result = split_frontmatter(content);
-        assert!(result.is_err());
-    }
-
     // ── parse_rpc_command ──────────────────────────────────────────
 
     #[test]
@@ -4681,91 +4227,6 @@ mod tests {
         let result = parse_rpc_command(&value);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("missing string field"));
-    }
-
-    // ── format_attempt ─────────────────────────────────────────────
-
-    #[test]
-    fn format_attempt_with_summary() {
-        let attempt = UnitAttempt {
-            num: Some(1),
-            outcome: Some("failed".to_string()),
-            agent: Some("pi-agent".to_string()),
-            started_at: None,
-            summary: Some("ran out of context".to_string()),
-        };
-        let result = format_attempt(&attempt);
-        assert!(result.contains("Attempt 1"));
-        assert!(result.contains("failed"));
-        assert!(result.contains("ran out of context"));
-    }
-
-    #[test]
-    fn format_attempt_without_summary() {
-        let attempt = UnitAttempt {
-            num: Some(2),
-            outcome: Some("abandoned".to_string()),
-            agent: Some("pi-agent".to_string()),
-            started_at: Some("2026-03-21T08:00:00Z".to_string()),
-            summary: None,
-        };
-        let result = format_attempt(&attempt);
-        assert!(result.contains("Attempt 2"));
-        assert!(result.contains("abandoned"));
-        assert!(result.contains("agent pi-agent"));
-    }
-
-    // ── ManaUnit::task_prompt ──────────────────────────────────────
-
-    #[test]
-    fn mana_unit_task_prompt_full() {
-        let unit = ManaUnit {
-            id: Some("42".to_string()),
-            title: "Fix the widget".to_string(),
-            description: "The widget is broken.\nPlease fix it.".to_string(),
-            acceptance: None,
-            verify: Some("cargo test".to_string()),
-            notes: Some("Check the edge case.".to_string()),
-            dependencies: Vec::new(),
-            decisions: Vec::new(),
-            attempts: vec![UnitAttempt {
-                num: Some(1),
-                outcome: Some("failed".to_string()),
-                agent: None,
-                started_at: None,
-                summary: Some("timed out".to_string()),
-            }],
-            files: Vec::new(),
-            paths: Vec::new(),
-            workspace_root: PathBuf::from("/tmp"),
-        };
-        let prompt = unit.task_prompt();
-        assert!(prompt.starts_with("Task: Fix the widget"));
-        assert!(prompt.contains("The widget is broken."));
-        assert!(prompt.contains("Notes:\nCheck the edge case."));
-        assert!(prompt.contains("Previous attempts:"));
-        assert!(prompt.contains("timed out"));
-        assert!(prompt.contains("Verify command: cargo test"));
-    }
-
-    #[test]
-    fn mana_unit_task_prompt_minimal() {
-        let unit = ManaUnit {
-            id: None,
-            title: "Simple task".to_string(),
-            description: String::new(),
-            acceptance: None,
-            verify: None,
-            notes: None,
-            dependencies: Vec::new(),
-            decisions: Vec::new(),
-            attempts: Vec::new(),
-            files: Vec::new(),
-            paths: Vec::new(),
-            workspace_root: PathBuf::from("/tmp"),
-        };
-        let prompt = unit.task_prompt();
-        assert_eq!(prompt, "Task: Simple task");
     }
 
     // ── rpc_stream_event_to_json ───────────────────────────────────
@@ -4856,32 +4317,44 @@ mod tests {
         assert_eq!(StartupStage::RunLoopStarted.as_str(), "run_loop_started");
     }
 
-    // ── parse_mana_unit (integration with tempfile) ────────────────
-
     #[test]
-    fn parse_mana_unit_from_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("42-fix-bug.md");
-        fs::write(
-            &path,
-            "---\nid: '42'\ntitle: Fix the bug\nverify: cargo test\n---\n\nDescription body.\n",
-        )
-        .unwrap();
-        let unit = parse_mana_unit(&path, dir.path().to_path_buf()).unwrap();
-        assert_eq!(unit.id.as_deref(), Some("42"));
-        assert_eq!(unit.title, "Fix the bug");
-        assert_eq!(unit.verify.as_deref(), Some("cargo test"));
-        assert!(unit.description.contains("Description body."));
-    }
+    fn imp_cli_uses_canonical_mana_worker_prompt_and_context_helpers() {
+        let assignment = imp_core::mana_worker::WorkerAssignment {
+            id: "42".to_string(),
+            title: "Fix the widget".to_string(),
+            description: "The widget is broken.\nPlease fix it.".to_string(),
+            acceptance: Some("Widget tests pass".to_string()),
+            verify: Some("cargo test -p imp-cli".to_string()),
+            notes: Some("Check the edge case.".to_string()),
+            decisions: vec!["Keep the CLI thin".to_string()],
+            dependencies: Vec::new(),
+            paths: vec!["imp/crates/imp-cli/src/main.rs".to_string()],
+            files: Vec::new(),
+            attempts: vec![imp_core::mana_worker::WorkerAttempt {
+                number: 1,
+                outcome: "failed".to_string(),
+                summary: "timed out".to_string(),
+            }],
+            workspace_root: PathBuf::from("/tmp"),
+            model: None,
+        };
 
-    #[test]
-    fn parse_mana_unit_missing_verify() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("99-no-verify.md");
-        fs::write(&path, "---\ntitle: No verify\n---\n\nJust do it.\n").unwrap();
-        let unit = parse_mana_unit(&path, dir.path().to_path_buf()).unwrap();
-        assert_eq!(unit.title, "No verify");
-        assert!(unit.verify.is_none());
+        let prompt = imp_core::mana_worker::build_task_prompt(&assignment);
+        let context = imp_core::mana_worker::build_task_context(&assignment);
+
+        assert!(prompt.starts_with("Task: Fix the widget"));
+        assert!(prompt.contains("Notes:\nCheck the edge case."));
+        assert!(prompt.contains("Previous attempts:"));
+        assert!(prompt.contains("Verify command: cargo test -p imp-cli"));
+
+        assert_eq!(context.title, "Fix the widget");
+        assert_eq!(context.acceptance.as_deref(), Some("Widget tests pass"));
+        assert_eq!(context.verify.as_deref(), Some("cargo test -p imp-cli"));
+        assert_eq!(context.context_paths, vec!["imp/crates/imp-cli/src/main.rs"]);
+        assert!(context
+            .constraints
+            .iter()
+            .any(|constraint| constraint.contains("verify command")));
     }
 }
 
