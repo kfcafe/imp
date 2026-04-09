@@ -635,7 +635,7 @@ fn fail_run_in_store(store: &std::sync::Mutex<ManaRunStore>, run_id: &str, error
 
 fn run_summary_lines(view: &RunView) -> Vec<String> {
     let mut lines = vec![format!(
-        "Mana run: {} total · {} done · {} failed · {} awaiting verify · {} skipped",
+        "Mana run: {} total · {} done · {} failed · {} candidate complete / awaiting verify · {} skipped",
         view.summary.total_units,
         view.summary.total_closed,
         view.summary.total_failed,
@@ -734,14 +734,14 @@ fn scope_from_target(target: &RunTarget) -> String {
 fn make_follow_up_summary(scope: &str, view: &RunView) -> String {
     let mut summary = if view.summary.total_failed > 0 {
         format!(
-            "Native mana orchestration finished for {scope}: {} done, {} failed, {} awaiting verify.",
+            "Native mana orchestration finished for {scope}: {} done, {} failed, {} candidate complete / awaiting verify.",
             view.summary.total_closed,
             view.summary.total_failed,
             view.summary.total_awaiting_verify
         )
     } else if view.summary.total_awaiting_verify > 0 {
         format!(
-            "Native mana orchestration finished for {scope}: {} done, {} awaiting verify.",
+            "Native mana orchestration finished for {scope}: {} done, {} candidate complete / awaiting verify.",
             view.summary.total_closed, view.summary.total_awaiting_verify
         )
     } else {
@@ -1021,7 +1021,7 @@ fn run_state_output(state: &NativeRunState) -> ToolOutput {
         lines.push(format!("Worker runtime: {agent} · {model}"));
     }
     lines.push(format!(
-        "{} total · {} done · {} failed · {} awaiting verify · {} skipped",
+        "{} total · {} done · {} failed · {} candidate complete / awaiting verify · {} skipped",
         state.summary.total_units,
         state.summary.total_closed,
         state.summary.total_failed,
@@ -1060,7 +1060,7 @@ fn evaluate_run_output(state: &NativeRunState) -> ToolOutput {
             state.run_id, state.summary.total_failed
         ),
         _ if state.summary.total_awaiting_verify > 0 => format!(
-            "Native mana orchestration run {} finished with {} unit(s) awaiting verify.",
+            "Native mana orchestration run {} finished with {} unit(s) candidate complete / awaiting verify.",
             state.run_id, state.summary.total_awaiting_verify
         ),
         _ => format!(
