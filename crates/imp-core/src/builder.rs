@@ -581,6 +581,48 @@ mod tests {
     }
 
     #[test]
+    fn builder_injects_mana_facts_into_system_prompt_when_available() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mana_dir = temp.path().join(".mana");
+        std::fs::create_dir(&mana_dir).unwrap();
+
+        let mut mana_config = mana_core::config::Config::default();
+        mana_config.project = "test".to_string();
+        mana_config.save(&mana_dir).unwrap();
+
+        let mut working = mana_core::unit::Unit::new("1", "Implement auth flow");
+        working.status = mana_core::unit::Status::InProgress;
+        working.paths = vec!["src/auth.rs".to_string()];
+        working.requires = vec!["AuthProvider".to_string()];
+        let working_slug = mana_core::util::title_to_slug(&working.title);
+        working
+            .to_file(mana_dir.join(format!("1-{}.md", working_slug)))
+            .unwrap();
+
+        let mut fact = mana_core::unit::Unit::new("2", "Auth uses RS256 signing");
+        fact.unit_type = "fact".to_string();
+        fact.paths = vec!["src/auth.rs".to_string()];
+        fact.produces = vec!["AuthProvider".to_string()];
+        fact.last_verified = Some(chrono::Utc::now() - chrono::Duration::hours(2));
+        let fact_slug = mana_core::util::title_to_slug(&fact.title);
+        fact.to_file(mana_dir.join(format!("2-{}.md", fact_slug)))
+            .unwrap();
+
+        let (agent, _handle) = AgentBuilder::new(
+            Config::default(),
+            temp.path().join("src"),
+            test_model(),
+            "key".into(),
+        )
+        .build()
+        .unwrap();
+
+        assert!(agent.system_prompt.contains("Project facts:"));
+        assert!(agent.system_prompt.contains("Auth uses RS256 signing"));
+        assert!(agent.system_prompt.contains("verified 2h ago"));
+    }
+
+    #[test]
     fn builder_hooks_loaded_from_config() {
         use crate::hooks::HookDef;
 
