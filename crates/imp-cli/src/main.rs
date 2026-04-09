@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(test)]
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -94,6 +95,7 @@ use imp_core::tools::web::types::SearchProvider;
 
 use imp_core::imp_session::{ImpSession, SessionChoice, SessionOptions};
 use imp_core::session::{SessionEntry, SessionManager};
+#[cfg(test)]
 use imp_core::system_prompt::{Attempt as TaskAttempt, Dependency as TaskDependency, TaskContext};
 use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
 use imp_core::usage::{UsageCostBreakdown, UsageRecordSource, UsageTokens};
@@ -105,7 +107,9 @@ use imp_llm::oauth::chatgpt::ChatGptOAuth;
 use imp_llm::provider::ThinkingLevel;
 use imp_llm::providers::create_provider;
 use imp_llm::{truncate_chars_with_suffix, Message, Model, StreamEvent};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+#[cfg(test)]
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::Command as TokioCommand;
@@ -341,6 +345,7 @@ struct UsageExportArgs {
     format: UsageExportFormat,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct UnitFrontmatter {
     id: Option<String>,
@@ -362,6 +367,7 @@ struct UnitFrontmatter {
     files: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Deserialize)]
 struct UnitAttempt {
     num: Option<u32>,
@@ -371,6 +377,8 @@ struct UnitAttempt {
     summary: Option<String>,
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct ManaUnit {
     id: Option<String>,
@@ -389,6 +397,8 @@ struct ManaUnit {
     paths: Vec<String>,
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 impl ManaUnit {
     fn task_prompt(&self) -> String {
         let mut prompt = format!("Task: {}", self.title);
@@ -1436,8 +1446,11 @@ async fn run_headless_mode(
     Ok(true)
 }
 
-/// Legacy ad hoc markdown loader retained for compatibility/reference while
-/// canonical single-unit execution now uses `imp_core::mana_worker::load_assignment_with_mana_dir()`.
+/// Legacy ad hoc markdown loader retained only for test/reference coverage.
+/// Canonical single-unit execution uses
+/// `imp_core::mana_worker::load_assignment_with_mana_dir()` instead.
+#[cfg(test)]
+#[allow(dead_code)]
 fn load_mana_unit(cwd: &Path, unit_id: &str) -> Result<ManaUnit, Box<dyn std::error::Error>> {
     let mana_dir = find_mana_dir(cwd).ok_or_else(|| {
         io::Error::other(format!(
@@ -1505,6 +1518,8 @@ fn load_mana_unit(cwd: &Path, unit_id: &str) -> Result<ManaUnit, Box<dyn std::er
     .into())
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn find_mana_dir(start: &Path) -> Option<PathBuf> {
     let mut current = Some(start);
 
@@ -1519,6 +1534,7 @@ fn find_mana_dir(start: &Path) -> Option<PathBuf> {
     None
 }
 
+#[cfg(test)]
 fn parse_mana_unit(
     path: &Path,
     workspace_root: PathBuf,
@@ -1559,6 +1575,7 @@ fn parse_mana_unit(
     })
 }
 
+#[cfg(test)]
 fn split_frontmatter(content: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
     let lines: Vec<&str> = content.lines().collect();
 
@@ -1579,6 +1596,8 @@ fn split_frontmatter(content: &str) -> Result<(String, String), Box<dyn std::err
 }
 
 /// Parse a file spec string like "src/foo.rs" or "src/foo.rs:tail:50" into a FileSpec.
+#[cfg(test)]
+#[allow(dead_code)]
 fn parse_file_spec_str(s: &str) -> Option<imp_core::context_prefill::FileSpec> {
     let s = s.trim();
     if s.is_empty() {
@@ -1624,6 +1643,7 @@ fn parse_file_spec_str(s: &str) -> Option<imp_core::context_prefill::FileSpec> {
     })
 }
 
+#[cfg(test)]
 fn format_attempt(attempt: &UnitAttempt) -> String {
     let number = attempt
         .num
