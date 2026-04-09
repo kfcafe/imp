@@ -220,6 +220,8 @@ enum Commands {
     Settings,
     /// Edit personality/soul settings in the terminal
     Personality,
+    /// Run the terminal-native setup wizard
+    Setup,
     /// Log in to an OAuth provider (Anthropic or OpenAI/ChatGPT)
     Login {
         /// OAuth provider to log in to (anthropic or openai). Defaults to anthropic.
@@ -690,6 +692,13 @@ async fn main() {
             }
             Commands::Personality => {
                 if let Err(e) = run_personality_mode() {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
+            Commands::Setup => {
+                if let Err(e) = run_setup_mode().await {
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
@@ -1245,6 +1254,173 @@ fn open_url(url: &str) -> std::io::Result<()> {
             .args(["/C", "start", url])
             .spawn()?;
     }
+    Ok(())
+}
+
+fn provider_has_auth(auth_store: &AuthStore, meta: &ProviderMeta) -> bool {
+    meta.env_vars.iter().any(|v| std::env::var(v).is_ok())
+        || auth_store.stored.contains_key(meta.id)
+}
+
+fn save_auth_secret_fields(
+    provider: &str,
+    fields: HashMap<String, String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let auth_path = Config::user_config_dir().join("auth.json");
+    let mut auth_store =
+        AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
+    auth_store.store_secret_fields(provider, fields)?;
+    Ok(())
+}
+
+async fn run_setup_mode() -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let config_path = Config::user_config_path();
+    let mut config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+    let auth_path = Config::user_config_dir().join("auth.json");
+    let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
+    let provider_registry = ProviderRegistry::with_builtins();
+    let model_registry = ModelRegistry::with_builtins();
+
+    println!("imp setup");
+    println!("=========");
+
+    let providers = provider_registry.list();
+    println!("Providers:");
+    for (idx, provider) in providers.iter().enumerate() {
+        let status = if provider_has_auth(&auth_store, provider) {
+            "configured"
+        } else {
+            "needs auth"
+        };
+        println!("{}. {} [{}]", idx + 1, provider.name, status);
+    }
+    let provider_choice = prompt_input_line("Select provider> ")?;
+    let provider_index = provider_choice
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .filter(|idx| *idx < providers.len())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid provider selection"))?;
+    let provider = &providers[provider_index];
+
+    if !provider_has_auth(&auth_store, provider) {
+        println!("No auth detected for {}.", provider.name);
+        if provider.id == "anthropic" || provider.id == "openai" {
+            let mode = prompt_input_line("Choose auth mode [login|key]> ")?;
+            if mode.eq_ignore_ascii_case("login") {
+                run_login(provider.id).await?;
+            } else {
+                println!("Enter api_key for {}", provider.name);
+                let value = prompt_input_line("api_key> ")?;
+                save_auth_secret_fields(
+                    provider.id,
+                    HashMap::from([("api_key".to_string(), value)]),
+                )?;
+            }
+        } else {
+            println!("Get a key at: {}", provider.docs_url);
+            let value = prompt_input_line("api_key> ")?;
+            save_auth_secret_fields(
+                provider.id,
+                HashMap::from([("api_key".to_string(), value)]),
+            )?;
+        }
+    }
+
+    let models = model_registry.list_by_provider(provider.id);
+    if models.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("No built-in models found for provider {}", provider.id),
+        )
+        .into());
+    }
+
+    println!();
+    println!("Models for {}:", provider.name);
+    for (idx, model) in models.iter().enumerate().take(20) {
+        println!("{}. {} ({})", idx + 1, model.name, model.id);
+    }
+    let model_choice = prompt_input_line("Select model> ")?;
+    let model_index = model_choice
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .filter(|idx| *idx < models.len())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid model selection"))?;
+    let model = models[model_index];
+    config.model = Some(model.id.clone());
+
+    println!();
+    println!("Thinking levels:");
+    println!("1. off");
+    println!("2. minimal");
+    println!("3. low");
+    println!("4. medium");
+    println!("5. high");
+    println!("6. xhigh");
+    let thinking_choice = prompt_input_line("Select thinking> ")?;
+    config.thinking = Some(match thinking_choice.trim() {
+        "1" => ThinkingLevel::Off,
+        "2" => ThinkingLevel::Minimal,
+        "3" => ThinkingLevel::Low,
+        "4" => ThinkingLevel::Medium,
+        "5" => ThinkingLevel::High,
+        "6" => ThinkingLevel::XHigh,
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid thinking selection").into()),
+    });
+
+    println!();
+    println!("Web search provider:");
+    println!("1. none");
+    println!("2. tavily");
+    println!("3. exa");
+    println!("4. linkup");
+    println!("5. perplexity");
+    let web_choice = prompt_input_line("Select web search provider> ")?;
+    config.web.search_provider = match web_choice.trim() {
+        "1" | "" => None,
+        "2" => Some(SearchProvider::Tavily),
+        "3" => Some(SearchProvider::Exa),
+        "4" => Some(SearchProvider::Linkup),
+        "5" => Some(SearchProvider::Perplexity),
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid web provider selection").into()),
+    };
+
+    if let Some(web_provider) = config.web.search_provider {
+        let web_provider_name = web_provider.name();
+        let web_has_auth = auth_store.resolve_secret_field(web_provider_name, "api_key").is_ok()
+            || std::env::var(web_provider.env_key_name()).is_ok();
+        if !web_has_auth {
+            println!("No key detected for web provider {}.", web_provider_name);
+            println!("Get a key at: {}", search_provider_docs_url(web_provider));
+            let value = prompt_input_line("api_key> ")?;
+            save_auth_secret_fields(
+                web_provider_name,
+                HashMap::from([("api_key".to_string(), value)]),
+            )?;
+        }
+    }
+
+    let saved_path = save_user_config(&config)?;
+    println!();
+    println!("Setup complete.");
+    println!("Config saved to {}", saved_path.display());
+    println!("Provider: {}", provider.name);
+    println!("Model: {}", model.id);
+    println!(
+        "Thinking: {}",
+        config
+            .thinking
+            .map(thinking_level_label)
+            .unwrap_or("off")
+    );
+    println!(
+        "Web search: {}",
+        web_search_provider_label(config.web.search_provider)
+    );
+
     Ok(())
 }
 
@@ -2859,6 +3035,7 @@ enum ChatShellCommand {
     Compact,
     Settings,
     Personality,
+    Setup,
     View(Option<String>),
     Model(Option<String>),
     Thinking(Option<String>),
@@ -2886,6 +3063,7 @@ fn parse_chat_shell_command(input: &str) -> Option<ChatShellCommand> {
         "compact" => ChatShellCommand::Compact,
         "settings" => ChatShellCommand::Settings,
         "personality" => ChatShellCommand::Personality,
+        "setup" => ChatShellCommand::Setup,
         "view" => ChatShellCommand::View(arg),
         "model" => ChatShellCommand::Model(arg),
         "thinking" => ChatShellCommand::Thinking(arg),
@@ -3516,7 +3694,7 @@ async fn execute_chat_shell_command(
                 }
                 _ => {
                     println!(
-                        "Chat shell commands:\n  :help [topic]      Show help\n  :status            Show current shell/session status\n  :new               Start a fresh session\n  :resume            Continue the most recent session for this cwd\n  :compact           Compact older context (planned)\n  :settings          Edit a guided subset of imp settings\n  :personality       Edit soul/personality tunables and source\n  :view <area>       Open viewer output for sessions, tree, logs, or checkpoints\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nCompatibility: /help, /status, /new, /resume, /compact, /settings, /personality, /view, /model, /thinking, and /quit also work here."
+                        "Chat shell commands:\n  :help [topic]      Show help\n  :status            Show current shell/session status\n  :new               Start a fresh session\n  :resume            Continue the most recent session for this cwd\n  :compact           Compact older context (planned)\n  :settings          Edit a guided subset of imp settings\n  :personality       Edit soul/personality tunables and source\n  :setup             Run the setup wizard\n  :view <area>       Open viewer output for sessions, tree, logs, or checkpoints\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nCompatibility: /help, /status, /new, /resume, /compact, /settings, /personality, /setup, /view, /model, /thinking, and /quit also work here."
                     );
                 }
             }
@@ -3555,6 +3733,10 @@ async fn execute_chat_shell_command(
         }
         ChatShellCommand::Personality => {
             run_personality_mode()?;
+            Ok(true)
+        }
+        ChatShellCommand::Setup => {
+            run_setup_mode().await?;
             Ok(true)
         }
         ChatShellCommand::View(area) => {
@@ -4105,6 +4287,10 @@ mod tests {
             Some(ChatShellCommand::Personality)
         );
         assert_eq!(
+            parse_chat_shell_command(":setup"),
+            Some(ChatShellCommand::Setup)
+        );
+        assert_eq!(
             parse_chat_shell_command(":resume"),
             Some(ChatShellCommand::Resume)
         );
@@ -4116,6 +4302,25 @@ mod tests {
             parse_chat_shell_command(":mystery abc"),
             Some(ChatShellCommand::Unknown("mystery abc".to_string()))
         );
+    }
+
+    #[test]
+    fn provider_has_auth_detects_stored_credentials() {
+        let path = std::path::PathBuf::from("auth.json");
+        let mut auth_store = AuthStore::new(path);
+        auth_store
+            .store(
+                "anthropic",
+                StoredCredential::ApiKey {
+                    key: "sk-test".into(),
+                },
+            )
+            .unwrap();
+        let provider = ProviderRegistry::with_builtins()
+            .find("anthropic")
+            .unwrap()
+            .clone();
+        assert!(provider_has_auth(&auth_store, &provider));
     }
 
     #[test]
