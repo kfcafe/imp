@@ -1174,6 +1174,7 @@ mod tests {
             dependencies: vec![],
             decisions: vec![],
             context_paths: vec![],
+            constraints: vec![],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Task"));
@@ -1211,6 +1212,7 @@ mod tests {
             dependencies: vec![],
             decisions: vec![],
             context_paths: vec![],
+            constraints: vec![],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Previous attempts"));
@@ -1242,6 +1244,7 @@ mod tests {
             }],
             decisions: vec![],
             context_paths: vec![],
+            constraints: vec![],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Dependencies"));
@@ -1266,6 +1269,7 @@ mod tests {
             dependencies: vec![],
             decisions: vec![],
             context_paths: vec!["src/auth.rs".into(), "tests/auth.rs".into()],
+            constraints: vec!["Scope changes to auth-related files unless broader edits are necessary".into()],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("Notes:"));
@@ -1275,6 +1279,8 @@ mod tests {
         assert!(result.text.contains("## Referenced files"));
         assert!(result.text.contains("- src/auth.rs"));
         assert!(result.text.contains("- tests/auth.rs"));
+        assert!(result.text.contains("## Constraints"));
+        assert!(result.text.contains("Scope changes to auth-related files unless broader edits are necessary"));
     }
 
     #[test]
@@ -1297,6 +1303,7 @@ mod tests {
             dependencies: vec![],
             decisions: vec![],
             context_paths: vec![],
+            constraints: vec![],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("Title: Do something"));
@@ -1426,6 +1433,7 @@ mod tests {
             }],
             decisions: vec![],
             context_paths: vec![],
+            constraints: vec![],
         };
 
         let result = test_assemble(&reg, &agents, &skills, &facts, None, Some(&task), None);
@@ -1546,6 +1554,7 @@ mod tests {
             dependencies: vec![],
             decisions: vec![],
             context_paths: vec![],
+            constraints: vec![],
         };
         let mem = "══════\nMEMORY [50%]\n══════\nSome fact";
         let result = assemble(&AssembleParams {
