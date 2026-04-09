@@ -9,8 +9,17 @@ brew tap kfcafe/tap && brew install imp
 ## Quick start
 
 ```bash
-# Start an interactive session
+# Start the current fullscreen interactive UI
 imp
+
+# Start the new CLI-first interactive chat shell
+imp chat
+
+# Open the fullscreen UI explicitly
+imp tui
+
+# Viewer/inspector surface (planned)
+imp view logs
 
 # Ask a one-shot question
 imp -p "What does this project do?"
@@ -49,6 +58,9 @@ imp is the native worker/runtime and orchestrator designed to use mana well. In 
 **Extensions** — Drop a Lua script in `~/.config/imp/lua/` and it loads automatically. Register custom tools, hook into events, add slash commands. One extension crashing doesn't affect others.
 
 ## TUI
+
+`imp` still opens the current fullscreen terminal UI by default during the CLI-first migration.
+Use `imp tui` to enter it explicitly, and use `imp chat` for the new line-oriented shell.
 
 The interactive terminal UI gives you:
 
