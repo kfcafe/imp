@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -94,6 +95,11 @@ use imp_core::config::{Config, ToolOutputDisplay};
 use imp_core::tools::web::types::SearchProvider;
 
 use imp_core::imp_session::{ImpSession, SessionChoice, SessionOptions};
+use imp_core::personality::{
+    default_soul_markdown, generated_tunable_line, replace_tunable_line, soul_identity_text,
+    tunable_state_for_label, SoulTunableState,
+};
+use imp_core::resources::{discover_project_soul, suggested_project_soul_path};
 use imp_core::session::{SessionEntry, SessionManager};
 #[cfg(test)]
 use imp_core::system_prompt::{Attempt as TaskAttempt, Dependency as TaskDependency, TaskContext};
@@ -212,6 +218,8 @@ enum Commands {
     },
     /// Edit a guided subset of imp settings in the terminal
     Settings,
+    /// Edit personality/soul settings in the terminal
+    Personality,
     /// Log in to an OAuth provider (Anthropic or OpenAI/ChatGPT)
     Login {
         /// OAuth provider to log in to (anthropic or openai). Defaults to anthropic.
@@ -675,6 +683,13 @@ async fn main() {
             }
             Commands::Settings => {
                 if let Err(e) = run_settings_mode() {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
+            Commands::Personality => {
+                if let Err(e) = run_personality_mode() {
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
@@ -2843,6 +2858,7 @@ enum ChatShellCommand {
     Resume,
     Compact,
     Settings,
+    Personality,
     View(Option<String>),
     Model(Option<String>),
     Thinking(Option<String>),
@@ -2869,6 +2885,7 @@ fn parse_chat_shell_command(input: &str) -> Option<ChatShellCommand> {
         "resume" => ChatShellCommand::Resume,
         "compact" => ChatShellCommand::Compact,
         "settings" => ChatShellCommand::Settings,
+        "personality" => ChatShellCommand::Personality,
         "view" => ChatShellCommand::View(arg),
         "model" => ChatShellCommand::Model(arg),
         "thinking" => ChatShellCommand::Thinking(arg),
@@ -2977,6 +2994,249 @@ fn print_settings_summary(config: &Config, config_path: &Path) {
     );
     println!("s. save and exit");
     println!("q. quit without saving");
+}
+
+fn resolve_project_soul_path(cwd: &Path) -> PathBuf {
+    discover_project_soul(cwd)
+        .map(|soul| soul.path)
+        .unwrap_or_else(|| suggested_project_soul_path(cwd))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersonalityScopeCli {
+    Global,
+    Project,
+}
+
+impl PersonalityScopeCli {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Global => Self::Project,
+            Self::Project => Self::Global,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Project => "project",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersonalityModeCli {
+    Builder,
+    Source,
+}
+
+fn tunable_cli_label(state: SoulTunableState) -> &'static str {
+    match state {
+        SoulTunableState::Preset(0) => "very low",
+        SoulTunableState::Preset(1) => "low",
+        SoulTunableState::Preset(2) => "balanced",
+        SoulTunableState::Preset(3) => "high",
+        SoulTunableState::Preset(4) => "very high",
+        SoulTunableState::Preset(_) => "preset",
+        SoulTunableState::Edited => "edited",
+        SoulTunableState::Missing => "missing",
+    }
+}
+
+fn personality_scope_paths(cwd: &Path) -> (PathBuf, PathBuf) {
+    (
+        Config::user_config_dir().join("soul.md"),
+        resolve_project_soul_path(cwd),
+    )
+}
+
+fn load_soul_content(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|_| default_soul_markdown())
+}
+
+fn save_soul_content(path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = if content.trim().is_empty() {
+        default_soul_markdown()
+    } else {
+        content.to_string()
+    };
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
+fn open_in_editor(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let status = ProcessCommand::new(&editor).arg(path).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("editor `{editor}` exited with {status}")).into())
+    }
+}
+
+fn print_personality_builder(
+    scope: PersonalityScopeCli,
+    path: &Path,
+    content: &str,
+) {
+    println!();
+    println!("Personality — builder mode");
+    println!("scope: {}", scope.label());
+    println!("path: {}", path.display());
+    println!("identity: {}", soul_identity_text(content));
+    println!("1. scope               {}", scope.label());
+    println!(
+        "2. autonomy            {}",
+        tunable_cli_label(tunable_state_for_label(content, "Autonomy"))
+    );
+    println!(
+        "3. brevity             {}",
+        tunable_cli_label(tunable_state_for_label(content, "Brevity"))
+    );
+    println!(
+        "4. caution             {}",
+        tunable_cli_label(tunable_state_for_label(content, "Caution"))
+    );
+    println!(
+        "5. warmth              {}",
+        tunable_cli_label(tunable_state_for_label(content, "Warmth"))
+    );
+    println!(
+        "6. planning            {}",
+        tunable_cli_label(tunable_state_for_label(content, "Planning"))
+    );
+    println!("7. switch to source mode");
+    println!("s. save and exit");
+    println!("q. quit without saving");
+}
+
+fn print_personality_source(
+    scope: PersonalityScopeCli,
+    path: &Path,
+    content: &str,
+) {
+    println!();
+    println!("Personality — source mode");
+    println!("scope: {}", scope.label());
+    println!("path: {}", path.display());
+    println!("identity: {}", soul_identity_text(content));
+    println!("Preview:");
+    for line in content.lines().take(16) {
+        println!("  {line}");
+    }
+    if content.lines().count() > 16 {
+        println!("  …");
+    }
+    println!("1. switch scope");
+    println!("2. switch to builder mode");
+    println!("3. open in $EDITOR");
+    println!("4. reset to default soul");
+    println!("s. save and exit");
+    println!("q. quit without saving");
+}
+
+fn cycle_personality_tunable(content: &str, label: &str) -> String {
+    let next_idx = match tunable_state_for_label(content, label) {
+        SoulTunableState::Preset(idx) => (idx + 1) % 5,
+        SoulTunableState::Missing | SoulTunableState::Edited => 0,
+    };
+    let new_line = generated_tunable_line(label, next_idx)
+        .unwrap_or_else(|| format!("- {label}: {}", next_idx));
+    replace_tunable_line(content, label, &new_line)
+}
+
+fn run_personality_mode() -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let (global_path, project_path) = personality_scope_paths(&cwd);
+    let mut global_content = load_soul_content(&global_path);
+    let mut project_content = load_soul_content(&project_path);
+    let mut scope = if discover_project_soul(&cwd).is_some() {
+        PersonalityScopeCli::Project
+    } else {
+        PersonalityScopeCli::Global
+    };
+    let mut mode = PersonalityModeCli::Builder;
+
+    loop {
+        let (path, content) = match scope {
+            PersonalityScopeCli::Global => (&global_path, &mut global_content),
+            PersonalityScopeCli::Project => (&project_path, &mut project_content),
+        };
+
+        match mode {
+            PersonalityModeCli::Builder => print_personality_builder(scope, path, content),
+            PersonalityModeCli::Source => print_personality_source(scope, path, content),
+        }
+
+        let Some(choice) = prompt_optional_input_line("Select field> ")? else {
+            println!();
+            return Ok(());
+        };
+
+        match mode {
+            PersonalityModeCli::Builder => match choice.trim() {
+                "1" => scope = scope.toggle(),
+                "2" => {
+                    *content = cycle_personality_tunable(content, "Autonomy");
+                    println!("Updated autonomy.");
+                }
+                "3" => {
+                    *content = cycle_personality_tunable(content, "Brevity");
+                    println!("Updated brevity.");
+                }
+                "4" => {
+                    *content = cycle_personality_tunable(content, "Caution");
+                    println!("Updated caution.");
+                }
+                "5" => {
+                    *content = cycle_personality_tunable(content, "Warmth");
+                    println!("Updated warmth.");
+                }
+                "6" => {
+                    *content = cycle_personality_tunable(content, "Planning");
+                    println!("Updated planning.");
+                }
+                "7" => mode = PersonalityModeCli::Source,
+                "s" | "save" => {
+                    save_soul_content(path, content)?;
+                    println!("Soul saved to {}", path.display());
+                    return Ok(());
+                }
+                "q" | "quit" => {
+                    println!("Discarded personality changes.");
+                    return Ok(());
+                }
+                other => println!("Unknown selection: {other}"),
+            },
+            PersonalityModeCli::Source => match choice.trim() {
+                "1" => scope = scope.toggle(),
+                "2" => mode = PersonalityModeCli::Builder,
+                "3" => {
+                    save_soul_content(path, content)?;
+                    open_in_editor(path)?;
+                    *content = load_soul_content(path);
+                    println!("Reloaded soul from {}", path.display());
+                }
+                "4" => {
+                    *content = default_soul_markdown();
+                    println!("Reset current scope to default soul markdown in memory.");
+                }
+                "s" | "save" => {
+                    save_soul_content(path, content)?;
+                    println!("Soul saved to {}", path.display());
+                    return Ok(());
+                }
+                "q" | "quit" => {
+                    println!("Discarded personality changes.");
+                    return Ok(());
+                }
+                other => println!("Unknown selection: {other}"),
+            },
+        }
+    }
 }
 
 fn run_settings_mode() -> Result<(), Box<dyn std::error::Error>> {
@@ -3256,7 +3516,7 @@ async fn execute_chat_shell_command(
                 }
                 _ => {
                     println!(
-                        "Chat shell commands:\n  :help [topic]      Show help\n  :status            Show current shell/session status\n  :new               Start a fresh session\n  :resume            Continue the most recent session for this cwd\n  :compact           Compact older context (planned)\n  :settings          Edit a guided subset of imp settings\n  :view <area>       Open viewer output for sessions, tree, logs, or checkpoints\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nCompatibility: /help, /status, /new, /resume, /compact, /settings, /view, /model, /thinking, and /quit also work here."
+                        "Chat shell commands:\n  :help [topic]      Show help\n  :status            Show current shell/session status\n  :new               Start a fresh session\n  :resume            Continue the most recent session for this cwd\n  :compact           Compact older context (planned)\n  :settings          Edit a guided subset of imp settings\n  :personality       Edit soul/personality tunables and source\n  :view <area>       Open viewer output for sessions, tree, logs, or checkpoints\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nCompatibility: /help, /status, /new, /resume, /compact, /settings, /personality, /view, /model, /thinking, and /quit also work here."
                     );
                 }
             }
@@ -3291,6 +3551,10 @@ async fn execute_chat_shell_command(
         }
         ChatShellCommand::Settings => {
             run_settings_mode()?;
+            Ok(true)
+        }
+        ChatShellCommand::Personality => {
+            run_personality_mode()?;
             Ok(true)
         }
         ChatShellCommand::View(area) => {
@@ -3837,6 +4101,10 @@ mod tests {
             Some(ChatShellCommand::Settings)
         );
         assert_eq!(
+            parse_chat_shell_command(":personality"),
+            Some(ChatShellCommand::Personality)
+        );
+        assert_eq!(
             parse_chat_shell_command(":resume"),
             Some(ChatShellCommand::Resume)
         );
@@ -3848,6 +4116,21 @@ mod tests {
             parse_chat_shell_command(":mystery abc"),
             Some(ChatShellCommand::Unknown("mystery abc".to_string()))
         );
+    }
+
+    #[test]
+    fn tunable_cli_label_formats_builder_states() {
+        assert_eq!(tunable_cli_label(SoulTunableState::Preset(2)), "balanced");
+        assert_eq!(tunable_cli_label(SoulTunableState::Edited), "edited");
+        assert_eq!(tunable_cli_label(SoulTunableState::Missing), "missing");
+    }
+
+    #[test]
+    fn cycle_personality_tunable_updates_markdown() {
+        let content = default_soul_markdown();
+        let updated = cycle_personality_tunable(&content, "Warmth");
+        assert_ne!(updated, content);
+        assert!(updated.contains("- Warmth:"));
     }
 
     #[test]
