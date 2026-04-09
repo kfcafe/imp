@@ -504,6 +504,7 @@ mod tests {
     #[test]
     fn builder_filters_tower_memory_outside_tower_projects() {
         let temp = tempfile::TempDir::new().unwrap();
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", temp.path());
 
         let imp_dir = temp.path().join("imp");
@@ -533,11 +534,18 @@ mod tests {
 
         assert!(!agent.system_prompt.contains("/Users/asher/tower"));
         assert!(!agent.system_prompt.contains("/tower for Tower work"));
+
+        if let Some(prev) = prev {
+            std::env::set_var("XDG_CONFIG_HOME", prev);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
     }
 
     #[test]
     fn builder_keeps_tower_memory_inside_tower_projects() {
         let temp = tempfile::TempDir::new().unwrap();
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", temp.path());
 
         let imp_dir = temp.path().join("imp");
@@ -561,6 +569,12 @@ mod tests {
         .unwrap();
 
         assert!(agent.system_prompt.contains("/Users/asher/tower"));
+
+        if let Some(prev) = prev {
+            std::env::set_var("XDG_CONFIG_HOME", prev);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
     }
 
     #[test]
