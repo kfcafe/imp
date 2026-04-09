@@ -3347,10 +3347,22 @@ fn print_tree_nodes(nodes: &[imp_core::session::TreeNode], depth: usize) {
 }
 
 fn summarize_message_for_view(message: &Message) -> String {
+    let text_content = |message: &Message| -> Option<String> {
+        let blocks = match message {
+            Message::User(user) => &user.content,
+            Message::Assistant(assistant) => &assistant.content,
+            Message::ToolResult(result) => &result.content,
+        };
+        blocks.iter().find_map(|block| match block {
+            imp_llm::ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+    };
+
     match message {
         Message::User(user) => format!(
             "user {}",
-            truncate_chars_with_suffix(&extract_text(message).unwrap_or_else(|| {
+            truncate_chars_with_suffix(&text_content(message).unwrap_or_else(|| {
                 user.content
                     .iter()
                     .filter_map(|block| match block {
@@ -3363,11 +3375,11 @@ fn summarize_message_for_view(message: &Message) -> String {
         ),
         Message::Assistant(_) => format!(
             "assistant {}",
-            truncate_chars_with_suffix(&extract_text(message).unwrap_or_default(), 80, "…")
+            truncate_chars_with_suffix(&text_content(message).unwrap_or_default(), 80, "…")
         ),
         Message::ToolResult(result) => format!(
             "tool-result {}",
-            truncate_chars_with_suffix(&extract_text(message).unwrap_or_else(|| result.tool_call_id.clone()), 80, "…")
+            truncate_chars_with_suffix(&text_content(message).unwrap_or_else(|| result.tool_call_id.clone()), 80, "…")
         ),
     }
 }

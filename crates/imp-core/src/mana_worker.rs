@@ -147,20 +147,14 @@ pub fn load_assignment_with_mana_dir(
 pub fn build_task_context(
     assignment: &WorkerAssignment,
 ) -> TaskContext {
-    let mut description = assignment.description.trim().to_string();
+    let description = assignment.description.trim().to_string();
 
-    if let Some(notes) = assignment
+    let notes = assignment
         .notes
         .as_deref()
         .map(str::trim)
         .filter(|n| !n.is_empty())
-    {
-        if !description.is_empty() {
-            description.push_str("\n\n");
-        }
-        description.push_str("Notes:\n");
-        description.push_str(notes);
-    }
+        .map(str::to_string);
 
     let dependencies = if assignment.dependencies.is_empty() {
         Vec::new()
@@ -196,11 +190,19 @@ pub fn build_task_context(
         }
     };
 
+    let mut context_paths = assignment.paths.clone();
+    for file in &assignment.files {
+        if !context_paths.iter().any(|path| path == file) {
+            context_paths.push(file.clone());
+        }
+    }
+
     TaskContext {
         title: assignment.title.clone(),
         description,
         acceptance: assignment.acceptance.clone(),
         verify: assignment.verify.clone(),
+        notes,
         attempts: assignment
             .attempts
             .iter()
@@ -212,6 +214,7 @@ pub fn build_task_context(
             .collect(),
         dependencies,
         decisions: assignment.decisions.clone(),
+        context_paths,
     }
 }
 
@@ -234,6 +237,18 @@ pub fn build_task_prompt(assignment: &WorkerAssignment) -> String {
     {
         prompt.push_str("\n\nNotes:\n");
         prompt.push_str(notes);
+    }
+
+    if !assignment.files.is_empty() || !assignment.paths.is_empty() {
+        prompt.push_str("\n\nReferenced files:\n");
+        for path in assignment.paths.iter().chain(assignment.files.iter()) {
+            prompt.push_str("- ");
+            prompt.push_str(path);
+            prompt.push('\n');
+        }
+        while prompt.ends_with('\n') {
+            prompt.pop();
+        }
     }
 
     if !assignment.attempts.is_empty() {
@@ -396,8 +411,8 @@ mod tests {
             notes: Some("Check the fixtures module".to_string()),
             decisions: Vec::new(),
             dependencies: Vec::new(),
-            paths: Vec::new(),
-            files: Vec::new(),
+            paths: vec!["tests/auth.rs".to_string()],
+            files: vec!["src/fixtures.rs".to_string()],
             attempts: vec![WorkerAttempt {
                 number: 1,
                 outcome: "fail".to_string(),
@@ -410,6 +425,9 @@ mod tests {
         assert!(prompt.contains("Notes:"));
         assert!(prompt.contains("Check the fixtures module"));
         assert!(prompt.contains("Previous attempts:"));
+        assert!(prompt.contains("Referenced files:"));
+        assert!(prompt.contains("tests/auth.rs"));
+        assert!(prompt.contains("src/fixtures.rs"));
         assert!(prompt.contains("Attempt 1 (fail): Wrong fixture path"));
     }
 
@@ -421,11 +439,11 @@ mod tests {
             description: "Split into submodules".to_string(),
             acceptance: Some("All tests pass".to_string()),
             verify: Some("cargo test".to_string()),
-            notes: None,
+            notes: Some("Prefer touching parser and module wiring first".to_string()),
             decisions: vec!["Use mod.rs or inline?".to_string()],
             dependencies: Vec::new(),
-            paths: Vec::new(),
-            files: Vec::new(),
+            paths: vec!["src/lib.rs".to_string()],
+            files: vec!["src/parser.rs".to_string()],
             attempts: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
             model: None,
@@ -434,7 +452,9 @@ mod tests {
         assert_eq!(ctx.title, "Refactor module");
         assert_eq!(ctx.acceptance.as_deref(), Some("All tests pass"));
         assert_eq!(ctx.verify.as_deref(), Some("cargo test"));
+        assert_eq!(ctx.notes.as_deref(), Some("Prefer touching parser and module wiring first"));
         assert_eq!(ctx.decisions, vec!["Use mod.rs or inline?"]);
+        assert_eq!(ctx.context_paths, vec!["src/lib.rs", "src/parser.rs"]);
     }
 
     #[test]

@@ -38,9 +38,11 @@ pub struct TaskContext {
     pub description: String,
     pub acceptance: Option<String>,
     pub verify: Option<String>,
+    pub notes: Option<String>,
     pub attempts: Vec<Attempt>,
     pub dependencies: Vec<Dependency>,
     pub decisions: Vec<String>,
+    pub context_paths: Vec<String>,
 }
 
 /// Result of system prompt assembly, including size tracking.
@@ -469,6 +471,13 @@ fn task_layer(task: &TaskContext) -> String {
     let mut s = String::from("## Task\n");
     s.push_str(&format!("Title: {}\n", task.title));
     s.push_str(&format!("Description: {}\n", task.description));
+    if let Some(ref notes) = task.notes {
+        if !notes.trim().is_empty() {
+            s.push_str("Notes:\n");
+            s.push_str(notes);
+            s.push('\n');
+        }
+    }
     if let Some(ref acceptance) = task.acceptance {
         s.push_str("Acceptance:\n");
         s.push_str(acceptance);
@@ -477,6 +486,14 @@ fn task_layer(task: &TaskContext) -> String {
     if let Some(ref verify) = task.verify {
         s.push_str(&format!("Verify: {}\n", verify));
         s.push_str("Treat the verify command as the primary completion check for this task.\n");
+    }
+
+    if !task.context_paths.is_empty() {
+        s.push_str("\n## Referenced files\n");
+        s.push_str("Use these declared file/path hints before broadening the search.\n");
+        for path in &task.context_paths {
+            s.push_str(&format!("- {}\n", path));
+        }
     }
 
     if !task.attempts.is_empty() {
@@ -1119,9 +1136,11 @@ mod tests {
             description: "The JWT validation test panics on expired tokens".into(),
             acceptance: None,
             verify: Some("cargo test auth::jwt_test".into()),
+            notes: None,
             attempts: vec![],
             dependencies: vec![],
             decisions: vec![],
+            context_paths: vec![],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Task"));
@@ -1143,6 +1162,7 @@ mod tests {
             description: "Something is broken".into(),
             acceptance: None,
             verify: None,
+            notes: None,
             attempts: vec![
                 Attempt {
                     number: 1,
@@ -1157,6 +1177,7 @@ mod tests {
             ],
             dependencies: vec![],
             decisions: vec![],
+            context_paths: vec![],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Previous attempts"));
@@ -1179,6 +1200,7 @@ mod tests {
             description: "New feature".into(),
             acceptance: None,
             verify: None,
+            notes: None,
             attempts: vec![],
             dependencies: vec![Dependency {
                 name: "Schema types".into(),
@@ -1186,6 +1208,7 @@ mod tests {
                 detail: "defined in src/schema.rs".into(),
             }],
             decisions: vec![],
+            context_paths: vec![],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Dependencies"));
@@ -1195,6 +1218,30 @@ mod tests {
         assert!(result
             .text
             .contains("- Schema types (completed): defined in src/schema.rs"));
+    }
+
+    #[test]
+    fn system_prompt_task_with_notes_and_context_paths() {
+        let reg = make_registry();
+        let task = TaskContext {
+            title: "Fix auth".into(),
+            description: "Tighten token validation".into(),
+            acceptance: None,
+            verify: Some("cargo test auth".into()),
+            notes: Some("Prefer touching only auth paths unless necessary".into()),
+            attempts: vec![],
+            dependencies: vec![],
+            decisions: vec![],
+            context_paths: vec!["src/auth.rs".into(), "tests/auth.rs".into()],
+        };
+        let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
+        assert!(result.text.contains("Notes:"));
+        assert!(result
+            .text
+            .contains("Prefer touching only auth paths unless necessary"));
+        assert!(result.text.contains("## Referenced files"));
+        assert!(result.text.contains("- src/auth.rs"));
+        assert!(result.text.contains("- tests/auth.rs"));
     }
 
     #[test]
@@ -1212,9 +1259,11 @@ mod tests {
             description: "Details here".into(),
             acceptance: None,
             verify: None,
+            notes: None,
             attempts: vec![],
             dependencies: vec![],
             decisions: vec![],
+            context_paths: vec![],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("Title: Do something"));
@@ -1331,6 +1380,7 @@ mod tests {
             description: "Add Redis caching layer".into(),
             acceptance: None,
             verify: Some("cargo test cache".into()),
+            notes: None,
             attempts: vec![Attempt {
                 number: 1,
                 outcome: "failed".into(),
@@ -1342,6 +1392,7 @@ mod tests {
                 detail: "src/config.rs".into(),
             }],
             decisions: vec![],
+            context_paths: vec![],
         };
 
         let result = test_assemble(&reg, &agents, &skills, &facts, None, Some(&task), None);
@@ -1457,9 +1508,11 @@ mod tests {
             description: "Broken".into(),
             acceptance: None,
             verify: None,
+            notes: None,
             attempts: vec![],
             dependencies: vec![],
             decisions: vec![],
+            context_paths: vec![],
         };
         let mem = "══════\nMEMORY [50%]\n══════\nSome fact";
         let result = assemble(&AssembleParams {
