@@ -719,6 +719,14 @@ async fn main() {
         return;
     }
 
+    if cli.mode == "chat" {
+        if let Err(e) = run_chat_mode(&cli).await {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Expand @file args into file content context
     let file_context = expand_file_args(&cli.args);
 
@@ -782,7 +790,7 @@ async fn main() {
             }
         }
         other => {
-            eprintln!("Unknown mode: {other}. Use interactive, rpc, or json.");
+            eprintln!("Unknown mode: {other}. Use interactive, chat, rpc, or json.");
             std::process::exit(1);
         }
     }
@@ -2665,6 +2673,497 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
+    Ok(())
+}
+
+struct CliTerminalUi;
+
+#[async_trait]
+impl UserInterface for CliTerminalUi {
+    fn has_ui(&self) -> bool {
+        true
+    }
+
+    async fn notify(&self, message: &str, level: NotifyLevel) {
+        let prefix = match level {
+            NotifyLevel::Info => "info",
+            NotifyLevel::Warning => "warning",
+            NotifyLevel::Error => "error",
+        };
+        eprintln!("[{prefix}] {message}");
+    }
+
+    async fn confirm(&self, title: &str, message: &str) -> Option<bool> {
+        let title = title.to_string();
+        let message = message.to_string();
+        tokio::task::spawn_blocking(move || {
+            eprintln!("\n{title}");
+            if !message.trim().is_empty() {
+                eprintln!("{message}");
+            }
+            eprint!("Proceed? [Y/n] ");
+            io::stdout().flush().ok()?;
+            let mut input = String::new();
+            let bytes = io::stdin().read_line(&mut input).ok()?;
+            if bytes == 0 {
+                return None;
+            }
+            let answer = input.trim().to_lowercase();
+            Some(!matches!(answer.as_str(), "n" | "no"))
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn select_with_context(
+        &self,
+        title: &str,
+        context: &str,
+        options: &[SelectOption],
+    ) -> Option<usize> {
+        let title = title.to_string();
+        let context = context.to_string();
+        let options = options.to_vec();
+        tokio::task::spawn_blocking(move || {
+            eprintln!("\n{title}");
+            if !context.trim().is_empty() {
+                eprintln!("{context}");
+            }
+            for (idx, option) in options.iter().enumerate() {
+                eprintln!("{}. {}", idx + 1, option.label);
+                if let Some(description) = &option.description {
+                    if !description.trim().is_empty() {
+                        eprintln!("   {description}");
+                    }
+                }
+            }
+            eprint!("Select> ");
+            io::stdout().flush().ok()?;
+            let mut input = String::new();
+            let bytes = io::stdin().read_line(&mut input).ok()?;
+            if bytes == 0 {
+                return None;
+            }
+            let index: usize = input.trim().parse().ok()?;
+            index.checked_sub(1).filter(|idx| *idx < options.len())
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn input_with_context(
+        &self,
+        title: &str,
+        context: &str,
+        placeholder: &str,
+    ) -> Option<String> {
+        let title = title.to_string();
+        let context = context.to_string();
+        let placeholder = placeholder.to_string();
+        tokio::task::spawn_blocking(move || {
+            eprintln!("\n{title}");
+            if !context.trim().is_empty() {
+                eprintln!("{context}");
+            }
+            if !placeholder.trim().is_empty() {
+                eprintln!("placeholder: {placeholder}");
+            }
+            eprint!("> ");
+            io::stdout().flush().ok()?;
+            let mut input = String::new();
+            let bytes = io::stdin().read_line(&mut input).ok()?;
+            if bytes == 0 {
+                return None;
+            }
+            Some(input.trim().to_string())
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn set_status(&self, _key: &str, _text: Option<&str>) {}
+
+    async fn set_widget(&self, _key: &str, _content: Option<WidgetContent>) {}
+
+    async fn custom(&self, _component: ComponentSpec) -> Option<serde_json::Value> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChatShellCommand {
+    Help(Option<String>),
+    Quit,
+    Model(Option<String>),
+    Thinking(Option<String>),
+    Unknown(String),
+}
+
+fn parse_chat_shell_command(input: &str) -> Option<ChatShellCommand> {
+    let raw = input.strip_prefix(':').or_else(|| input.strip_prefix('/'))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some(ChatShellCommand::Help(None));
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let command = parts.next().unwrap_or_default();
+    let rest = parts.collect::<Vec<_>>().join(" ");
+    let arg = if rest.is_empty() { None } else { Some(rest) };
+
+    Some(match command {
+        "help" | "h" => ChatShellCommand::Help(arg),
+        "quit" | "q" | "exit" => ChatShellCommand::Quit,
+        "model" => ChatShellCommand::Model(arg),
+        "thinking" => ChatShellCommand::Thinking(arg),
+        _ => ChatShellCommand::Unknown(trimmed.to_string()),
+    })
+}
+
+fn parse_thinking_level_strict(raw: &str) -> Option<ThinkingLevel> {
+    match raw.trim().to_lowercase().as_str() {
+        "off" => Some(ThinkingLevel::Off),
+        "minimal" => Some(ThinkingLevel::Minimal),
+        "low" => Some(ThinkingLevel::Low),
+        "medium" => Some(ThinkingLevel::Medium),
+        "high" => Some(ThinkingLevel::High),
+        "xhigh" => Some(ThinkingLevel::XHigh),
+        _ => None,
+    }
+}
+
+fn thinking_level_label(level: ThinkingLevel) -> &'static str {
+    match level {
+        ThinkingLevel::Off => "off",
+        ThinkingLevel::Minimal => "minimal",
+        ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High => "high",
+        ThinkingLevel::XHigh => "xhigh",
+    }
+}
+
+fn shell_session_choice(cli: &Cli) -> SessionChoice {
+    if cli.no_session {
+        SessionChoice::InMemory
+    } else if cli.cont {
+        SessionChoice::Continue
+    } else if let Some(ref path) = cli.session {
+        SessionChoice::Open(path.clone())
+    } else {
+        SessionChoice::New
+    }
+}
+
+fn shell_project_label(cwd: &Path) -> String {
+    cwd.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| cwd.display().to_string())
+}
+
+fn shell_session_label(session: &ImpSession) -> String {
+    session
+        .session_manager()
+        .title(32)
+        .or_else(|| session.session_manager().session_id())
+        .unwrap_or_else(|| "in-memory".to_string())
+}
+
+fn print_chat_status(session: &ImpSession) {
+    let project = shell_project_label(session.cwd());
+    let model = truncate_chars_with_suffix(&session.model().meta.id, 20, "…");
+    let thinking = session
+        .config()
+        .thinking
+        .map(thinking_level_label)
+        .unwrap_or("off");
+    let session_label = shell_session_label(session);
+    println!(
+        "[{project} | {model} | {thinking} | session: {session_label}]"
+    );
+}
+
+fn format_chat_tool_summary(tool_name: &str, args: &Value) -> String {
+    match tool_name {
+        "bash" => args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|c| truncate_chars_with_suffix(c, 60, "…"))
+            .unwrap_or_default(),
+        "read" | "write" | "edit" => args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "scan" => args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "mana" => args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
+async fn execute_chat_shell_command(
+    session: &mut ImpSession,
+    command: ChatShellCommand,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match command {
+        ChatShellCommand::Help(topic) => {
+            match topic.as_deref() {
+                Some("model") => {
+                    println!(
+                        "Current model: {}\nUsage: :model <name>\nHint: run `imp --list-models` for the full built-in catalog.",
+                        session.model().meta.id
+                    );
+                }
+                Some("thinking") => {
+                    let current = session
+                        .config()
+                        .thinking
+                        .map(thinking_level_label)
+                        .unwrap_or("off");
+                    println!(
+                        "Current thinking level: {current}\nUsage: :thinking <off|minimal|low|medium|high|xhigh>"
+                    );
+                }
+                _ => {
+                    println!(
+                        "Chat shell commands:\n  :help [topic]      Show help\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nCompatibility: /help, /model, /thinking, and /quit also work here."
+                    );
+                }
+            }
+            Ok(true)
+        }
+        ChatShellCommand::Quit => Ok(false),
+        ChatShellCommand::Model(None) => {
+            let mut models: Vec<String> = session
+                .model_registry()
+                .list()
+                .iter()
+                .map(|meta| meta.id.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            models.sort();
+            let preview = models.into_iter().take(12).collect::<Vec<_>>().join(", ");
+            println!(
+                "Current model: {}\nUsage: :model <name>\nExamples: {}{}",
+                session.model().meta.id,
+                preview,
+                if preview.is_empty() { "" } else { ", ..." }
+            );
+            Ok(true)
+        }
+        ChatShellCommand::Model(Some(name)) => {
+            session
+                .set_model(name.trim())
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+            println!("Model set to {}", session.model().meta.id);
+            Ok(true)
+        }
+        ChatShellCommand::Thinking(None) => {
+            let current = session
+                .config()
+                .thinking
+                .map(thinking_level_label)
+                .unwrap_or("off");
+            println!(
+                "Current thinking level: {current}\nUsage: :thinking <off|minimal|low|medium|high|xhigh>"
+            );
+            Ok(true)
+        }
+        ChatShellCommand::Thinking(Some(level)) => {
+            let Some(parsed) = parse_thinking_level_strict(level.trim()) else {
+                println!("Unknown thinking level: {}", level.trim());
+                println!("Expected one of: off, minimal, low, medium, high, xhigh");
+                return Ok(true);
+            };
+            session.set_thinking(parsed);
+            println!("Thinking level set to {}", thinking_level_label(parsed));
+            Ok(true)
+        }
+        ChatShellCommand::Unknown(raw) => {
+            println!("Unknown shell command: :{raw}");
+            println!("Type :help for available commands.");
+            Ok(true)
+        }
+    }
+}
+
+async fn run_chat_prompt(
+    session: &mut ImpSession,
+    cli: &Cli,
+    prompt: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    session
+        .prompt(prompt)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+    let mut printed_trailing_newline = true;
+    let mut printed_thinking = false;
+
+    while let Some(event) = session.recv_event().await {
+        match event {
+            AgentEvent::MessageDelta { delta } => match delta {
+                StreamEvent::TextDelta { text } => {
+                    print!("{text}");
+                    io::stdout().flush().ok();
+                    printed_trailing_newline = false;
+                }
+                StreamEvent::ThinkingDelta { .. } => {
+                    if !printed_thinking {
+                        eprintln!("thinking…");
+                        printed_thinking = true;
+                    }
+                }
+                _ => {}
+            },
+            AgentEvent::ToolExecutionStart {
+                tool_name, args, ..
+            } if !cli.no_tools => {
+                let summary = format_chat_tool_summary(&tool_name, &args);
+                if summary.is_empty() {
+                    eprintln!("tool: {tool_name}");
+                } else {
+                    eprintln!("tool: {tool_name} {summary}");
+                }
+            }
+            AgentEvent::ToolExecutionEnd { result, .. } if !cli.no_tools => {
+                if result.is_error {
+                    let text: String = result
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if !text.is_empty() {
+                        eprintln!("error: {}", truncate_chars_with_suffix(&text, 160, "…"));
+                        eprintln!("hint: deeper log viewing is planned under `imp view logs`.");
+                    }
+                }
+            }
+            AgentEvent::TurnEnd { .. } => {
+                if !printed_trailing_newline {
+                    println!();
+                    printed_trailing_newline = true;
+                }
+            }
+            AgentEvent::Error { error } => {
+                eprintln!("error: {error}");
+            }
+            AgentEvent::Timing { timing } => {
+                if cli.verbose {
+                    eprintln!("{}", format_timing_event(&timing));
+                }
+            }
+            AgentEvent::AgentEnd { usage, cost } => {
+                eprintln!(
+                    "summary: tokens ↑{} ↓{} · cost ${:.4}",
+                    usage.input_tokens, usage.output_tokens, cost.total
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    session
+        .wait()
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    Ok(())
+}
+
+async fn run_chat_mode(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+
+    let mut options = SessionOptions {
+        cwd: cwd.clone(),
+        model: cli.model.clone(),
+        provider: cli.provider.clone(),
+        api_key: cli.api_key.clone(),
+        thinking: cli
+            .thinking
+            .as_ref()
+            .map(|thinking| parse_thinking_level(thinking)),
+        max_turns: cli.max_turns.or(config.max_turns),
+        max_tokens: cli.max_tokens.or(config.max_tokens),
+        system_prompt: cli.system_prompt.clone(),
+        no_tools: cli.no_tools,
+        session: shell_session_choice(cli),
+        ui: Some(Arc::new(CliTerminalUi) as Arc<dyn UserInterface>),
+        ..Default::default()
+    };
+
+    if !cli.no_tools {
+        let lua_cwd = cwd.clone();
+        let user_config_dir = Config::user_config_dir();
+        options.lua_loader = Some(Box::new(move |tools| {
+            imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
+        }));
+    }
+
+    let mut session = ImpSession::create(options)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+    println!("imp chat — type :help for commands, Ctrl-D to exit.");
+
+    loop {
+        print_chat_status(&session);
+        print!("imp> ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        let bytes = io::stdin().read_line(&mut input)?;
+        if bytes == 0 {
+            println!();
+            break;
+        }
+
+        let input = input.trim_end_matches(['\r', '\n']).to_string();
+        if input.trim().is_empty() {
+            continue;
+        }
+
+        if let Some(command) = parse_chat_shell_command(&input) {
+            if !execute_chat_shell_command(&mut session, command).await? {
+                break;
+            }
+            continue;
+        }
+
+        run_chat_prompt(&mut session, cli, &input).await?;
+    }
+
+    Ok(())
+}
+
+async fn run_view_mode(
+    _cli: &Cli,
+    area: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let area = area.unwrap_or("overview");
+    println!(
+        "`imp view {area}` is not implemented yet. Planned focused viewer areas: sessions, tree, logs, checkpoints."
+    );
+    println!("For now, use `imp tui` for the current fullscreen interface or `imp chat` for the new CLI chat shell.");
     Ok(())
 }
 
