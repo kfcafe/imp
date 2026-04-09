@@ -89,7 +89,7 @@ impl StartupTimer {
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
-use imp_core::config::Config;
+use imp_core::config::{Config, ToolOutputDisplay};
 use imp_core::tools::web::types::SearchProvider;
 
 use imp_core::imp_session::{ImpSession, SessionChoice, SessionOptions};
@@ -206,6 +206,8 @@ enum Commands {
         /// Viewer area to open (planned: sessions, tree, logs, checkpoints)
         area: Option<String>,
     },
+    /// Edit a guided subset of imp settings in the terminal
+    Settings,
     /// Log in to an OAuth provider (Anthropic or OpenAI/ChatGPT)
     Login {
         /// OAuth provider to log in to (anthropic or openai). Defaults to anthropic.
@@ -491,6 +493,7 @@ impl ManaUnit {
             description,
             acceptance: self.acceptance.clone(),
             verify: self.verify.clone(),
+            notes: self.notes.clone(),
             attempts: self
                 .attempts
                 .iter()
@@ -509,6 +512,7 @@ impl ManaUnit {
                 .collect(),
             dependencies,
             decisions: self.decisions.clone(),
+            context_paths: self.paths.clone(),
         }
     }
 }
@@ -654,6 +658,13 @@ async fn main() {
             }
             Commands::View { area } => {
                 if let Err(e) = run_view_mode(&cli, area.as_deref()).await {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
+            Commands::Settings => {
+                if let Err(e) = run_settings_mode() {
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
@@ -2805,6 +2816,8 @@ enum ChatShellCommand {
     New,
     Resume,
     Compact,
+    Settings,
+    View(Option<String>),
     Model(Option<String>),
     Thinking(Option<String>),
     Unknown(String),
@@ -2829,6 +2842,8 @@ fn parse_chat_shell_command(input: &str) -> Option<ChatShellCommand> {
         "new" => ChatShellCommand::New,
         "resume" => ChatShellCommand::Resume,
         "compact" => ChatShellCommand::Compact,
+        "settings" => ChatShellCommand::Settings,
+        "view" => ChatShellCommand::View(arg),
         "model" => ChatShellCommand::Model(arg),
         "thinking" => ChatShellCommand::Thinking(arg),
         _ => ChatShellCommand::Unknown(trimmed.to_string()),
@@ -2844,6 +2859,208 @@ fn parse_thinking_level_strict(raw: &str) -> Option<ThinkingLevel> {
         "high" => Some(ThinkingLevel::High),
         "xhigh" => Some(ThinkingLevel::XHigh),
         _ => None,
+    }
+}
+
+fn tool_output_display_label(display: ToolOutputDisplay) -> &'static str {
+    match display {
+        ToolOutputDisplay::Full => "full",
+        ToolOutputDisplay::Compact => "compact",
+        ToolOutputDisplay::Collapsed => "collapsed",
+    }
+}
+
+fn parse_tool_output_display(raw: &str) -> Option<ToolOutputDisplay> {
+    match raw.trim().to_lowercase().as_str() {
+        "full" => Some(ToolOutputDisplay::Full),
+        "compact" => Some(ToolOutputDisplay::Compact),
+        "collapsed" => Some(ToolOutputDisplay::Collapsed),
+        _ => None,
+    }
+}
+
+fn web_search_provider_label(provider: Option<SearchProvider>) -> &'static str {
+    match provider {
+        Some(provider) => provider.name(),
+        None => "none",
+    }
+}
+
+fn prompt_input_line(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
+    eprint!("{prompt}");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    let bytes = io::stdin().read_line(&mut input)?;
+    if bytes == 0 {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "stdin closed").into());
+    }
+    Ok(input.trim().to_string())
+}
+
+fn prompt_optional_input_line(prompt: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    eprint!("{prompt}");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    let bytes = io::stdin().read_line(&mut input)?;
+    if bytes == 0 {
+        return Ok(None);
+    }
+    Ok(Some(input.trim().to_string()))
+}
+
+fn save_user_config(config: &Config) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = Config::user_config_path();
+    config
+        .save(&path)
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    Ok(path)
+}
+
+fn print_settings_summary(config: &Config, config_path: &Path) {
+    println!("Settings ({})", config_path.display());
+    println!("================");
+    println!("1. model               {}", config.model.as_deref().unwrap_or("(unset)"));
+    println!(
+        "2. thinking            {}",
+        config
+            .thinking
+            .map(thinking_level_label)
+            .unwrap_or("(unset)")
+    );
+    println!(
+        "3. max_tokens          {}",
+        config
+            .max_tokens
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "(unset)".to_string())
+    );
+    println!(
+        "4. max_turns           {}",
+        config
+            .max_turns
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "(unset)".to_string())
+    );
+    println!(
+        "5. tool_output         {}",
+        tool_output_display_label(config.ui.tool_output)
+    );
+    println!(
+        "6. web_search_provider {}",
+        web_search_provider_label(config.web.search_provider)
+    );
+    println!("s. save and exit");
+    println!("q. quit without saving");
+}
+
+fn run_settings_mode() -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let config_path = Config::user_config_path();
+    let mut config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+
+    loop {
+        println!();
+        print_settings_summary(&config, &config_path);
+        let Some(choice) = prompt_optional_input_line("Select field> ")? else {
+            println!();
+            return Ok(());
+        };
+
+        match choice.trim() {
+            "1" => {
+                let value = prompt_input_line("model> ")?;
+                if value.is_empty() {
+                    config.model = None;
+                    println!("Cleared model.");
+                } else {
+                    config.model = Some(value);
+                    println!("Updated model.");
+                }
+            }
+            "2" => {
+                let value = prompt_input_line("thinking [off|minimal|low|medium|high|xhigh]> ")?;
+                if value.is_empty() {
+                    config.thinking = None;
+                    println!("Cleared thinking level.");
+                } else if let Some(level) = parse_thinking_level_strict(&value) {
+                    config.thinking = Some(level);
+                    println!("Updated thinking level.");
+                } else {
+                    println!("Unknown thinking level: {value}");
+                }
+            }
+            "3" => {
+                let value = prompt_input_line("max_tokens> ")?;
+                if value.is_empty() {
+                    config.max_tokens = None;
+                    println!("Cleared max_tokens.");
+                } else if let Ok(parsed) = value.parse::<u32>() {
+                    config.max_tokens = Some(parsed.max(1));
+                    println!("Updated max_tokens.");
+                } else {
+                    println!("Expected a positive integer.");
+                }
+            }
+            "4" => {
+                let value = prompt_input_line("max_turns> ")?;
+                if value.is_empty() {
+                    config.max_turns = None;
+                    println!("Cleared max_turns.");
+                } else if let Ok(parsed) = value.parse::<u32>() {
+                    config.max_turns = Some(parsed.max(1));
+                    println!("Updated max_turns.");
+                } else {
+                    println!("Expected a positive integer.");
+                }
+            }
+            "5" => {
+                let value = prompt_input_line("tool_output [full|compact|collapsed]> ")?;
+                if let Some(display) = parse_tool_output_display(&value) {
+                    config.ui.tool_output = display;
+                    println!("Updated tool output display.");
+                } else {
+                    println!("Expected one of: full, compact, collapsed.");
+                }
+            }
+            "6" => {
+                let value = prompt_input_line("web_search_provider [none|tavily|exa|linkup|perplexity]> ")?;
+                match value.trim().to_lowercase().as_str() {
+                    "" | "none" => {
+                        config.web.search_provider = None;
+                        println!("Cleared web search provider.");
+                    }
+                    "tavily" => {
+                        config.web.search_provider = Some(SearchProvider::Tavily);
+                        println!("Updated web search provider.");
+                    }
+                    "exa" => {
+                        config.web.search_provider = Some(SearchProvider::Exa);
+                        println!("Updated web search provider.");
+                    }
+                    "linkup" => {
+                        config.web.search_provider = Some(SearchProvider::Linkup);
+                        println!("Updated web search provider.");
+                    }
+                    "perplexity" => {
+                        config.web.search_provider = Some(SearchProvider::Perplexity);
+                        println!("Updated web search provider.");
+                    }
+                    _ => println!("Expected one of: none, tavily, exa, linkup, perplexity."),
+                }
+            }
+            "s" | "save" => {
+                let saved_path = save_user_config(&config)?;
+                println!("Saved settings to {}", saved_path.display());
+                return Ok(());
+            }
+            "q" | "quit" => {
+                println!("Discarded settings changes.");
+                return Ok(());
+            }
+            other => {
+                println!("Unknown selection: {other}");
+            }
+        }
     }
 }
 
@@ -3013,7 +3230,7 @@ async fn execute_chat_shell_command(
                 }
                 _ => {
                     println!(
-                        "Chat shell commands:\n  :help [topic]      Show help\n  :status            Show current shell/session status\n  :new               Start a fresh session\n  :resume            Continue the most recent session for this cwd\n  :compact           Compact older context (planned)\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nCompatibility: /help, /status, /new, /resume, /compact, /model, /thinking, and /quit also work here."
+                        "Chat shell commands:\n  :help [topic]      Show help\n  :status            Show current shell/session status\n  :new               Start a fresh session\n  :resume            Continue the most recent session for this cwd\n  :compact           Compact older context (planned)\n  :settings          Edit a guided subset of imp settings\n  :view <area>       Open viewer output for sessions, tree, logs, or checkpoints\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nCompatibility: /help, /status, /new, /resume, /compact, /settings, /view, /model, /thinking, and /quit also work here."
                     );
                 }
             }
@@ -3044,6 +3261,16 @@ async fn execute_chat_shell_command(
         ChatShellCommand::Compact => {
             println!("Context compaction is not wired into `imp chat` yet.");
             println!("Use `imp tui` and `/compact` for now; a shell-native compaction path is planned.");
+            Ok(true)
+        }
+        ChatShellCommand::Settings => {
+            run_settings_mode()?;
+            Ok(true)
+        }
+        ChatShellCommand::View(area) => {
+            let area = area.unwrap_or_else(|| "sessions".to_string());
+            println!("opening viewer: {area}");
+            run_view_mode(cli, Some(area.as_str())).await?;
             Ok(true)
         }
         ChatShellCommand::Model(None) => {
@@ -3576,6 +3803,14 @@ mod tests {
             Some(ChatShellCommand::Thinking(Some("high".to_string())))
         );
         assert_eq!(
+            parse_chat_shell_command(":view logs"),
+            Some(ChatShellCommand::View(Some("logs".to_string())))
+        );
+        assert_eq!(
+            parse_chat_shell_command(":settings"),
+            Some(ChatShellCommand::Settings)
+        );
+        assert_eq!(
             parse_chat_shell_command(":resume"),
             Some(ChatShellCommand::Resume)
         );
@@ -3586,6 +3821,29 @@ mod tests {
         assert_eq!(
             parse_chat_shell_command(":mystery abc"),
             Some(ChatShellCommand::Unknown("mystery abc".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_tool_output_display_accepts_known_values() {
+        assert_eq!(parse_tool_output_display("full"), Some(ToolOutputDisplay::Full));
+        assert_eq!(
+            parse_tool_output_display("compact"),
+            Some(ToolOutputDisplay::Compact)
+        );
+        assert_eq!(
+            parse_tool_output_display("collapsed"),
+            Some(ToolOutputDisplay::Collapsed)
+        );
+        assert_eq!(parse_tool_output_display("mystery"), None);
+    }
+
+    #[test]
+    fn web_search_provider_label_formats_none_and_provider_names() {
+        assert_eq!(web_search_provider_label(None), "none");
+        assert_eq!(
+            web_search_provider_label(Some(SearchProvider::Exa)),
+            "exa"
         );
     }
 
