@@ -8,6 +8,7 @@ description = "Agent engine — loop, tools, sessions, hooks, context"
 [dependencies]
 imp-llm.workspace = true
 mana-core.workspace = true
+chrono = { version = "0.4", features = ["serde"] }
 tower-contracts = { path = "../../../tower-contracts" }
 mana = { path = "../../../mana/crates/mana-cli", package = "mana-cli" }
 serde.workspace = true
