@@ -15,6 +15,7 @@ use crate::config::{AgentMode, ContextConfig, ContinuePolicy};
 use crate::error::Result;
 use crate::guardrails::{self, GuardrailConfig, GuardrailLevel, GuardrailProfile};
 use crate::hooks::{HookEvent, HookRunner};
+use crate::mana_review::{TurnManaReview, TurnManaReviewAccumulator};
 use crate::roles::Role;
 use crate::tools::ToolRegistry;
 
@@ -64,6 +65,7 @@ pub enum AgentEvent {
     TurnEnd {
         index: u32,
         message: AssistantMessage,
+        mana_review: TurnManaReview,
     },
     MessageStart {
         message: Message,
@@ -154,6 +156,8 @@ pub struct Agent {
     pub continue_policy: ContinuePolicy,
     /// Prevent repeated confidence-based auto-continue nudges in a single run.
     queued_confidence_continue_nudge: bool,
+    /// Runtime-side turn-scoped between-turn mana review accumulator.
+    turn_mana_review: Arc<std::sync::Mutex<TurnManaReviewAccumulator>>,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_tx: mpsc::Sender<AgentCommand>,
@@ -222,6 +226,7 @@ impl Agent {
             queued_mana_externalization_nudge: false,
             continue_policy: ContinuePolicy::Disabled,
             queued_confidence_continue_nudge: false,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
 
             event_tx,
             command_tx: command_tx.clone(),
@@ -299,6 +304,9 @@ impl Agent {
             }
 
             self.emit(AgentEvent::TurnStart { index: turn }).await;
+            if let Ok(mut review) = self.turn_mana_review.lock() {
+                review.begin_turn(turn);
+            }
             let turn_started_at = Instant::now();
 
             let mut usage = crate::context::context_usage(&self.messages, &self.model);
@@ -489,9 +497,11 @@ impl Agent {
                                     timestamp: imp_llm::now(),
                                 };
                                 self.messages.push(Message::Assistant(err_msg.clone()));
+                                let mana_review = self.finish_turn_mana_review(turn);
                                 self.emit(AgentEvent::TurnEnd {
                                     index: turn,
                                     message: err_msg,
+                                    mana_review,
                                 })
                                 .await;
                                 let cost = total_usage.cost(&self.model.meta.pricing);
@@ -528,9 +538,11 @@ impl Agent {
                     build_assistant_message(&ordered_content, &tool_calls, None)
                 });
                 self.messages.push(Message::Assistant(partial.clone()));
+                let mana_review = self.finish_turn_mana_review(turn);
                 self.emit(AgentEvent::TurnEnd {
                     index: turn,
                     message: partial,
+                    mana_review,
                 })
                 .await;
                 break;
@@ -544,9 +556,11 @@ impl Agent {
 
             if tool_calls.is_empty() {
                 // No tool calls — the model is done unless a queued follow-up exists.
+                let mana_review = self.finish_turn_mana_review(turn);
                 self.emit(AgentEvent::TurnEnd {
                     index: turn,
                     message: msg.clone(),
+                    mana_review,
                 })
                 .await;
                 if should_queue_mana_externalization_follow_up(
@@ -582,9 +596,11 @@ impl Agent {
                 self.messages.push(Message::ToolResult(result.clone()));
             }
 
+            let mana_review = self.finish_turn_mana_review(turn);
             self.emit(AgentEvent::TurnEnd {
                 index: turn,
                 message: msg.clone(),
+                mana_review,
             })
             .await;
 

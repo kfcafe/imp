@@ -13,6 +13,7 @@ pub mod imp_session;
 pub mod import;
 pub mod learning;
 pub mod mana_prompt_context;
+pub mod mana_review;
 pub mod mana_worker;
 pub mod memory;
 pub mod personality;
@@ -28,6 +29,7 @@ pub mod usage;
 
 pub use agent::{TimingEvent, TimingStage};
 pub use error::{Error, Result};
+pub use mana_review::{ManaReviewState, TurnManaReview};
 
 // Re-export imp-llm for downstream crates
 pub use imp_llm;

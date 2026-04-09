@@ -25,6 +25,7 @@ use imp_llm::{ContentBlock, ToolResultMessage};
 use crate::agent::AgentCommand;
 use crate::config::AgentMode;
 use crate::error::Result;
+use crate::mana_review::TurnManaReviewAccumulator;
 use crate::ui::UserInterface;
 
 /// Resolve a user-provided path: expands `~` to home dir, resolves relative paths against cwd.
@@ -136,6 +137,8 @@ pub struct ToolContext {
     pub mode: AgentMode,
     /// Max lines the read tool may return before truncating. 0 means unlimited.
     pub read_max_lines: usize,
+    /// Turn-scoped runtime accumulator for between-turn mana review packets.
+    pub turn_mana_review: Arc<std::sync::Mutex<TurnManaReviewAccumulator>>,
 }
 
 /// In-session file content cache. Avoids re-reading files that haven't changed.
