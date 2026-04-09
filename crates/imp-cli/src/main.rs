@@ -3315,6 +3315,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_chat_shell_command_supports_colon_and_slash_prefix() {
+        assert_eq!(
+            parse_chat_shell_command(":help"),
+            Some(ChatShellCommand::Help(None))
+        );
+        assert_eq!(
+            parse_chat_shell_command("/quit"),
+            Some(ChatShellCommand::Quit)
+        );
+    }
+
+    #[test]
+    fn parse_chat_shell_command_parses_model_and_thinking_args() {
+        assert_eq!(
+            parse_chat_shell_command(":model sonnet"),
+            Some(ChatShellCommand::Model(Some("sonnet".to_string())))
+        );
+        assert_eq!(
+            parse_chat_shell_command(":thinking high"),
+            Some(ChatShellCommand::Thinking(Some("high".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_chat_shell_command_returns_unknown_for_unrecognized_commands() {
+        assert_eq!(
+            parse_chat_shell_command(":mystery abc"),
+            Some(ChatShellCommand::Unknown("mystery abc".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_thinking_level_strict_rejects_unknown_values() {
+        assert_eq!(parse_thinking_level_strict("medium"), Some(ThinkingLevel::Medium));
+        assert_eq!(parse_thinking_level_strict("turbo"), None);
+    }
+
+    #[test]
+    fn shell_session_choice_prefers_continue_and_open_over_new() {
+        let mut cli = default_cli();
+        assert!(matches!(shell_session_choice(&cli), SessionChoice::New));
+
+        cli.cont = true;
+        assert!(matches!(shell_session_choice(&cli), SessionChoice::Continue));
+
+        cli.cont = false;
+        cli.session = Some(PathBuf::from("session.jsonl"));
+        assert!(matches!(
+            shell_session_choice(&cli),
+            SessionChoice::Open(path) if path == PathBuf::from("session.jsonl")
+        ));
+    }
+
+    #[test]
+    fn thinking_level_label_matches_expected_strings() {
+        assert_eq!(thinking_level_label(ThinkingLevel::Off), "off");
+        assert_eq!(thinking_level_label(ThinkingLevel::Minimal), "minimal");
+        assert_eq!(thinking_level_label(ThinkingLevel::Low), "low");
+        assert_eq!(thinking_level_label(ThinkingLevel::Medium), "medium");
+        assert_eq!(thinking_level_label(ThinkingLevel::High), "high");
+        assert_eq!(thinking_level_label(ThinkingLevel::XHigh), "xhigh");
+    }
+
     // ── parse_thinking_level ───────────────────────────────────────
 
     #[test]
