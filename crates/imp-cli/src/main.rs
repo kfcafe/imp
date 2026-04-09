@@ -2797,6 +2797,10 @@ impl UserInterface for CliTerminalUi {
 enum ChatShellCommand {
     Help(Option<String>),
     Quit,
+    Status,
+    New,
+    Resume,
+    Compact,
     Model(Option<String>),
     Thinking(Option<String>),
     Unknown(String),
@@ -2817,6 +2821,10 @@ fn parse_chat_shell_command(input: &str) -> Option<ChatShellCommand> {
     Some(match command {
         "help" | "h" => ChatShellCommand::Help(arg),
         "quit" | "q" | "exit" => ChatShellCommand::Quit,
+        "status" => ChatShellCommand::Status,
+        "new" => ChatShellCommand::New,
+        "resume" => ChatShellCommand::Resume,
+        "compact" => ChatShellCommand::Compact,
         "model" => ChatShellCommand::Model(arg),
         "thinking" => ChatShellCommand::Thinking(arg),
         _ => ChatShellCommand::Unknown(trimmed.to_string()),
@@ -2887,6 +2895,68 @@ fn print_chat_status(session: &ImpSession) {
     );
 }
 
+fn print_chat_status_detail(session: &ImpSession) {
+    let project = shell_project_label(session.cwd());
+    let model = &session.model().meta.id;
+    let provider = &session.model().meta.provider;
+    let thinking = session
+        .config()
+        .thinking
+        .map(thinking_level_label)
+        .unwrap_or("off");
+    let session_id = session
+        .session_manager()
+        .session_id()
+        .unwrap_or_else(|| "in-memory".to_string());
+    let title = shell_session_label(session);
+    let path = session
+        .session_manager()
+        .path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "(in-memory)".to_string());
+    println!(
+        "status:\n  project    {project}\n  model      {model}\n  provider   {provider}\n  thinking   {thinking}\n  session    {title}\n  session_id {session_id}\n  path       {path}"
+    );
+}
+
+async fn build_chat_session(
+    cli: &Cli,
+    session_choice: SessionChoice,
+) -> Result<ImpSession, Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+
+    let mut options = SessionOptions {
+        cwd: cwd.clone(),
+        model: cli.model.clone(),
+        provider: cli.provider.clone(),
+        api_key: cli.api_key.clone(),
+        thinking: cli
+            .thinking
+            .as_ref()
+            .map(|thinking| parse_thinking_level(thinking)),
+        max_turns: cli.max_turns.or(config.max_turns),
+        max_tokens: cli.max_tokens.or(config.max_tokens),
+        system_prompt: cli.system_prompt.clone(),
+        no_tools: cli.no_tools,
+        session: session_choice,
+        ui: Some(Arc::new(CliTerminalUi) as Arc<dyn UserInterface>),
+        ..Default::default()
+    };
+
+    if !cli.no_tools {
+        let lua_cwd = cwd.clone();
+        let user_config_dir = Config::user_config_dir();
+        options.lua_loader = Some(Box::new(move |tools| {
+            imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
+        }));
+    }
+
+    ImpSession::create(options)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+}
+
 fn format_chat_tool_summary(tool_name: &str, args: &Value) -> String {
     match tool_name {
         "bash" => args
@@ -2915,6 +2985,7 @@ fn format_chat_tool_summary(tool_name: &str, args: &Value) -> String {
 
 async fn execute_chat_shell_command(
     session: &mut ImpSession,
+    cli: &Cli,
     command: ChatShellCommand,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     match command {
@@ -2938,13 +3009,39 @@ async fn execute_chat_shell_command(
                 }
                 _ => {
                     println!(
-                        "Chat shell commands:\n  :help [topic]      Show help\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nCompatibility: /help, /model, /thinking, and /quit also work here."
+                        "Chat shell commands:\n  :help [topic]      Show help\n  :status            Show current shell/session status\n  :new               Start a fresh session\n  :resume            Continue the most recent session for this cwd\n  :compact           Compact older context (planned)\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nCompatibility: /help, /status, /new, /resume, /compact, /model, /thinking, and /quit also work here."
                     );
                 }
             }
             Ok(true)
         }
         ChatShellCommand::Quit => Ok(false),
+        ChatShellCommand::Status => {
+            print_chat_status_detail(session);
+            Ok(true)
+        }
+        ChatShellCommand::New => {
+            let replacement = build_chat_session(cli, SessionChoice::New).await?;
+            *session = replacement;
+            println!("Started a fresh session.");
+            Ok(true)
+        }
+        ChatShellCommand::Resume => {
+            let replacement = build_chat_session(cli, SessionChoice::Continue).await?;
+            let resumed = shell_session_label(&replacement);
+            let session_id = replacement
+                .session_manager()
+                .session_id()
+                .unwrap_or_else(|| "in-memory".to_string());
+            *session = replacement;
+            println!("Resumed session: {resumed} ({session_id})");
+            Ok(true)
+        }
+        ChatShellCommand::Compact => {
+            println!("Context compaction is not wired into `imp chat` yet.");
+            println!("Use `imp tui` and `/compact` for now; a shell-native compaction path is planned.");
+            Ok(true)
+        }
         ChatShellCommand::Model(None) => {
             let mut models: Vec<String> = session
                 .model_registry()
@@ -3090,38 +3187,7 @@ async fn run_chat_prompt(
 }
 
 async fn run_chat_mode(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = std::env::current_dir()?;
-    let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
-
-    let mut options = SessionOptions {
-        cwd: cwd.clone(),
-        model: cli.model.clone(),
-        provider: cli.provider.clone(),
-        api_key: cli.api_key.clone(),
-        thinking: cli
-            .thinking
-            .as_ref()
-            .map(|thinking| parse_thinking_level(thinking)),
-        max_turns: cli.max_turns.or(config.max_turns),
-        max_tokens: cli.max_tokens.or(config.max_tokens),
-        system_prompt: cli.system_prompt.clone(),
-        no_tools: cli.no_tools,
-        session: shell_session_choice(cli),
-        ui: Some(Arc::new(CliTerminalUi) as Arc<dyn UserInterface>),
-        ..Default::default()
-    };
-
-    if !cli.no_tools {
-        let lua_cwd = cwd.clone();
-        let user_config_dir = Config::user_config_dir();
-        options.lua_loader = Some(Box::new(move |tools| {
-            imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
-        }));
-    }
-
-    let mut session = ImpSession::create(options)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    let mut session = build_chat_session(cli, shell_session_choice(cli)).await?;
 
     println!("imp chat — type :help for commands, Ctrl-D to exit.");
 
@@ -3143,7 +3209,7 @@ async fn run_chat_mode(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if let Some(command) = parse_chat_shell_command(&input) {
-            if !execute_chat_shell_command(&mut session, command).await? {
+            if !execute_chat_shell_command(&mut session, cli, command).await? {
                 break;
             }
             continue;
@@ -3325,6 +3391,10 @@ mod tests {
             parse_chat_shell_command("/quit"),
             Some(ChatShellCommand::Quit)
         );
+        assert_eq!(
+            parse_chat_shell_command(":status"),
+            Some(ChatShellCommand::Status)
+        );
     }
 
     #[test]
@@ -3336,6 +3406,10 @@ mod tests {
         assert_eq!(
             parse_chat_shell_command(":thinking high"),
             Some(ChatShellCommand::Thinking(Some("high".to_string())))
+        );
+        assert_eq!(
+            parse_chat_shell_command(":resume"),
+            Some(ChatShellCommand::Resume)
         );
     }
 
@@ -3358,6 +3432,10 @@ mod tests {
         let mut cli = default_cli();
         assert!(matches!(shell_session_choice(&cli), SessionChoice::New));
 
+        cli.no_session = true;
+        assert!(matches!(shell_session_choice(&cli), SessionChoice::InMemory));
+
+        cli.no_session = false;
         cli.cont = true;
         assert!(matches!(shell_session_choice(&cli), SessionChoice::Continue));
 
