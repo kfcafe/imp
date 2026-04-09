@@ -1,21 +1,21 @@
-//! Canonical mana unit worker runtime.
+//! Canonical single-unit mana worker runtime.
 //!
-//! Provides the reusable substrate for executing a single mana unit:
+//! Provides the reusable substrate for executing one mana unit:
 //! loading the unit via canonical mana-core APIs, assembling execution
 //! context (task prompt, prefill, dependency summaries), and reporting
 //! structured outcomes.
 //!
 //! This module is consumed by:
-//! - `imp run <unit-id>` (imp-cli) — the CLI entrypoint
-//! - `mana run` — the parallel orchestrator dispatching imp workers
+//! - `imp run <unit-id>` (imp-cli) — the preferred single-unit CLI path
+//! - legacy `mana run` compatibility flows — transitional dispatch into imp workers
 //! - imp's native mana tool — the first-class orchestration UX
 //!
 //! ## Architecture
 //!
 //! ```text
-//! imp native mana tool = first-class orchestration UX
-//! mana run             = orchestration engine / parallel dispatch
-//! imp run (this module) = canonical single-unit worker runtime
+//! imp native mana tool        = first-class orchestration UX
+//! imp run (this module)       = canonical single-unit worker runtime
+//! legacy mana run compatibility = transitional parallel dispatch into imp workers
 //! ```
 
 use std::path::{Path, PathBuf};
