@@ -6,7 +6,7 @@ use imp_llm::Model;
 use crate::agent::{Agent, AgentHandle};
 use crate::config::Config;
 use crate::error::Result;
-use crate::mana_prompt_context::load_session_start_facts;
+use crate::mana_prompt_context;
 use crate::resources;
 use crate::roles::Role;
 use crate::system_prompt::{self, TaskContext};
@@ -239,13 +239,13 @@ impl AgentBuilder {
                 (None, None)
             };
 
-            let facts = load_session_start_facts(&self.cwd);
+            let prompt_context = mana_prompt_context::load_session_prompt_context(&self.cwd);
 
             system_prompt::assemble(&system_prompt::AssembleParams {
                 tools: &agent.tools,
                 agents_md: &agents_md,
                 skills: &skills,
-                facts: &facts,
+                facts: &prompt_context.facts,
                 personality: Some(&self.config.personality.profile),
                 soul: soul.as_ref(),
                 task: self.task.as_ref(),

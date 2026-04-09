@@ -22,21 +22,27 @@ pub(crate) fn load_session_prompt_context(cwd: &Path) -> SessionPromptContext {
         return SessionPromptContext::default();
     };
 
-    load_session_prompt_context_from_mana_dir(&mana_dir).unwrap_or_default()
+    let Ok(memory) = mana_core::ops::memory_context::memory_context(&mana_dir) else {
+        return SessionPromptContext::default();
+    };
+
+    SessionPromptContext {
+        facts: map_relevant_facts(memory),
+    }
 }
 
 pub(crate) fn nearest_mana_dir(cwd: &Path) -> Option<PathBuf> {
     mana_core::discovery::find_mana_dir(cwd).ok()
 }
 
-fn load_session_prompt_context_from_mana_dir(
-    mana_dir: &Path,
-) -> anyhow::Result<SessionPromptContext> {
-    let memory = mana_core::ops::memory_context::memory_context(mana_dir)?;
+fn load_session_prompt_context_from_mana_dir(mana_dir: &Path) -> SessionPromptContext {
+    let Ok(memory) = mana_core::ops::memory_context::memory_context(mana_dir) else {
+        return SessionPromptContext::default();
+    };
 
-    Ok(SessionPromptContext {
+    SessionPromptContext {
         facts: map_relevant_facts(memory),
-    })
+    }
 }
 
 fn map_relevant_facts(memory: mana_core::ops::memory_context::MemoryContext) -> Vec<Fact> {
@@ -138,7 +144,7 @@ mod tests {
 
         let mut stale = Unit::new(
             "2",
-            "A very long fact title that should be truncated before it reaches the prompt because prompt context should stay bounded and selective for interactive startup",
+            "A very long fact title that should be truncated before it reaches the prompt because prompt context should stay bounded and selective for interactive startup and this extra suffix pushes it over the limit",
         );
         stale.last_verified = None;
 
@@ -182,7 +188,7 @@ mod tests {
         fact.last_verified = Some(Utc::now() - Duration::minutes(30));
         write_unit(&mana_dir, &fact);
 
-        let context = load_session_prompt_context_from_mana_dir(&mana_dir).unwrap();
+        let context = load_session_prompt_context_from_mana_dir(&mana_dir);
         assert_eq!(context.facts.len(), 1);
         assert_eq!(context.facts[0].text, "Auth uses RS256 signing");
         assert_eq!(context.facts[0].verified_ago, "30m ago");
