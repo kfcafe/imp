@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -197,6 +197,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Start the CLI-first interactive chat shell
+    Chat,
+    /// Open the fullscreen terminal UI explicitly
+    Tui,
+    /// Open the viewer/inspector surface (planned; not fully implemented yet)
+    View {
+        /// Viewer area to open (planned: sessions, tree, logs, checkpoints)
+        area: Option<String>,
+    },
     /// Log in to an OAuth provider (Anthropic or OpenAI/ChatGPT)
     Login {
         /// OAuth provider to log in to (anthropic or openai). Defaults to anthropic.
@@ -629,6 +638,27 @@ async fn main() {
     // Dispatch subcommands first
     if let Some(command) = &cli.command {
         match command {
+            Commands::Chat => {
+                if let Err(e) = run_chat_mode(&cli).await {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
+            Commands::Tui => {
+                if let Err(e) = run_interactive(&cli).await {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
+            Commands::View { area } => {
+                if let Err(e) = run_view_mode(&cli, area.as_deref()).await {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
             Commands::Login { provider } => {
                 let provider_name = provider.as_deref().unwrap_or("anthropic");
                 if let Err(e) = run_login(provider_name).await {

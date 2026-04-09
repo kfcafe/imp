@@ -6,6 +6,7 @@ license = "Apache-2.0"
 description = "Agent engine — loop, tools, sessions, hooks, context"
 
 [dependencies]
+tower-contracts = { path = "../../../tower-contracts" }
 imp-llm.workspace = true
 mana-core.workspace = true
 mana = { path = "../../../mana/crates/mana-cli", package = "mana-cli" }
