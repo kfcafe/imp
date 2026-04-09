@@ -3705,8 +3705,11 @@ mod tests {
             id: Some("42".to_string()),
             title: "Fix the widget".to_string(),
             description: "The widget is broken.\nPlease fix it.".to_string(),
+            acceptance: None,
             verify: Some("cargo test".to_string()),
             notes: Some("Check the edge case.".to_string()),
+            dependencies: Vec::new(),
+            decisions: Vec::new(),
             attempts: vec![UnitAttempt {
                 num: Some(1),
                 outcome: Some("failed".to_string()),
@@ -3715,6 +3718,7 @@ mod tests {
                 summary: Some("timed out".to_string()),
             }],
             files: Vec::new(),
+            paths: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
         };
         let prompt = unit.task_prompt();
@@ -3732,10 +3736,14 @@ mod tests {
             id: None,
             title: "Simple task".to_string(),
             description: String::new(),
+            acceptance: None,
             verify: None,
             notes: None,
+            dependencies: Vec::new(),
+            decisions: Vec::new(),
             attempts: Vec::new(),
             files: Vec::new(),
+            paths: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
         };
         let prompt = unit.task_prompt();
