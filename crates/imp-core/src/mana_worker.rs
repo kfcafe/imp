@@ -21,108 +21,19 @@
 use std::path::{Path, PathBuf};
 
 use mana_core::api;
+pub use tower_contracts::worker::{
+    WorkerAssignment, WorkerAttempt, WorkerResult, WorkerStatus,
+};
 
 use crate::context_prefill::{self, AssembledContext, FileSpec, PrefillConfig};
 use crate::system_prompt::{Attempt, Dependency, TaskContext};
 
 // ---------------------------------------------------------------------------
-// Public types
+// Shared contract re-exports
 // ---------------------------------------------------------------------------
 
-/// Everything needed to execute a mana unit as a worker.
-#[derive(Debug, Clone)]
-pub struct WorkerAssignment {
-    /// The unit ID (e.g. "28.1.2").
-    pub id: String,
-    /// Unit title.
-    pub title: String,
-    /// Combined description (frontmatter + body).
-    pub description: String,
-    /// Acceptance criteria, if any.
-    pub acceptance: Option<String>,
-    /// Verify command, if any.
-    pub verify: Option<String>,
-    /// Unit notes (progress, diagnosis, etc.).
-    pub notes: Option<String>,
-    /// Unresolved decisions.
-    pub decisions: Vec<String>,
-    /// Dependency IDs.
-    pub dependencies: Vec<String>,
-    /// File paths declared on the unit.
-    pub paths: Vec<String>,
-    /// Explicit file references for context prefill.
-    pub files: Vec<String>,
-    /// Structured attempt history.
-    pub attempts: Vec<WorkerAttempt>,
-    /// Workspace root (parent of .mana/).
-    pub workspace_root: PathBuf,
-    /// Model override from unit metadata, if any.
-    pub model: Option<String>,
-}
-
-/// A previous attempt on this unit.
-#[derive(Debug, Clone)]
-pub struct WorkerAttempt {
-    pub number: u32,
-    pub outcome: String,
-    pub summary: String,
-}
-
-/// Structured outcome from a worker run.
-#[derive(Debug, Clone)]
-pub struct WorkerResult {
-    /// The unit ID.
-    pub unit_id: String,
-    /// Final status.
-    pub status: WorkerStatus,
-    /// Human-readable summary of what happened.
-    pub summary: Option<String>,
-    /// Error message if failed.
-    pub error: Option<String>,
-    /// Number of tool calls made.
-    pub tool_count: usize,
-    /// Number of agent turns.
-    pub turns: usize,
-    /// Total tokens used, if available.
-    pub tokens: Option<u64>,
-    /// Total cost, if available.
-    pub cost: Option<f64>,
-    /// Model used.
-    pub model: Option<String>,
-}
-
-/// Worker completion status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkerStatus {
-    /// Agent completed work; verify not yet run (orchestrator should verify).
-    AwaitingVerify,
-    /// Agent completed work and verify passed.
-    Completed,
-    /// Agent hit a blocker it could not resolve.
-    Blocked,
-    /// Agent or verify failed.
-    Failed,
-    /// Run was cancelled.
-    Cancelled,
-}
-
-impl WorkerStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::AwaitingVerify => "awaiting_verify",
-            Self::Completed => "completed",
-            Self::Blocked => "blocked",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
-impl std::fmt::Display for WorkerStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+// Canonical worker assignment/outcome vocabulary now lives in tower-contracts.
+// Re-export it here to keep current imp-core call sites stable during migration.
 
 // ---------------------------------------------------------------------------
 // Loading
