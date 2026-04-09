@@ -35,28 +35,31 @@ fn resolve_mana_dir(
         .or_else(|| params.get("mana_scope").and_then(|v| v.as_str()))
         .unwrap_or("auto");
 
+    if let Some(explicit) = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("mana_dir").and_then(|v| v.as_str()))
+    {
+        let path = Path::new(explicit);
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        return Ok(if resolved
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some(".mana")
+        {
+            resolved
+        } else {
+            resolved.join(".mana")
+        });
+    }
+
     match scope {
         "auto" | "project" => find_mana_dir(cwd),
-        "root" => {
-            let mut current = cwd.to_path_buf();
-            loop {
-                let candidate = current.join(".mana");
-                if candidate.is_dir() {
-                    let config = candidate.join("config.yaml");
-                    if config.is_file() {
-                        if let Ok(contents) = std::fs::read_to_string(&config) {
-                            if contents.contains("project: tower") || contents.contains("project: Tower") {
-                                return Ok(candidate);
-                            }
-                        }
-                    }
-                }
-                if !current.pop() {
-                    break;
-                }
-            }
-            Err("No root .mana/ directory found for scope=root".to_string())
-        }
+        "root" => mana_core::discovery::find_outermost_mana_dir(cwd).map_err(|e| e.to_string()),
         other => Err(format!(
             "Unknown mana scope '{other}'. Use auto, project, or root."
         )),
@@ -1239,6 +1242,14 @@ impl Tool for ManaTool {
         properties.insert(
             "mana_scope".into(),
             json!({ "type": "string", "enum": ["auto", "project", "root"], "description": "Alias for scope" }),
+        );
+        properties.insert(
+            "path".into(),
+            json!({ "type": "string", "description": "Explicit project directory or .mana directory to target for this action" }),
+        );
+        properties.insert(
+            "mana_dir".into(),
+            json!({ "type": "string", "description": "Alias for path; explicit .mana or project directory to target" }),
         );
         properties.insert("from_id".into(), json!({ "type": "string", "description": "Source unit ID for dependency updates" }));
         properties.insert("dep_id".into(), json!({ "type": "string", "description": "Dependency unit ID to add or remove" }));
@@ -2791,11 +2802,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn root_scope_targets_tower_root_mana() {
+    async fn root_scope_targets_outermost_mana() {
         let tower = tempfile::tempdir().unwrap();
         let root_mana = tower.path().join(".mana");
         std::fs::create_dir_all(&root_mana).unwrap();
-        std::fs::write(root_mana.join("config.yaml"), "project: tower\nnext_id: 2\n").unwrap();
+        std::fs::write(root_mana.join("config.yaml"), "project: root\nnext_id: 2\n").unwrap();
         std::fs::write(
             root_mana.join("1-root-unit.md"),
             "---\nid: '1'\ntitle: Root unit\nstatus: open\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\n---\n\nbody\n",
@@ -2803,7 +2814,7 @@ mod tests {
         let project = tower.path().join("imp");
         let project_mana = project.join(".mana");
         std::fs::create_dir_all(&project_mana).unwrap();
-        std::fs::write(project_mana.join("config.yaml"), "project: imp\nnext_id: 2\n").unwrap();
+        std::fs::write(project_mana.join("config.yaml"), "project: nested\nnext_id: 2\n").unwrap();
         std::fs::write(
             project_mana.join("1-project-unit.md"),
             "---\nid: '1'\ntitle: Project unit\nstatus: open\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\n---\n\nbody\n",
@@ -2834,6 +2845,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.details["title"], "Root unit");
+    }
+
+    #[tokio::test]
+    async fn explicit_path_targets_project_outside_cwd_ancestry() {
+        let outside = tempfile::tempdir().unwrap();
+        let target_project = outside.path().join("other-project");
+        let target_mana = target_project.join(".mana");
+        std::fs::create_dir_all(&target_mana).unwrap();
+        std::fs::write(target_mana.join("config.yaml"), "project: other\nnext_id: 2\n").unwrap();
+        std::fs::write(
+            target_mana.join("1-other-unit.md"),
+            "---\nid: '1'\ntitle: Other unit\nstatus: open\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let unrelated = tempfile::tempdir().unwrap();
+        let workdir = unrelated.path().join("scratch");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let (tx, _rx) = mpsc::channel::<ToolUpdate>(1);
+        let (cmd_tx, _cmd_rx) = mpsc::channel(16);
+        let ctx = ToolContext {
+            cwd: workdir,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            command_tx: cmd_tx,
+            ui: Arc::new(NullInterface),
+            file_cache: Arc::new(FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
+            mode: crate::config::AgentMode::Full,
+            read_max_lines: 500,
+        };
+        let tool = ManaTool::default();
+        let result = tool
+            .execute(
+                "call_explicit_path",
+                json!({ "action": "show", "id": "1", "path": target_project }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.details["title"], "Other unit");
     }
 
     #[tokio::test]

@@ -11,6 +11,37 @@ use crate::roles::Role;
 use crate::system_prompt::{self, TaskContext};
 use crate::tools::ToolRegistry;
 
+fn load_scoped_memory_block(cwd: &std::path::Path, path: &std::path::Path, label: &str, char_limit: usize) -> Option<String> {
+    let store = crate::memory::MemoryStore::load(path, char_limit).ok()?;
+    let filtered: Vec<String> = store
+        .entries()
+        .iter()
+        .filter(|entry| !entry.contains("/tower") || cwd.to_string_lossy().contains("/tower"))
+        .cloned()
+        .collect();
+
+    if filtered.is_empty() {
+        return None;
+    }
+
+    let used: usize = filtered.iter().map(|e| e.len()).sum::<usize>()
+        + if filtered.len() > 1 {
+            (filtered.len() - 1) * 3
+        } else {
+            0
+        };
+    let pct = if char_limit > 0 {
+        (used as f64 / char_limit as f64 * 100.0) as u32
+    } else {
+        0
+    };
+    let bar = "══════════════════════════════════════════════";
+    Some(format!(
+        "{bar}\n{label} [{pct}% — {used}/{char_limit} chars]\n{bar}\n{}",
+        filtered.join("\n§\n")
+    ))
+}
+
 /// Builder for creating a fully wired [`Agent`] from config and context.
 ///
 /// Handles resource discovery, hook loading, system prompt assembly, and tool
@@ -188,19 +219,19 @@ impl AgentBuilder {
 
             // Layer 6: Load agent memory if learning is enabled
             let (memory_block, user_block) = if self.config.learning.enabled {
-                let mem = crate::memory::MemoryStore::load(
+                let mem = load_scoped_memory_block(
+                    &self.cwd,
                     &user_config_dir.join("memory.md"),
+                    "MEMORY (your personal notes)",
                     self.config.learning.memory_char_limit,
-                )
-                .ok()
-                .map(|s| s.render("MEMORY (your personal notes)"));
+                );
 
-                let user = crate::memory::MemoryStore::load(
+                let user = load_scoped_memory_block(
+                    &self.cwd,
                     &user_config_dir.join("user.md"),
+                    "USER PROFILE",
                     self.config.learning.user_char_limit,
-                )
-                .ok()
-                .map(|s| s.render("USER PROFILE"));
+                );
 
                 (mem, user)
             } else {
