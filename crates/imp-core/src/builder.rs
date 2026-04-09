@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::mana_prompt_context;
 use crate::resources;
 use crate::roles::Role;
-use crate::system_prompt::{self, TaskContext};
+use crate::system_prompt::{self, Fact, TaskContext};
 use crate::tools::ToolRegistry;
 
 fn load_scoped_memory_block(cwd: &std::path::Path, path: &std::path::Path, label: &str, char_limit: usize) -> Option<String> {
@@ -54,6 +54,7 @@ pub struct AgentBuilder {
     api_key: String,
     role: Option<Role>,
     task: Option<TaskContext>,
+    facts: Vec<Fact>,
     /// Override the assembled system prompt entirely.
     system_prompt_override: Option<String>,
     /// Additional tool registrar called after native tools are registered.
@@ -78,6 +79,7 @@ impl AgentBuilder {
             api_key,
             role: None,
             task: None,
+            facts: Vec::new(),
             system_prompt_override: None,
             extra_tools: None,
             lua_tool_loader: None,
@@ -93,6 +95,12 @@ impl AgentBuilder {
     /// Set the task context (headless/task mode — Layer 5 of the system prompt).
     pub fn task(mut self, task: TaskContext) -> Self {
         self.task = Some(task);
+        self
+    }
+
+    /// Set task-specific facts to inject into the system prompt.
+    pub fn facts(mut self, facts: Vec<Fact>) -> Self {
+        self.facts = facts;
         self
     }
 
@@ -239,7 +247,13 @@ impl AgentBuilder {
                 (None, None)
             };
 
-            let prompt_context = mana_prompt_context::load_session_prompt_context(&self.cwd);
+            let prompt_context = if self.facts.is_empty() {
+                mana_prompt_context::load_session_prompt_context(&self.cwd)
+            } else {
+                mana_prompt_context::SessionPromptContext {
+                    facts: self.facts.clone(),
+                }
+            };
 
             system_prompt::assemble(&system_prompt::AssembleParams {
                 tools: &agent.tools,

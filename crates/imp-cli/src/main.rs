@@ -1350,6 +1350,11 @@ async fn run_headless_mode(
     let context_prefill = assembled.messages;
 
     let task_context = imp_core::mana_worker::build_task_context(&assignment);
+    let task_facts = mana_dir_override
+        .map(Path::to_path_buf)
+        .or_else(|| imp_core::mana_prompt_context::nearest_mana_dir(&cwd))
+        .map(|mana_dir| imp_core::mana_prompt_context::load_task_prompt_context(&mana_dir, &task_context.context_paths).facts)
+        .unwrap_or_default();
 
     let mut options = SessionOptions {
         cwd: cwd.clone(),
@@ -1366,6 +1371,7 @@ async fn run_headless_mode(
         no_tools: cli.no_tools,
         session: SessionChoice::InMemory,
         task: Some(task_context),
+        facts: task_facts,
         context_prefill,
         ..Default::default()
     };

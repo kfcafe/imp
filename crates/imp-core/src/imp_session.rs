@@ -44,7 +44,7 @@ use crate::builder::AgentBuilder;
 use crate::config::{AgentMode, Config};
 use crate::error::{Error, Result};
 use crate::session::{SessionCheckpointRecord, SessionEntry, SessionManager};
-use crate::system_prompt::TaskContext;
+use crate::system_prompt::{Fact, TaskContext};
 use crate::ui::UserInterface;
 
 // ── Options ─────────────────────────────────────────────────────
@@ -104,6 +104,9 @@ pub struct SessionOptions {
     /// Task context for headless / unit mode.
     pub task: Option<TaskContext>,
 
+    /// Task-specific facts to inject into the system prompt.
+    pub facts: Vec<Fact>,
+
     /// Lua extension loader. Called after native tools are registered.
     /// The binary crate typically provides this; library callers can
     /// pass `None` to skip Lua extensions.
@@ -137,6 +140,7 @@ impl Default for SessionOptions {
             no_tools: false,
             session: SessionChoice::default(),
             task: None,
+            facts: Vec::new(),
             lua_loader: None,
             ui: None,
             auth_path: None,
@@ -238,8 +242,16 @@ impl ImpSession {
         let provider = create_provider(&provider_name)
             .ok_or_else(|| Error::Config(format!("Unknown provider: {provider_name}")))?;
 
-        // 4. Resolve API key
-        let api_key = resolve_api_key(&mut auth_store, &provider_name).await?;
+        // 4. Resolve API key. In no-tools sessions we allow the shell/session
+        // to come up without provider auth so local commands like settings/help
+        // can run before any model-backed prompt is attempted.
+        let api_key = if options.no_tools {
+            resolve_api_key(&mut auth_store, &provider_name)
+                .await
+                .unwrap_or_default()
+        } else {
+            resolve_api_key(&mut auth_store, &provider_name).await?
+        };
 
         let model = Model {
             meta,
@@ -268,6 +280,9 @@ impl ImpSession {
 
             if let Some(task) = &options.task {
                 builder = builder.task(task.clone());
+            }
+            if !options.facts.is_empty() {
+                builder = builder.facts(options.facts.clone());
             }
             if let Some(prompt) = &options.system_prompt {
                 builder = builder.system_prompt(prompt.clone());

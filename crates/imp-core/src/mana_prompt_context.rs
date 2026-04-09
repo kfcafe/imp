@@ -13,36 +13,50 @@ const MAX_FACT_TEXT_CHARS: usize = 160;
 /// a compact textual project-memory block for warnings / working-on / recent work
 /// without changing builder call sites again.
 #[derive(Debug, Default)]
-pub(crate) struct SessionPromptContext {
+pub struct SessionPromptContext {
     pub facts: Vec<Fact>,
 }
 
-pub(crate) fn load_session_prompt_context(cwd: &Path) -> SessionPromptContext {
+pub fn load_session_prompt_context(cwd: &Path) -> SessionPromptContext {
     let Some(mana_dir) = nearest_mana_dir(cwd) else {
         return SessionPromptContext::default();
     };
 
-    let Ok(memory) = mana_core::ops::memory_context::memory_context(&mana_dir) else {
-        return SessionPromptContext::default();
-    };
-
-    SessionPromptContext {
-        facts: map_relevant_facts(memory),
-    }
+    load_session_prompt_context_from_mana_dir(&mana_dir).unwrap_or_default()
 }
 
-pub(crate) fn nearest_mana_dir(cwd: &Path) -> Option<PathBuf> {
+pub fn load_task_prompt_context(
+    mana_dir: &Path,
+    task_paths: &[String],
+) -> SessionPromptContext {
+    load_task_prompt_context_from_mana_dir(mana_dir, task_paths).unwrap_or_default()
+}
+
+pub fn nearest_mana_dir(cwd: &Path) -> Option<PathBuf> {
     mana_core::discovery::find_mana_dir(cwd).ok()
 }
 
-fn load_session_prompt_context_from_mana_dir(mana_dir: &Path) -> SessionPromptContext {
-    let Ok(memory) = mana_core::ops::memory_context::memory_context(mana_dir) else {
-        return SessionPromptContext::default();
-    };
+fn load_session_prompt_context_from_mana_dir(
+    mana_dir: &Path,
+) -> Result<SessionPromptContext, String> {
+    let memory = mana_core::ops::memory_context::memory_context(mana_dir)
+        .map_err(|err| err.to_string())?;
 
-    SessionPromptContext {
+    Ok(SessionPromptContext {
         facts: map_relevant_facts(memory),
-    }
+    })
+}
+
+fn load_task_prompt_context_from_mana_dir(
+    mana_dir: &Path,
+    task_paths: &[String],
+) -> Result<SessionPromptContext, String> {
+    let memory = mana_core::ops::memory_context::memory_context(mana_dir)
+        .map_err(|err| err.to_string())?;
+
+    Ok(SessionPromptContext {
+        facts: map_task_relevant_facts(memory, task_paths),
+    })
 }
 
 fn map_relevant_facts(memory: mana_core::ops::memory_context::MemoryContext) -> Vec<Fact> {
@@ -55,6 +69,34 @@ fn map_relevant_facts(memory: mana_core::ops::memory_context::MemoryContext) -> 
             verified_ago: format_verified_ago(relevant.unit.last_verified),
         })
         .collect()
+}
+
+fn map_task_relevant_facts(
+    memory: mana_core::ops::memory_context::MemoryContext,
+    task_paths: &[String],
+) -> Vec<Fact> {
+    let mut relevant = memory.relevant_facts;
+    if !task_paths.is_empty() {
+        relevant.retain(|fact| {
+            fact.unit
+                .paths
+                .iter()
+                .any(|fact_path| task_paths.iter().any(|task_path| path_overlap(fact_path, task_path)))
+        });
+    }
+
+    relevant
+        .into_iter()
+        .take(MAX_RELEVANT_FACTS)
+        .map(|relevant| Fact {
+            text: truncate_for_prompt(&relevant.unit.title, MAX_FACT_TEXT_CHARS),
+            verified_ago: format_verified_ago(relevant.unit.last_verified),
+        })
+        .collect()
+}
+
+fn path_overlap(a: &str, b: &str) -> bool {
+    a.starts_with(b) || b.starts_with(a) || a == b
 }
 
 fn truncate_for_prompt(text: &str, max_chars: usize) -> String {
@@ -144,7 +186,7 @@ mod tests {
 
         let mut stale = Unit::new(
             "2",
-            "A very long fact title that should be truncated before it reaches the prompt because prompt context should stay bounded and selective for interactive startup and this extra suffix pushes it over the limit",
+            "A very long fact title that should be truncated before it reaches the prompt because prompt context should stay bounded and selective for interactive startup",
         );
         stale.last_verified = None;
 
@@ -188,10 +230,34 @@ mod tests {
         fact.last_verified = Some(Utc::now() - Duration::minutes(30));
         write_unit(&mana_dir, &fact);
 
-        let context = load_session_prompt_context_from_mana_dir(&mana_dir);
+        let context = load_session_prompt_context_from_mana_dir(&mana_dir).unwrap();
         assert_eq!(context.facts.len(), 1);
         assert_eq!(context.facts[0].text, "Auth uses RS256 signing");
         assert_eq!(context.facts[0].verified_ago, "30m ago");
+    }
+
+    #[test]
+    fn loads_task_specific_relevant_facts_from_context_paths() {
+        let (_dir, mana_dir) = setup_mana_dir();
+
+        let mut fact_auth = Unit::new("2", "Auth uses RS256 signing");
+        fact_auth.unit_type = "fact".to_string();
+        fact_auth.paths = vec!["src/auth.rs".to_string()];
+        fact_auth.last_verified = Some(Utc::now() - Duration::minutes(30));
+        write_unit(&mana_dir, &fact_auth);
+
+        let mut fact_cache = Unit::new("3", "Cache keys must include tenant id");
+        fact_cache.unit_type = "fact".to_string();
+        fact_cache.paths = vec!["src/cache.rs".to_string()];
+        fact_cache.last_verified = Some(Utc::now() - Duration::minutes(45));
+        write_unit(&mana_dir, &fact_cache);
+
+        let context = load_task_prompt_context(
+            &mana_dir,
+            &["src/auth.rs".to_string(), "tests/auth.rs".to_string()],
+        );
+        assert_eq!(context.facts.len(), 1);
+        assert_eq!(context.facts[0].text, "Auth uses RS256 signing");
     }
 
     #[test]
