@@ -585,6 +585,16 @@ fn stream_event_line(event: &StreamEvent) -> Option<String> {
             passed.len(),
             failed.len()
         )),
+        StreamEvent::VerifyGroupRun {
+            command,
+            unit_ids,
+            success,
+        } => Some(format!(
+            "Verify command: {} · {} unit(s) · {}",
+            truncate_line_for_log(command),
+            unit_ids.len(),
+            if *success { "passed" } else { "failed" }
+        )),
         StreamEvent::DryRun { rounds, .. } => {
             Some(format!("Dry run: {} planned wave(s)", rounds.len()))
         }

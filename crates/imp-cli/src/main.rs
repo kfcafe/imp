@@ -107,7 +107,7 @@ use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, Widg
 use imp_core::usage::{UsageCostBreakdown, UsageRecordSource, UsageTokens};
 use imp_core::TimingEvent;
 use imp_llm::auth::{AuthStore, StoredCredential};
-use imp_llm::model::{ModelRegistry, ProviderRegistry};
+use imp_llm::model::{ModelRegistry, ProviderMeta, ProviderRegistry};
 use imp_llm::oauth::anthropic::AnthropicOAuth;
 use imp_llm::oauth::chatgpt::ChatGptOAuth;
 use imp_llm::provider::ThinkingLevel;
