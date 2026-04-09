@@ -36,7 +36,7 @@ Notable slash commands:
 
 imp is an agent engine — not a wrapper around an LLM API. It runs a full ReAct loop (think → act → observe → repeat), manages context intelligently, and gives the model real tools to work with.
 
-imp is the native worker/runtime designed to use mana well. In the happy path, mana is the cross-agent durable substrate, imp picks up mana-shaped work natively, executes it live, and writes a rich durable result back so future workers can inherit selectively from mana instead of reconstructing everything from transcripts.
+imp is the native worker/runtime and orchestrator designed to use mana well. In the happy path, mana is the cross-agent durable substrate, imp reads mana-shaped work directly, executes it live, and writes a rich durable result back so future workers can inherit selectively from mana instead of reconstructing everything from transcripts.
 
 **Tools** — File I/O, shell execution, code search (grep, find, AST scan), web search, diff preview/apply, user prompts, mana unit management, persistent memory, session search across past conversations, and built-in multi-edit for coordinated file changes. Readonly tools run in parallel. Prefer native tools over shell wrappers when available; for mana operations, use the built-in `mana` tool instead of `bash` for equivalent actions.
 
@@ -80,7 +80,7 @@ The interactive terminal UI gives you:
 | `scan` | Tree-sitter AST extraction — types, functions, imports |
 | `web` | Web search (Tavily/Exa) and page content extraction |
 | `ask` | Prompt the user for input or multiple-choice |
-| `mana` | Native mana work coordination — status, list/show, create/update/close/claim/release, logs/agents, next/tree, and run |
+| `mana` | Native mana work coordination — status, list/show, create/update/close/claim/release, logs/agents, next/tree, and legacy run compatibility during migration |
 | `memory` | Persistent memory across sessions |
 | `session_search` | Search past conversations from the local session index |
 
@@ -384,14 +384,17 @@ See `imp/tools/README.md` for caveats and requirements.
 
 ## Integration with mana
 
-imp is the worker engine for [mana](https://github.com/kfcafe/mana), a coordination substrate for AI coding agents. When mana dispatches a unit, imp runs it headlessly:
+imp is the native worker/runtime and orchestrator for [mana](https://github.com/kfcafe/mana), a coordination substrate for AI coding agents.
+
+Preferred execution framing:
 
 ```bash
-# mana calls this automatically
 imp run <unit-id>
 ```
 
-The agent reads the unit's title, description, and verify command, works through the task, and reports back. The verify gate must pass for the unit to close.
+In that model, imp reads the unit's title, description, verify command, and relevant mana state, works through the task, and reports back. The verify gate must pass for the unit to close.
+
+The current repo still contains `mana run`-style compatibility behavior, but that is legacy boundary language on the path to disappearing rather than the intended long-term architecture.
 
 ## Install
 
