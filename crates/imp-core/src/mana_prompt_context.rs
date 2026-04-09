@@ -30,22 +30,18 @@ pub fn load_session_prompt_context(cwd: &Path) -> SessionPromptContext {
     load_session_prompt_context_from_mana_dir(&mana_dir).unwrap_or_default()
 }
 
-pub fn load_task_prompt_context(
-    mana_dir: &Path,
-    task_paths: &[String],
-) -> SessionPromptContext {
+pub fn load_task_prompt_context(mana_dir: &Path, task_paths: &[String]) -> SessionPromptContext {
     load_task_prompt_context_from_mana_dir(mana_dir, task_paths).unwrap_or_default()
 }
 
 pub fn nearest_mana_dir(cwd: &Path) -> Option<PathBuf> {
-    mana_core::discovery::find_mana_dir(cwd).ok()
+    mana_core::api::find_mana_dir(cwd).ok()
 }
 
 fn load_session_prompt_context_from_mana_dir(
     mana_dir: &Path,
 ) -> Result<SessionPromptContext, String> {
-    let memory = mana_core::ops::memory_context::memory_context(mana_dir)
-        .map_err(|err| err.to_string())?;
+    let memory = mana_core::api::memory_context(mana_dir).map_err(|err| err.to_string())?;
 
     Ok(SessionPromptContext {
         facts: map_relevant_facts(&memory),
@@ -57,8 +53,7 @@ fn load_task_prompt_context_from_mana_dir(
     mana_dir: &Path,
     task_paths: &[String],
 ) -> Result<SessionPromptContext, String> {
-    let memory = mana_core::ops::memory_context::memory_context(mana_dir)
-        .map_err(|err| err.to_string())?;
+    let memory = mana_core::api::memory_context(mana_dir).map_err(|err| err.to_string())?;
 
     Ok(SessionPromptContext {
         facts: map_task_relevant_facts(&memory, task_paths),
@@ -66,7 +61,7 @@ fn load_task_prompt_context_from_mana_dir(
     })
 }
 
-fn map_relevant_facts(memory: &mana_core::ops::memory_context::MemoryContext) -> Vec<Fact> {
+fn map_relevant_facts(memory: &mana_core::api::MemoryContext) -> Vec<Fact> {
     memory
         .relevant_facts
         .iter()
@@ -79,7 +74,7 @@ fn map_relevant_facts(memory: &mana_core::ops::memory_context::MemoryContext) ->
 }
 
 fn map_task_relevant_facts(
-    memory: &mana_core::ops::memory_context::MemoryContext,
+    memory: &mana_core::api::MemoryContext,
     task_paths: &[String],
 ) -> Vec<Fact> {
     let mut relevant: Vec<_> = memory.relevant_facts.iter().collect();
@@ -107,9 +102,7 @@ fn path_overlap(a: &str, b: &str) -> bool {
     a.starts_with(b) || b.starts_with(a) || a == b
 }
 
-fn format_project_memory_status(
-    memory: &mana_core::ops::memory_context::MemoryContext,
-) -> Option<String> {
+fn format_project_memory_status(memory: &mana_core::api::MemoryContext) -> Option<String> {
     let warnings = format_warning_lines(memory);
     let working_on = format_working_on_lines(memory);
     let recent_work = format_recent_work_lines(memory);
@@ -132,13 +125,10 @@ fn format_project_memory_status(
         sections.push(format!("Recent work:\n{}", recent_work.join("\n")));
     }
 
-    Some(format!(
-        "Project memory status:\n{}",
-        sections.join("\n\n")
-    ))
+    Some(format!("Project memory status:\n{}", sections.join("\n\n")))
 }
 
-fn format_warning_lines(memory: &mana_core::ops::memory_context::MemoryContext) -> Vec<String> {
+fn format_warning_lines(memory: &mana_core::api::MemoryContext) -> Vec<String> {
     memory
         .warnings
         .iter()
@@ -147,7 +137,7 @@ fn format_warning_lines(memory: &mana_core::ops::memory_context::MemoryContext) 
         .collect()
 }
 
-fn format_working_on_lines(memory: &mana_core::ops::memory_context::MemoryContext) -> Vec<String> {
+fn format_working_on_lines(memory: &mana_core::api::MemoryContext) -> Vec<String> {
     memory
         .working_on
         .iter()
@@ -172,7 +162,7 @@ fn format_working_on_lines(memory: &mana_core::ops::memory_context::MemoryContex
         .collect()
 }
 
-fn format_recent_work_lines(memory: &mana_core::ops::memory_context::MemoryContext) -> Vec<String> {
+fn format_recent_work_lines(memory: &mana_core::api::MemoryContext) -> Vec<String> {
     memory
         .recent_work
         .iter()
@@ -262,6 +252,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let context = load_session_prompt_context(dir.path());
         assert!(context.facts.is_empty());
+        assert!(context.project_memory_status.is_none());
     }
 
     #[test]
@@ -272,6 +263,7 @@ mod tests {
 
         let context = load_session_prompt_context(dir.path());
         assert!(context.facts.is_empty());
+        assert!(context.project_memory_status.is_none());
     }
 
     #[test]
@@ -285,7 +277,7 @@ mod tests {
         );
         stale.last_verified = None;
 
-        let facts = map_relevant_facts(MemoryContext {
+        let memory = MemoryContext {
             warnings: vec!["warn".into()],
             working_on: vec![],
             relevant_facts: vec![
@@ -299,7 +291,9 @@ mod tests {
                 },
             ],
             recent_work: vec![],
-        });
+        };
+
+        let facts = map_relevant_facts(&memory);
 
         assert_eq!(facts.len(), 2);
         assert_eq!(facts[0].text, "Recent verified fact");
@@ -329,6 +323,12 @@ mod tests {
         assert_eq!(context.facts.len(), 1);
         assert_eq!(context.facts[0].text, "Auth uses RS256 signing");
         assert_eq!(context.facts[0].verified_ago, "30m ago");
+        assert!(context.project_memory_status.is_some());
+        let status = context.project_memory_status.as_deref().unwrap();
+        assert!(status.contains("Project memory status:"));
+        assert!(status.contains("Working on:"));
+        assert!(status.contains("[1] Implement auth flow"));
+        assert!(!status.contains("Auth uses RS256 signing"));
     }
 
     #[test]
@@ -356,16 +356,61 @@ mod tests {
     }
 
     #[test]
+    fn formats_compact_project_memory_status_block() {
+        let mut working = Unit::new(
+            "1",
+            "A very long working unit title that should be truncated before it reaches the prompt because startup context should stay compact and preview oriented",
+        );
+        working.status = Status::InProgress;
+        working.claimed_by = Some("imp".into());
+
+        let mut recent = Unit::new("9", "Recently closed cleanup task");
+        recent.closed_at = Some(Utc::now() - Duration::hours(3));
+
+        let status = format_project_memory_status(&MemoryContext {
+            warnings: vec![
+                "STALE: \"Old fact\" — not verified in 5d".into(),
+                "PAST FAILURE [1]: \"retry with narrower verify\"".into(),
+                "warn three".into(),
+                "warn four should be omitted".into(),
+            ],
+            working_on: vec![mana_core::ops::memory_context::WorkingUnit {
+                unit: working,
+                failed_attempts: 2,
+                last_failure_notes: Some("narrow verify first".into()),
+            }],
+            relevant_facts: vec![],
+            recent_work: vec![mana_core::ops::memory_context::RecentWork { unit: recent }],
+        })
+        .unwrap();
+
+        assert!(status.contains("Project memory status:"));
+        assert!(status.contains("Warnings:"));
+        assert!(status.contains("Working on:"));
+        assert!(status.contains("Recent work:"));
+        assert!(status.contains("warn three"));
+        assert!(!status.contains("warn four should be omitted"));
+        assert!(status.contains("[1]"));
+        assert!(status.contains("2 failed attempt(s)"));
+        assert!(status.contains("claimed by imp"));
+        assert!(status.contains("[9] Recently closed cleanup task — closed 3h ago"));
+        assert!(status.contains('…'));
+    }
+
+    #[test]
     fn caps_fact_count_for_prompt_budget() {
         let relevant_facts = (0..12)
             .map(|idx| {
                 let mut unit = Unit::new(format!("{}", idx + 1), format!("Fact {idx}"));
                 unit.last_verified = Some(Utc::now() - Duration::minutes(idx.into()));
-                mana_core::ops::memory_context::RelevantFact { unit, score: 100 - idx }
+                mana_core::ops::memory_context::RelevantFact {
+                    unit,
+                    score: 100 - idx,
+                }
             })
             .collect();
 
-        let facts = map_relevant_facts(MemoryContext {
+        let facts = map_relevant_facts(&MemoryContext {
             warnings: vec![],
             working_on: vec![],
             relevant_facts,

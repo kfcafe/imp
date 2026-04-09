@@ -12,7 +12,12 @@ use crate::roles::Role;
 use crate::system_prompt::{self, Fact, TaskContext};
 use crate::tools::ToolRegistry;
 
-fn load_scoped_memory_block(cwd: &std::path::Path, path: &std::path::Path, label: &str, char_limit: usize) -> Option<String> {
+fn load_scoped_memory_block(
+    cwd: &std::path::Path,
+    path: &std::path::Path,
+    label: &str,
+    char_limit: usize,
+) -> Option<String> {
     let store = crate::memory::MemoryStore::load(path, char_limit).ok()?;
     let filtered: Vec<String> = store
         .entries()
@@ -313,10 +318,10 @@ mod tests {
     use async_trait::async_trait;
     use futures_core::Stream;
     use imp_llm::{
+        Context, Model, RequestOptions, StreamEvent,
         auth::{ApiKey, AuthStore},
         model::{Capabilities, ModelMeta, ModelPricing},
         provider::Provider,
-        Context, Model, RequestOptions, StreamEvent,
     };
 
     struct MockProvider;
@@ -636,6 +641,74 @@ mod tests {
         assert!(agent.system_prompt.contains("Project facts:"));
         assert!(agent.system_prompt.contains("Auth uses RS256 signing"));
         assert!(agent.system_prompt.contains("verified 2h ago"));
+        assert!(agent.system_prompt.contains("Project memory status:"));
+        assert!(agent.system_prompt.contains("Working on:"));
+        assert!(agent.system_prompt.contains("[1] Implement auth flow"));
+    }
+
+    #[test]
+    fn builder_injects_project_memory_status_into_system_prompt_when_available() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mana_dir = temp.path().join(".mana");
+        std::fs::create_dir(&mana_dir).unwrap();
+
+        let mut mana_config = mana_core::config::Config::default();
+        mana_config.project = "test".to_string();
+        mana_config.save(&mana_dir).unwrap();
+
+        let mut working = mana_core::unit::Unit::new("1", "Implement auth flow");
+        working.status = mana_core::unit::Status::InProgress;
+        working.claimed_by = Some("imp".to_string());
+        let working_slug = mana_core::util::title_to_slug(&working.title);
+        working
+            .to_file(mana_dir.join(format!("1-{}.md", working_slug)))
+            .unwrap();
+
+        let mut recent = mana_core::unit::Unit::new("3", "Recently closed cleanup");
+        recent.status = mana_core::unit::Status::Closed;
+        recent.closed_at = Some(chrono::Utc::now() - chrono::Duration::hours(2));
+        let recent_slug = mana_core::util::title_to_slug(&recent.title);
+        let archive_dir = mana_dir.join("archive").join("closed");
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        recent
+            .to_file(archive_dir.join(format!("3-{}.md", recent_slug)))
+            .unwrap();
+
+        let (agent, _handle) = AgentBuilder::new(
+            Config::default(),
+            temp.path().join("src"),
+            test_model(),
+            "key".into(),
+        )
+        .build()
+        .unwrap();
+
+        assert!(agent.system_prompt.contains("Project memory status:"));
+        assert!(agent.system_prompt.contains("Working on:"));
+        assert!(agent.system_prompt.contains("[1] Implement auth flow"));
+        assert!(agent.system_prompt.contains("Recent work:"));
+        assert!(agent.system_prompt.contains("[3] Recently closed cleanup"));
+    }
+
+    #[test]
+    fn builder_task_fact_override_does_not_add_project_memory_status() {
+        let facts = vec![Fact {
+            text: "Auth uses RS256 signing".into(),
+            verified_ago: "2h ago".into(),
+        }];
+
+        let (agent, _handle) = AgentBuilder::new(
+            Config::default(),
+            PathBuf::from("/tmp"),
+            test_model(),
+            "key".into(),
+        )
+        .facts(facts)
+        .build()
+        .unwrap();
+
+        assert!(agent.system_prompt.contains("Project facts:"));
+        assert!(!agent.system_prompt.contains("Project memory status:"));
     }
 
     #[test]

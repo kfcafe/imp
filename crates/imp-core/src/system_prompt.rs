@@ -3,7 +3,7 @@ use std::fmt;
 use crate::config::AgentMode;
 use crate::context::estimate_tokens;
 use crate::guardrails::{self, GuardrailProfile};
-use crate::personality::{soul_identity_text, PersonalityBand, PersonalityProfile};
+use crate::personality::{PersonalityBand, PersonalityProfile, soul_identity_text};
 use crate::resources::{AgentsMd, Skill, SoulDoc};
 use crate::roles::Role;
 use crate::tools::ToolRegistry;
@@ -132,7 +132,7 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
     // Layer 4.25: Compact project memory status
     if let Some(status) = p.project_memory_status {
         if !status.is_empty() {
-            parts.push(status.to_string());
+            parts.push(project_memory_status_layer(status));
         }
     }
 
@@ -450,16 +450,22 @@ fn mana_skill_trigger(skills: &[Skill], mode: &AgentMode) -> Option<&'static str
         }
         AgentMode::Worker => {
             if has_mana_basics {
-                Some("Load `mana-basics` before using worker-safe mana actions beyond a quick status check.")
+                Some(
+                    "Load `mana-basics` before using worker-safe mana actions beyond a quick status check.",
+                )
             } else if has_mana {
-                Some("Load `mana` before using worker-safe mana actions beyond a quick status check.")
+                Some(
+                    "Load `mana` before using worker-safe mana actions beyond a quick status check.",
+                )
             } else {
                 None
             }
         }
         AgentMode::Auditor => {
             if has_mana_basics {
-                Some("Load `mana-basics` before inspecting mana state across multiple units or runs.")
+                Some(
+                    "Load `mana-basics` before inspecting mana state across multiple units or runs.",
+                )
             } else if has_mana {
                 Some("Load `mana` before inspecting mana state across multiple units or runs.")
             } else {
@@ -479,6 +485,10 @@ fn facts_layer(facts: &[Fact]) -> String {
         ));
     }
     s
+}
+
+fn project_memory_status_layer(status: &str) -> String {
+    status.to_string()
 }
 
 fn task_layer(task: &TaskContext) -> String {
@@ -556,14 +566,18 @@ fn headless_execution_layer(task: &TaskContext) -> String {
     s.push_str("- Treat the unit title, description, notes, acceptance criteria, and verify gate as the source of truth for scope and success.\n");
     s.push_str("- Execute the assigned outcome before expanding into adjacent cleanup, refactors, or unrelated improvements.\n");
     s.push_str("- Use explicit file references and prefilled context first before searching more broadly.\n");
-    s.push_str("- If the unit includes prior failed attempts, do not retry the same plan unchanged.\n");
+    s.push_str(
+        "- If the unit includes prior failed attempts, do not retry the same plan unchanged.\n",
+    );
     s.push_str("- If dependency state or prerequisite decisions are unresolved, treat that as a blocker rather than improvising around it.\n");
     s.push_str("- Keep progress updates concise and useful. Record meaningful discoveries, blockers, and revised plans with `mana update`.\n");
     if task.verify.is_some() {
         s.push_str("- If the verify command fails, either fix the issue or report the exact blocker. Do not claim completion anyway.\n");
     }
     s.push_str("- In batch-verify flows, treat your goal as leaving the unit ready for verify rather than assuming verify already passed.\n");
-    s.push_str("- Respect parent/child structure: finish this unit's outcome, not the whole feature.\n");
+    s.push_str(
+        "- Respect parent/child structure: finish this unit's outcome, not the whole feature.\n",
+    );
     s
 }
 
@@ -737,9 +751,11 @@ mod tests {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(result.text.contains("Execution discipline:"));
-        assert!(result
-            .text
-            .contains("Never claim repository facts that you have not inspected in this session."));
+        assert!(
+            result.text.contains(
+                "Never claim repository facts that you have not inspected in this session."
+            )
+        );
         assert!(result.text.contains(
             "For analysis-only requests, stay read-only unless the user asks for changes."
         ));
@@ -752,18 +768,20 @@ mod tests {
         assert!(result.text.contains(
             "During planning and design conversations, proactively externalize durable structure as it appears."
         ));
-        assert!(result
-            .text
-            .contains("epic, child job, note, or decision"));
-        assert!(result.text.contains(
-            "Do not ask permission merely to capture plan artifacts in mana."
-        ));
+        assert!(result.text.contains("epic, child job, note, or decision"));
+        assert!(
+            result
+                .text
+                .contains("Do not ask permission merely to capture plan artifacts in mana.")
+        );
         assert!(result.text.contains(
             "If durable planning state changed this turn, make the between-turn mana update before the substantive reply"
         ));
-        assert!(result.text.contains(
-            "include a concise mana delta summary in the response"
-        ));
+        assert!(
+            result
+                .text
+                .contains("include a concise mana delta summary in the response")
+        );
     }
 
     #[test]
@@ -773,9 +791,11 @@ mod tests {
         assert!(result.text.contains("You are imp, a coding agent."));
         assert!(result.text.contains("- read: Read file contents"));
         assert!(result.text.contains("- write: Write content to a file"));
-        assert!(result
-            .text
-            .contains("- edit: Edit a file by replacing exact text"));
+        assert!(
+            result
+                .text
+                .contains("- edit: Edit a file by replacing exact text")
+        );
         assert!(result.text.contains("- bash: Run shell commands"));
     }
 
@@ -847,9 +867,11 @@ mod tests {
         let reg = make_registry();
         let personality = make_personality();
         let result = test_assemble(&reg, &[], &[], &[], Some(&personality), None, None);
-        assert!(result
-            .text
-            .contains("You are Nova, a careful, direct, research assistant."));
+        assert!(
+            result
+                .text
+                .contains("You are Nova, a careful, direct, research assistant.")
+        );
     }
 
     #[test]
@@ -861,18 +883,24 @@ mod tests {
         assert!(result.text.contains(
             "Prefer confirmation before acting when requirements or consequences are unclear."
         ));
-        assert!(result
-            .text
-            .contains("Be concise by default, but explain important tradeoffs when useful."));
+        assert!(
+            result
+                .text
+                .contains("Be concise by default, but explain important tradeoffs when useful.")
+        );
         assert!(result.text.contains(
             "Be highly conservative with risky changes: verify assumptions and avoid acting on weak evidence."
         ));
-        assert!(result
-            .text
-            .contains("Use a warm, supportive tone without becoming verbose."));
-        assert!(result
-            .text
-            .contains("Favor immediate execution on the most obvious next step."));
+        assert!(
+            result
+                .text
+                .contains("Use a warm, supportive tone without becoming verbose.")
+        );
+        assert!(
+            result
+                .text
+                .contains("Favor immediate execution on the most obvious next step.")
+        );
     }
 
     #[test]
@@ -900,9 +928,11 @@ mod tests {
             learning_enabled: false,
             guardrail_profile: None,
         });
-        assert!(result
-            .text
-            .contains("You are Sol, a tuned and reflective collaborator."));
+        assert!(
+            result
+                .text
+                .contains("You are Sol, a tuned and reflective collaborator.")
+        );
         assert!(result.text.contains("Soul:"));
         assert!(result.text.contains("## Tunables"));
         assert!(!result.text.contains("Working style:"));
@@ -924,9 +954,11 @@ mod tests {
         let agents = vec![make_agents_md("# Rules\n\nUse snake_case everywhere.")];
         let result = test_assemble(&reg, &agents, &[], &[], None, None, None);
         assert!(result.text.contains("# Project Context"));
-        assert!(result
-            .text
-            .contains("# Rules\n\nUse snake_case everywhere."));
+        assert!(
+            result
+                .text
+                .contains("# Rules\n\nUse snake_case everywhere.")
+        );
     }
 
     #[test]
@@ -966,15 +998,21 @@ mod tests {
             ),
         ];
         let result = test_assemble(&reg, &[], &skills, &[], None, None, None);
-        assert!(result
-            .text
-            .contains("Available skills (use read to load when relevant):"));
-        assert!(result
-            .text
-            .contains("- rust: Conventions for Rust code [/home/.imp/skills/rust/SKILL.md]"));
-        assert!(result
-            .text
-            .contains("- testing: Write and review tests [/home/.imp/skills/testing/SKILL.md]"));
+        assert!(
+            result
+                .text
+                .contains("Available skills (use read to load when relevant):")
+        );
+        assert!(
+            result
+                .text
+                .contains("- rust: Conventions for Rust code [/home/.imp/skills/rust/SKILL.md]")
+        );
+        assert!(
+            result
+                .text
+                .contains("- testing: Write and review tests [/home/.imp/skills/testing/SKILL.md]")
+        );
     }
 
     #[test]
@@ -1160,12 +1198,16 @@ mod tests {
         ];
         let result = test_assemble(&reg, &[], &[], &facts, None, None, None);
         assert!(result.text.contains("Project facts:"));
-        assert!(result
-            .text
-            .contains("\"Uses JWT for auth\" [verified 2h ago]"));
-        assert!(result
-            .text
-            .contains("\"Test suite requires Docker\" [verified 1d ago]"));
+        assert!(
+            result
+                .text
+                .contains("\"Uses JWT for auth\" [verified 2h ago]")
+        );
+        assert!(
+            result
+                .text
+                .contains("\"Test suite requires Docker\" [verified 1d ago]")
+        );
     }
 
     #[test]
@@ -1173,6 +1215,95 @@ mod tests {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(!result.text.contains("Project facts"));
+    }
+
+    #[test]
+    fn system_prompt_project_memory_status_included() {
+        let reg = make_registry();
+        let result = assemble(&AssembleParams {
+            tools: &reg,
+            agents_md: &[],
+            skills: &[],
+            facts: &[],
+            project_memory_status: Some(
+                "Project memory status:\nWarnings:\n- STALE: \"Lockfile drift\"\n\nWorking on:\n- [12] Refresh auth flow",
+            ),
+            personality: None,
+            soul: None,
+            task: None,
+            role: None,
+            mode: &AgentMode::Full,
+            memory: None,
+            user_profile: None,
+            cwd: None,
+            learning_enabled: false,
+            guardrail_profile: None,
+        });
+        assert!(result.text.contains("Project memory status:"));
+        assert!(result.text.contains("Warnings:"));
+        assert!(result.text.contains("Working on:"));
+    }
+
+    #[test]
+    fn system_prompt_project_memory_status_empty_string_is_skipped() {
+        let reg = make_registry();
+        let result = assemble(&AssembleParams {
+            tools: &reg,
+            agents_md: &[],
+            skills: &[],
+            facts: &[],
+            project_memory_status: Some(""),
+            personality: None,
+            soul: None,
+            task: None,
+            role: None,
+            mode: &AgentMode::Full,
+            memory: None,
+            user_profile: None,
+            cwd: None,
+            learning_enabled: false,
+            guardrail_profile: None,
+        });
+        assert!(!result.text.contains("Project memory status:"));
+    }
+
+    #[test]
+    fn system_prompt_project_memory_status_included_separately_from_facts() {
+        let reg = make_registry();
+        let facts = vec![Fact {
+            text: "Uses JWT for auth".into(),
+            verified_ago: "2h ago".into(),
+        }];
+        let status =
+            "Project memory status:\nWarnings:\n- stale fact\n\nWorking on:\n- [7] Fix auth flow";
+        let result = assemble(&AssembleParams {
+            tools: &reg,
+            agents_md: &[],
+            skills: &[],
+            facts: &facts,
+            project_memory_status: Some(status),
+            personality: None,
+            soul: None,
+            task: None,
+            role: None,
+            mode: &AgentMode::Full,
+            memory: None,
+            user_profile: None,
+            cwd: None,
+            learning_enabled: false,
+            guardrail_profile: None,
+        });
+
+        let facts_pos = result.text.find("Project facts:").unwrap();
+        let status_pos = result.text.find("Project memory status:").unwrap();
+        assert!(
+            result
+                .text
+                .contains("\"Uses JWT for auth\" [verified 2h ago]")
+        );
+        assert!(result.text.contains("Warnings:"));
+        assert!(result.text.contains("Working on:"));
+        assert!(facts_pos < status_pos);
     }
 
     // -- Layer 5: Task context --
@@ -1195,13 +1326,17 @@ mod tests {
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Task"));
         assert!(result.text.contains("Title: Fix the failing auth test"));
-        assert!(result
-            .text
-            .contains("Description: The JWT validation test panics"));
+        assert!(
+            result
+                .text
+                .contains("Description: The JWT validation test panics")
+        );
         assert!(result.text.contains("Verify: cargo test auth::jwt_test"));
-        assert!(result
-            .text
-            .contains("Treat the verify command as the primary completion check for this task."));
+        assert!(
+            result.text.contains(
+                "Treat the verify command as the primary completion check for this task."
+            )
+        );
     }
 
     #[test]
@@ -1235,12 +1370,16 @@ mod tests {
         assert!(result.text.contains(
             "Do not repeat a failed approach unchanged; use the attempt history to adjust your plan."
         ));
-        assert!(result
-            .text
-            .contains("Attempt 1 (failed): Tried X, got error Y"));
-        assert!(result
-            .text
-            .contains("Attempt 2 (failed): Tried Z, still broken"));
+        assert!(
+            result
+                .text
+                .contains("Attempt 1 (failed): Tried X, got error Y")
+        );
+        assert!(
+            result
+                .text
+                .contains("Attempt 2 (failed): Tried Z, still broken")
+        );
     }
 
     #[test]
@@ -1267,9 +1406,11 @@ mod tests {
         assert!(result.text.contains(
             "Respect dependency state when sequencing work; unresolved dependencies are potential blockers."
         ));
-        assert!(result
-            .text
-            .contains("- Schema types (completed): defined in src/schema.rs"));
+        assert!(
+            result
+                .text
+                .contains("- Schema types (completed): defined in src/schema.rs")
+        );
     }
 
     #[test]
@@ -1285,18 +1426,26 @@ mod tests {
             dependencies: vec![],
             decisions: vec![],
             context_paths: vec!["src/auth.rs".into(), "tests/auth.rs".into()],
-            constraints: vec!["Scope changes to auth-related files unless broader edits are necessary".into()],
+            constraints: vec![
+                "Scope changes to auth-related files unless broader edits are necessary".into(),
+            ],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("Notes:"));
-        assert!(result
-            .text
-            .contains("Prefer touching only auth paths unless necessary"));
+        assert!(
+            result
+                .text
+                .contains("Prefer touching only auth paths unless necessary")
+        );
         assert!(result.text.contains("## Referenced files"));
         assert!(result.text.contains("- src/auth.rs"));
         assert!(result.text.contains("- tests/auth.rs"));
         assert!(result.text.contains("## Constraints"));
-        assert!(result.text.contains("Scope changes to auth-related files unless broader edits are necessary"));
+        assert!(
+            result
+                .text
+                .contains("Scope changes to auth-related files unless broader edits are necessary")
+        );
     }
 
     #[test]
@@ -1345,9 +1494,11 @@ mod tests {
         let reg = make_registry();
         let role = make_readonly_role();
         let result = test_assemble(&reg, &[], &[], &[], None, None, Some(&role));
-        assert!(result
-            .text
-            .contains("Review code carefully. Do not modify files."));
+        assert!(
+            result
+                .text
+                .contains("Review code carefully. Do not modify files.")
+        );
     }
 
     #[test]
