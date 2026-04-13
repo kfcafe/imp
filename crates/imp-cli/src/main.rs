@@ -89,7 +89,7 @@ impl StartupTimer {
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
-use imp_core::config::{Config, ToolOutputDisplay};
+use imp_core::config::{AnimationLevel, Config, ToolOutputDisplay};
 use imp_core::tools::web::types::SearchProvider;
 
 use imp_core::imp_session::{ImpSession, SessionChoice, SessionOptions};
@@ -114,9 +114,108 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, oneshot, Mutex};
+use imp_tui::animation::{
+    activity_label as tui_activity_label, ActivitySurface, AnimationState,
+};
 use tokio::task::JoinHandle;
 
 mod usage_report;
+
+#[derive(Debug)]
+struct ShellLiveness {
+    enabled: bool,
+    tick: u64,
+    visible_len: usize,
+}
+
+impl ShellLiveness {
+    fn new() -> Self {
+        Self {
+            enabled: io::stderr().is_terminal(),
+            tick: 0,
+            visible_len: 0,
+        }
+    }
+
+    fn render(&mut self, state: AnimationState) {
+        if !self.enabled {
+            return;
+        }
+        let label = tui_activity_label(
+            state,
+            self.tick,
+            AnimationLevel::Minimal,
+            ActivitySurface::Chat,
+        );
+        self.tick = self.tick.wrapping_add(1);
+        if label.is_empty() {
+            self.clear();
+            return;
+        }
+        let padded = if self.visible_len > label.len() {
+            format!("{label}{:width$}", "", width = self.visible_len - label.len())
+        } else {
+            label.clone()
+        };
+        eprint!("\r{padded}");
+        io::stderr().flush().ok();
+        self.visible_len = label.len();
+    }
+
+    fn clear(&mut self) {
+        if !self.enabled || self.visible_len == 0 {
+            return;
+        }
+        eprint!("\r{:width$}\r", "", width = self.visible_len);
+        io::stderr().flush().ok();
+        self.visible_len = 0;
+    }
+
+    fn settle_line(&mut self) {
+        if !self.enabled || self.visible_len == 0 {
+            return;
+        }
+        eprintln!();
+        self.visible_len = 0;
+    }
+}
+
+fn shell_animation_state(
+    printed_thinking: bool,
+    printed_any_text: bool,
+    active_tools: u32,
+) -> AnimationState {
+    if active_tools > 0 {
+        AnimationState::ExecutingTools { active_tools }
+    } else if printed_any_text {
+        AnimationState::Streaming
+    } else if printed_thinking {
+        AnimationState::Thinking
+    } else {
+        AnimationState::WaitingForResponse
+    }
+}
+
+fn bump_shell_liveness(
+    liveness: &mut ShellLiveness,
+    printed_thinking: bool,
+    printed_any_text: bool,
+    active_tools: u32,
+) {
+    let state = shell_animation_state(printed_thinking, printed_any_text, active_tools);
+    liveness.render(state);
+}
+
+fn clear_shell_liveness_for_output(
+    liveness: &mut ShellLiveness,
+    printed_trailing_newline: &mut bool,
+) {
+    if liveness.visible_len > 0 {
+        liveness.settle_line();
+        *printed_trailing_newline = true;
+    }
+}
+
 
 /// A coding agent engine
 #[derive(Parser)]
@@ -3486,27 +3585,44 @@ async fn run_chat_prompt(
 
     let mut printed_trailing_newline = true;
     let mut printed_thinking = false;
+    let mut printed_any_text = false;
+    let mut active_tools = 0u32;
+    let mut liveness = ShellLiveness::new();
     let mut turn_summary = ChatTurnSummaryState::default();
 
+
     while let Some(event) = session.recv_event().await {
+        bump_shell_liveness(
+            &mut liveness,
+            printed_thinking,
+            printed_any_text,
+            active_tools,
+        );
         match event {
             AgentEvent::MessageDelta { delta } => match delta {
                 StreamEvent::TextDelta { text } => {
+                    clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
                     print!("{text}");
                     io::stdout().flush().ok();
                     printed_trailing_newline = false;
+                    printed_any_text = true;
                 }
                 StreamEvent::ThinkingDelta { .. } => {
-                    if !printed_thinking {
-                        eprintln!("thinking…");
-                        printed_thinking = true;
-                    }
+                    printed_thinking = true;
+                    bump_shell_liveness(
+                        &mut liveness,
+                        printed_thinking,
+                        printed_any_text,
+                        active_tools,
+                    );
                 }
                 _ => {}
             },
             AgentEvent::ToolExecutionStart {
                 tool_name, args, ..
             } if !cli.no_tools => {
+                active_tools = active_tools.saturating_add(1);
+                clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
                 turn_summary.record_tool_start(&tool_name, &args);
                 let summary = format_chat_tool_summary(&tool_name, &args);
                 if summary.is_empty() {
@@ -3516,6 +3632,7 @@ async fn run_chat_prompt(
                 }
             }
             AgentEvent::ToolExecutionEnd { result, .. } if !cli.no_tools => {
+                active_tools = active_tools.saturating_sub(1);
                 if result.is_error {
                     let text: String = result
                         .content
@@ -3526,6 +3643,7 @@ async fn run_chat_prompt(
                         })
                         .collect::<Vec<_>>()
                         .join("");
+                    clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
                     if !text.is_empty() {
                         eprintln!("error: {}", truncate_chars_with_suffix(&text, 160, "…"));
                         eprintln!("hint: deeper log viewing is planned under `imp view logs`.");
@@ -3533,20 +3651,24 @@ async fn run_chat_prompt(
                 }
             }
             AgentEvent::TurnEnd { .. } => {
+                liveness.clear();
                 if !printed_trailing_newline {
                     println!();
                     printed_trailing_newline = true;
                 }
             }
             AgentEvent::Error { error } => {
+                clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
                 eprintln!("error: {error}");
             }
             AgentEvent::Timing { timing } => {
                 if cli.verbose {
+                    clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
                     eprintln!("{}", format_timing_event(&timing));
                 }
             }
             AgentEvent::AgentEnd { usage: _, cost } => {
+                clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
                 eprintln!("{}", turn_summary.summary_line(cost.total));
                 break;
             }
