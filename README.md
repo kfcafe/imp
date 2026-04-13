@@ -9,13 +9,13 @@ brew tap kfcafe/tap && brew install imp
 ## Quick start
 
 ```bash
-# Start the current fullscreen interactive UI
+# Start the CLI-first interactive chat shell
 imp
 
-# Start the new CLI-first interactive chat shell
+# Start the CLI-first interactive chat shell explicitly
 imp chat
 
-# Open the fullscreen UI explicitly
+# Open the fullscreen cockpit explicitly
 imp tui
 
 # Viewer/inspector surface (planned)
@@ -34,7 +34,9 @@ imp run 5.1
 imp -c
 ```
 
-Type `/` in the editor to open the command palette. Arrow keys, Tab, or Ctrl+N/P to navigate. Enter to select.
+Type `/` in the cockpit editor to open the command palette. Arrow keys, Tab, or Ctrl+N/P to navigate. Enter to select.
+
+In the CLI shell, use `:help` for commands and `@file` to attach context.
 
 Notable slash commands:
 - `/new` — start a fresh in-memory session
@@ -59,8 +61,8 @@ imp is the native worker/runtime and orchestrator designed to use mana well. In 
 
 ## TUI
 
-`imp` still opens the current fullscreen terminal UI by default during the CLI-first migration.
-Use `imp tui` to enter it explicitly, and use `imp chat` for the new line-oriented shell.
+`imp` now opens the CLI-first interactive chat shell by default.
+Use `imp tui` to enter the fullscreen cockpit explicitly, and use `imp chat` if you want to spell the shell path explicitly.
 
 The interactive terminal UI gives you:
 

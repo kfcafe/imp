@@ -629,9 +629,9 @@ async fn main() {
         return;
     }
 
-    // Interactive TUI mode
+    // Default interactive mode: CLI chat shell
     if cli.mode == "interactive" {
-        if let Err(e) = run_interactive(&cli).await {
+        if let Err(e) = run_chat_mode(&cli).await {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
@@ -3145,7 +3145,15 @@ fn shell_session_label(session: &ImpSession) -> String {
         .unwrap_or_else(|| "in-memory".to_string())
 }
 
-fn print_chat_status(session: &ImpSession) {
+fn pluralize(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        singular.to_string()
+    } else {
+        plural.to_string()
+    }
+}
+
+fn format_chat_status_line(session: &ImpSession) -> String {
     let project = shell_project_label(session.cwd());
     let model = truncate_chars_with_suffix(&session.model().meta.id, 20, "…");
     let thinking = session
@@ -3154,9 +3162,94 @@ fn print_chat_status(session: &ImpSession) {
         .map(thinking_level_label)
         .unwrap_or("off");
     let session_label = shell_session_label(session);
-    println!(
-        "[{project} | {model} | {thinking} | session: {session_label}]"
-    );
+
+    format!("[{project} · {model} · {thinking} · {session_label}]")
+}
+
+#[derive(Debug, Default)]
+struct ChatTurnSummaryState {
+    tool_calls: usize,
+    read_paths: std::collections::HashSet<String>,
+    changed_paths: std::collections::HashSet<String>,
+    other_tools: usize,
+    had_tool_error: bool,
+    mana_review_state: Option<imp_core::mana_review::ManaReviewState>,
+}
+
+impl ChatTurnSummaryState {
+    fn record_tool_start(&mut self, tool_name: &str, args: &Value) {
+        self.tool_calls += 1;
+        match tool_name {
+            "read" => {
+                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    self.read_paths.insert(path.to_string());
+                } else {
+                    self.other_tools += 1;
+                }
+            }
+            "write" | "edit" | "multi_edit" => {
+                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    self.changed_paths.insert(path.to_string());
+                } else {
+                    self.other_tools += 1;
+                }
+            }
+            _ => {
+                self.other_tools += 1;
+            }
+        }
+    }
+
+    fn summary_line(&self, cost_total: f64) -> String {
+        let mut parts = Vec::new();
+
+        if self.tool_calls == 0 {
+            parts.push("analysis only".to_string());
+        } else {
+            if !self.read_paths.is_empty() {
+                let count = self.read_paths.len();
+                parts.push(format!(
+                    "{count} {} read",
+                    pluralize(count, "file", "files")
+                ));
+            }
+            if !self.changed_paths.is_empty() {
+                let count = self.changed_paths.len();
+                parts.push(format!(
+                    "{count} {} changed",
+                    pluralize(count, "file", "files")
+                ));
+            }
+            if self.other_tools > 0 {
+                let count = self.other_tools;
+                parts.push(format!(
+                    "{count} {} used",
+                    pluralize(count, "tool", "tools")
+                ));
+            }
+        }
+
+        if self.had_tool_error {
+            parts.push("errors surfaced".to_string());
+        }
+
+        match self.mana_review_state {
+            Some(imp_core::mana_review::ManaReviewState::NeedsDecision) => {
+                parts.push("review required".to_string())
+            }
+            Some(imp_core::mana_review::ManaReviewState::Changed) => {
+                parts.push("durable changes captured".to_string())
+            }
+            _ => {}
+        }
+
+        parts.push(format!("cost ${cost_total:.4}"));
+        format!("summary: {}", parts.join(" · "))
+    }
+}
+
+fn print_chat_status(session: &ImpSession) {
+    println!("{}", format_chat_status_line(session));
 }
 
 fn print_chat_status_detail(session: &ImpSession) {
@@ -3393,6 +3486,7 @@ async fn run_chat_prompt(
 
     let mut printed_trailing_newline = true;
     let mut printed_thinking = false;
+    let mut turn_summary = ChatTurnSummaryState::default();
 
     while let Some(event) = session.recv_event().await {
         match event {
@@ -3413,6 +3507,7 @@ async fn run_chat_prompt(
             AgentEvent::ToolExecutionStart {
                 tool_name, args, ..
             } if !cli.no_tools => {
+                turn_summary.record_tool_start(&tool_name, &args);
                 let summary = format_chat_tool_summary(&tool_name, &args);
                 if summary.is_empty() {
                     eprintln!("tool: {tool_name}");
@@ -3451,11 +3546,8 @@ async fn run_chat_prompt(
                     eprintln!("{}", format_timing_event(&timing));
                 }
             }
-            AgentEvent::AgentEnd { usage, cost } => {
-                eprintln!(
-                    "summary: tokens ↑{} ↓{} · cost ${:.4}",
-                    usage.input_tokens, usage.output_tokens, cost.total
-                );
+            AgentEvent::AgentEnd { usage: _, cost } => {
+                eprintln!("{}", turn_summary.summary_line(cost.total));
                 break;
             }
             _ => {}
