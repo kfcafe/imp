@@ -1578,7 +1578,11 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
             json!({ "type": "agent_end", "usage": usage, "cost": cost })
         }
         AgentEvent::TurnStart { index } => json!({ "type": "turn_start", "index": index }),
-        AgentEvent::TurnEnd { index, message } => {
+        AgentEvent::TurnEnd {
+            index,
+            message,
+            ..
+        } => {
             json!({ "type": "turn_end", "index": index, "message": message })
         }
         AgentEvent::MessageStart { message } => {
@@ -2221,7 +2225,11 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             "cost_total": cost.total,
         }),
         AgentEvent::TurnStart { index } => json!({ "type": "turn_start", "index": index }),
-        AgentEvent::TurnEnd { index, message } => {
+        AgentEvent::TurnEnd {
+            index,
+            message,
+            ..
+        } => {
             json!({ "type": "turn_end", "index": index, "message": message })
         }
         AgentEvent::MessageStart { message } => {
@@ -3265,7 +3273,7 @@ async fn execute_chat_shell_command(
                 }
                 _ => {
                     println!(
-                        "Chat shell commands:\n  :help [topic]      Show help\n  :status            Show current shell/session status\n  :new               Start a fresh session\n  :resume            Continue the most recent session for this cwd\n  :compact           Compact older context (planned)\n  :settings          Edit a guided subset of imp settings\n  :personality       Edit soul/personality tunables and source\n  :setup             Run the setup wizard\n  :view <area>       Open viewer output for sessions, tree, logs, or checkpoints\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nCompatibility: /help, /status, /new, /resume, /compact, /settings, /personality, /setup, /view, /model, /thinking, and /quit also work here."
+                        "Shell commands:\n  :help [topic]      Show commands and quick guidance\n  :status            Show current shell/session status\n  :new               Start a fresh session\n  :resume            Continue the most recent session for this cwd\n  :compact           Compact older context (planned)\n  :settings          Edit a guided subset of imp settings\n  :personality       Edit soul/personality tunables and source\n  :setup             Run the setup wizard\n  :view <area>       Open `imp view` for sessions, tree, logs, or checkpoints\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nCompatibility: slash-prefixed forms like `/help` and `/view` still work here during migration, but `:` is the preferred shell grammar."
                     );
                 }
             }
@@ -3294,8 +3302,8 @@ async fn execute_chat_shell_command(
             Ok(true)
         }
         ChatShellCommand::Compact => {
-            println!("Context compaction is not wired into `imp chat` yet.");
-            println!("Use `imp tui` and `/compact` for now; a shell-native compaction path is planned.");
+            println!("Compaction isn't available in the shell yet.");
+            println!("For now, use `imp tui` or inspect session history with `imp view sessions`. A shell-native compaction flow is planned.");
             Ok(true)
         }
         ChatShellCommand::Settings => {
@@ -3312,8 +3320,9 @@ async fn execute_chat_shell_command(
         }
         ChatShellCommand::View(area) => {
             let area = area.unwrap_or_else(|| "sessions".to_string());
-            println!("opening viewer: {area}");
+            println!("Opening `imp view {area}`...");
             run_view_mode(cli, Some(area.as_str())).await?;
+            println!("Returned from viewer.");
             Ok(true)
         }
         ChatShellCommand::Model(None) => {
@@ -3463,7 +3472,7 @@ async fn run_chat_prompt(
 async fn run_chat_mode(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_chat_session(cli, shell_session_choice(cli)).await?;
 
-    println!("imp chat — type :help for commands, Ctrl-D to exit.");
+    println!("imp chat — use :help for commands, Ctrl-D to exit.");
 
     loop {
         print_chat_status(&session);
