@@ -99,6 +99,34 @@ pub struct WelcomeState {
 }
 
 impl WelcomeState {
+    fn normalized_step(&self) -> usize {
+        self.step.min(STEPS.len().saturating_sub(1))
+    }
+
+    fn normalized_provider_selected(&self) -> usize {
+        if self.providers.is_empty() {
+            0
+        } else {
+            self.provider_selected.min(self.providers.len() - 1)
+        }
+    }
+
+    fn normalized_model_selected(&self) -> usize {
+        if self.models.is_empty() {
+            0
+        } else {
+            self.model_selected.min(self.models.len() - 1)
+        }
+    }
+
+    fn normalized_web_provider_selected(&self) -> usize {
+        if self.web_providers.is_empty() {
+            0
+        } else {
+            self.web_provider_selected.min(self.web_providers.len() - 1)
+        }
+    }
+
     /// Create welcome state, detecting existing auth from env vars for all registered providers.
     pub fn new(all_models: &[ModelMeta]) -> Self {
         let registry = ProviderRegistry::with_builtins();
@@ -125,7 +153,10 @@ impl WelcomeState {
         // Pre-select the first provider with auth, or the first provider (Anthropic) by default.
         let provider_selected = providers.iter().position(|p| p.has_auth()).unwrap_or(0);
 
-        let selected_id = providers[provider_selected].meta.id;
+        let selected_id = providers
+            .get(provider_selected)
+            .map(|provider| provider.meta.id)
+            .unwrap_or("anthropic");
         let models = filter_models_for_provider(all_models, selected_id);
 
         let web_providers = vec![
@@ -186,20 +217,20 @@ impl WelcomeState {
     }
 
     pub fn current_step(&self) -> WelcomeStep {
-        STEPS[self.step]
+        STEPS[self.normalized_step()]
     }
 
-    pub fn selected_provider(&self) -> &ProviderStatus {
-        &self.providers[self.provider_selected]
+    pub fn selected_provider(&self) -> Option<&ProviderStatus> {
+        self.providers.get(self.normalized_provider_selected())
     }
 
     /// Return the selected provider's id string.
-    pub fn selected_provider_id(&self) -> &str {
-        self.providers[self.provider_selected].meta.id
+    pub fn selected_provider_id(&self) -> Option<&str> {
+        self.selected_provider().map(|provider| provider.meta.id)
     }
 
     pub fn selected_model(&self) -> Option<&ModelMeta> {
-        self.models.get(self.model_selected)
+        self.models.get(self.normalized_model_selected())
     }
 
     pub fn advance(&mut self) {
@@ -272,7 +303,9 @@ impl WelcomeState {
 
     /// Check whether auth is available for the current provider (env or entered key).
     pub fn check_auth_resolved(&mut self) -> Result<(), String> {
-        let status = &self.providers[self.provider_selected];
+        let Some(status) = self.selected_provider() else {
+            return Err("No providers available.".into());
+        };
         if status.has_auth() {
             self.auth_resolved = true;
             self.resolved_key = None;
@@ -287,13 +320,17 @@ impl WelcomeState {
     }
 
     pub fn update_models(&mut self, all_models: &[ModelMeta]) {
-        let id = self.selected_provider_id().to_string();
+        let Some(id) = self.selected_provider_id().map(str::to_string) else {
+            self.models.clear();
+            self.model_selected = 0;
+            return;
+        };
         self.models = filter_models_for_provider(all_models, &id);
         self.model_selected = 0;
     }
 
-    pub fn selected_web_provider(&self) -> &WebProviderStatus {
-        &self.web_providers[self.web_provider_selected]
+    pub fn selected_web_provider(&self) -> Option<&WebProviderStatus> {
+        self.web_providers.get(self.normalized_web_provider_selected())
     }
 
     pub fn web_provider_up(&mut self) {
@@ -320,7 +357,9 @@ impl WelcomeState {
 
     pub fn check_web_auth_resolved(&mut self) -> Result<(), String> {
         let (provider_id, has_auth) = {
-            let status = self.selected_web_provider();
+            let Some(status) = self.selected_web_provider() else {
+                return Err("No web search providers available.".into());
+            };
             (status.id.to_string(), status.has_auth())
         };
         self.resolved_web_provider = Some(provider_id.clone());
@@ -408,7 +447,7 @@ impl Widget for WelcomeView<'_> {
 
         Clear.render(area, buf);
 
-        let step_indicator = format!(" Welcome ({}/{}) ", self.state.step + 1, STEPS.len());
+        let step_indicator = format!(" Welcome ({}/{}) ", self.state.normalized_step() + 1, STEPS.len());
         let block = Block::default()
             .title(step_indicator)
             .borders(Borders::ALL)
@@ -431,7 +470,6 @@ impl WelcomeView<'_> {
         let mut row: u16 = 0;
         let center_x = area.x;
 
-        // ASCII art logo
         let logo = [
             "  ╔╗    ╔╗  ",
             "  ║╚════╝║  ",
@@ -441,7 +479,6 @@ impl WelcomeView<'_> {
             "╚══════════╝",
         ];
 
-        // Center the logo
         for line in &logo {
             if row >= area.height {
                 return;
@@ -452,7 +489,7 @@ impl WelcomeView<'_> {
             row += 1;
         }
 
-        row += 1; // spacer
+        row += 1;
 
         let lines = [
             (
@@ -476,7 +513,6 @@ impl WelcomeView<'_> {
             row += 1;
         }
 
-        // Footer
         if area.height > row + 2 {
             let footer_y = area.y + area.height - 1;
             let footer = Line::from(vec![
@@ -494,7 +530,6 @@ impl WelcomeView<'_> {
         let mut row: u16 = 0;
         let x = area.x;
 
-        // Title
         let title = Line::from(Span::styled(
             "  Choose your AI provider",
             Style::default().add_modifier(Modifier::BOLD),
@@ -502,7 +537,6 @@ impl WelcomeView<'_> {
         buf.set_line(x, area.y + row, &title, area.width);
         row += 2;
 
-        // Provider list
         for (i, status) in self.state.providers.iter().enumerate() {
             if row >= area.height.saturating_sub(4) {
                 break;
@@ -511,7 +545,6 @@ impl WelcomeView<'_> {
             let marker = if is_selected { "▸ " } else { "  " };
 
             let auth_hint = if status.env_detected {
-                // Show the first env var that is set, or the primary one
                 let detected_var = status
                     .meta
                     .env_vars
@@ -545,15 +578,16 @@ impl WelcomeView<'_> {
 
         row += 1;
 
-        // API key input (only if selected provider has no auth)
-        let selected = self.state.selected_provider();
+        let Some(selected) = self.state.selected_provider() else {
+            let line = Line::from(Span::styled("  No providers available", self.theme.muted_style()));
+            buf.set_line(x, area.y + row, &line, area.width);
+            return;
+        };
         if !selected.has_auth() {
-            let prompt_line =
-                Line::from(vec![Span::styled("  API Key: ", self.theme.muted_style())]);
+            let prompt_line = Line::from(vec![Span::styled("  API Key: ", self.theme.muted_style())]);
             buf.set_line(x, area.y + row, &prompt_line, area.width);
             row += 1;
 
-            // Key input field (masked)
             let display_key = if self.state.key_input.is_empty() {
                 "  ┌─ paste your key here ─────────────────┐".to_string()
             } else {
@@ -578,22 +612,16 @@ impl WelcomeView<'_> {
             buf.set_line(x, area.y + row, &key_line, area.width);
             row += 1;
 
-            // Key URL hint — use the provider's docs_url
             let url_line = Line::from(vec![
                 Span::styled("  Get a key: ", self.theme.muted_style()),
-                Span::styled(
-                    selected.meta.docs_url,
-                    Style::default().fg(self.theme.accent),
-                ),
+                Span::styled(selected.meta.docs_url, Style::default().fg(self.theme.accent)),
             ]);
             buf.set_line(x, area.y + row, &url_line, area.width);
             row += 1;
 
-            // Error
             if let Some(ref error) = self.state.key_error {
                 row += 1;
-                let error_line =
-                    Line::from(Span::styled(format!("  {error}"), self.theme.error_style()));
+                let error_line = Line::from(Span::styled(format!("  {error}"), self.theme.error_style()));
                 buf.set_line(x, area.y + row, &error_line, area.width);
             }
         } else {
@@ -604,7 +632,6 @@ impl WelcomeView<'_> {
             buf.set_line(x, area.y + row, &ready, area.width);
         }
 
-        // Footer
         if area.height > 2 {
             let footer_y = area.y + area.height - 1;
             let footer = Line::from(vec![
@@ -632,22 +659,22 @@ impl WelcomeView<'_> {
         buf.set_line(x, area.y + row, &title, area.width);
         row += 2;
 
-        // Model list
         let subtitle = Line::from(Span::styled("  Model:", self.theme.muted_style()));
         buf.set_line(x, area.y + row, &subtitle, area.width);
         row += 1;
 
         let visible_models = 6usize;
-        let start = self.state.model_selected.saturating_sub(visible_models / 2);
+        let selected_model = self.state.normalized_model_selected();
+        let start = selected_model.saturating_sub(visible_models / 2);
         let end = (start + visible_models).min(self.state.models.len());
         let start = end.saturating_sub(visible_models);
 
-        for (display_i, model_i) in (start..end).enumerate() {
+        for model_i in start..end {
             if row >= area.height.saturating_sub(6) {
                 break;
             }
             let model = &self.state.models[model_i];
-            let is_selected = model_i == self.state.model_selected;
+            let is_selected = model_i == selected_model;
             let marker = if is_selected { "▸ " } else { "  " };
 
             let name_style = if is_selected {
@@ -673,12 +700,10 @@ impl WelcomeView<'_> {
             ]);
             buf.set_line(x, area.y + row, &line, area.width);
             row += 1;
-            let _ = display_i; // used for loop count
         }
 
         row += 1;
 
-        // Thinking level
         let thinking_label = match self.state.thinking_level {
             ThinkingLevel::Off => "Off",
             ThinkingLevel::Minimal => "Minimal",
@@ -701,7 +726,6 @@ impl WelcomeView<'_> {
         buf.set_line(x, area.y + row, &thinking_line, area.width);
         row += 2;
 
-        // Hint
         let hint = Line::from(Span::styled(
             "  You can change these anytime with Ctrl+L and Shift+Tab.",
             self.theme.muted_style(),
@@ -710,7 +734,6 @@ impl WelcomeView<'_> {
             buf.set_line(x, area.y + row, &hint, area.width);
         }
 
-        // Footer
         if area.height > 2 {
             let footer_y = area.y + area.height - 1;
             let footer = Line::from(vec![
@@ -779,10 +802,16 @@ impl WelcomeView<'_> {
         }
 
         row += 1;
-        let selected = self.state.selected_web_provider();
+        let Some(selected) = self.state.selected_web_provider() else {
+            let line = Line::from(Span::styled(
+                "  No web search providers available",
+                self.theme.muted_style(),
+            ));
+            buf.set_line(x, area.y + row, &line, area.width);
+            return;
+        };
         if selected.id != "none" && !selected.has_auth() {
-            let prompt_line =
-                Line::from(vec![Span::styled("  API Key: ", self.theme.muted_style())]);
+            let prompt_line = Line::from(vec![Span::styled("  API Key: ", self.theme.muted_style())]);
             buf.set_line(x, area.y + row, &prompt_line, area.width);
             row += 1;
 
@@ -818,10 +847,7 @@ impl WelcomeView<'_> {
         } else if selected.id == "none" {
             let ready = Line::from(vec![
                 Span::styled("  ↷ ", self.theme.muted_style()),
-                Span::styled(
-                    "Skipping web search setup for now.",
-                    self.theme.muted_style(),
-                ),
+                Span::styled("Skipping web search setup for now.", self.theme.muted_style()),
             ]);
             buf.set_line(x, area.y + row, &ready, area.width);
         } else {
@@ -852,18 +878,18 @@ impl WelcomeView<'_> {
         let mut row: u16 = 0;
         let x = area.x;
 
-        // Checkmark header
         let header = Line::from(Span::styled(
             "  ✓ You're all set.",
-            Style::default()
-                .fg(self.theme.success)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(self.theme.success).add_modifier(Modifier::BOLD),
         ));
         buf.set_line(x, area.y + row, &header, area.width);
         row += 2;
 
-        // Summary — use the provider's human-readable name from ProviderMeta
-        let provider_name = self.state.providers[self.state.provider_selected].meta.name;
+        let provider_name = self
+            .state
+            .selected_provider()
+            .map(|provider| provider.meta.name)
+            .unwrap_or("not configured");
         let web_provider_name = self
             .state
             .resolved_web_provider
@@ -910,7 +936,6 @@ impl WelcomeView<'_> {
 
         row += 1;
 
-        // Config path
         let config_hint = Line::from(Span::styled(
             "  Config saved to ~/.config/imp/config.toml",
             self.theme.muted_style(),
@@ -922,7 +947,6 @@ impl WelcomeView<'_> {
 
         row += 1;
 
-        // Quick tips
         let tips_header = Line::from(Span::styled(
             "  Quick tips:",
             Style::default().add_modifier(Modifier::BOLD),
@@ -953,7 +977,6 @@ impl WelcomeView<'_> {
             row += 1;
         }
 
-        // Footer
         if area.height > 2 {
             let footer_y = area.y + area.height - 1;
             let footer = Line::from(vec![
@@ -962,5 +985,37 @@ impl WelcomeView<'_> {
             ]);
             buf.set_line(x, footer_y, &footer, area.width);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use imp_llm::model::ModelRegistry;
+
+    #[test]
+    fn selected_provider_and_step_clamp_stale_indices() {
+        let registry = ModelRegistry::with_builtins();
+        let models = registry.list().to_vec();
+        let mut state = WelcomeState::new(&models);
+        state.step = usize::MAX;
+        state.provider_selected = usize::MAX;
+        state.web_provider_selected = usize::MAX;
+
+        assert_eq!(state.current_step(), WelcomeStep::Done);
+        assert!(state.selected_provider().is_some());
+        assert!(state.selected_web_provider().is_some());
+    }
+
+    #[test]
+    fn empty_provider_lists_fail_gracefully() {
+        let mut state = WelcomeState::new(&[]);
+        state.providers.clear();
+        state.web_providers.clear();
+
+        assert!(state.selected_provider().is_none());
+        assert!(state.selected_web_provider().is_none());
+        assert!(state.check_auth_resolved().is_err());
+        assert!(state.check_web_auth_resolved().is_err());
     }
 }

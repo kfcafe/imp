@@ -3443,7 +3443,7 @@ impl App {
             }
             KeyCode::Tab => {
                 let replacement = if !state.options.is_empty() && !state.input_active {
-                    Some(state.options[state.cursor].label.clone())
+                    state.options.get(state.cursor).map(|opt| opt.label.clone())
                 } else {
                     None
                 };
@@ -4076,7 +4076,10 @@ impl App {
                     .map(|m| m.id.clone())
                     .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
                 let thinking = state.thinking_level;
-                let provider_id = state.selected_provider_id().to_string();
+                let provider_id = state
+            .selected_provider_id()
+            .unwrap_or("anthropic")
+            .to_string();
                 let resolved_key = state.resolved_key.clone();
                 let resolved_web_provider = state.resolved_web_provider.clone();
                 let resolved_web_key = state.resolved_web_key.clone();
@@ -4844,7 +4847,11 @@ impl App {
                     ),
                 );
             }
-            AgentEvent::TurnEnd { index, message } => {
+            AgentEvent::TurnEnd {
+                index,
+                message,
+                mana_review: _,
+            } => {
                 self.completed_turns_in_run += 1;
                 // Update context tracking from this turn's usage
                 if let Some(ref usage) = message.usage {
@@ -6288,6 +6295,7 @@ mod session_lifecycle {
         app.handle_agent_event(AgentEvent::TurnEnd {
             index: 0,
             message: assistant,
+            mana_review: imp_core::mana_review::TurnManaReview::no_change(0),
         });
         app.handle_agent_event(AgentEvent::AgentEnd {
             usage: Usage {

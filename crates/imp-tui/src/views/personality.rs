@@ -76,6 +76,10 @@ pub struct PersonalityState {
 }
 
 impl PersonalityState {
+    fn normalized_selected(&self) -> usize {
+        self.selected.min(FIELDS.len().saturating_sub(1))
+    }
+
     pub fn new(cwd: PathBuf, scope: PersonalityScope) -> Self {
         Self::from_paths(
             imp_core::config::Config::user_config_dir().join("soul.md"),
@@ -114,7 +118,7 @@ impl PersonalityState {
     }
 
     pub fn current_field(&self) -> PersonalityField {
-        FIELDS[self.selected]
+        FIELDS[self.normalized_selected()]
     }
 
     pub fn current_path(&self) -> &PathBuf {
@@ -535,6 +539,15 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_field_clamps_stale_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = PersonalityState::new(tmp.path().to_path_buf(), PersonalityScope::Global);
+        state.selected = usize::MAX;
+
+        assert_eq!(state.current_field(), PersonalityField::Save);
+    }
 
     #[test]
     fn personality_state_defaults_to_generated_soul() {

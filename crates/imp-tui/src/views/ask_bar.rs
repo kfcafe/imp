@@ -1,5 +1,5 @@
 use crate::theme::Theme;
-use crate::views::editor::{cursor_visual_position_for_text, wrapped_lines_for_width};
+use crate::views::editor::{clamp_cursor_to_boundary, cursor_visual_position_for_text, wrapped_lines_for_width};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -38,6 +38,22 @@ pub struct AskState {
 }
 
 impl AskState {
+    fn normalized_option_cursor(&self) -> usize {
+        if self.options.is_empty() {
+            0
+        } else {
+            self.cursor.min(self.options.len() - 1)
+        }
+    }
+
+    fn normalize_option_cursor(&mut self) {
+        self.cursor = self.normalized_option_cursor();
+    }
+
+    fn normalized_input_cursor(&self) -> usize {
+        clamp_cursor_to_boundary(&self.input, self.input_cursor)
+    }
+
     pub fn new(question: String, context: String, options: Vec<AskOption>, multi: bool) -> Self {
         Self::with_placeholder(question, context, options, multi, String::new())
     }
@@ -73,8 +89,9 @@ impl AskState {
 
     pub fn sync_from_editor(&mut self, text: &str, cursor: usize) {
         self.input = text.to_string();
-        self.input_cursor = cursor.min(self.input.len());
+        self.input_cursor = clamp_cursor_to_boundary(&self.input, cursor);
         self.editor_cursor = self.input_cursor;
+        self.normalize_option_cursor();
         if self.input.is_empty() && !self.options.is_empty() {
             self.input_active = false;
         } else {
@@ -106,6 +123,10 @@ impl AskState {
 
     /// Cursor position inside the ask prompt area.
     pub fn cursor_screen_position(&self, area: Rect) -> (u16, u16) {
+        if area.width == 0 || area.height == 0 {
+            return (area.x, area.y);
+        }
+
         let inner_x = area.x.saturating_add(1);
         let inner_y = area.y.saturating_add(1);
         let inner_width = area.width.saturating_sub(2).max(1);
@@ -124,12 +145,12 @@ impl AskState {
 
         let (visual_row, visual_col) = cursor_visual_position_for_text(
             &self.input,
-            self.editor_cursor,
+            self.normalized_input_cursor(),
             inner_width.saturating_sub(2),
         );
 
-        let max_x = area.x + area.width.saturating_sub(2);
-        let max_y = area.y + area.height.saturating_sub(2);
+        let max_x = area.x.saturating_add(area.width.saturating_sub(2));
+        let max_y = area.y.saturating_add(area.height.saturating_sub(2));
         (
             (inner_x + 2 + visual_col as u16).min(max_x),
             (input_row + visual_row as u16).min(max_y),
@@ -163,6 +184,7 @@ impl AskState {
     /// Toggle checkbox in multi-select mode.
     pub fn toggle_current(&mut self) {
         if self.mode == AskMode::MultiSelect && !self.input_active {
+            self.normalize_option_cursor();
             if let Some(opt) = self.options.get_mut(self.cursor) {
                 opt.checked = !opt.checked;
             }
@@ -172,9 +194,13 @@ impl AskState {
     /// Tab: copy highlighted option text into the input editor.
     pub fn tab_to_edit(&mut self) {
         if !self.options.is_empty() && !self.input_active {
-            self.input = self.options[self.cursor].label.clone();
-            self.input_cursor = self.input.len();
-            self.input_active = true;
+            self.normalize_option_cursor();
+            if let Some(option) = self.options.get(self.cursor) {
+                self.input = option.label.clone();
+                self.input_cursor = self.input.len();
+                self.editor_cursor = self.input_cursor;
+                self.input_active = true;
+            }
         }
     }
 
@@ -191,12 +217,16 @@ impl AskState {
     /// Insert a character into the input.
     pub fn type_char(&mut self, ch: char) {
         self.input_active = true;
-        self.input.insert(self.input_cursor, ch);
-        self.input_cursor += ch.len_utf8();
+        let cursor = self.normalized_input_cursor();
+        self.input.insert(cursor, ch);
+        self.input_cursor = cursor + ch.len_utf8();
+        self.editor_cursor = self.input_cursor;
     }
 
     /// Backspace in the input.
     pub fn backspace(&mut self) {
+        self.input_cursor = self.normalized_input_cursor();
+        self.editor_cursor = self.input_cursor;
         if self.input_cursor > 0 && !self.input.is_empty() {
             let prev = self.input[..self.input_cursor]
                 .char_indices()
@@ -205,6 +235,7 @@ impl AskState {
                 .unwrap_or(0);
             self.input.drain(prev..self.input_cursor);
             self.input_cursor = prev;
+            self.editor_cursor = prev;
         }
         // If input is now empty and we have options, go back to option mode
         if self.input.is_empty() && !self.options.is_empty() {
@@ -225,7 +256,7 @@ impl AskState {
                 if self.options.is_empty() {
                     AskResult::Text(self.input.clone())
                 } else {
-                    AskResult::Selected(vec![self.cursor])
+                    AskResult::Selected(vec![self.normalized_option_cursor()])
                 }
             }
             AskMode::MultiSelect => {
@@ -238,7 +269,7 @@ impl AskState {
                     .collect();
                 if selected.is_empty() {
                     // If nothing checked, use the highlighted one
-                    AskResult::Selected(vec![self.cursor])
+                    AskResult::Selected(vec![self.normalized_option_cursor()])
                 } else {
                     AskResult::Selected(selected)
                 }
@@ -477,6 +508,7 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::layout::Rect;
 
     #[test]
     fn single_select_confirm() {
@@ -633,5 +665,60 @@ mod tests {
         // question(1) + context(1) + 2 options(2) + blank(1) + input(1) + hints(1) = 7
         // Use a wide width so nothing wraps
         assert_eq!(state.height(100), 7);
+    }
+
+    #[test]
+    fn tab_to_edit_clamps_stale_option_cursor() {
+        let opts = vec![AskOption {
+            label: "React".into(),
+            description: None,
+            checked: false,
+        }];
+        let mut state = AskState::new("Pick".into(), String::new(), opts, false);
+        state.cursor = 99;
+
+        state.tab_to_edit();
+
+        assert_eq!(state.input, "React");
+        assert_eq!(state.input_cursor, state.input.len());
+        assert_eq!(state.editor_cursor, state.input.len());
+    }
+
+    #[test]
+    fn sync_from_editor_clamps_invalid_utf8_boundary() {
+        let mut state = AskState::new("Pick".into(), String::new(), vec![], false);
+
+        state.sync_from_editor("éx", 1);
+
+        assert_eq!(state.input_cursor, 0);
+        assert_eq!(state.editor_cursor, 0);
+    }
+
+    #[test]
+    fn confirm_clamps_stale_selected_cursor() {
+        let opts = vec![AskOption {
+            label: "Only".into(),
+            description: None,
+            checked: false,
+        }];
+        let mut state = AskState::new("Pick".into(), String::new(), opts, false);
+        state.cursor = 42;
+
+        let result = state.confirm();
+        assert!(matches!(result, AskResult::Selected(v) if v == vec![0]));
+    }
+
+    #[test]
+    fn cursor_screen_position_handles_tiny_area_and_stale_cursor() {
+        let mut state = AskState::new("Q".into(), String::new(), vec![], false);
+        state.input = "abc".into();
+        state.input_cursor = usize::MAX;
+        state.editor_cursor = usize::MAX;
+
+        let (x, y) = state.cursor_screen_position(Rect::new(3, 4, 0, 0));
+        assert_eq!((x, y), (3, 4));
+
+        let (x, y) = state.cursor_screen_position(Rect::new(3, 4, 1, 1));
+        assert_eq!((x, y), (3, 4));
     }
 }

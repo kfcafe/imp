@@ -23,6 +23,14 @@ pub struct EditorState {
 }
 
 impl EditorState {
+    fn normalized_cursor(&self) -> usize {
+        clamp_cursor_to_boundary(&self.content, self.cursor)
+    }
+
+    fn normalize_cursor(&mut self) {
+        self.cursor = self.normalized_cursor();
+    }
+
     pub fn new() -> Self {
         Self {
             content: String::new(),
@@ -36,18 +44,21 @@ impl EditorState {
     }
 
     pub fn insert_char(&mut self, c: char) {
+        self.normalize_cursor();
         self.content.insert(self.cursor, c);
         self.cursor += c.len_utf8();
         self.update_position();
     }
 
     pub fn insert_newline(&mut self) {
+        self.normalize_cursor();
         self.content.insert(self.cursor, '\n');
         self.cursor += 1;
         self.update_position();
     }
 
     pub fn delete_back(&mut self) {
+        self.normalize_cursor();
         if self.cursor > 0 {
             let prev = prev_char_boundary(&self.content, self.cursor);
             self.content.drain(prev..self.cursor);
@@ -57,6 +68,7 @@ impl EditorState {
     }
 
     pub fn delete_forward(&mut self) {
+        self.normalize_cursor();
         if self.cursor < self.content.len() {
             let next = next_char_boundary(&self.content, self.cursor);
             self.content.drain(self.cursor..next);
@@ -65,6 +77,7 @@ impl EditorState {
     }
 
     pub fn move_left(&mut self) {
+        self.normalize_cursor();
         if self.cursor > 0 {
             self.cursor = prev_char_boundary(&self.content, self.cursor);
             self.update_position();
@@ -72,6 +85,7 @@ impl EditorState {
     }
 
     pub fn move_right(&mut self) {
+        self.normalize_cursor();
         if self.cursor < self.content.len() {
             self.cursor = next_char_boundary(&self.content, self.cursor);
             self.update_position();
@@ -79,6 +93,8 @@ impl EditorState {
     }
 
     pub fn move_up(&mut self) -> bool {
+        self.normalize_cursor();
+        self.update_position();
         if self.cursor_line == 0 {
             return false; // signal: at top, caller may use for history
         }
@@ -91,6 +107,8 @@ impl EditorState {
     }
 
     pub fn move_down(&mut self) -> bool {
+        self.normalize_cursor();
+        self.update_position();
         let lines: Vec<&str> = self.content.split('\n').collect();
         if self.cursor_line >= lines.len() - 1 {
             return false; // signal: at bottom, caller may use for history
@@ -103,18 +121,21 @@ impl EditorState {
     }
 
     pub fn move_home(&mut self) {
+        self.normalize_cursor();
         let before = &self.content[..self.cursor];
         self.cursor = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
         self.update_position();
     }
 
     pub fn move_end(&mut self) {
+        self.normalize_cursor();
         let after = &self.content[self.cursor..];
         self.cursor += after.find('\n').unwrap_or(after.len());
         self.update_position();
     }
 
     pub fn move_word_left(&mut self) {
+        self.normalize_cursor();
         if self.cursor == 0 {
             return;
         }
@@ -133,6 +154,7 @@ impl EditorState {
     }
 
     pub fn move_word_right(&mut self) {
+        self.normalize_cursor();
         let bytes = self.content.as_bytes();
         let len = bytes.len();
         let mut pos = self.cursor;
@@ -149,6 +171,7 @@ impl EditorState {
     }
 
     pub fn delete_word_back(&mut self) {
+        self.normalize_cursor();
         if self.cursor == 0 {
             return;
         }
@@ -159,6 +182,7 @@ impl EditorState {
     }
 
     pub fn delete_to_start(&mut self) {
+        self.normalize_cursor();
         let line_start = {
             let before = &self.content[..self.cursor];
             before.rfind('\n').map(|p| p + 1).unwrap_or(0)
@@ -169,6 +193,7 @@ impl EditorState {
     }
 
     pub fn delete_to_end(&mut self) {
+        self.normalize_cursor();
         let line_end = {
             let after = &self.content[self.cursor..];
             self.cursor + after.find('\n').unwrap_or(after.len())
@@ -250,20 +275,25 @@ impl EditorState {
 
     /// Calculate cursor position relative to a render area, accounting for soft wraps.
     pub fn cursor_screen_position(&self, area: Rect) -> (u16, u16) {
-        let inner_x = area.x + 1; // account for border
-        let inner_y = area.y + 1;
+        if area.width == 0 || area.height == 0 {
+            return (area.x, area.y);
+        }
+
+        let inner_x = area.x.saturating_add(1); // account for border
+        let inner_y = area.y.saturating_add(1);
         let inner_width = area.width.saturating_sub(2).max(1);
+        let cursor = self.normalized_cursor();
         let (visual_line, visual_col) =
-            cursor_visual_position_for_text(&self.content, self.cursor, inner_width);
-        let x = inner_x + visual_col as u16;
-        let y = inner_y + (visual_line as u16).saturating_sub(self.scroll_offset as u16);
-        (
-            x.min(area.x + area.width - 2),
-            y.min(area.y + area.height - 2),
-        )
+            cursor_visual_position_for_text(&self.content, cursor, inner_width);
+        let x = inner_x.saturating_add(visual_col as u16);
+        let y = inner_y.saturating_add((visual_line as u16).saturating_sub(self.scroll_offset as u16));
+        let max_x = area.x.saturating_add(area.width.saturating_sub(2));
+        let max_y = area.y.saturating_add(area.height.saturating_sub(2));
+        (x.min(max_x), y.min(max_y))
     }
 
     fn update_position(&mut self) {
+        self.normalize_cursor();
         let before = &self.content[..self.cursor];
         self.cursor_line = before.matches('\n').count();
         self.cursor_col = before
@@ -509,7 +539,7 @@ fn prev_char_boundary(s: &str, pos: usize) -> usize {
 }
 
 fn next_char_boundary(s: &str, pos: usize) -> usize {
-    let mut p = pos;
+    let mut p = pos.min(s.len());
     while p < s.len() {
         p += 1;
         if s.is_char_boundary(p) {
@@ -517,6 +547,14 @@ fn next_char_boundary(s: &str, pos: usize) -> usize {
         }
     }
     s.len()
+}
+
+pub fn clamp_cursor_to_boundary(text: &str, cursor: usize) -> usize {
+    let mut clamped = cursor.min(text.len());
+    while clamped > 0 && !text.is_char_boundary(clamped) {
+        clamped -= 1;
+    }
+    clamped
 }
 
 fn line_col_to_byte(lines: &[&str], line: usize, col: usize) -> usize {
@@ -675,5 +713,42 @@ mod tests {
         let (x, y) = editor.cursor_screen_position(area);
 
         assert_eq!((x, y), (3, 3));
+    }
+
+    #[test]
+    fn editor_operations_clamp_cursor_past_end() {
+        let mut editor = EditorState::new();
+        editor.set_content("abc");
+        editor.cursor = 99;
+
+        editor.delete_back();
+
+        assert_eq!(editor.content(), "ab");
+        assert_eq!(editor.cursor, 2);
+    }
+
+    #[test]
+    fn editor_operations_clamp_invalid_utf8_boundary() {
+        let mut editor = EditorState::new();
+        editor.set_content("éx");
+        editor.cursor = 1; // inside 'é'
+
+        editor.insert_char('!');
+
+        assert_eq!(editor.content(), "!éx");
+        assert!(editor.content().is_char_boundary(editor.cursor));
+    }
+
+    #[test]
+    fn cursor_screen_position_handles_tiny_area_without_underflow() {
+        let mut editor = EditorState::new();
+        editor.set_content("abc");
+        editor.cursor = usize::MAX;
+
+        let (x, y) = editor.cursor_screen_position(Rect::new(5, 7, 0, 0));
+        assert_eq!((x, y), (5, 7));
+
+        let (x, y) = editor.cursor_screen_position(Rect::new(5, 7, 1, 1));
+        assert_eq!((x, y), (5, 7));
     }
 }

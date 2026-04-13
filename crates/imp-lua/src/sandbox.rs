@@ -77,6 +77,9 @@ impl LuaCallContext {
             file_tracker: Arc::clone(&self.file_tracker),
             mode: self.mode,
             read_max_lines: self.read_max_lines,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                imp_core::mana_review::TurnManaReviewAccumulator::default(),
+            )),
         }
     }
 }

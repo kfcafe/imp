@@ -95,6 +95,9 @@ mod tests {
             )),
             mode: imp_core::config::AgentMode::Full,
             read_max_lines: 0,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                imp_core::mana_review::TurnManaReviewAccumulator::default(),
+            )),
         }
     }
 

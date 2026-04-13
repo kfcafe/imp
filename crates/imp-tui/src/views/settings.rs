@@ -128,6 +128,10 @@ pub struct SettingsState {
 }
 
 impl SettingsState {
+    fn normalized_selected(&self) -> usize {
+        self.selected.min(FIELDS.len().saturating_sub(1))
+    }
+
     pub fn new(
         config: &Config,
         model_name: &str,
@@ -179,7 +183,7 @@ impl SettingsState {
     }
 
     pub fn current_field(&self) -> SettingsField {
-        FIELDS[self.selected]
+        FIELDS[self.normalized_selected()]
     }
 
     pub fn move_up(&mut self) {
@@ -201,22 +205,26 @@ impl SettingsState {
         self.dirty = true;
         match self.current_field() {
             SettingsField::Model => {
-                if let Some(idx) = self.model_options.iter().position(|m| *m == self.model) {
-                    let next = (idx + 1) % self.model_options.len();
-                    self.model = self.model_options[next].clone();
+                if !self.model_options.is_empty() {
+                    if let Some(idx) = self.model_options.iter().position(|m| *m == self.model) {
+                        let next = (idx + 1) % self.model_options.len();
+                        self.model = self.model_options[next].clone();
+                    }
                 }
             }
             SettingsField::ChosenModels => {
                 self.toggle_current_model_in_chosen();
             }
             SettingsField::Theme => {
-                if let Some(idx) = self
-                    .theme_options
-                    .iter()
-                    .position(|t| *t == self.theme_name)
-                {
-                    let next = (idx + 1) % self.theme_options.len();
-                    self.theme_name = self.theme_options[next].clone();
+                if !self.theme_options.is_empty() {
+                    if let Some(idx) = self
+                        .theme_options
+                        .iter()
+                        .position(|t| *t == self.theme_name)
+                    {
+                        let next = (idx + 1) % self.theme_options.len();
+                        self.theme_name = self.theme_options[next].clone();
+                    }
                 }
             }
             SettingsField::ThinkingLevel => {
@@ -331,30 +339,34 @@ impl SettingsState {
         self.dirty = true;
         match self.current_field() {
             SettingsField::Model => {
-                if let Some(idx) = self.model_options.iter().position(|m| *m == self.model) {
-                    let prev = if idx == 0 {
-                        self.model_options.len() - 1
-                    } else {
-                        idx - 1
-                    };
-                    self.model = self.model_options[prev].clone();
+                if !self.model_options.is_empty() {
+                    if let Some(idx) = self.model_options.iter().position(|m| *m == self.model) {
+                        let prev = if idx == 0 {
+                            self.model_options.len() - 1
+                        } else {
+                            idx - 1
+                        };
+                        self.model = self.model_options[prev].clone();
+                    }
                 }
             }
             SettingsField::ChosenModels => {
                 self.toggle_current_model_in_chosen();
             }
             SettingsField::Theme => {
-                if let Some(idx) = self
-                    .theme_options
-                    .iter()
-                    .position(|t| *t == self.theme_name)
-                {
-                    let prev = if idx == 0 {
-                        self.theme_options.len() - 1
-                    } else {
-                        idx - 1
-                    };
-                    self.theme_name = self.theme_options[prev].clone();
+                if !self.theme_options.is_empty() {
+                    if let Some(idx) = self
+                        .theme_options
+                        .iter()
+                        .position(|t| *t == self.theme_name)
+                    {
+                        let prev = if idx == 0 {
+                            self.theme_options.len() - 1
+                        } else {
+                            idx - 1
+                        };
+                        self.theme_name = self.theme_options[prev].clone();
+                    }
                 }
             }
             SettingsField::ThinkingLevel => {
@@ -1375,6 +1387,32 @@ mod tests {
     use imp_core::config::Config;
     use imp_llm::auth::AuthStore;
     use imp_llm::model::ModelRegistry;
+
+    #[test]
+    fn current_field_clamps_stale_selection() {
+        let registry = ModelRegistry::with_builtins();
+        let models = registry.list().to_vec();
+        let auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
+        let state = SettingsState {
+            selected: usize::MAX,
+            ..SettingsState::new(&Config::default(), &models[0].id, &models, &auth_store)
+        };
+
+        assert_eq!(state.current_field(), SettingsField::Save);
+    }
+
+    #[test]
+    fn cycle_model_is_safe_with_empty_model_options() {
+        let auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
+        let mut state = SettingsState::new(&Config::default(), "custom-model", &[], &auth_store);
+        state.selected = 0;
+        state.model_options.clear();
+
+        state.cycle_forward();
+        state.cycle_backward();
+
+        assert_eq!(state.model, "custom-model");
+    }
 
     #[test]
     fn chosen_models_round_trip_into_config() {
