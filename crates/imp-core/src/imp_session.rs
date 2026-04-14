@@ -673,7 +673,13 @@ fn should_use_codex(
     model_id: &str,
     provider_name: &str,
 ) -> bool {
-    options.provider.is_none()
+    let provider_allows_fallback = match options.provider.as_deref() {
+        None => true,
+        Some("openai") => true,
+        Some(_) => false,
+    };
+
+    provider_allows_fallback
         && options.api_key.is_none()
         && provider_name == "openai"
         && auth_store.resolve_api_key_only("openai").is_err()
@@ -880,9 +886,67 @@ mod tests {
     }
 
     #[test]
-    fn should_use_codex_returns_false_when_provider_set() {
+    fn should_use_codex_returns_true_when_provider_forced_to_openai_and_oauth_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let mut auth_store = AuthStore::new(auth_path);
+        auth_store
+            .store(
+                "openai",
+                imp_llm::auth::StoredCredential::OAuth(imp_llm::auth::OAuthCredential {
+                    access_token: "oauth-token".into(),
+                    refresh_token: "refresh-token".into(),
+                    expires_at: imp_llm::now() + 3600,
+                }),
+            )
+            .unwrap();
+        let registry = ModelRegistry::with_builtins();
+        let options = SessionOptions {
+            provider: Some("openai".into()),
+            ..Default::default()
+        };
+        assert!(should_use_codex(
+            &options,
+            &auth_store,
+            &registry,
+            "gpt-5.4",
+            "openai"
+        ));
+    }
+
+    #[test]
+    fn should_use_codex_returns_false_when_provider_set_to_non_openai() {
         let auth_path = PathBuf::from("/tmp/nonexistent-auth.json");
         let auth_store = AuthStore::new(auth_path);
+        let registry = ModelRegistry::with_builtins();
+        let options = SessionOptions {
+            provider: Some("anthropic".into()),
+            ..Default::default()
+        };
+        assert!(!should_use_codex(
+            &options,
+            &auth_store,
+            &registry,
+            "gpt-5.4",
+            "openai"
+        ));
+    }
+
+    #[test]
+    fn should_use_codex_returns_false_when_model_is_not_codex_supported() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let mut auth_store = AuthStore::new(auth_path);
+        auth_store
+            .store(
+                "openai",
+                imp_llm::auth::StoredCredential::OAuth(imp_llm::auth::OAuthCredential {
+                    access_token: "oauth-token".into(),
+                    refresh_token: "refresh-token".into(),
+                    expires_at: imp_llm::now() + 3600,
+                }),
+            )
+            .unwrap();
         let registry = ModelRegistry::with_builtins();
         let options = SessionOptions {
             provider: Some("openai".into()),
