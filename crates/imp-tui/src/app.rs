@@ -2684,6 +2684,9 @@ impl App {
                 self.invalidate_chat_render_cache();
                 self.session = SessionManager::in_memory();
                 self.tool_focus = None;
+                self.accumulated_usage = Usage::default();
+                self.accumulated_cost = Cost::default();
+                self.current_context_tokens = 0;
             }
             "compact" => {
                 self.run_manual_compaction();
@@ -5069,6 +5072,9 @@ mod session_lifecycle {
     use imp_llm::model::ModelRegistry;
     use imp_llm::ThinkingLevel;
     use imp_llm::{AssistantMessage, ContentBlock, StopReason};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::widgets::Widget;
     use tempfile::TempDir;
 
     /// Helper: build an App with defaults and an in-memory session.
@@ -5097,6 +5103,24 @@ mod session_lifecycle {
         };
         let registry = ModelRegistry::with_builtins();
         App::new(config, session, registry, cwd)
+    }
+
+    fn render_status_to_string(info: &StatusInfo, width: u16) -> String {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        crate::views::status::StatusBar::new(info, &theme).render(area, &mut buf);
+
+        (0..area.width)
+            .map(|x| {
+                buf.cell((x, 0))
+                    .unwrap()
+                    .symbol()
+                    .chars()
+                    .next()
+                    .unwrap_or(' ')
+            })
+            .collect()
     }
 
     #[test]
@@ -5265,14 +5289,56 @@ mod session_lifecycle {
             is_streaming: false,
             timestamp: 0,
         });
+        app.accumulated_usage = Usage {
+            input_tokens: 12_345,
+            output_tokens: 678,
+            cache_read_tokens: 90,
+            cache_write_tokens: 0,
+        };
+        app.accumulated_cost = Cost {
+            input: 0.5,
+            output: 0.25,
+            cache_read: 0.0,
+            cache_write: 0.0,
+            total: 0.75,
+        };
+        app.current_context_tokens = 12_435;
         assert_eq!(app.messages.len(), 1);
 
         // Execute /new
         app.execute_command("new");
 
         assert!(app.messages.is_empty());
+        assert_eq!(app.accumulated_usage, Usage::default());
+        assert_eq!(app.accumulated_cost, Cost::default());
+        assert_eq!(app.current_context_tokens, 0);
         // Session replaced with in-memory
         assert!(app.session.path().is_none());
+    }
+
+    #[test]
+    fn tui_integration_slash_new_resets_rendered_context_percent() {
+        let mut app = make_app();
+        app.context_window = 200_000;
+        app.accumulated_usage = Usage {
+            input_tokens: 12_345,
+            output_tokens: 678,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        };
+        app.current_context_tokens = 50_000;
+
+        let before = app.build_status_info();
+        let before_render = render_status_to_string(&before, 120);
+        assert!(before.context_percent > 0.0);
+        assert!(before_render.contains("25%"));
+
+        app.execute_command("new");
+
+        let after = app.build_status_info();
+        let after_render = render_status_to_string(&after, 120);
+        assert_eq!(after.context_percent, 0.0);
+        assert!(after_render.contains("0%"));
     }
 
     #[test]
