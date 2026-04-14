@@ -15,7 +15,7 @@ use crate::config::{AgentMode, ContextConfig, ContinuePolicy};
 use crate::error::Result;
 use crate::guardrails::{self, GuardrailConfig, GuardrailLevel, GuardrailProfile};
 use crate::hooks::{HookEvent, HookRunner};
-use crate::mana_review::{TurnManaReview, TurnManaReviewAccumulator};
+use crate::mana_review::{ManaReviewState, TurnManaReview, TurnManaReviewAccumulator};
 use crate::roles::Role;
 use crate::tools::{LuaToolLoader, ToolRegistry};
 
@@ -590,11 +590,11 @@ impl Agent {
                 self.emit(AgentEvent::TurnEnd {
                     index: turn,
                     message: msg.clone(),
-                    mana_review,
+                    mana_review: mana_review.clone(),
                 })
                 .await;
 
-                let next_action = self.decide_next_action(&msg, &[], false);
+                let next_action = self.decide_next_action(&msg, &[], false, &mana_review);
                 self.enqueue_next_action(&mut queued_follow_ups, next_action);
 
                 if let Some(follow_up) = queued_follow_ups.pop_front() {
@@ -616,11 +616,11 @@ impl Agent {
             self.emit(AgentEvent::TurnEnd {
                 index: turn,
                 message: msg.clone(),
-                mana_review,
+                mana_review: mana_review.clone(),
             })
             .await;
 
-            let next_action = self.decide_next_action(&msg, &results, true);
+            let next_action = self.decide_next_action(&msg, &results, true, &mana_review);
             let should_stop_after_tool_turn = matches!(
                 next_action,
                 NextAction::Stop {
@@ -659,11 +659,16 @@ impl Agent {
         message: &AssistantMessage,
         tool_results: &[imp_llm::ToolResultMessage],
         used_tools: bool,
+        mana_review: &TurnManaReview,
     ) -> NextAction {
         if tool_results_indicate_repeated_action(tool_results) {
             return NextAction::Stop {
                 reason: NextActionStopReason::RepeatedAction,
             };
+        }
+
+        if let Some(reason) = mana_review_stop_reason(mana_review, self.mode) {
+            return NextAction::Stop { reason };
         }
 
         if !used_tools && assistant_message_text(message).trim().is_empty() {
@@ -1253,6 +1258,28 @@ fn tool_results_indicate_repeated_action(tool_results: &[imp_llm::ToolResultMess
                 _ => false,
             })
     })
+}
+
+fn mana_review_stop_reason(
+    mana_review: &TurnManaReview,
+    mode: AgentMode,
+) -> Option<NextActionStopReason> {
+    match mana_review.state {
+        ManaReviewState::NeedsDecision => Some(NextActionStopReason::UserBlocker),
+        ManaReviewState::Changed if matches!(mode, AgentMode::Planner) => {
+            if !mana_review.proposed_children.is_empty()
+                || !mana_review.touched_units.is_empty()
+                || !mana_review.material_field_changes.is_empty()
+                || !mana_review.notes_appended.is_empty()
+                || !mana_review.decision_events.is_empty()
+            {
+                Some(NextActionStopReason::DecompositionCompleted)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 fn planner_stop_reason(
@@ -1998,6 +2025,55 @@ mod tests {
         assert_eq!(user_texts.len(), 2);
         assert_eq!(user_texts[0], "Plan the rollout");
         assert!(user_texts[1].contains("externalize the durable plan"));
+    }
+
+    #[test]
+    fn mana_review_needs_decision_maps_to_user_blocker() {
+        let review = TurnManaReview {
+            turn_index: 0,
+            state: ManaReviewState::NeedsDecision,
+            scope: crate::mana_review::ManaReviewScope::default(),
+            anchor_unit: None,
+            touched_units: Vec::new(),
+            proposed_children: Vec::new(),
+            material_field_changes: Vec::new(),
+            notes_appended: Vec::new(),
+            decision_events: Vec::new(),
+            unresolved_consequential_choices: Vec::new(),
+            next_question: Some("Which path should we take?".to_string()),
+        };
+
+        assert_eq!(
+            mana_review_stop_reason(&review, AgentMode::Planner),
+            Some(NextActionStopReason::UserBlocker)
+        );
+    }
+
+    #[test]
+    fn mana_review_changed_with_planner_children_maps_to_decomposition_completed() {
+        let review = TurnManaReview {
+            turn_index: 0,
+            state: ManaReviewState::Changed,
+            scope: crate::mana_review::ManaReviewScope::default(),
+            anchor_unit: None,
+            touched_units: Vec::new(),
+            proposed_children: vec![crate::mana_review::TurnManaProposedChild {
+                unit: crate::mana_review::ManaUnitRef::new("28.6.1", "child", Some("job".to_string())),
+                parent: crate::mana_review::ManaUnitRef::new("28.6", "parent", Some("epic".to_string())),
+                child_kind: crate::mana_review::ManaReviewUnitKind::Job,
+                child_origin: crate::mana_review::ManaUnitOrigin::CreatedInTurn,
+            }],
+            material_field_changes: Vec::new(),
+            notes_appended: Vec::new(),
+            decision_events: Vec::new(),
+            unresolved_consequential_choices: Vec::new(),
+            next_question: None,
+        };
+
+        assert_eq!(
+            mana_review_stop_reason(&review, AgentMode::Planner),
+            Some(NextActionStopReason::DecompositionCompleted)
+        );
     }
 
     #[tokio::test]

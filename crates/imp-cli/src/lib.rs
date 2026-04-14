@@ -1184,7 +1184,6 @@ fn save_auth_secret_fields(
 
 async fn run_setup_mode() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
-    let config_path = Config::user_config_path();
     let mut config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
     let auth_path = Config::user_config_dir().join("auth.json");
     let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
