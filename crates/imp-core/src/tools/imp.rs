@@ -43,6 +43,10 @@ impl Tool for ImpTool {
                     "type": "string",
                     "description": "Mana unit id to execute when mode='unit'"
                 },
+                "prompt": {
+                    "type": "string",
+                    "description": "Prompt to run when mode='ad_hoc'"
+                },
                 "mana_dir": {
                     "type": "string",
                     "description": "Optional explicit mana directory or project root"
@@ -63,17 +67,7 @@ impl Tool for ImpTool {
                     "description": "Optional caller-supplied dedupe key"
                 }
             },
-            "required": ["action", "mode"],
-            "allOf": [
-                {
-                    "if": { "properties": { "mode": { "const": "unit" } } },
-                    "then": { "required": ["unit_id"] }
-                },
-                {
-                    "if": { "properties": { "mode": { "const": "ad_hoc" } } },
-                    "then": { "required": ["prompt"] }
-                }
-            ]
+            "required": ["action", "mode"]
         })
     }
 
@@ -388,19 +382,46 @@ mod tests {
     }
 
     #[test]
-    fn schema_requires_unit_id_for_unit_mode() {
+    fn schema_is_plain_object_without_top_level_all_of() {
         let schema = ImpTool.parameters();
-        let args = json!({"action": "delegate", "mode": "unit"});
-        let err = super::super::validate_tool_args(&schema, &args).unwrap_err();
-        assert!(format!("{err}").contains("unit_id"));
+        assert_eq!(schema.get("type").and_then(|v| v.as_str()), Some("object"));
+        assert!(schema.get("allOf").is_none());
+        assert_eq!(
+            schema["properties"]["prompt"]["type"].as_str(),
+            Some("string")
+        );
     }
 
-    #[test]
-    fn schema_requires_prompt_for_ad_hoc_mode() {
-        let schema = ImpTool.parameters();
-        let args = json!({"action": "delegate", "mode": "ad_hoc"});
-        let err = super::super::validate_tool_args(&schema, &args).unwrap_err();
-        assert!(format!("{err}").contains("prompt"));
+    #[tokio::test]
+    async fn unit_mode_requires_unit_id_at_runtime() {
+        let tool = ImpTool;
+        let result = tool
+            .execute(
+                "call-1",
+                json!({"action": "delegate", "mode": "unit"}),
+                test_ctx(AgentMode::Orchestrator),
+            )
+            .await;
+        match result {
+            Ok(_) => panic!("expected missing unit_id to return an error"),
+            Err(err) => assert!(err.to_string().contains("unit_id")),
+        }
+    }
+
+    #[tokio::test]
+    async fn ad_hoc_mode_requires_prompt_at_runtime() {
+        let tool = ImpTool;
+        let result = tool
+            .execute(
+                "call-1",
+                json!({"action": "delegate", "mode": "ad_hoc"}),
+                test_ctx(AgentMode::Orchestrator),
+            )
+            .await;
+        match result {
+            Ok(_) => panic!("expected missing prompt to return an error"),
+            Err(err) => assert!(err.to_string().contains("prompt")),
+        }
     }
 
     #[tokio::test]

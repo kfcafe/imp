@@ -62,6 +62,10 @@ pub enum AgentEvent {
     TurnStart {
         index: u32,
     },
+    TurnAssessment {
+        index: u32,
+        assessment: NextActionAssessment,
+    },
     TurnEnd {
         index: u32,
         message: AssistantMessage,
@@ -122,6 +126,15 @@ enum ContinueReason {
     HighConfidenceVisibleNextStep,
 }
 
+impl ContinueReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ExternalizationNeeded => "externalization_needed",
+            Self::HighConfidenceVisibleNextStep => "high_confidence_visible_next_step",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NextActionStopReason {
     NoAutomaticFollowUp,
@@ -131,6 +144,20 @@ enum NextActionStopReason {
     ExecutionBlocked,
     DecompositionCompleted,
     WorkCompleted,
+}
+
+impl NextActionStopReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NoAutomaticFollowUp => "no_automatic_follow_up",
+            Self::NoProgress => "no_progress",
+            Self::RepeatedAction => "repeated_action",
+            Self::UserBlocker => "user_blocker",
+            Self::ExecutionBlocked => "execution_blocked",
+            Self::DecompositionCompleted => "decomposition_completed",
+            Self::WorkCompleted => "work_completed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +183,46 @@ struct TextFallbackEvidence {
 struct ContinueRecommendation {
     prompt: String,
     reason: ContinueReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NextActionAssessment {
+    pub runtime: NextActionRuntimeEvidence,
+    pub mana: NextActionManaEvidence,
+    pub text_fallback: NextActionTextFallbackEvidence,
+    pub continue_recommendation: Option<NextActionContinueRecommendation>,
+    pub chosen_action: NextActionDebugView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NextActionRuntimeEvidence {
+    pub repeated_action: bool,
+    pub execution_stop_reason: Option<String>,
+    pub work_completed: bool,
+    pub no_progress: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NextActionManaEvidence {
+    pub stop_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NextActionTextFallbackEvidence {
+    pub planner_stop_reason: Option<String>,
+    pub execution_stop_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NextActionContinueRecommendation {
+    pub prompt: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NextActionDebugView {
+    Continue { prompt: String, reason: String },
+    Stop { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +278,51 @@ impl PostTurnAssessment {
 
         NextAction::Stop {
             reason: NextActionStopReason::NoAutomaticFollowUp,
+        }
+    }
+
+    fn debug_view(&self) -> NextActionAssessment {
+        let chosen_action = match self.clone().into_next_action() {
+            NextAction::Continue { prompt, reason } => NextActionDebugView::Continue {
+                prompt,
+                reason: reason.as_str().to_string(),
+            },
+            NextAction::Stop { reason } => NextActionDebugView::Stop {
+                reason: reason.as_str().to_string(),
+            },
+        };
+
+        NextActionAssessment {
+            runtime: NextActionRuntimeEvidence {
+                repeated_action: self.runtime.repeated_action,
+                execution_stop_reason: self
+                    .runtime
+                    .execution_stop_reason
+                    .map(|reason| reason.as_str().to_string()),
+                work_completed: self.runtime.work_completed,
+                no_progress: self.runtime.no_progress,
+            },
+            mana: NextActionManaEvidence {
+                stop_reason: self.mana.stop_reason.map(|reason| reason.as_str().to_string()),
+            },
+            text_fallback: NextActionTextFallbackEvidence {
+                planner_stop_reason: self
+                    .text_fallback
+                    .planner_stop_reason
+                    .map(|reason| reason.as_str().to_string()),
+                execution_stop_reason: self
+                    .text_fallback
+                    .execution_stop_reason
+                    .map(|reason| reason.as_str().to_string()),
+            },
+            continue_recommendation: self
+                .continue_recommendation
+                .clone()
+                .map(|recommendation| NextActionContinueRecommendation {
+                    prompt: recommendation.prompt,
+                    reason: recommendation.reason.as_str().to_string(),
+                }),
+            chosen_action,
         }
     }
 }
@@ -677,7 +789,13 @@ impl Agent {
                 })
                 .await;
 
-                let next_action = self.decide_next_action(&msg, &[], false, &mana_review);
+                let assessment = self.assess_post_turn(&msg, &[], false, &mana_review);
+                self.emit(AgentEvent::TurnAssessment {
+                    index: turn,
+                    assessment: assessment.debug_view(),
+                })
+                .await;
+                let next_action = assessment.into_next_action();
                 self.enqueue_next_action(&mut queued_follow_ups, next_action);
 
                 if let Some(follow_up) = queued_follow_ups.pop_front() {
@@ -703,7 +821,13 @@ impl Agent {
             })
             .await;
 
-            let next_action = self.decide_next_action(&msg, &results, true, &mana_review);
+            let assessment = self.assess_post_turn(&msg, &results, true, &mana_review);
+            self.emit(AgentEvent::TurnAssessment {
+                index: turn,
+                assessment: assessment.debug_view(),
+            })
+            .await;
+            let next_action = assessment.into_next_action();
             let should_stop_after_tool_turn = matches!(
                 next_action,
                 NextAction::Stop {
@@ -735,17 +859,6 @@ impl Agent {
         }
 
         Ok(())
-    }
-
-    fn decide_next_action(
-        &self,
-        message: &AssistantMessage,
-        tool_results: &[imp_llm::ToolResultMessage],
-        used_tools: bool,
-        mana_review: &TurnManaReview,
-    ) -> NextAction {
-        self.assess_post_turn(message, tool_results, used_tools, mana_review)
-            .into_next_action()
     }
 
     fn assess_post_turn(
@@ -2225,6 +2338,184 @@ mod tests {
         assert_eq!(user_texts.len(), 2);
         assert_eq!(user_texts[0], "Plan the rollout");
         assert!(user_texts[1].contains("externalize the durable plan"));
+    }
+
+    #[tokio::test]
+    async fn turn_assessment_debug_view_reports_execution_blocker() {
+        let (agent, _handle) = Agent::new(test_model(Arc::new(MockProvider::new(vec![]))), PathBuf::from("/tmp"));
+        let assessment = agent.assess_post_turn(
+            &AssistantMessage {
+                content: vec![ContentBlock::Text {
+                    text: "Verify failed.".to_string(),
+                }],
+                usage: None,
+                stop_reason: StopReason::EndTurn,
+                timestamp: 0,
+            },
+            &[imp_llm::ToolResultMessage {
+                tool_call_id: "call_verify".to_string(),
+                tool_name: "mana".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "Verify failed".to_string(),
+                }],
+                is_error: true,
+                details: serde_json::json!({
+                    "action": "verify",
+                    "passed": false,
+                    "exit_code": 1
+                }),
+                timestamp: 0,
+            }],
+            true,
+            &TurnManaReview::no_change(0),
+        );
+
+        let debug = assessment.debug_view();
+        assert_eq!(debug.runtime.execution_stop_reason.as_deref(), Some("execution_blocked"));
+        assert_eq!(
+            debug.chosen_action,
+            NextActionDebugView::Stop {
+                reason: "execution_blocked".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn turn_assessment_debug_view_reports_continue_recommendation() {
+        let assessment = PostTurnAssessment {
+            runtime: RuntimeEvidence {
+                repeated_action: false,
+                execution_stop_reason: None,
+                work_completed: false,
+                no_progress: false,
+            },
+            mana: ManaEvidence { stop_reason: None },
+            text_fallback: TextFallbackEvidence {
+                planner_stop_reason: None,
+                execution_stop_reason: None,
+            },
+            continue_recommendation: Some(ContinueRecommendation {
+                prompt: "continue".to_string(),
+                reason: ContinueReason::HighConfidenceVisibleNextStep,
+            }),
+        };
+
+        let debug = assessment.debug_view();
+        let recommendation = debug
+            .continue_recommendation
+            .expect("continue recommendation present");
+        assert_eq!(recommendation.reason, "high_confidence_visible_next_step");
+        assert!(matches!(
+            debug.chosen_action,
+            NextActionDebugView::Continue { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn emits_turn_assessment_event_for_execution_blocker() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_check",
+                "bash",
+                serde_json::json!({"command": "cargo check -p definitely_missing_crate", "timeout": 1}),
+                100,
+                20,
+            ),
+            text_response("The check failed.", 120, 20),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Full;
+        agent.tools.register(Arc::new(crate::tools::bash::BashTool));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Run the check".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let assessment = events.iter().find_map(|event| match event {
+            AgentEvent::TurnAssessment { assessment, .. } => Some(assessment),
+            _ => None,
+        });
+
+        let assessment = assessment.expect("turn assessment emitted");
+        assert_eq!(assessment.runtime.execution_stop_reason.as_deref(), Some("execution_blocked"));
+        assert_eq!(
+            assessment.chosen_action,
+            NextActionDebugView::Stop {
+                reason: "execution_blocked".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn emits_turn_assessment_event_for_continue_recommendation() {
+        let provider = Arc::new(MockProvider::new(vec![
+            vec![
+                StreamEvent::MessageStart {
+                    model: "test-model".to_string(),
+                },
+                StreamEvent::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "mana".to_string(),
+                    arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
+                },
+                StreamEvent::TextDelta {
+                    text: "Done. Updated mana and next step is ready to continue.".to_string(),
+                },
+                StreamEvent::MessageEnd {
+                    message: AssistantMessage {
+                        content: vec![
+                            ContentBlock::ToolCall {
+                                id: "call_1".to_string(),
+                                name: "mana".to_string(),
+                                arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
+                            },
+                            ContentBlock::Text {
+                                text: "Done. Updated mana and next step is ready to continue.".to_string(),
+                            },
+                        ],
+                        usage: Some(Usage {
+                            input_tokens: 100,
+                            output_tokens: 20,
+                            cache_read_tokens: 0,
+                            cache_write_tokens: 0,
+                        }),
+                        stop_reason: StopReason::ToolUse,
+                        timestamp: 1000,
+                    },
+                },
+            ],
+            text_response("Stopped after visible mana turn.", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Planner;
+        agent.continue_policy = ContinuePolicy::Balanced;
+        agent.tools.register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Do the next thing".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let assessment = events.iter().find_map(|event| match event {
+            AgentEvent::TurnAssessment { assessment, .. } => Some(assessment),
+            _ => None,
+        });
+
+        let assessment = assessment.expect("turn assessment emitted");
+        let recommendation = assessment
+            .continue_recommendation
+            .as_ref()
+            .expect("continue recommendation present");
+        assert_eq!(recommendation.reason, "high_confidence_visible_next_step");
+        assert!(matches!(
+            assessment.chosen_action,
+            NextActionDebugView::Continue { .. }
+        ));
     }
 
     #[test]

@@ -1641,6 +1641,11 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
             json!({ "type": "agent_end", "usage": usage, "cost": cost })
         }
         AgentEvent::TurnStart { index } => json!({ "type": "turn_start", "index": index }),
+        AgentEvent::TurnAssessment { index, assessment } => json!({
+            "type": "turn_assessment",
+            "index": index,
+            "assessment": next_action_assessment_to_json(assessment),
+        }),
         AgentEvent::TurnEnd {
             index,
             message,
@@ -2288,6 +2293,11 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             "cost_total": cost.total,
         }),
         AgentEvent::TurnStart { index } => json!({ "type": "turn_start", "index": index }),
+        AgentEvent::TurnAssessment { index, assessment } => json!({
+            "type": "turn_assessment",
+            "index": index,
+            "assessment": next_action_assessment_to_json(assessment),
+        }),
         AgentEvent::TurnEnd {
             index,
             message,
@@ -2334,6 +2344,41 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             json!({ "type": "tool_output_delta", "tool_call_id": tool_call_id, "text": text })
         }
     }
+}
+
+fn next_action_assessment_to_json(assessment: &imp_core::agent::NextActionAssessment) -> Value {
+    let chosen_action = match &assessment.chosen_action {
+        imp_core::agent::NextActionDebugView::Continue { prompt, reason } => json!({
+            "kind": "continue",
+            "prompt": prompt,
+            "reason": reason,
+        }),
+        imp_core::agent::NextActionDebugView::Stop { reason } => json!({
+            "kind": "stop",
+            "reason": reason,
+        }),
+    };
+
+    json!({
+        "runtime": {
+            "repeated_action": assessment.runtime.repeated_action,
+            "execution_stop_reason": assessment.runtime.execution_stop_reason,
+            "work_completed": assessment.runtime.work_completed,
+            "no_progress": assessment.runtime.no_progress,
+        },
+        "mana": {
+            "stop_reason": assessment.mana.stop_reason,
+        },
+        "text_fallback": {
+            "planner_stop_reason": assessment.text_fallback.planner_stop_reason,
+            "execution_stop_reason": assessment.text_fallback.execution_stop_reason,
+        },
+        "continue_recommendation": assessment.continue_recommendation.as_ref().map(|recommendation| json!({
+            "prompt": recommendation.prompt,
+            "reason": recommendation.reason,
+        })),
+        "chosen_action": chosen_action,
+    })
 }
 
 fn rpc_stream_event_to_json(event: &StreamEvent) -> Value {
