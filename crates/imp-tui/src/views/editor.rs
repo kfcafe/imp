@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::animation::{activity_label, format_elapsed, ActivitySurface, AnimationState};
+use crate::animation::{activity_label, ActivitySurface, AnimationState};
 use imp_core::config::AnimationLevel;
 use imp_llm::ThinkingLevel;
 use ratatui::buffer::Buffer;
@@ -229,10 +229,14 @@ impl EditorState {
         self.content.split('\n').count().max(1)
     }
 
-    pub fn visual_line_count(&self, inner_width: u16) -> usize {
-        wrapped_lines_for_width(&self.content, inner_width)
+    pub fn visual_line_count_with_summary(&self, inner_width: u16, summarize_paste: bool) -> usize {
+        editor_display_lines(&self.content, inner_width, summarize_paste)
             .len()
             .max(1)
+    }
+
+    pub fn visual_line_count(&self, inner_width: u16) -> usize {
+        self.visual_line_count_with_summary(inner_width, false)
     }
 
     pub fn push_history(&mut self) {
@@ -317,6 +321,7 @@ pub struct EditorView<'a> {
     state: &'a EditorState,
     theme: &'a Theme,
     thinking_level: ThinkingLevel,
+    summarize_paste: bool,
     model_name: &'a str,
     cwd: &'a str,
     session_name: &'a str,
@@ -339,6 +344,7 @@ impl<'a> EditorView<'a> {
             state,
             theme,
             thinking_level,
+            summarize_paste: false,
             model_name: "",
             cwd: "",
             session_name: "",
@@ -354,6 +360,11 @@ impl<'a> EditorView<'a> {
             animation_level: AnimationLevel::Minimal,
             activity_state: AnimationState::Idle,
         }
+    }
+
+    pub fn summarize_paste(mut self, summarize: bool) -> Self {
+        self.summarize_paste = summarize;
+        self
     }
 
     /// Set the model name shown in the editor border.
@@ -422,14 +433,13 @@ impl Widget for EditorView<'_> {
         let border_color = base_border_color;
 
         let top_left = build_identity_label(self.cwd, self.session_name, area.width);
-        let top_right = build_top_right_label(
-            self.model_name,
-            self.turn_elapsed,
-            self.current_context_tokens,
-            self.context_window,
-            self.show_context_usage,
+        let top_right = Vec::new();
+        let bottom_left = build_bottom_left_label(
+            self.activity_state,
+            self.tick,
+            self.animation_level,
+            self.has_queued,
         );
-        let bottom_left = build_bottom_left_label(self.extension_items, self.peek);
         let activity = activity_label(
             self.activity_state,
             self.tick,
@@ -437,7 +447,7 @@ impl Widget for EditorView<'_> {
             ActivitySurface::Editor,
         );
 
-        // Build bottom-right live state indicator
+        // Build bottom-right metadata cluster
         let thinking_label = match self.thinking_level {
             ThinkingLevel::Off => "",
             ThinkingLevel::Minimal => "min",
@@ -446,12 +456,12 @@ impl Widget for EditorView<'_> {
             ThinkingLevel::High => "high",
             ThinkingLevel::XHigh => "xhigh",
         };
-        let model_label = None;
-        let queue_label = if self.has_queued {
-            Some("queued".to_string())
-        } else {
+        let model_label = if self.model_name.is_empty() {
             None
+        } else {
+            Some(self.model_name.to_string())
         };
+        let queue_label = None;
         let context_ratio = if self.context_window > 0 {
             self.current_context_tokens as f64 / self.context_window as f64
         } else {
@@ -505,7 +515,7 @@ impl Widget for EditorView<'_> {
         block.render(area, buf);
 
         // Render editor content using wrapped visual lines so auto-grow and cursor math stay aligned.
-        let lines = wrapped_lines_for_width(&self.state.content, inner.width)
+        let lines = editor_display_lines(&self.state.content, inner.width, self.summarize_paste)
             .into_iter()
             .skip(self.state.scroll_offset)
             .take(inner.height as usize)
@@ -538,6 +548,16 @@ impl Widget for EditorView<'_> {
 
 // --- Helpers ---
 
+fn editor_display_lines(text: &str, inner_width: u16, summarize_paste: bool) -> Vec<String> {
+    if summarize_paste {
+        if let Some(summary) = crate::views::chat::pasted_block_summary(text) {
+            return wrapped_lines_for_width(&summary, inner_width);
+        }
+    }
+
+    wrapped_lines_for_width(text, inner_width)
+}
+
 fn build_identity_label(cwd: &str, session_name: &str, area_width: u16) -> Vec<Span<'static>> {
     let max_path = (area_width as usize / 3).clamp(12, 36);
     let cwd = abbreviate_home(cwd);
@@ -552,54 +572,25 @@ fn build_identity_label(cwd: &str, session_name: &str, area_width: u16) -> Vec<S
     spans
 }
 
-fn build_top_right_label(
-    model_name: &str,
-    turn_elapsed: Option<Duration>,
-    current_context_tokens: u32,
-    context_window: u32,
-    show_context_usage: bool,
-) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    let mut push_part = |text: String| {
-        if !spans.is_empty() {
-            spans.push(Span::raw(" • "));
-        }
-        spans.push(Span::raw(text));
-    };
-
-    if !model_name.is_empty() {
-        push_part(model_name.to_string());
-    }
-    if let Some(elapsed) = turn_elapsed {
-        push_part(format_elapsed(elapsed));
-    }
-    if show_context_usage && context_window > 0 {
-        push_part(format_context_usage(current_context_tokens, context_window));
-    }
-
-    spans
-}
-
 fn build_bottom_left_label(
-    extension_items: Option<&HashMap<String, String>>,
-    peek: bool,
+    activity_state: AnimationState,
+    tick: u64,
+    animation_level: AnimationLevel,
+    has_queued: bool,
 ) -> Vec<Span<'static>> {
-    if peek {
-        return vec![Span::raw("peek")];
-    }
-
-    let Some(items) = extension_items else {
-        return Vec::new();
+    let state = if has_queued {
+        AnimationState::Queued
+    } else {
+        activity_state
     };
-    let mut keys: Vec<_> = items.keys().collect();
-    keys.sort();
-    if let Some(key) = keys.first() {
-        if let Some(value) = items.get(*key) {
-            return vec![Span::raw(format!("{key}: {value}"))];
-        }
+    let label = activity_label(state, tick, animation_level, ActivitySurface::Editor);
+    if label.is_empty() {
+        Vec::new()
+    } else {
+        vec![Span::raw(label)]
     }
-    Vec::new()
 }
+
 
 fn abbreviate_home(path: &str) -> String {
     if path == "/Users/asher" {
@@ -845,6 +836,19 @@ mod tests {
     }
 
     #[test]
+    fn visual_line_count_with_paste_summary_uses_summary_height() {
+        let mut editor = EditorState::new();
+        editor.set_content(
+            &(1..=25)
+                .map(|i| format!("fn example_{i}() {{}}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+
+        assert_eq!(editor.visual_line_count_with_summary(80, true), 1);
+    }
+
+    #[test]
     fn cursor_screen_position_tracks_soft_wraps() {
         let mut editor = EditorState::new();
         editor.set_content("abcdefghij");
@@ -907,17 +911,14 @@ mod tests {
     }
 
     #[test]
-    fn top_right_label_includes_model_elapsed_and_context() {
-        let rendered = build_top_right_label(
-            "sonnet",
-            Some(Duration::from_secs(75)),
-            82_400,
-            1_000_000,
-            true,
+    fn bottom_left_label_uses_live_run_state() {
+        let rendered = build_bottom_left_label(
+            AnimationState::ExecutingTools { active_tools: 2 },
+            0,
+            AnimationLevel::Minimal,
+            false,
         );
         let text: String = rendered.into_iter().map(|span| span.content.into_owned()).collect();
-        assert!(text.contains("sonnet"));
-        assert!(text.contains("1m15s"));
-        assert!(text.contains("8%/1.0M"));
+        assert!(text.contains("working"));
     }
 }

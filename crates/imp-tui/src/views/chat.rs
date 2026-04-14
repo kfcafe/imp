@@ -213,7 +213,7 @@ pub fn summarize_user_text_for_display(text: &str) -> String {
     pasted_block_summary(text).unwrap_or_else(|| text.to_string())
 }
 
-fn pasted_block_summary(text: &str) -> Option<String> {
+pub fn pasted_block_summary(text: &str) -> Option<String> {
     let line_count = text.lines().count();
     if line_count < PASTED_SUMMARY_MIN_LINES {
         return None;

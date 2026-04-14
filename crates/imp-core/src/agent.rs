@@ -128,6 +128,7 @@ enum NextActionStopReason {
     NoProgress,
     RepeatedAction,
     UserBlocker,
+    ExecutionBlocked,
     DecompositionCompleted,
     WorkCompleted,
 }
@@ -665,6 +666,10 @@ impl Agent {
             return NextAction::Stop {
                 reason: NextActionStopReason::RepeatedAction,
             };
+        }
+
+        if let Some(reason) = tool_results_indicate_execution_blocker(tool_results, self.mode) {
+            return NextAction::Stop { reason };
         }
 
         if tool_results_indicate_work_completed(tool_results, self.mode) {
@@ -1266,6 +1271,59 @@ fn tool_results_indicate_repeated_action(tool_results: &[imp_llm::ToolResultMess
     })
 }
 
+fn tool_results_indicate_execution_blocker(
+    tool_results: &[imp_llm::ToolResultMessage],
+    mode: AgentMode,
+) -> Option<NextActionStopReason> {
+    if !matches!(mode, AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker) {
+        return None;
+    }
+
+    let saw_edit_like_success = tool_results.iter().any(|result| {
+        !result.is_error && matches!(result.tool_name.as_str(), "write" | "edit" | "multi_edit")
+    });
+
+    for result in tool_results {
+        let action = result.details.get("action").and_then(|v| v.as_str());
+
+        if action == Some("verify") && result.details.get("passed").and_then(|v| v.as_bool()) == Some(false) {
+            return Some(NextActionStopReason::ExecutionBlocked);
+        }
+
+        if result.tool_name == "ask" && !result.is_error {
+            return Some(NextActionStopReason::UserBlocker);
+        }
+
+        if result.tool_name == "bash" || result.tool_name == "shell" {
+            let exit_code = result.details.get("exit_code").and_then(|v| v.as_i64());
+            let timed_out = result.details.get("timed_out").and_then(|v| v.as_bool()) == Some(true);
+            let cancelled = result.details.get("cancelled").and_then(|v| v.as_bool()) == Some(true);
+            let command = result
+                .details
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let looks_like_check = command.contains("check")
+                || command.contains("test")
+                || command.contains("verify")
+                || command.contains("pytest")
+                || command.contains("cargo test")
+                || command.contains("cargo check");
+
+            if looks_like_check && (timed_out || cancelled || exit_code.is_some_and(|code| code != 0)) {
+                return Some(NextActionStopReason::ExecutionBlocked);
+            }
+
+            if saw_edit_like_success && (timed_out || cancelled || exit_code.is_some_and(|code| code != 0)) {
+                return Some(NextActionStopReason::ExecutionBlocked);
+            }
+        }
+    }
+
+    None
+}
+
 fn tool_results_indicate_work_completed(
     tool_results: &[imp_llm::ToolResultMessage],
     mode: AgentMode,
@@ -1274,21 +1332,51 @@ fn tool_results_indicate_work_completed(
         return false;
     }
 
-    tool_results.iter().any(|result| {
+    let mut saw_edit_like_success = false;
+    let mut saw_successful_check = false;
+
+    for result in tool_results {
         if result.is_error {
-            return false;
+            continue;
+        }
+
+        if matches!(result.tool_name.as_str(), "write" | "edit" | "multi_edit") {
+            saw_edit_like_success = true;
         }
 
         let action = result.details.get("action").and_then(|v| v.as_str());
-        let has_closed_unit = result.details.get("action").and_then(|v| v.as_str()) == Some("close")
-            || result.details.get("unit").and_then(|unit| unit.get("status")).and_then(|v| v.as_str()) == Some("closed");
+        let has_closed_unit = result
+            .details
+            .get("unit")
+            .and_then(|unit| unit.get("status"))
+            .and_then(|v| v.as_str())
+            == Some("closed");
+
+        if let Some(command) = result.details.get("command").and_then(|v| v.as_str()) {
+            let exit_code_ok = result.details.get("exit_code").and_then(|v| v.as_i64()) == Some(0);
+            let command_lower = command.to_ascii_lowercase();
+            let looks_like_check = command_lower.contains("check")
+                || command_lower.contains("test")
+                || command_lower.contains("verify")
+                || command_lower.contains("pytest")
+                || command_lower.contains("cargo test")
+                || command_lower.contains("cargo check");
+            if exit_code_ok && looks_like_check {
+                saw_successful_check = true;
+            }
+        }
 
         match action {
-            Some("close") => true,
-            Some("verify") if result.details.get("passed").and_then(|v| v.as_bool()) == Some(true) => true,
-            _ => has_closed_unit,
+            Some("close") => return true,
+            Some("verify") if result.details.get("passed").and_then(|v| v.as_bool()) == Some(true) => {
+                return true;
+            }
+            _ if has_closed_unit => return true,
+            _ => {}
         }
-    })
+    }
+
+    saw_edit_like_success && saw_successful_check
 }
 
 fn mana_review_stop_reason(
@@ -2059,6 +2147,82 @@ mod tests {
     }
 
     #[test]
+    fn tool_results_indicate_execution_blocker_detects_failed_verify() {
+        let result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_verify".to_string(),
+            tool_name: "mana".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "Verify failed".to_string(),
+            }],
+            is_error: true,
+            details: serde_json::json!({
+                "action": "verify",
+                "passed": false,
+                "exit_code": 1
+            }),
+            timestamp: 0,
+        };
+
+        assert_eq!(
+            tool_results_indicate_execution_blocker(&[result], AgentMode::Full),
+            Some(NextActionStopReason::ExecutionBlocked)
+        );
+    }
+
+    #[test]
+    fn tool_results_indicate_execution_blocker_detects_ask_tool_as_user_blocker() {
+        let result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_ask".to_string(),
+            tool_name: "ask".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "blue".to_string(),
+            }],
+            is_error: false,
+            details: serde_json::Value::Null,
+            timestamp: 0,
+        };
+
+        assert_eq!(
+            tool_results_indicate_execution_blocker(&[result], AgentMode::Full),
+            Some(NextActionStopReason::UserBlocker)
+        );
+    }
+
+    #[test]
+    fn tool_results_indicate_work_completed_detects_edit_plus_successful_check() {
+        let edit_result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_edit".to_string(),
+            tool_name: "edit".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "diff output".to_string(),
+            }],
+            is_error: false,
+            details: serde_json::json!({
+                "path": "/tmp/file.rs"
+            }),
+            timestamp: 0,
+        };
+        let check_result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_check".to_string(),
+            tool_name: "bash".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "ok".to_string(),
+            }],
+            is_error: false,
+            details: serde_json::json!({
+                "exit_code": 0,
+                "command": "cargo check -p imp-core"
+            }),
+            timestamp: 0,
+        };
+
+        assert!(tool_results_indicate_work_completed(
+            &[edit_result, check_result],
+            AgentMode::Full
+        ));
+    }
+
+    #[test]
     fn tool_results_indicate_work_completed_detects_closed_unit_details() {
         let result = imp_llm::ToolResultMessage {
             tool_call_id: "call_close".to_string(),
@@ -2787,6 +2951,41 @@ mod tests {
     }
 
     // ── Test 4: Cancel command mid-run ─────────────────────────────
+
+    #[tokio::test]
+    async fn execution_stops_after_failed_verify_tool_result_without_blocked_text() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_verify",
+                "mana",
+                serde_json::json!({"action": "verify", "id": "1"}),
+                100,
+                20,
+            ),
+            text_response("Verify failed.", 120, 20),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Full;
+        agent.tools.register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        agent.run("Verify the unit".to_string()).await.unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts, vec!["Verify the unit".to_string()]);
+    }
 
     #[tokio::test]
     async fn execution_stops_after_mana_close_tool_result_without_done_text() {

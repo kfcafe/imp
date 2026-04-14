@@ -1093,7 +1093,9 @@ impl App {
         let desired_editor_height = if let Some(state) = self.ask_state.as_ref() {
             state.prompt_height(editor_inner_width)
         } else {
-            self.editor.visual_line_count(editor_inner_width) as u16 + 2
+            self.editor
+                .visual_line_count_with_summary(editor_inner_width, true) as u16
+                + 2
         };
         let max_editor_height = area.height.saturating_sub(3).max(3);
         let editor_height = desired_editor_height.clamp(3, max_editor_height);
@@ -1258,9 +1260,17 @@ impl App {
             frame.render_widget(AskBar::new(state, &self.theme), editor_area);
         } else {
             let status_info = self.build_status_info();
+            let subagent_count = status_info
+                .extension_items
+                .get("subagents")
+                .or_else(|| status_info.extension_items.get("workers"))
+                .and_then(|text| text.split_whitespace().next())
+                .and_then(|n| n.parse::<u32>().ok());
             let editor = EditorView::new(&self.editor, &self.theme, self.thinking_level)
+                .summarize_paste(true)
                 .model(&self.model_name)
                 .identity(&status_info.cwd, &status_info.session_name)
+                .subagent_count(subagent_count)
                 .turn_elapsed(status_info.turn_elapsed)
                 .extension_items(&status_info.extension_items, status_info.peek)
                 .streaming(self.is_streaming)
