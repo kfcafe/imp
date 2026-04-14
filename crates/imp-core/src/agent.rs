@@ -129,6 +129,7 @@ enum NextActionStopReason {
     RepeatedAction,
     UserBlocker,
     DecompositionCompleted,
+    WorkCompleted,
 }
 
 /// The core agent — runs the ReAct loop (reason, act, observe).
@@ -672,6 +673,10 @@ impl Agent {
         }
 
         if let Some(reason) = planner_stop_reason(message, self.mode) {
+            return NextAction::Stop { reason };
+        }
+
+        if let Some(reason) = execution_stop_reason(message, self.mode) {
             return NextAction::Stop { reason };
         }
 
@@ -1258,6 +1263,29 @@ fn planner_stop_reason(
         return None;
     }
 
+    classify_stop_reason_from_text(message, true)
+}
+
+fn execution_stop_reason(
+    message: &AssistantMessage,
+    mode: AgentMode,
+) -> Option<NextActionStopReason> {
+    if !matches!(mode, AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker) {
+        return None;
+    }
+
+    match classify_stop_reason_from_text(message, false) {
+        Some(reason @ (NextActionStopReason::UserBlocker | NextActionStopReason::WorkCompleted)) => {
+            Some(reason)
+        }
+        _ => None,
+    }
+}
+
+fn classify_stop_reason_from_text(
+    message: &AssistantMessage,
+    planner_mode: bool,
+) -> Option<NextActionStopReason> {
     let text = assistant_message_text(message);
     if text.trim().is_empty() {
         return None;
@@ -1280,18 +1308,35 @@ fn planner_stop_reason(
         return Some(NextActionStopReason::UserBlocker);
     }
 
-    let decomposition_complete_signal = [
-        "externalized into mana",
-        "created the units",
-        "created child units",
-        "decomposition is complete",
-        "plan is complete",
-        "ready for handoff",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-    if decomposition_complete_signal {
-        return Some(NextActionStopReason::DecompositionCompleted);
+    if planner_mode {
+        let decomposition_complete_signal = [
+            "externalized into mana",
+            "created the units",
+            "created child units",
+            "decomposition is complete",
+            "plan is complete",
+            "ready for handoff",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+        if decomposition_complete_signal {
+            return Some(NextActionStopReason::DecompositionCompleted);
+        }
+    } else {
+        let work_complete_signal = [
+            "all done",
+            "done",
+            "completed",
+            "finished",
+            "implemented",
+            "fixed",
+            "handled",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+        if work_complete_signal {
+            return Some(NextActionStopReason::WorkCompleted);
+        }
     }
 
     None
@@ -2612,6 +2657,64 @@ mod tests {
     }
 
     // ── Test 4: Cancel command mid-run ─────────────────────────────
+
+    #[tokio::test]
+    async fn execution_stops_after_work_completed_text() {
+        let provider = Arc::new(MockProvider::new(vec![text_response(
+            "All done! Implemented the change and finished the task.",
+            100,
+            20,
+        )]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Full;
+
+        agent.run("Implement the change".to_string()).await.unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts, vec!["Implement the change".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn execution_stops_for_user_blocker_text() {
+        let provider = Arc::new(MockProvider::new(vec![text_response(
+            "Blocked: I need your input on which path to take before continuing.",
+            100,
+            20,
+        )]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Full;
+
+        agent.run("Implement the change".to_string()).await.unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts, vec!["Implement the change".to_string()]);
+    }
 
     #[tokio::test]
     async fn agent_follow_up_runs_after_current_work_finishes() {
