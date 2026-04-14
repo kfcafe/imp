@@ -134,56 +134,79 @@ enum NextActionStopReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PostTurnAssessment {
+struct RuntimeEvidence {
     repeated_action: bool,
     execution_stop_reason: Option<NextActionStopReason>,
     work_completed: bool,
-    mana_stop_reason: Option<NextActionStopReason>,
     no_progress: bool,
-    planner_text_stop_reason: Option<NextActionStopReason>,
-    execution_text_stop_reason: Option<NextActionStopReason>,
-    continue_prompt: Option<String>,
-    continue_reason: Option<ContinueReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManaEvidence {
+    stop_reason: Option<NextActionStopReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TextFallbackEvidence {
+    planner_stop_reason: Option<NextActionStopReason>,
+    execution_stop_reason: Option<NextActionStopReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContinueRecommendation {
+    prompt: String,
+    reason: ContinueReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PostTurnAssessment {
+    runtime: RuntimeEvidence,
+    mana: ManaEvidence,
+    text_fallback: TextFallbackEvidence,
+    continue_recommendation: Option<ContinueRecommendation>,
 }
 
 impl PostTurnAssessment {
     fn into_next_action(self) -> NextAction {
-        if self.repeated_action {
+        if self.runtime.repeated_action {
             return NextAction::Stop {
                 reason: NextActionStopReason::RepeatedAction,
             };
         }
 
-        if let Some(reason) = self.execution_stop_reason {
+        if let Some(reason) = self.runtime.execution_stop_reason {
             return NextAction::Stop { reason };
         }
 
-        if self.work_completed {
+        if self.runtime.work_completed {
             return NextAction::Stop {
                 reason: NextActionStopReason::WorkCompleted,
             };
         }
 
-        if let Some(reason) = self.mana_stop_reason {
+        if let Some(reason) = self.mana.stop_reason {
             return NextAction::Stop { reason };
         }
 
-        if self.no_progress {
+        if self.runtime.no_progress {
             return NextAction::Stop {
                 reason: NextActionStopReason::NoProgress,
             };
         }
 
-        if let Some(reason) = self.planner_text_stop_reason {
+        if let Some(reason) = self.text_fallback.planner_stop_reason {
             return NextAction::Stop { reason };
         }
 
-        if let Some(reason) = self.execution_text_stop_reason {
+        if let Some(reason) = self.text_fallback.execution_stop_reason {
             return NextAction::Stop { reason };
         }
 
-        if let (Some(prompt), Some(reason)) = (self.continue_prompt, self.continue_reason) {
-            return NextAction::Continue { prompt, reason };
+        if let Some(continue_recommendation) = self.continue_recommendation {
+            return NextAction::Continue {
+                prompt: continue_recommendation.prompt,
+                reason: continue_recommendation.reason,
+            };
         }
 
         NextAction::Stop {
@@ -741,40 +764,45 @@ impl Agent {
         let planner_text_stop_reason = planner_stop_reason(message, self.mode);
         let execution_text_stop_reason = execution_stop_reason(message, self.mode);
 
-        let (continue_prompt, continue_reason) = if should_queue_mana_externalization_follow_up(
+        let continue_recommendation = if should_queue_mana_externalization_follow_up(
             message,
             self.mode,
             self.has_mana_skill,
             self.queued_mana_externalization_nudge,
         ) {
-            (
-                Some(mana_externalization_follow_up_text().to_string()),
-                Some(ContinueReason::ExternalizationNeeded),
-            )
+            Some(ContinueRecommendation {
+                prompt: mana_externalization_follow_up_text().to_string(),
+                reason: ContinueReason::ExternalizationNeeded,
+            })
         } else if should_queue_confidence_continue_follow_up(
             message,
             self.mode,
             self.continue_policy,
             self.queued_confidence_continue_nudge,
         ) {
-            (
-                Some(confidence_continue_follow_up_text().to_string()),
-                Some(ContinueReason::HighConfidenceVisibleNextStep),
-            )
+            Some(ContinueRecommendation {
+                prompt: confidence_continue_follow_up_text().to_string(),
+                reason: ContinueReason::HighConfidenceVisibleNextStep,
+            })
         } else {
-            (None, None)
+            None
         };
 
         PostTurnAssessment {
-            repeated_action,
-            execution_stop_reason: runtime_execution_stop_reason,
-            work_completed,
-            mana_stop_reason,
-            no_progress,
-            planner_text_stop_reason,
-            execution_text_stop_reason,
-            continue_prompt,
-            continue_reason,
+            runtime: RuntimeEvidence {
+                repeated_action,
+                execution_stop_reason: runtime_execution_stop_reason,
+                work_completed,
+                no_progress,
+            },
+            mana: ManaEvidence {
+                stop_reason: mana_stop_reason,
+            },
+            text_fallback: TextFallbackEvidence {
+                planner_stop_reason: planner_text_stop_reason,
+                execution_stop_reason: execution_text_stop_reason,
+            },
+            continue_recommendation,
         }
     }
 
@@ -2202,15 +2230,23 @@ mod tests {
     #[test]
     fn post_turn_assessment_prefers_execution_blocker_over_completion() {
         let assessment = PostTurnAssessment {
-            repeated_action: false,
-            execution_stop_reason: Some(NextActionStopReason::ExecutionBlocked),
-            work_completed: true,
-            mana_stop_reason: Some(NextActionStopReason::DecompositionCompleted),
-            no_progress: false,
-            planner_text_stop_reason: Some(NextActionStopReason::DecompositionCompleted),
-            execution_text_stop_reason: Some(NextActionStopReason::WorkCompleted),
-            continue_prompt: Some("continue".to_string()),
-            continue_reason: Some(ContinueReason::HighConfidenceVisibleNextStep),
+            runtime: RuntimeEvidence {
+                repeated_action: false,
+                execution_stop_reason: Some(NextActionStopReason::ExecutionBlocked),
+                work_completed: true,
+                no_progress: false,
+            },
+            mana: ManaEvidence {
+                stop_reason: Some(NextActionStopReason::DecompositionCompleted),
+            },
+            text_fallback: TextFallbackEvidence {
+                planner_stop_reason: Some(NextActionStopReason::DecompositionCompleted),
+                execution_stop_reason: Some(NextActionStopReason::WorkCompleted),
+            },
+            continue_recommendation: Some(ContinueRecommendation {
+                prompt: "continue".to_string(),
+                reason: ContinueReason::HighConfidenceVisibleNextStep,
+            }),
         };
 
         assert_eq!(
@@ -2224,15 +2260,21 @@ mod tests {
     #[test]
     fn post_turn_assessment_emits_continue_when_no_stop_reason_exists() {
         let assessment = PostTurnAssessment {
-            repeated_action: false,
-            execution_stop_reason: None,
-            work_completed: false,
-            mana_stop_reason: None,
-            no_progress: false,
-            planner_text_stop_reason: None,
-            execution_text_stop_reason: None,
-            continue_prompt: Some("continue".to_string()),
-            continue_reason: Some(ContinueReason::HighConfidenceVisibleNextStep),
+            runtime: RuntimeEvidence {
+                repeated_action: false,
+                execution_stop_reason: None,
+                work_completed: false,
+                no_progress: false,
+            },
+            mana: ManaEvidence { stop_reason: None },
+            text_fallback: TextFallbackEvidence {
+                planner_stop_reason: None,
+                execution_stop_reason: None,
+            },
+            continue_recommendation: Some(ContinueRecommendation {
+                prompt: "continue".to_string(),
+                reason: ContinueReason::HighConfidenceVisibleNextStep,
+            }),
         };
 
         assert_eq!(
