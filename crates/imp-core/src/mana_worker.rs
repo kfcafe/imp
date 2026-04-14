@@ -20,13 +20,17 @@
 
 use std::path::{Path, PathBuf};
 
+use imp_llm::ThinkingLevel;
 use mana_core::api;
+use tokio::process::Command as TokioCommand;
 pub use tower_contracts::worker::{
     WorkerAssignment, WorkerAttempt, WorkerResult, WorkerStatus,
 };
 
 use crate::context_prefill::{self, AssembledContext, FileSpec, PrefillConfig};
-use crate::system_prompt::{Attempt, Dependency, TaskContext};
+use crate::imp_session::{ImpSession, SessionChoice, SessionOptions};
+use crate::mana_prompt_context;
+use crate::system_prompt::{Attempt, Dependency, Fact, TaskContext};
 
 // ---------------------------------------------------------------------------
 // Shared contract re-exports
@@ -256,6 +260,270 @@ pub fn build_task_context(
         context_paths,
         constraints: derive_task_constraints(assignment),
     }
+}
+
+pub struct WorkerRunOptions {
+    pub cwd: PathBuf,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub api_key: Option<String>,
+    pub thinking: Option<ThinkingLevel>,
+    pub max_turns: Option<u32>,
+    pub max_tokens: Option<u32>,
+    pub system_prompt: Option<String>,
+    pub no_tools: bool,
+    pub mana_dir_override: Option<PathBuf>,
+    pub defer_verify: bool,
+    #[allow(clippy::type_complexity)]
+    pub lua_loader: Option<Box<dyn FnOnce(&mut crate::tools::ToolRegistry) + Send>>,
+}
+
+pub struct PreparedWorkerRun {
+    pub assignment: WorkerAssignment,
+    pub task_context: TaskContext,
+    pub facts: Vec<Fact>,
+    pub prefilled_files: Vec<PathBuf>,
+    pub prefill_warnings: Vec<String>,
+    pub estimated_prefill_tokens: usize,
+    pub prompt: String,
+    pub session: ImpSession,
+    defer_verify: bool,
+}
+
+pub struct WorkerRunOutcome {
+    pub assignment: WorkerAssignment,
+    pub result: WorkerResult,
+    pub verify_passed: Option<bool>,
+    pub closed_after_verify: bool,
+    pub prefilled_files: Vec<PathBuf>,
+    pub prefill_warnings: Vec<String>,
+    pub estimated_prefill_tokens: usize,
+}
+
+pub async fn prepare_worker_run(
+    assignment: WorkerAssignment,
+    options: WorkerRunOptions,
+) -> Result<PreparedWorkerRun, Box<dyn std::error::Error>> {
+    let assembled = assemble_prefill(&assignment, &options.cwd);
+    let task_context = build_task_context(&assignment);
+    let facts = options
+        .mana_dir_override
+        .clone()
+        .or_else(|| mana_prompt_context::nearest_mana_dir(&options.cwd))
+        .map(|mana_dir| {
+            mana_prompt_context::load_task_prompt_context(&mana_dir, &task_context.context_paths)
+                .facts
+        })
+        .unwrap_or_default();
+
+    let session_options = SessionOptions {
+        cwd: options.cwd,
+        model: options.model,
+        provider: options.provider,
+        api_key: options.api_key,
+        thinking: options.thinking,
+        max_turns: options.max_turns,
+        max_tokens: options.max_tokens,
+        system_prompt: options.system_prompt,
+        no_tools: options.no_tools,
+        session: SessionChoice::InMemory,
+        task: Some(task_context.clone()),
+        facts: facts.clone(),
+        context_prefill: assembled.messages,
+        lua_loader: options.lua_loader,
+        ..Default::default()
+    };
+
+    let session = ImpSession::create(session_options)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    let prompt = build_task_prompt(&assignment);
+
+    Ok(PreparedWorkerRun {
+        assignment,
+        task_context,
+        facts,
+        prefilled_files: assembled.included_files,
+        prefill_warnings: assembled.warnings,
+        estimated_prefill_tokens: assembled.estimated_tokens,
+        prompt,
+        session,
+        defer_verify: options.defer_verify,
+    })
+}
+
+pub async fn finalize_worker_run(
+    prepared: PreparedWorkerRun,
+) -> Result<WorkerRunOutcome, Box<dyn std::error::Error>> {
+    let PreparedWorkerRun {
+        assignment,
+        prefilled_files,
+        prefill_warnings,
+        estimated_prefill_tokens,
+        session,
+        defer_verify,
+        ..
+    } = prepared;
+
+    let model = Some(session.model().meta.id.clone());
+    let tool_count = session
+        .session_manager()
+        .get_active_messages()
+        .iter()
+        .filter(|message| matches!(message, imp_llm::Message::ToolResult(_)))
+        .count();
+    let turns = session
+        .session_manager()
+        .get_active_messages()
+        .iter()
+        .filter(|message| matches!(message, imp_llm::Message::Assistant(_)))
+        .count();
+
+    let batch_verify = defer_verify || std::env::var("MANA_BATCH_VERIFY").is_ok();
+    let mut verify_passed = None;
+    let mut closed_after_verify = false;
+    let mut status = if assignment
+        .verify
+        .as_deref()
+        .map(str::trim)
+        .filter(|verify| !verify.is_empty())
+        .is_some()
+    {
+        WorkerStatus::AwaitingVerify
+    } else {
+        WorkerStatus::Completed
+    };
+    let mut error = None;
+
+    if !batch_verify {
+        if let Some(verify) = assignment
+            .verify
+            .as_deref()
+            .map(str::trim)
+            .filter(|verify| !verify.is_empty())
+        {
+            let passed = run_verify_command(verify, &assignment.workspace_root).await?;
+            verify_passed = Some(passed);
+            if passed {
+                status = WorkerStatus::Completed;
+                let close_result = std::process::Command::new("mana")
+                    .args(["close", &assignment.id])
+                    .current_dir(&assignment.workspace_root)
+                    .output();
+                if let Ok(output) = close_result {
+                    if output.status.success() {
+                        closed_after_verify = true;
+                    }
+                }
+            } else {
+                status = WorkerStatus::Failed;
+                error = Some(format!("Verify command failed: {verify}"));
+            }
+        }
+    }
+
+    let summary = Some(match status {
+        WorkerStatus::Completed => {
+            if closed_after_verify {
+                format!("Unit {} completed and closed after verify pass.", assignment.id)
+            } else if verify_passed == Some(true) {
+                format!("Unit {} completed successfully.", assignment.id)
+            } else {
+                format!("Unit {} completed.", assignment.id)
+            }
+        }
+        WorkerStatus::AwaitingVerify => {
+            format!("Unit {} completed and is awaiting verify.", assignment.id)
+        }
+        WorkerStatus::Failed => {
+            if verify_passed == Some(false) {
+                format!("Unit {} finished but verify failed.", assignment.id)
+            } else {
+                format!("Unit {} failed.", assignment.id)
+            }
+        }
+        WorkerStatus::Blocked => format!("Unit {} is blocked.", assignment.id),
+        WorkerStatus::Cancelled => format!("Unit {} was cancelled.", assignment.id),
+    });
+
+    let result = WorkerResult {
+        unit_id: assignment.id.clone(),
+        status,
+        summary,
+        error,
+        tool_count,
+        turns,
+        tokens: None,
+        cost: None,
+        model,
+    };
+
+    Ok(WorkerRunOutcome {
+        assignment,
+        result,
+        verify_passed,
+        closed_after_verify,
+        prefilled_files,
+        prefill_warnings,
+        estimated_prefill_tokens,
+    })
+}
+
+pub async fn run_worker_assignment(
+    assignment: WorkerAssignment,
+    options: WorkerRunOptions,
+) -> Result<WorkerRunOutcome, Box<dyn std::error::Error>> {
+    let mut prepared = prepare_worker_run(assignment, options).await?;
+    prepared
+        .session
+        .prompt(&prepared.prompt)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    prepared
+        .session
+        .wait()
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    finalize_worker_run(prepared).await
+}
+
+async fn run_verify_command(
+    verify: &str,
+    cwd: &Path,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let output = run_shell_command(verify, cwd).output().await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        if !stderr.trim().is_empty() {
+            eprintln!("{stderr}");
+        } else if !stdout.trim().is_empty() {
+            eprintln!("{stdout}");
+        }
+    }
+
+    Ok(output.status.success())
+}
+
+fn run_shell_command(command: &str, cwd: &Path) -> TokioCommand {
+    #[cfg(target_os = "windows")]
+    let mut shell = {
+        let mut shell = TokioCommand::new("cmd");
+        shell.args(["/C", command]);
+        shell
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let mut shell = {
+        let mut shell = TokioCommand::new("sh");
+        shell.args(["-lc", command]);
+        shell
+    };
+
+    shell.current_dir(cwd);
+    shell
 }
 
 /// Build a task prompt string from a worker assignment.

@@ -112,7 +112,6 @@ use imp_llm::{truncate_chars_with_suffix, Message, Model, StreamEvent};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use imp_tui::animation::{
     activity_label as tui_activity_label, ActivitySurface, AnimationState,
@@ -728,9 +727,9 @@ async fn main() {
         return;
     }
 
-    // Default interactive mode: CLI chat shell
+    // Default interactive mode: fullscreen TUI
     if cli.mode == "interactive" {
-        if let Err(e) = run_chat_mode(&cli).await {
+        if let Err(e) = run_interactive(&cli).await {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
@@ -1437,28 +1436,7 @@ async fn run_headless_mode(
     emit_startup_timing(&mut startup_timer, StartupStage::ProviderReady);
     emit_startup_timing(&mut startup_timer, StartupStage::ApiKeyResolved);
 
-    // Assemble context prefill from the assignment's file references.
-    let assembled = imp_core::mana_worker::assemble_prefill(&assignment, &cwd);
-    for warning in &assembled.warnings {
-        eprintln!("[imp] context prefill: {warning}");
-    }
-    if !assembled.included_files.is_empty() {
-        eprintln!(
-            "[imp] prefilled {} files (~{} tokens)",
-            assembled.included_files.len(),
-            assembled.estimated_tokens
-        );
-    }
-    let context_prefill = assembled.messages;
-
-    let task_context = imp_core::mana_worker::build_task_context(&assignment);
-    let task_facts = mana_dir_override
-        .map(Path::to_path_buf)
-        .or_else(|| imp_core::mana_prompt_context::nearest_mana_dir(&cwd))
-        .map(|mana_dir| imp_core::mana_prompt_context::load_task_prompt_context(&mana_dir, &task_context.context_paths).facts)
-        .unwrap_or_default();
-
-    let mut options = SessionOptions {
+    let options = imp_core::mana_worker::WorkerRunOptions {
         cwd: cwd.clone(),
         model: cli.model.clone().or_else(|| assignment.model.clone()),
         provider: cli.provider.clone(),
@@ -1471,30 +1449,29 @@ async fn run_headless_mode(
         max_tokens: cli.max_tokens.or(config.max_tokens),
         system_prompt: cli.system_prompt.clone(),
         no_tools: cli.no_tools,
-        session: SessionChoice::InMemory,
-        task: Some(task_context),
-        facts: task_facts,
-        context_prefill,
-        ..Default::default()
+        mana_dir_override: mana_dir_override.map(Path::to_path_buf),
+        defer_verify,
+        lua_loader: build_lua_loader(cli.no_tools, cwd.clone()),
     };
 
-    if !cli.no_tools {
-        let lua_cwd = cwd.clone();
-        options.lua_loader = Some(Box::new(move |tools| {
-            let user_config_dir = Config::user_config_dir();
-            imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
-        }));
-    }
-
-    let mut session = ImpSession::create(options)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    let mut prepared = imp_core::mana_worker::prepare_worker_run(assignment, options).await?;
     emit_startup_timing(&mut startup_timer, StartupStage::AgentBuilt);
 
-    let prompt = imp_core::mana_worker::build_task_prompt(&assignment);
+    for warning in &prepared.prefill_warnings {
+        eprintln!("[imp] context prefill: {warning}");
+    }
+    if !prepared.prefilled_files.is_empty() {
+        eprintln!(
+            "[imp] prefilled {} files (~{} tokens)",
+            prepared.prefilled_files.len(),
+            prepared.estimated_prefill_tokens
+        );
+    }
+
     emit_startup_timing(&mut startup_timer, StartupStage::PromptReady);
-    session
-        .prompt(&prompt)
+    prepared
+        .session
+        .prompt(&prepared.prompt)
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
     emit_startup_timing(&mut startup_timer, StartupStage::RunLoopStarted);
@@ -1502,7 +1479,7 @@ async fn run_headless_mode(
     let output_mode = determine_headless_output_mode(&cli.mode, io::stdout().is_terminal());
     let mut printed_trailing_newline = false;
 
-    while let Some(event) = session.recv_event().await {
+    while let Some(event) = prepared.session.recv_event().await {
         match output_mode {
             HeadlessOutputMode::Json => print_json_event(&event)?,
             HeadlessOutputMode::Human => print_headless_human_event(
@@ -1514,44 +1491,33 @@ async fn run_headless_mode(
         }
     }
 
-    session
+    prepared
+        .session
         .wait()
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
-    // When MANA_BATCH_VERIFY is set the legacy compatibility runner handles
-    // verification after all agents complete. Skip inline verify and exit 0 so
-    // compatibility flows can batch the shared verify commands once per unique
-    // command string.
-    let batch_verify = defer_verify || std::env::var("MANA_BATCH_VERIFY").is_ok();
-    if !batch_verify {
-        if let Some(verify) = assignment
-            .verify
-            .as_deref()
-            .map(str::trim)
-            .filter(|verify| !verify.is_empty())
-        {
-            let passed = run_verify_command(verify, &assignment.workspace_root).await?;
-            if passed {
-                // Auto-close the unit on verify pass
-                let close_result = std::process::Command::new("mana")
-                    .args(["close", &assignment.id])
-                    .current_dir(&assignment.workspace_root)
-                    .output();
-                match close_result {
-                    Ok(output) if output.status.success() => {
-                        eprintln!("[imp] Unit {} closed (verify passed)", assignment.id);
-                    }
-                    _ => {
-                        eprintln!("[imp] Verify passed but failed to close unit {}", assignment.id);
-                    }
-                }
-            }
-            return Ok(passed);
-        }
+    let outcome = imp_core::mana_worker::finalize_worker_run(prepared).await?;
+    Ok(outcome.verify_passed.unwrap_or(true))
+}
+
+fn build_lua_loader(
+    no_tools: bool,
+    cwd: PathBuf,
+) -> Option<Box<dyn FnOnce(&mut imp_core::tools::ToolRegistry) + Send>> {
+    if no_tools {
+        return None;
     }
 
-    Ok(true)
+    fn init_lua_tools(
+        cwd: PathBuf,
+        tools: &mut imp_core::tools::ToolRegistry,
+    ) {
+        let user_config_dir = Config::user_config_dir();
+        imp_lua::init_lua_extensions(&user_config_dir, Some(&cwd), tools);
+    }
+
+    Some(Box::new(move |tools| init_lua_tools(cwd, tools)))
 }
 
 fn emit_startup_timing(timer: &mut StartupTimer, stage: StartupStage) {
@@ -2399,42 +2365,6 @@ async fn emit_protocol_error(stdout_tx: &mpsc::Sender<Value>, error: impl Into<S
             "error": error.into(),
         }))
         .await;
-}
-
-async fn run_verify_command(verify: &str, cwd: &Path) -> Result<bool, Box<dyn std::error::Error>> {
-    let output = run_shell_command(verify, cwd).output().await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        if !stderr.trim().is_empty() {
-            eprintln!("{stderr}");
-        } else if !stdout.trim().is_empty() {
-            eprintln!("{stdout}");
-        }
-    }
-
-    Ok(output.status.success())
-}
-
-fn run_shell_command(command: &str, cwd: &Path) -> TokioCommand {
-    #[cfg(target_os = "windows")]
-    let mut shell = {
-        let mut shell = TokioCommand::new("cmd");
-        shell.args(["/C", command]);
-        shell
-    };
-
-    #[cfg(not(target_os = "windows"))]
-    let mut shell = {
-        let mut shell = TokioCommand::new("sh");
-        shell.args(["-lc", command]);
-        shell
-    };
-
-    shell.current_dir(cwd);
-    shell
 }
 
 async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -3370,9 +3300,14 @@ fn print_chat_status_detail(session: &ImpSession) {
         .path()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "(in-memory)".to_string());
-    println!(
-        "status:\n  project    {project}\n  model      {model}\n  provider   {provider}\n  thinking   {thinking}\n  session    {title}\n  session_id {session_id}\n  path       {path}"
-    );
+    println!("Status");
+    println!("  project     {project}");
+    println!("  model       {model}");
+    println!("  provider    {provider}");
+    println!("  thinking    {thinking}");
+    println!("  session     {title}");
+    println!("  session id  {session_id}");
+    println!("  path        {path}");
 }
 
 async fn build_chat_session(
@@ -3465,7 +3400,7 @@ async fn execute_chat_shell_command(
                 }
                 _ => {
                     println!(
-                        "Shell commands:\n  :help [topic]      Show commands and quick guidance\n  :status            Show current shell/session status\n  :new               Start a fresh session\n  :resume            Continue the most recent session for this cwd\n  :compact           Compact older context (planned)\n  :settings          Edit a guided subset of imp settings\n  :personality       Edit soul/personality tunables and source\n  :setup             Run the setup wizard\n  :view <area>       Open `imp view` for sessions, tree, logs, or checkpoints\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nCompatibility: slash-prefixed forms like `/help` and `/view` still work here during migration, but `:` is the preferred shell grammar."
+                        "Shell commands\n  :help [topic]      Show commands and quick guidance\n  :status            Show current shell/session status\n  :new               Start a fresh session\n  :resume            Continue the most recent session for this cwd\n  :compact           Compact older context (planned)\n  :settings          Edit a guided subset of imp settings\n  :personality       Edit soul/personality tunables and source\n  :setup             Run the setup wizard\n  :view <area>       Open `imp view` for sessions, tree, logs, or checkpoints\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nCompatibility\n  Slash-prefixed forms like `/help` and `/view` still work during migration,\n  but `:` is the preferred shell grammar."
                     );
                 }
             }
@@ -3495,7 +3430,10 @@ async fn execute_chat_shell_command(
         }
         ChatShellCommand::Compact => {
             println!("Compaction isn't available in the shell yet.");
-            println!("For now, use `imp tui` or inspect session history with `imp view sessions`. A shell-native compaction flow is planned.");
+            println!(
+                "For now, use `imp tui` or inspect session history with `imp view sessions`."
+            );
+            println!("A shell-native compaction flow is planned.");
             Ok(true)
         }
         ChatShellCommand::Settings => {
@@ -3646,7 +3584,7 @@ async fn run_chat_prompt(
                     clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
                     if !text.is_empty() {
                         eprintln!("error: {}", truncate_chars_with_suffix(&text, 160, "…"));
-                        eprintln!("hint: deeper log viewing is planned under `imp view logs`.");
+                        eprintln!("next: deeper log viewing is planned under `imp view logs`.");
                     }
                 }
             }
@@ -3686,7 +3624,8 @@ async fn run_chat_prompt(
 async fn run_chat_mode(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_chat_session(cli, shell_session_choice(cli)).await?;
 
-    println!("imp chat — use :help for commands, Ctrl-D to exit.");
+    println!("imp chat");
+    println!("  Use :help for commands. Ctrl-D exits.");
 
     loop {
         print_chat_status(&session);

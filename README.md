@@ -9,7 +9,7 @@ brew tap kfcafe/tap && brew install imp
 ## Quick start
 
 ```bash
-# Start the CLI-first interactive chat shell
+# Open the fullscreen cockpit
 imp
 
 # Start the CLI-first interactive chat shell explicitly
@@ -61,8 +61,8 @@ imp is the native worker/runtime and orchestrator designed to use mana well. In 
 
 ## TUI
 
-`imp` now opens the CLI-first interactive chat shell by default.
-Use `imp tui` to enter the fullscreen cockpit explicitly, and use `imp chat` if you want to spell the shell path explicitly.
+`imp` opens the fullscreen cockpit by default.
+Use `imp chat` for the CLI-first interactive shell, or `imp tui` if you want to spell the fullscreen path explicitly.
 
 The interactive terminal UI gives you:
 

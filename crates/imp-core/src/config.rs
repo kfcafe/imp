@@ -48,7 +48,7 @@ impl AgentMode {
                 "memory",
                 "ask",
             ],
-            AgentMode::Orchestrator => &["read", "scan", "web", "session_search", "mana", "ask"],
+            AgentMode::Orchestrator => &["read", "scan", "web", "session_search", "mana", "ask", "imp"],
             AgentMode::Planner => &["read", "scan", "web", "session_search", "mana", "ask"],
             AgentMode::Reviewer => &["read", "scan", "web", "session_search", "ask"],
             AgentMode::Auditor => &["read", "scan", "web", "session_search", "mana"],
@@ -1252,6 +1252,7 @@ model = "sonnet"
         assert!(mode.allows_tool("session_search"));
         assert!(mode.allows_tool("mana"));
         assert!(mode.allows_tool("ask"));
+        assert!(mode.allows_tool("imp"));
     }
 
     #[test]
@@ -1261,6 +1262,18 @@ model = "sonnet"
         assert!(!mode.allows_tool("edit"));
         assert!(!mode.allows_tool("multi_edit"));
         assert!(!mode.allows_tool("bash"));
+    }
+
+    #[test]
+    fn non_orchestrator_modes_block_imp() {
+        for mode in [
+            AgentMode::Worker,
+            AgentMode::Planner,
+            AgentMode::Reviewer,
+            AgentMode::Auditor,
+        ] {
+            assert!(!mode.allows_tool("imp"), "mode {mode:?} should block imp");
+        }
     }
 
     #[test]
