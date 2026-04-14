@@ -174,6 +174,7 @@ mod tests {
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
         }
     }
 

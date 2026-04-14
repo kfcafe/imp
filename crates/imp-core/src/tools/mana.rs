@@ -960,11 +960,13 @@ fn spawn_background_run(
                 )
                 .await;
                 ui.notify(&summary, NotifyLevel::Info).await;
-                let _ = command_tx
-                    .send(crate::agent::AgentCommand::FollowUp(
-                        make_follow_up_summary(&scope, &view),
-                    ))
-                    .await;
+                if !ui.has_ui() {
+                    let _ = command_tx
+                        .send(crate::agent::AgentCommand::FollowUp(
+                            make_follow_up_summary(&scope, &view),
+                        ))
+                        .await;
+                }
                 let ui_clear = ui.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(12)).await;
@@ -979,11 +981,13 @@ fn spawn_background_run(
                 ui.set_widget("mana", Some(mana_widget_lines(message.clone(), None)))
                     .await;
                 ui.notify(&message, NotifyLevel::Error).await;
-                let _ = command_tx
-                    .send(crate::agent::AgentCommand::FollowUp(format!(
-                        "Native mana orchestration failed for {scope}: {err}. Inspect with mana(action=\"run_state\") or mana(action=\"logs\", run_id=\"{run_id}\")."
-                    )))
-                    .await;
+                if !ui.has_ui() {
+                    let _ = command_tx
+                        .send(crate::agent::AgentCommand::FollowUp(format!(
+                            "Native mana orchestration failed for {scope}: {err}. Inspect with mana(action=\"run_state\") or mana(action=\"logs\", run_id=\"{run_id}\")."
+                        )))
+                        .await;
+                }
             }
             Err(join_err) => {
                 let message = format!("mana orchestration: {scope} task failed: {join_err}");
@@ -992,11 +996,13 @@ fn spawn_background_run(
                 ui.set_widget("mana", Some(mana_widget_lines(message.clone(), None)))
                     .await;
                 ui.notify(&message, NotifyLevel::Error).await;
-                let _ = command_tx
-                    .send(crate::agent::AgentCommand::FollowUp(format!(
-                        "Native mana orchestration background task failed for {scope}: {join_err}. Inspect with mana(action=\"run_state\") or mana(action=\"logs\", run_id=\"{run_id}\")."
-                    )))
-                    .await;
+                if !ui.has_ui() {
+                    let _ = command_tx
+                        .send(crate::agent::AgentCommand::FollowUp(format!(
+                            "Native mana orchestration background task failed for {scope}: {join_err}. Inspect with mana(action=\"run_state\") or mana(action=\"logs\", run_id=\"{run_id}\")."
+                        )))
+                        .await;
+                }
             }
         }
     });
@@ -2385,6 +2391,7 @@ mod tests {
             mode: crate::config::AgentMode::from_name(mode_name)
                 .unwrap_or(crate::config::AgentMode::Full),
             read_max_lines: 500,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
         };
 
         let tool = ManaTool::default();
@@ -2446,6 +2453,7 @@ mod tests {
             file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
             mode,
             read_max_lines: 500,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
         };
         (ctx, tempfile::tempdir().unwrap())
     }
@@ -2482,6 +2490,7 @@ mod tests {
             file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
             mode,
             read_max_lines: 500,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
         };
         (ctx, tempfile::tempdir().unwrap(), widgets)
     }
@@ -2696,6 +2705,7 @@ mod tests {
             file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
         };
         let tool = ManaTool::default();
         let reopened = tool.execute("call_reopen", json!({ "action": "reopen", "id": "1" }), ctx).await.unwrap();
@@ -2722,6 +2732,7 @@ mod tests {
             file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
         };
         let verify = tool.execute("call_verify", json!({ "action": "verify", "id": "1" }), ctx2).await.unwrap();
         assert_eq!(verify.details["passed"], true);
@@ -2743,6 +2754,7 @@ mod tests {
             file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
         };
         let fact = tool.execute("call_fact", json!({ "action": "fact_create", "fact_title": "Auth fact", "verify": "test -d .mana", "description": "fact body", "ttl_days": 7 }), ctx3).await.unwrap();
         assert_eq!(fact.details["unit"]["unit_type"], "fact");
@@ -2844,6 +2856,7 @@ mod tests {
             file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -2886,6 +2899,7 @@ mod tests {
             file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -3089,7 +3103,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_run_enqueues_follow_up_on_completion() {
+    async fn background_run_enqueues_follow_up_on_completion_without_ui() {
         let dir = tempfile::tempdir().unwrap();
         let mana_dir = dir.path().join(".mana");
         std::fs::create_dir_all(&mana_dir).unwrap();
@@ -3113,6 +3127,7 @@ mod tests {
             file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
         };
 
         let tool = ManaTool::default();
@@ -3139,6 +3154,36 @@ mod tests {
                 );
             }
             other => panic!("expected follow-up, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn background_run_with_ui_does_not_enqueue_follow_up_on_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep, _widgets) = ctx_with_ui(dir.path(), crate::config::AgentMode::Full);
+        let tool = ManaTool::default();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let ctx = ToolContext {
+            command_tx: cmd_tx,
+            ..ctx
+        };
+
+        let _ = tool
+            .execute(
+                "call_bg_follow_up_ui",
+                json!({ "action": "run", "background": true, "dry_run": true }),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        let follow_up = tokio::time::timeout(std::time::Duration::from_millis(700), cmd_rx.recv())
+            .await;
+        match follow_up {
+            Err(_) | Ok(None) => {}
+            Ok(Some(msg)) => panic!(
+                "UI mode should rely on widget/status instead of queueing duplicate follow-up chat text, got: {msg:?}"
+            ),
         }
     }
 

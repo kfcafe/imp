@@ -1082,7 +1082,7 @@ fn should_queue_mana_externalization_follow_up(
 }
 
 fn mana_externalization_follow_up_text() -> &'static str {
-    "Before you continue: externalize the durable plan or decomposition you just described into mana now. Create or update the relevant unit(s) with native mana actions, prefer root scope for cross-project work, and keep the delta visible."
+    "Before you continue: externalize the durable plan or decomposition you just described into mana now. Create or update the relevant unit(s) with native mana actions, prefer root scope for cross-project work, and avoid extra chat restatement when the mana tool/UI already makes the delta obvious."
 }
 
 fn should_queue_confidence_continue_follow_up(
@@ -1144,7 +1144,7 @@ fn should_queue_confidence_continue_follow_up(
 }
 
 fn confidence_continue_follow_up_text() -> &'static str {
-    "Confidence is high and the mana delta is already visible. Continue to the next small, well-bounded step now using native mana-backed workflow, unless a consequential decision or blocker appears."
+    "Confidence is high and the mana delta is already visible. Continue to the next small, well-bounded step now using native mana-backed workflow, unless a consequential decision or blocker appears. Do not re-summarize the same visible mana change in chat unless new context needs to be called out."
 }
 
 /// Build an AssistantMessage from accumulated stream parts while preserving
