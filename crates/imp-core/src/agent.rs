@@ -105,6 +105,28 @@ pub enum AgentCommand {
     FollowUp(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NextAction {
+    Continue {
+        prompt: String,
+        reason: ContinueReason,
+    },
+    Stop {
+        reason: NextActionStopReason,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContinueReason {
+    ExternalizationNeeded,
+    HighConfidenceVisibleNextStep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NextActionStopReason {
+    NoAutomaticFollowUp,
+}
+
 /// The core agent — runs the ReAct loop (reason, act, observe).
 pub struct Agent {
     pub model: Model,
@@ -566,24 +588,10 @@ impl Agent {
                     mana_review,
                 })
                 .await;
-                if should_queue_mana_externalization_follow_up(
-                    &msg,
-                    self.mode,
-                    self.has_mana_skill,
-                    self.queued_mana_externalization_nudge,
-                ) {
-                    queued_follow_ups.push_back(mana_externalization_follow_up_text().to_string());
-                    self.queued_mana_externalization_nudge = true;
-                }
-                if should_queue_confidence_continue_follow_up(
-                    &msg,
-                    self.mode,
-                    self.continue_policy,
-                    self.queued_confidence_continue_nudge,
-                ) {
-                    queued_follow_ups.push_back(confidence_continue_follow_up_text().to_string());
-                    self.queued_confidence_continue_nudge = true;
-                }
+
+                let next_action = self.decide_next_action(&msg, false);
+                self.enqueue_next_action(&mut queued_follow_ups, next_action);
+
                 if let Some(follow_up) = queued_follow_ups.pop_front() {
                     self.messages.push(Message::user(&follow_up));
                     turn += 1;
@@ -607,15 +615,8 @@ impl Agent {
             })
             .await;
 
-            if should_queue_confidence_continue_follow_up(
-                &msg,
-                self.mode,
-                self.continue_policy,
-                self.queued_confidence_continue_nudge,
-            ) {
-                queued_follow_ups.push_back(confidence_continue_follow_up_text().to_string());
-                self.queued_confidence_continue_nudge = true;
-            }
+            let next_action = self.decide_next_action(&msg, true);
+            self.enqueue_next_action(&mut queued_follow_ups, next_action);
 
             if let Some(follow_up) = queued_follow_ups.pop_front() {
                 self.messages.push(Message::user(&follow_up));
@@ -636,6 +637,58 @@ impl Agent {
         }
 
         Ok(())
+    }
+
+    fn decide_next_action(&self, message: &AssistantMessage, used_tools: bool) -> NextAction {
+        if should_queue_mana_externalization_follow_up(
+            message,
+            self.mode,
+            self.has_mana_skill,
+            self.queued_mana_externalization_nudge,
+        ) {
+            return NextAction::Continue {
+                prompt: mana_externalization_follow_up_text().to_string(),
+                reason: ContinueReason::ExternalizationNeeded,
+            };
+        }
+
+        if should_queue_confidence_continue_follow_up(
+            message,
+            self.mode,
+            self.continue_policy,
+            self.queued_confidence_continue_nudge,
+        ) {
+            return NextAction::Continue {
+                prompt: confidence_continue_follow_up_text().to_string(),
+                reason: ContinueReason::HighConfidenceVisibleNextStep,
+            };
+        }
+
+        let _ = used_tools;
+        NextAction::Stop {
+            reason: NextActionStopReason::NoAutomaticFollowUp,
+        }
+    }
+
+    fn enqueue_next_action(
+        &mut self,
+        queued_follow_ups: &mut std::collections::VecDeque<String>,
+        next_action: NextAction,
+    ) {
+        match next_action {
+            NextAction::Continue { prompt, reason } => {
+                match reason {
+                    ContinueReason::ExternalizationNeeded => {
+                        self.queued_mana_externalization_nudge = true;
+                    }
+                    ContinueReason::HighConfidenceVisibleNextStep => {
+                        self.queued_confidence_continue_nudge = true;
+                    }
+                }
+                queued_follow_ups.push_back(prompt);
+            }
+            NextAction::Stop { .. } => {}
+        }
     }
 
     async fn emit(&self, event: AgentEvent) {
