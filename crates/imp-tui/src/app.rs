@@ -28,7 +28,7 @@ use imp_llm::{
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Clear};
 use ratatui::Frame;
 
 use crate::animation::AnimationState;
@@ -43,7 +43,7 @@ use crate::turn_tracker::TurnTracker;
 use crate::views::ask_bar::AskState;
 use crate::views::chat::{
     build_chat_render_data, build_text_surface_from_lines, clamped_scroll_offset_for_total_lines,
-    summarize_user_text_for_display, DisplayMessage, MessageRole, RenderedChatView,
+    DisplayMessage, MessageRole, RenderedChatView,
 };
 use crate::views::command_palette::{builtin_commands, CommandPaletteState, CommandPaletteView};
 use crate::views::editor::{EditorState, EditorView};
@@ -60,7 +60,6 @@ use crate::views::sidebar::{
 };
 use crate::views::status::StatusInfo;
 use crate::views::tools::DisplayToolCall;
-use crate::views::top_bar::TopBar;
 use crate::views::tree::{flatten_tree, TreeView, TreeViewState};
 use crate::views::welcome::{needs_welcome, WelcomeState, WelcomeStep, WelcomeView};
 
@@ -1083,62 +1082,23 @@ impl App {
             .render
     }
 
-    fn render_widget_tray(&self, frame: &mut Frame, area: Rect) {
-        if self.widgets.is_empty() || area.height == 0 {
-            return;
-        }
-
-        let mut keys: Vec<_> = self.widgets.keys().cloned().collect();
-        keys.sort();
-
-        let mut sections = Vec::new();
-        for key in keys {
-            if let Some(widget) = self.widgets.get(&key) {
-                match widget {
-                    WidgetContent::Lines(lines) => {
-                        if !lines.is_empty() {
-                            sections.push(format!("{key}\n{}", lines.join("\n")));
-                        }
-                    }
-                    WidgetContent::Component(component) => {
-                        sections.push(format!("{key}\n[component: {}]", component.component_type));
-                    }
-                }
-            }
-        }
-
-        if sections.is_empty() {
-            return;
-        }
-
-        let text = sections.join("\n\n");
-        let widget =
-            Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("widgets"));
-        frame.render_widget(widget, area);
-    }
-
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
         frame.render_widget(Clear, area);
 
-        let has_widgets = !self.widgets.is_empty();
-        let widget_height = if has_widgets { 5 } else { 0 };
-
         // Editor/prompt height: while asking, the prompt box becomes the ask box.
         // Otherwise it grows to fit wrapped prompt text while preserving at least
-        // 3 lines for the chat area and 1 for the top bar.
+        // 3 lines for the chat area.
         let editor_inner_width = area.width.saturating_sub(2).max(1);
         let desired_editor_height = if let Some(state) = self.ask_state.as_ref() {
             state.prompt_height(editor_inner_width)
         } else {
             self.editor.visual_line_count(editor_inner_width) as u16 + 2
         };
-        let max_editor_height = area.height.saturating_sub(1 + 3).max(3);
+        let max_editor_height = area.height.saturating_sub(3).max(3);
         let editor_height = desired_editor_height.clamp(3, max_editor_height);
 
         let constraints = vec![
-            Constraint::Length(1),             // top bar
-            Constraint::Length(widget_height), // widget tray
             Constraint::Min(3),                // messages area
             Constraint::Length(editor_height), // editor / ask prompt
         ];
@@ -1148,8 +1108,7 @@ impl App {
             .constraints(constraints)
             .split(area);
 
-        let (top_bar_area, widget_area, chat_area, editor_area) =
-            (chunks[0], Some(chunks[1]), chunks[2], chunks[3]);
+        let (chat_area, editor_area) = (chunks[0], chunks[1]);
 
         // Split chat area for sidebar when open
         let (chat_area, sidebar_area) = if self.sidebar.open && chat_area.width >= 60 {
@@ -1173,15 +1132,6 @@ impl App {
             (chat_area, None)
         };
         let _ = self.theme_kind();
-
-        // Top bar (header line)
-        let status_info = self.build_status_info();
-        let top_bar = TopBar::new(&status_info, &self.theme);
-        frame.render_widget(top_bar, top_bar_area);
-
-        if let Some(widget_area) = widget_area {
-            self.render_widget_tray(frame, widget_area);
-        }
 
         // Messages
         let chat_tool_display = self.config.ui.effective_chat_tool_display();
@@ -1307,8 +1257,12 @@ impl App {
             use crate::views::ask_bar::AskBar;
             frame.render_widget(AskBar::new(state, &self.theme), editor_area);
         } else {
+            let status_info = self.build_status_info();
             let editor = EditorView::new(&self.editor, &self.theme, self.thinking_level)
                 .model(&self.model_name)
+                .identity(&status_info.cwd, &status_info.session_name)
+                .turn_elapsed(status_info.turn_elapsed)
+                .extension_items(&status_info.extension_items, status_info.peek)
                 .streaming(self.is_streaming)
                 .queued(!self.message_queue.is_empty())
                 .context_usage(
@@ -2592,7 +2546,7 @@ impl App {
         // Add user message to display
         self.messages.push(DisplayMessage {
             role: MessageRole::User,
-            content: summarize_user_text_for_display(&text),
+            content: text.clone(),
             thinking: None,
             tool_calls: Vec::new(),
             assistant_blocks: Vec::new(),
@@ -5215,7 +5169,7 @@ mod session_lifecycle {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn tui_integration_send_message_large_paste_displays_summary() {
+    async fn tui_integration_send_message_large_paste_displays_full_text() {
         let tmp = TempDir::new().unwrap();
         let mut app = make_persistent_app(&tmp);
         let pasted = (1..=25)
@@ -5228,7 +5182,7 @@ mod session_lifecycle {
 
         assert!(app.messages.len() >= 2);
         assert_eq!(app.messages[0].role, MessageRole::User);
-        assert_eq!(app.messages[0].content, "[Pasted 25 Lines]");
+        assert_eq!(app.messages[0].content, pasted);
 
         let persisted = app.session.get_messages();
         assert_eq!(persisted.len(), 1);

@@ -667,6 +667,12 @@ impl Agent {
             };
         }
 
+        if tool_results_indicate_work_completed(tool_results, self.mode) {
+            return NextAction::Stop {
+                reason: NextActionStopReason::WorkCompleted,
+            };
+        }
+
         if let Some(reason) = mana_review_stop_reason(mana_review, self.mode) {
             return NextAction::Stop { reason };
         }
@@ -1257,6 +1263,31 @@ fn tool_results_indicate_repeated_action(tool_results: &[imp_llm::ToolResultMess
                 }
                 _ => false,
             })
+    })
+}
+
+fn tool_results_indicate_work_completed(
+    tool_results: &[imp_llm::ToolResultMessage],
+    mode: AgentMode,
+) -> bool {
+    if !matches!(mode, AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker) {
+        return false;
+    }
+
+    tool_results.iter().any(|result| {
+        if result.is_error {
+            return false;
+        }
+
+        let action = result.details.get("action").and_then(|v| v.as_str());
+        let has_closed_unit = result.details.get("action").and_then(|v| v.as_str()) == Some("close")
+            || result.details.get("unit").and_then(|unit| unit.get("status")).and_then(|v| v.as_str()) == Some("closed");
+
+        match action {
+            Some("close") => true,
+            Some("verify") if result.details.get("passed").and_then(|v| v.as_bool()) == Some(true) => true,
+            _ => has_closed_unit,
+        }
     })
 }
 
@@ -2028,6 +2059,29 @@ mod tests {
     }
 
     #[test]
+    fn tool_results_indicate_work_completed_detects_closed_unit_details() {
+        let result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_close".to_string(),
+            tool_name: "mana".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "Closed unit 1".to_string(),
+            }],
+            is_error: false,
+            details: serde_json::json!({
+                "action": "close",
+                "unit": {
+                    "id": "1",
+                    "title": "Test unit",
+                    "status": "closed"
+                }
+            }),
+            timestamp: 0,
+        };
+
+        assert!(tool_results_indicate_work_completed(&[result], AgentMode::Full));
+    }
+
+    #[test]
     fn mana_review_needs_decision_maps_to_user_blocker() {
         let review = TurnManaReview {
             turn_index: 0,
@@ -2733,6 +2787,41 @@ mod tests {
     }
 
     // ── Test 4: Cancel command mid-run ─────────────────────────────
+
+    #[tokio::test]
+    async fn execution_stops_after_mana_close_tool_result_without_done_text() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_close",
+                "mana",
+                serde_json::json!({"action": "close", "id": "1"}),
+                100,
+                20,
+            ),
+            text_response("Unit closed.", 120, 20),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Full;
+        agent.tools.register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        agent.run("Close the unit".to_string()).await.unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts, vec!["Close the unit".to_string()]);
+    }
 
     #[tokio::test]
     async fn execution_stops_after_work_completed_text() {

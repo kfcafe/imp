@@ -1,4 +1,7 @@
-use crate::animation::{activity_label, ActivitySurface, AnimationState};
+use std::collections::HashMap;
+use std::time::Duration;
+
+use crate::animation::{activity_label, format_elapsed, ActivitySurface, AnimationState};
 use imp_core::config::AnimationLevel;
 use imp_llm::ThinkingLevel;
 use ratatui::buffer::Buffer;
@@ -315,11 +318,16 @@ pub struct EditorView<'a> {
     theme: &'a Theme,
     thinking_level: ThinkingLevel,
     model_name: &'a str,
+    cwd: &'a str,
+    session_name: &'a str,
     is_streaming: bool,
     has_queued: bool,
     current_context_tokens: u32,
     context_window: u32,
     show_context_usage: bool,
+    turn_elapsed: Option<Duration>,
+    extension_items: Option<&'a HashMap<String, String>>,
+    peek: bool,
     tick: u64,
     animation_level: AnimationLevel,
     activity_state: AnimationState,
@@ -332,11 +340,16 @@ impl<'a> EditorView<'a> {
             theme,
             thinking_level,
             model_name: "",
+            cwd: "",
+            session_name: "",
             is_streaming: false,
             has_queued: false,
             current_context_tokens: 0,
             context_window: 0,
             show_context_usage: true,
+            turn_elapsed: None,
+            extension_items: None,
+            peek: false,
             tick: 0,
             animation_level: AnimationLevel::Minimal,
             activity_state: AnimationState::Idle,
@@ -346,6 +359,23 @@ impl<'a> EditorView<'a> {
     /// Set the model name shown in the editor border.
     pub fn model(mut self, name: &'a str) -> Self {
         self.model_name = name;
+        self
+    }
+
+    pub fn identity(mut self, cwd: &'a str, session_name: &'a str) -> Self {
+        self.cwd = cwd;
+        self.session_name = session_name;
+        self
+    }
+
+    pub fn turn_elapsed(mut self, elapsed: Option<Duration>) -> Self {
+        self.turn_elapsed = elapsed;
+        self
+    }
+
+    pub fn extension_items(mut self, items: &'a HashMap<String, String>, peek: bool) -> Self {
+        self.extension_items = Some(items);
+        self.peek = peek;
         self
     }
 
@@ -391,7 +421,15 @@ impl Widget for EditorView<'_> {
         let base_border_color = self.theme.thinking_border_color(self.thinking_level);
         let border_color = base_border_color;
 
-        let top_title = String::new();
+        let top_left = build_identity_label(self.cwd, self.session_name, area.width);
+        let top_right = build_top_right_label(
+            self.model_name,
+            self.turn_elapsed,
+            self.current_context_tokens,
+            self.context_window,
+            self.show_context_usage,
+        );
+        let bottom_left = build_bottom_left_label(self.extension_items, self.peek);
         let activity = activity_label(
             self.activity_state,
             self.tick,
@@ -399,7 +437,7 @@ impl Widget for EditorView<'_> {
             ActivitySurface::Editor,
         );
 
-        // Build bottom-right model + thinking indicator
+        // Build bottom-right live state indicator
         let thinking_label = match self.thinking_level {
             ThinkingLevel::Off => "",
             ThinkingLevel::Minimal => "min",
@@ -408,11 +446,7 @@ impl Widget for EditorView<'_> {
             ThinkingLevel::High => "high",
             ThinkingLevel::XHigh => "xhigh",
         };
-        let model_label = if self.model_name.is_empty() {
-            None
-        } else {
-            Some(self.model_name.to_string())
-        };
+        let model_label = None;
         let queue_label = if self.has_queued {
             Some("queued".to_string())
         } else {
@@ -460,7 +494,9 @@ impl Widget for EditorView<'_> {
         }
 
         let block = Block::default()
-            .title(top_title)
+            .title(Line::from(top_left))
+            .title(Line::from(top_right).alignment(Alignment::Right))
+            .title_bottom(Line::from(bottom_left))
             .title_bottom(Line::from(bottom_spans).alignment(Alignment::Right))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color));
@@ -501,6 +537,110 @@ impl Widget for EditorView<'_> {
 }
 
 // --- Helpers ---
+
+fn build_identity_label(cwd: &str, session_name: &str, area_width: u16) -> Vec<Span<'static>> {
+    let max_path = (area_width as usize / 3).clamp(12, 36);
+    let cwd = abbreviate_home(cwd);
+    let cwd = shorten_path(&cwd, max_path);
+    let session_name = session_name.trim();
+
+    let mut spans = vec![Span::raw(cwd)];
+    if !session_name.is_empty() {
+        spans.push(Span::raw(" · "));
+        spans.push(Span::raw(session_name.to_string()));
+    }
+    spans
+}
+
+fn build_top_right_label(
+    model_name: &str,
+    turn_elapsed: Option<Duration>,
+    current_context_tokens: u32,
+    context_window: u32,
+    show_context_usage: bool,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut push_part = |text: String| {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" • "));
+        }
+        spans.push(Span::raw(text));
+    };
+
+    if !model_name.is_empty() {
+        push_part(model_name.to_string());
+    }
+    if let Some(elapsed) = turn_elapsed {
+        push_part(format_elapsed(elapsed));
+    }
+    if show_context_usage && context_window > 0 {
+        push_part(format_context_usage(current_context_tokens, context_window));
+    }
+
+    spans
+}
+
+fn build_bottom_left_label(
+    extension_items: Option<&HashMap<String, String>>,
+    peek: bool,
+) -> Vec<Span<'static>> {
+    if peek {
+        return vec![Span::raw("peek")];
+    }
+
+    let Some(items) = extension_items else {
+        return Vec::new();
+    };
+    let mut keys: Vec<_> = items.keys().collect();
+    keys.sort();
+    if let Some(key) = keys.first() {
+        if let Some(value) = items.get(*key) {
+            return vec![Span::raw(format!("{key}: {value}"))];
+        }
+    }
+    Vec::new()
+}
+
+fn abbreviate_home(path: &str) -> String {
+    if path == "/Users/asher" {
+        "~".to_string()
+    } else if let Some(rest) = path.strip_prefix("/Users/asher/") {
+        format!("~/{rest}")
+    } else {
+        path.to_string()
+    }
+}
+
+fn shorten_path(path: &str, max_len: usize) -> String {
+    if path.len() <= max_len {
+        return path.to_string();
+    }
+
+    if let Some(rest) = path.strip_prefix("~/") {
+        let shortened = shorten_path(&format!("home/{rest}"), max_len.saturating_sub(1));
+        return shortened.replacen("home/", "~/", 1);
+    }
+
+    let parts: Vec<&str> = path.split('/').collect();
+    let mut result = String::new();
+    for part in parts.iter().rev() {
+        let candidate = if result.is_empty() {
+            part.to_string()
+        } else {
+            format!("{part}/{result}")
+        };
+        if candidate.len() > max_len {
+            break;
+        }
+        result = candidate;
+    }
+
+    if result.len() < path.len() {
+        format!("…/{result}")
+    } else {
+        result
+    }
+}
 
 fn format_context_usage(current_tokens: u32, context_window: u32) -> String {
     if context_window == 0 {
@@ -750,5 +890,34 @@ mod tests {
 
         let (x, y) = editor.cursor_screen_position(Rect::new(5, 7, 1, 1));
         assert_eq!((x, y), (5, 7));
+    }
+
+    #[test]
+    fn abbreviate_home_prefers_tilde() {
+        assert_eq!(abbreviate_home("/Users/asher/tower/imp"), "~/tower/imp");
+        assert_eq!(abbreviate_home("/tmp/project"), "/tmp/project");
+    }
+
+    #[test]
+    fn identity_label_prefers_tilde_path() {
+        let rendered = build_identity_label("/Users/asher/tower/imp", "chat", 80);
+        let text: String = rendered.into_iter().map(|span| span.content.into_owned()).collect();
+        assert!(text.contains("~/tower/imp"));
+        assert!(text.contains("chat"));
+    }
+
+    #[test]
+    fn top_right_label_includes_model_elapsed_and_context() {
+        let rendered = build_top_right_label(
+            "sonnet",
+            Some(Duration::from_secs(75)),
+            82_400,
+            1_000_000,
+            true,
+        );
+        let text: String = rendered.into_iter().map(|span| span.content.into_owned()).collect();
+        assert!(text.contains("sonnet"));
+        assert!(text.contains("1m15s"));
+        assert!(text.contains("8%/1.0M"));
     }
 }

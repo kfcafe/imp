@@ -64,7 +64,7 @@ impl DisplayMessage {
                     .join("");
                 Self {
                     role: MessageRole::User,
-                    content: summarize_user_text_for_display(&text),
+                    content: text,
                     thinking: None,
                     tool_calls: Vec::new(),
                     assistant_blocks: Vec::new(),
