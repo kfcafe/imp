@@ -1,11 +1,12 @@
 use async_trait::async_trait;
-use imp_llm::ContentBlock;
+use imp_llm::{AssistantMessage, ContentBlock};
 use imp_llm::ThinkingLevel;
 use serde_json::json;
 
 use super::{Tool, ToolContext, ToolOutput};
 use crate::config::AgentMode;
 use crate::error::{Error, Result};
+use crate::imp_session::{ImpSession, SessionChoice, SessionOptions};
 use crate::mana_worker::{self, WorkerRunOptions};
 
 pub struct ImpTool;
@@ -21,7 +22,7 @@ impl Tool for ImpTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate work to another imp worker. Supports durable mana-unit delegation now, with ad hoc helper delegation reserved for follow-up work."
+        "Delegate work to another imp worker. Supports durable mana-unit delegation and bounded ad hoc helper delegation."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -67,6 +68,10 @@ impl Tool for ImpTool {
                 {
                     "if": { "properties": { "mode": { "const": "unit" } } },
                     "then": { "required": ["unit_id"] }
+                },
+                {
+                    "if": { "properties": { "mode": { "const": "ad_hoc" } } },
+                    "then": { "required": ["prompt"] }
                 }
             ]
         })
@@ -101,9 +106,7 @@ impl Tool for ImpTool {
         let mode = params.get("mode").and_then(|v| v.as_str()).unwrap_or("");
         match mode {
             "unit" => execute_unit_delegate(params, ctx).await,
-            "ad_hoc" => Ok(ToolOutput::error(
-                "imp mode='ad_hoc' is not yet supported. This path is reserved for follow-up work.",
-            )),
+            "ad_hoc" => execute_ad_hoc_delegate(params, ctx).await,
             _ => Ok(ToolOutput::error(
                 "Unsupported imp mode. Expected mode='unit' or mode='ad_hoc'.",
             )),
@@ -226,6 +229,117 @@ async fn execute_unit_delegate(
     })
 }
 
+async fn execute_ad_hoc_delegate(
+    params: serde_json::Value,
+    ctx: ToolContext,
+) -> Result<ToolOutput> {
+    let prompt = params
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Tool("Missing required parameter: prompt".into()))?;
+
+    let idempotency_key = params
+        .get("idempotency_key")
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned);
+
+    let session_options = SessionOptions {
+        cwd: ctx.cwd.clone(),
+        model: params
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned),
+        provider: params
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned),
+        api_key: None,
+        thinking: parse_optional_thinking(&params)?,
+        mode: Some(AgentMode::Reviewer),
+        max_turns: params
+            .get("max_turns")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32),
+        max_tokens: params
+            .get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32),
+        system_prompt: params
+            .get("system_prompt")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned),
+        no_tools: false,
+        session: SessionChoice::InMemory,
+        task: None,
+        facts: Vec::new(),
+        lua_loader: None,
+        ui: Some(ctx.ui.clone()),
+        auth_path: None,
+        context_prefill: Vec::new(),
+    };
+
+    let mut session = ImpSession::create(session_options)
+        .await
+        .map_err(|e| Error::Tool(e.to_string()))?;
+    session
+        .prompt_and_wait(prompt)
+        .await
+        .map_err(|e| Error::Tool(e.to_string()))?;
+
+    let final_text = extract_final_assistant_text(&session);
+    let summary = final_text
+        .clone()
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| "Transient helper run completed.".to_string());
+
+    Ok(ToolOutput {
+        content: vec![ContentBlock::Text {
+            text: "Transient helper run completed.".to_string(),
+        }],
+        details: json!({
+            "tool": "imp",
+            "action": "delegate",
+            "delegation_mode": "ad_hoc",
+            "durable": false,
+            "status": "completed",
+            "summary": summary,
+            "final_text": final_text,
+            "model": session.model().meta.id.clone(),
+            "provider": session.model().meta.provider.clone(),
+            "idempotency_key": idempotency_key,
+        }),
+        is_error: false,
+    })
+}
+
+fn extract_final_assistant_text(session: &ImpSession) -> Option<String> {
+    session
+        .session_manager()
+        .get_active_messages()
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            imp_llm::Message::Assistant(AssistantMessage { content, .. }) => {
+                let text = content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            _ => None,
+        })
+}
+
 fn parse_optional_thinking(params: &serde_json::Value) -> Result<Option<ThinkingLevel>> {
     let Some(raw) = params.get("thinking").and_then(|v| v.as_str()) else {
         return Ok(None);
@@ -280,6 +394,14 @@ mod tests {
         assert!(format!("{err}").contains("unit_id"));
     }
 
+    #[test]
+    fn schema_requires_prompt_for_ad_hoc_mode() {
+        let schema = ImpTool.parameters();
+        let args = json!({"action": "delegate", "mode": "ad_hoc"});
+        let err = super::super::validate_tool_args(&schema, &args).unwrap_err();
+        assert!(format!("{err}").contains("prompt"));
+    }
+
     #[tokio::test]
     async fn blocked_modes_fail_clearly() {
         let tool = ImpTool;
@@ -297,17 +419,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ad_hoc_reserved_until_follow_up() {
+    async fn ad_hoc_returns_transient_details() {
         let tool = ImpTool;
         let out = tool
             .execute(
                 "call-1",
-                json!({"action": "delegate", "mode": "ad_hoc", "prompt": "hi"}),
+                json!({"action": "delegate", "mode": "ad_hoc", "prompt": "Say only the word transient."}),
                 test_ctx(AgentMode::Orchestrator),
             )
             .await
             .unwrap();
-        assert!(out.is_error);
-        assert!(out.text_content().unwrap_or_default().contains("not yet supported"));
+        assert!(!out.is_error);
+        assert_eq!(out.details.get("delegation_mode").and_then(|v| v.as_str()), Some("ad_hoc"));
+        assert_eq!(out.details.get("durable").and_then(|v| v.as_bool()), Some(false));
+        assert!(out.details.get("final_text").is_some());
     }
 }
