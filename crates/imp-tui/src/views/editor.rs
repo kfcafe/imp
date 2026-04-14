@@ -429,8 +429,13 @@ impl Widget for EditorView<'_> {
             return;
         }
 
-        let base_border_color = self.theme.thinking_border_color(self.thinking_level);
-        let border_color = base_border_color;
+        let border_style = superbar_border_style(
+            self.theme,
+            self.thinking_level,
+            self.activity_state,
+            self.tick,
+            self.animation_level,
+        );
 
         let top_left = build_identity_label(self.cwd, self.session_name, area.width);
         let top_right = Vec::new();
@@ -509,7 +514,7 @@ impl Widget for EditorView<'_> {
             .title_bottom(Line::from(bottom_left))
             .title_bottom(Line::from(bottom_spans).alignment(Alignment::Right))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color));
+            .border_style(border_style);
 
         let inner = block.inner(area);
         block.render(area, buf);
@@ -589,6 +594,74 @@ fn build_bottom_left_label(
     } else {
         vec![Span::raw(label)]
     }
+}
+
+fn superbar_border_style(
+    theme: &Theme,
+    thinking_level: ThinkingLevel,
+    activity_state: AnimationState,
+    tick: u64,
+    animation_level: AnimationLevel,
+) -> Style {
+    let color = superbar_border_color(theme, thinking_level, activity_state, tick, animation_level);
+    let mut style = Style::default().fg(color);
+    if activity_state != AnimationState::Idle && animation_level != AnimationLevel::None {
+        style = style.add_modifier(ratatui::style::Modifier::BOLD);
+    }
+    style
+}
+
+fn superbar_border_color(
+    theme: &Theme,
+    thinking_level: ThinkingLevel,
+    activity_state: AnimationState,
+    tick: u64,
+    animation_level: AnimationLevel,
+) -> Color {
+    let base = theme.thinking_border_color(thinking_level);
+    if activity_state == AnimationState::Idle || animation_level == AnimationLevel::None {
+        return base;
+    }
+
+    let target = match activity_state {
+        AnimationState::Idle => base,
+        AnimationState::WaitingForResponse => theme.muted,
+        AnimationState::Thinking => theme.accent,
+        AnimationState::ExecutingTools { .. } => theme.warning,
+        AnimationState::Streaming => theme.success,
+        AnimationState::Queued => theme.warning,
+    };
+
+    let pulse = match animation_level {
+        AnimationLevel::None => 0.0,
+        AnimationLevel::Minimal => {
+            const PULSE: [f32; 4] = [0.10, 0.22, 0.34, 0.22];
+            PULSE[(tick / 4) as usize % PULSE.len()]
+        }
+        AnimationLevel::Spinner => {
+            const PULSE: [f32; 6] = [0.16, 0.32, 0.50, 0.68, 0.50, 0.32];
+            PULSE[(tick / 2) as usize % PULSE.len()]
+        }
+    };
+
+    mix_color(base, target, pulse)
+}
+
+fn mix_color(base: Color, target: Color, amount: f32) -> Color {
+    let amount = amount.clamp(0.0, 1.0);
+    match (base, target) {
+        (Color::Rgb(br, bg, bb), Color::Rgb(tr, tg, tb)) => Color::Rgb(
+            mix_channel(br, tr, amount),
+            mix_channel(bg, tg, amount),
+            mix_channel(bb, tb, amount),
+        ),
+        _ if amount >= 0.5 => target,
+        _ => base,
+    }
+}
+
+fn mix_channel(base: u8, target: u8, amount: f32) -> u8 {
+    (base as f32 + (target as f32 - base as f32) * amount).round() as u8
 }
 
 
@@ -920,5 +993,38 @@ mod tests {
         );
         let text: String = rendered.into_iter().map(|span| span.content.into_owned()).collect();
         assert!(text.contains("working"));
+    }
+
+    #[test]
+    fn superbar_border_color_stays_base_when_idle() {
+        let theme = Theme::default();
+        let color = superbar_border_color(
+            &theme,
+            ThinkingLevel::Medium,
+            AnimationState::Idle,
+            0,
+            AnimationLevel::Spinner,
+        );
+        assert_eq!(color, theme.thinking_border_color(ThinkingLevel::Medium));
+    }
+
+    #[test]
+    fn superbar_border_color_pulses_when_active() {
+        let theme = Theme::default();
+        let early = superbar_border_color(
+            &theme,
+            ThinkingLevel::Medium,
+            AnimationState::ExecutingTools { active_tools: 1 },
+            0,
+            AnimationLevel::Spinner,
+        );
+        let peak = superbar_border_color(
+            &theme,
+            ThinkingLevel::Medium,
+            AnimationState::ExecutingTools { active_tools: 1 },
+            6,
+            AnimationLevel::Spinner,
+        );
+        assert_ne!(early, peak);
     }
 }

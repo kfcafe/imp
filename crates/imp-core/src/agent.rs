@@ -133,6 +133,65 @@ enum NextActionStopReason {
     WorkCompleted,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PostTurnAssessment {
+    repeated_action: bool,
+    execution_stop_reason: Option<NextActionStopReason>,
+    work_completed: bool,
+    mana_stop_reason: Option<NextActionStopReason>,
+    no_progress: bool,
+    planner_text_stop_reason: Option<NextActionStopReason>,
+    execution_text_stop_reason: Option<NextActionStopReason>,
+    continue_prompt: Option<String>,
+    continue_reason: Option<ContinueReason>,
+}
+
+impl PostTurnAssessment {
+    fn into_next_action(self) -> NextAction {
+        if self.repeated_action {
+            return NextAction::Stop {
+                reason: NextActionStopReason::RepeatedAction,
+            };
+        }
+
+        if let Some(reason) = self.execution_stop_reason {
+            return NextAction::Stop { reason };
+        }
+
+        if self.work_completed {
+            return NextAction::Stop {
+                reason: NextActionStopReason::WorkCompleted,
+            };
+        }
+
+        if let Some(reason) = self.mana_stop_reason {
+            return NextAction::Stop { reason };
+        }
+
+        if self.no_progress {
+            return NextAction::Stop {
+                reason: NextActionStopReason::NoProgress,
+            };
+        }
+
+        if let Some(reason) = self.planner_text_stop_reason {
+            return NextAction::Stop { reason };
+        }
+
+        if let Some(reason) = self.execution_text_stop_reason {
+            return NextAction::Stop { reason };
+        }
+
+        if let (Some(prompt), Some(reason)) = (self.continue_prompt, self.continue_reason) {
+            return NextAction::Continue { prompt, reason };
+        }
+
+        NextAction::Stop {
+            reason: NextActionStopReason::NoAutomaticFollowUp,
+        }
+    }
+}
+
 /// The core agent — runs the ReAct loop (reason, act, observe).
 pub struct Agent {
     pub model: Model,
@@ -662,66 +721,60 @@ impl Agent {
         used_tools: bool,
         mana_review: &TurnManaReview,
     ) -> NextAction {
-        if tool_results_indicate_repeated_action(tool_results) {
-            return NextAction::Stop {
-                reason: NextActionStopReason::RepeatedAction,
-            };
-        }
+        self.assess_post_turn(message, tool_results, used_tools, mana_review)
+            .into_next_action()
+    }
 
-        if let Some(reason) = tool_results_indicate_execution_blocker(tool_results, self.mode) {
-            return NextAction::Stop { reason };
-        }
+    fn assess_post_turn(
+        &self,
+        message: &AssistantMessage,
+        tool_results: &[imp_llm::ToolResultMessage],
+        used_tools: bool,
+        mana_review: &TurnManaReview,
+    ) -> PostTurnAssessment {
+        let repeated_action = tool_results_indicate_repeated_action(tool_results);
+        let runtime_execution_stop_reason =
+            tool_results_indicate_execution_blocker(tool_results, self.mode);
+        let work_completed = tool_results_indicate_work_completed(tool_results, self.mode);
+        let mana_stop_reason = mana_review_stop_reason(mana_review, self.mode);
+        let no_progress = !used_tools && assistant_message_text(message).trim().is_empty();
+        let planner_text_stop_reason = planner_stop_reason(message, self.mode);
+        let execution_text_stop_reason = execution_stop_reason(message, self.mode);
 
-        if tool_results_indicate_work_completed(tool_results, self.mode) {
-            return NextAction::Stop {
-                reason: NextActionStopReason::WorkCompleted,
-            };
-        }
-
-        if let Some(reason) = mana_review_stop_reason(mana_review, self.mode) {
-            return NextAction::Stop { reason };
-        }
-
-        if !used_tools && assistant_message_text(message).trim().is_empty() {
-            return NextAction::Stop {
-                reason: NextActionStopReason::NoProgress,
-            };
-        }
-
-        if let Some(reason) = planner_stop_reason(message, self.mode) {
-            return NextAction::Stop { reason };
-        }
-
-        if let Some(reason) = execution_stop_reason(message, self.mode) {
-            return NextAction::Stop { reason };
-        }
-
-        if should_queue_mana_externalization_follow_up(
+        let (continue_prompt, continue_reason) = if should_queue_mana_externalization_follow_up(
             message,
             self.mode,
             self.has_mana_skill,
             self.queued_mana_externalization_nudge,
         ) {
-            return NextAction::Continue {
-                prompt: mana_externalization_follow_up_text().to_string(),
-                reason: ContinueReason::ExternalizationNeeded,
-            };
-        }
-
-        if should_queue_confidence_continue_follow_up(
+            (
+                Some(mana_externalization_follow_up_text().to_string()),
+                Some(ContinueReason::ExternalizationNeeded),
+            )
+        } else if should_queue_confidence_continue_follow_up(
             message,
             self.mode,
             self.continue_policy,
             self.queued_confidence_continue_nudge,
         ) {
-            return NextAction::Continue {
-                prompt: confidence_continue_follow_up_text().to_string(),
-                reason: ContinueReason::HighConfidenceVisibleNextStep,
-            };
-        }
+            (
+                Some(confidence_continue_follow_up_text().to_string()),
+                Some(ContinueReason::HighConfidenceVisibleNextStep),
+            )
+        } else {
+            (None, None)
+        };
 
-        NextAction::Stop {
-            reason: NextActionStopReason::NoAutomaticFollowUp,
+        PostTurnAssessment {
+            repeated_action,
+            execution_stop_reason: runtime_execution_stop_reason,
+            work_completed,
+            mana_stop_reason,
+            no_progress,
+            planner_text_stop_reason,
+            execution_text_stop_reason,
+            continue_prompt,
+            continue_reason,
         }
     }
 
@@ -2144,6 +2197,51 @@ mod tests {
         assert_eq!(user_texts.len(), 2);
         assert_eq!(user_texts[0], "Plan the rollout");
         assert!(user_texts[1].contains("externalize the durable plan"));
+    }
+
+    #[test]
+    fn post_turn_assessment_prefers_execution_blocker_over_completion() {
+        let assessment = PostTurnAssessment {
+            repeated_action: false,
+            execution_stop_reason: Some(NextActionStopReason::ExecutionBlocked),
+            work_completed: true,
+            mana_stop_reason: Some(NextActionStopReason::DecompositionCompleted),
+            no_progress: false,
+            planner_text_stop_reason: Some(NextActionStopReason::DecompositionCompleted),
+            execution_text_stop_reason: Some(NextActionStopReason::WorkCompleted),
+            continue_prompt: Some("continue".to_string()),
+            continue_reason: Some(ContinueReason::HighConfidenceVisibleNextStep),
+        };
+
+        assert_eq!(
+            assessment.into_next_action(),
+            NextAction::Stop {
+                reason: NextActionStopReason::ExecutionBlocked,
+            }
+        );
+    }
+
+    #[test]
+    fn post_turn_assessment_emits_continue_when_no_stop_reason_exists() {
+        let assessment = PostTurnAssessment {
+            repeated_action: false,
+            execution_stop_reason: None,
+            work_completed: false,
+            mana_stop_reason: None,
+            no_progress: false,
+            planner_text_stop_reason: None,
+            execution_text_stop_reason: None,
+            continue_prompt: Some("continue".to_string()),
+            continue_reason: Some(ContinueReason::HighConfidenceVisibleNextStep),
+        };
+
+        assert_eq!(
+            assessment.into_next_action(),
+            NextAction::Continue {
+                prompt: "continue".to_string(),
+                reason: ContinueReason::HighConfidenceVisibleNextStep,
+            }
+        );
     }
 
     #[test]

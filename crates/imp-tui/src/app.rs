@@ -1260,17 +1260,10 @@ impl App {
             frame.render_widget(AskBar::new(state, &self.theme), editor_area);
         } else {
             let status_info = self.build_status_info();
-            let subagent_count = status_info
-                .extension_items
-                .get("subagents")
-                .or_else(|| status_info.extension_items.get("workers"))
-                .and_then(|text| text.split_whitespace().next())
-                .and_then(|n| n.parse::<u32>().ok());
             let editor = EditorView::new(&self.editor, &self.theme, self.thinking_level)
                 .summarize_paste(true)
                 .model(&self.model_name)
                 .identity(&status_info.cwd, &status_info.session_name)
-                .subagent_count(subagent_count)
                 .turn_elapsed(status_info.turn_elapsed)
                 .extension_items(&status_info.extension_items, status_info.peek)
                 .streaming(self.is_streaming)
