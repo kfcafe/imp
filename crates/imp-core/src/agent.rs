@@ -125,6 +125,8 @@ enum ContinueReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NextActionStopReason {
     NoAutomaticFollowUp,
+    NoProgress,
+    RepeatedAction,
 }
 
 /// The core agent — runs the ReAct loop (reason, act, observe).
@@ -589,7 +591,7 @@ impl Agent {
                 })
                 .await;
 
-                let next_action = self.decide_next_action(&msg, false);
+                let next_action = self.decide_next_action(&msg, &[], false);
                 self.enqueue_next_action(&mut queued_follow_ups, next_action);
 
                 if let Some(follow_up) = queued_follow_ups.pop_front() {
@@ -615,11 +617,21 @@ impl Agent {
             })
             .await;
 
-            let next_action = self.decide_next_action(&msg, true);
+            let next_action = self.decide_next_action(&msg, &results, true);
+            let should_stop_after_tool_turn = matches!(
+                next_action,
+                NextAction::Stop {
+                    reason: NextActionStopReason::RepeatedAction,
+                }
+            );
             self.enqueue_next_action(&mut queued_follow_ups, next_action);
 
             if let Some(follow_up) = queued_follow_ups.pop_front() {
                 self.messages.push(Message::user(&follow_up));
+            }
+
+            if should_stop_after_tool_turn {
+                break;
             }
 
             turn += 1;
@@ -639,7 +651,24 @@ impl Agent {
         Ok(())
     }
 
-    fn decide_next_action(&self, message: &AssistantMessage, used_tools: bool) -> NextAction {
+    fn decide_next_action(
+        &self,
+        message: &AssistantMessage,
+        tool_results: &[imp_llm::ToolResultMessage],
+        used_tools: bool,
+    ) -> NextAction {
+        if tool_results_indicate_repeated_action(tool_results) {
+            return NextAction::Stop {
+                reason: NextActionStopReason::RepeatedAction,
+            };
+        }
+
+        if !used_tools && assistant_message_text(message).trim().is_empty() {
+            return NextAction::Stop {
+                reason: NextActionStopReason::NoProgress,
+            };
+        }
+
         if should_queue_mana_externalization_follow_up(
             message,
             self.mode,
@@ -664,7 +693,6 @@ impl Agent {
             };
         }
 
-        let _ = used_tools;
         NextAction::Stop {
             reason: NextActionStopReason::NoAutomaticFollowUp,
         }
@@ -1202,6 +1230,18 @@ fn should_queue_confidence_continue_follow_up(
 
 fn confidence_continue_follow_up_text() -> &'static str {
     "Confidence is high and the mana delta is already visible. Continue to the next small, well-bounded step now using native mana-backed workflow, unless a consequential decision or blocker appears. Do not re-summarize the same visible mana change in chat unless new context needs to be called out."
+}
+
+fn tool_results_indicate_repeated_action(tool_results: &[imp_llm::ToolResultMessage]) -> bool {
+    tool_results.iter().any(|result| {
+        result.is_error
+            && result.content.iter().any(|block| match block {
+                ContentBlock::Text { text } => {
+                    text.contains("Blocked: identical tool call repeated")
+                }
+                _ => false,
+            })
+    })
 }
 
 /// Build an AssistantMessage from accumulated stream parts while preserving
@@ -3777,6 +3817,30 @@ mod integration {
         assert!(third_text.contains("Warning: identical tool call repeated 3 times"));
         assert!(fourth.is_error);
         assert!(fourth_text.contains("Blocked: identical tool call repeated 4 times"));
+        assert_eq!(
+            agent.messages
+                .iter()
+                .filter(|message| matches!(message, Message::User(_)))
+                .count(),
+            1,
+            "agent should stop after repeated-action block rather than enqueueing more follow-ups"
+        );
+    }
+
+    #[test]
+    fn tool_results_indicate_repeated_action_detects_blocked_repeat_message() {
+        let result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_repeat".to_string(),
+            tool_name: "read".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "Blocked: identical tool call repeated 4 times in a row for 'read'.".to_string(),
+            }],
+            is_error: true,
+            details: serde_json::Value::Null,
+            timestamp: 0,
+        };
+
+        assert!(tool_results_indicate_repeated_action(&[result]));
     }
 
     // ── Test 4: Bash runs a command ────────────────────────────────
