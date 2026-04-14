@@ -127,6 +127,8 @@ enum NextActionStopReason {
     NoAutomaticFollowUp,
     NoProgress,
     RepeatedAction,
+    UserBlocker,
+    DecompositionCompleted,
 }
 
 /// The core agent — runs the ReAct loop (reason, act, observe).
@@ -667,6 +669,10 @@ impl Agent {
             return NextAction::Stop {
                 reason: NextActionStopReason::NoProgress,
             };
+        }
+
+        if let Some(reason) = planner_stop_reason(message, self.mode) {
+            return NextAction::Stop { reason };
         }
 
         if should_queue_mana_externalization_follow_up(
@@ -1242,6 +1248,53 @@ fn tool_results_indicate_repeated_action(tool_results: &[imp_llm::ToolResultMess
                 _ => false,
             })
     })
+}
+
+fn planner_stop_reason(
+    message: &AssistantMessage,
+    mode: AgentMode,
+) -> Option<NextActionStopReason> {
+    if !matches!(mode, AgentMode::Planner) {
+        return None;
+    }
+
+    let text = assistant_message_text(message);
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    let lower = text.to_ascii_lowercase();
+
+    let blocker_signal = [
+        "blocked",
+        "need your input",
+        "which should",
+        "waiting on you",
+        "approval",
+        "before i continue",
+        "before continuing",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if blocker_signal {
+        return Some(NextActionStopReason::UserBlocker);
+    }
+
+    let decomposition_complete_signal = [
+        "externalized into mana",
+        "created the units",
+        "created child units",
+        "decomposition is complete",
+        "plan is complete",
+        "ready for handoff",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if decomposition_complete_signal {
+        return Some(NextActionStopReason::DecompositionCompleted);
+    }
+
+    None
 }
 
 /// Build an AssistantMessage from accumulated stream parts while preserving
@@ -1900,6 +1953,72 @@ mod tests {
         assert_eq!(user_texts.len(), 2);
         assert_eq!(user_texts[0], "Plan the rollout");
         assert!(user_texts[1].contains("externalize the durable plan"));
+    }
+
+    #[tokio::test]
+    async fn planner_stops_after_decomposition_is_externalized() {
+        let provider = Arc::new(MockProvider::new(vec![text_response(
+            "Externalized into mana. Plan is complete and ready for handoff.",
+            100,
+            20,
+        )]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Planner;
+        agent.has_mana_skill = true;
+
+        agent
+            .run("Plan the rollout".to_string())
+            .await
+            .unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts, vec!["Plan the rollout".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn planner_stops_for_user_blocker_instead_of_auto_follow_up() {
+        let provider = Arc::new(MockProvider::new(vec![text_response(
+            "Blocked: I need your input on which auth direction we should choose before continuing.",
+            100,
+            20,
+        )]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Planner;
+        agent.has_mana_skill = true;
+
+        agent
+            .run("Plan the rollout".to_string())
+            .await
+            .unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts, vec!["Plan the rollout".to_string()]);
     }
 
     #[tokio::test]
