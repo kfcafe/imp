@@ -30,6 +30,7 @@ pub use tower_contracts::worker::{
 use crate::context_prefill::{self, AssembledContext, FileSpec, PrefillConfig};
 use crate::imp_session::{ImpSession, SessionChoice, SessionOptions};
 use crate::mana_prompt_context;
+use crate::tools::LuaToolLoader;
 use crate::system_prompt::{Attempt, Dependency, Fact, TaskContext};
 
 // ---------------------------------------------------------------------------
@@ -274,8 +275,7 @@ pub struct WorkerRunOptions {
     pub no_tools: bool,
     pub mana_dir_override: Option<PathBuf>,
     pub defer_verify: bool,
-    #[allow(clippy::type_complexity)]
-    pub lua_loader: Option<Box<dyn FnOnce(&mut crate::tools::ToolRegistry) + Send>>,
+    pub lua_loader: Option<LuaToolLoader>,
 }
 
 pub struct PreparedWorkerRun {

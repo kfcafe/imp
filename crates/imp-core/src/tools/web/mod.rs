@@ -305,6 +305,7 @@ mod tests {
             file_tracker: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::tools::FileTracker::new(),
             )),
+            lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
             turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),

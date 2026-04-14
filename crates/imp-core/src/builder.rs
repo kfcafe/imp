@@ -10,7 +10,7 @@ use crate::mana_prompt_context;
 use crate::resources;
 use crate::roles::Role;
 use crate::system_prompt::{self, Fact, TaskContext};
-use crate::tools::ToolRegistry;
+use crate::tools::{LuaToolLoader, ToolRegistry};
 
 fn load_scoped_memory_block(
     cwd: &std::path::Path,
@@ -71,7 +71,7 @@ pub struct AgentBuilder {
     /// crate wires it in to avoid a cyclic dependency between imp-core
     /// and imp-lua.
     #[allow(clippy::type_complexity)]
-    lua_tool_loader: Option<Box<dyn FnOnce(&mut ToolRegistry) + Send>>,
+    lua_tool_loader: Option<LuaToolLoader>,
 }
 
 impl AgentBuilder {
@@ -136,9 +136,9 @@ impl AgentBuilder {
     /// `imp_lua::load_lua_extensions()`.
     pub fn lua_tool_loader<F>(mut self, f: F) -> Self
     where
-        F: FnOnce(&mut ToolRegistry) + Send + 'static,
+        F: Fn(&mut ToolRegistry) + Send + Sync + 'static,
     {
-        self.lua_tool_loader = Some(Box::new(f));
+        self.lua_tool_loader = Some(Arc::new(f));
         self
     }
 
@@ -197,6 +197,7 @@ impl AgentBuilder {
         // Wire read tool truncation from config
         agent.read_max_lines = self.config.ui.read_max_lines;
         agent.continue_policy = self.config.ui.continue_policy;
+        agent.lua_tool_loader = self.lua_tool_loader.clone();
 
         // Register native tools
         register_native_tools(&mut agent.tools);

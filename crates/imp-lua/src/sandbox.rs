@@ -59,6 +59,7 @@ pub struct LuaCallContext {
     pub file_cache: Arc<FileCache>,
     pub checkpoint_state: Arc<imp_core::tools::CheckpointState>,
     pub file_tracker: Arc<std::sync::Mutex<FileTracker>>,
+    pub lua_tool_loader: Option<imp_core::tools::LuaToolLoader>,
     pub mode: AgentMode,
     pub read_max_lines: usize,
 }
@@ -75,6 +76,7 @@ impl LuaCallContext {
             file_cache: Arc::clone(&self.file_cache),
             checkpoint_state: Arc::clone(&self.checkpoint_state),
             file_tracker: Arc::clone(&self.file_tracker),
+            lua_tool_loader: self.lua_tool_loader.clone(),
             mode: self.mode,
             read_max_lines: self.read_max_lines,
             turn_mana_review: Arc::new(std::sync::Mutex::new(

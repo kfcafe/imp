@@ -17,7 +17,7 @@ use crate::guardrails::{self, GuardrailConfig, GuardrailLevel, GuardrailProfile}
 use crate::hooks::{HookEvent, HookRunner};
 use crate::mana_review::{TurnManaReview, TurnManaReviewAccumulator};
 use crate::roles::Role;
-use crate::tools::ToolRegistry;
+use crate::tools::{LuaToolLoader, ToolRegistry};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimingStage {
@@ -138,6 +138,8 @@ pub struct Agent {
     pub guardrail_config: GuardrailConfig,
     /// Resolved guardrail profile (None = disabled).
     pub guardrail_profile: Option<GuardrailProfile>,
+    /// Cloneable Lua extension tool loader inherited from the session/builder.
+    pub lua_tool_loader: Option<LuaToolLoader>,
     /// In-session file content cache, shared across tool calls.
     pub file_cache: Arc<crate::tools::FileCache>,
     /// Shared checkpoint/file-history state, used to capture destructive edit restore points.
@@ -227,6 +229,7 @@ impl Agent {
             continue_policy: ContinuePolicy::Disabled,
             queued_confidence_continue_nudge: false,
             turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
+            lua_tool_loader: None,
 
             event_tx,
             command_tx: command_tx.clone(),
@@ -873,6 +876,7 @@ impl Agent {
                     file_cache: self.file_cache.clone(),
                     checkpoint_state: self.checkpoint_state.clone(),
                     file_tracker: self.file_tracker.clone(),
+                    lua_tool_loader: self.lua_tool_loader.clone(),
                     mode: self.mode,
                     read_max_lines: self.read_max_lines,
                     turn_mana_review: self.turn_mana_review.clone(),

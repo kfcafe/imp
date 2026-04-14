@@ -71,6 +71,7 @@ impl Tool for LuaTool {
             file_cache: ctx.file_cache,
             checkpoint_state: ctx.checkpoint_state,
             file_tracker: ctx.file_tracker,
+            lua_tool_loader: ctx.lua_tool_loader,
             mode: ctx.mode,
             read_max_lines: ctx.read_max_lines,
         };

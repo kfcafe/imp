@@ -37,7 +37,7 @@ impl Tool for ImpTool {
                 "mode": {
                     "type": "string",
                     "enum": ["unit", "ad_hoc"],
-                    "description": "Delegation mode. 'unit' is implemented now; 'ad_hoc' is reserved for follow-up work."
+                    "description": "Delegation mode. 'unit' executes a tracked mana unit; 'ad_hoc' runs a bounded transient helper session."
                 },
                 "unit_id": {
                     "type": "string",
@@ -171,7 +171,7 @@ async fn execute_unit_delegate(
             .get("defer_verify")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        lua_loader: None,
+        lua_loader: ctx.lua_tool_loader.clone(),
     };
 
     let idempotency_key = params
@@ -378,6 +378,7 @@ mod tests {
             file_cache: Arc::new(super::super::FileCache::new()),
             checkpoint_state: Arc::new(super::super::CheckpointState::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(super::super::FileTracker::new())),
+            lua_tool_loader: None,
             mode,
             read_max_lines: 0,
             turn_mana_review: Arc::new(std::sync::Mutex::new(

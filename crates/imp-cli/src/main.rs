@@ -1504,7 +1504,7 @@ async fn run_headless_mode(
 fn build_lua_loader(
     no_tools: bool,
     cwd: PathBuf,
-) -> Option<Box<dyn FnOnce(&mut imp_core::tools::ToolRegistry) + Send>> {
+) -> Option<imp_core::tools::LuaToolLoader> {
     if no_tools {
         return None;
     }
@@ -1517,7 +1517,7 @@ fn build_lua_loader(
         imp_lua::init_lua_extensions(&user_config_dir, Some(&cwd), tools);
     }
 
-    Some(Box::new(move |tools| init_lua_tools(cwd, tools)))
+    Some(Arc::new(move |tools| init_lua_tools(cwd.clone(), tools)))
 }
 
 fn emit_startup_timing(timer: &mut StartupTimer, stage: StartupStage) {
@@ -2410,11 +2410,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
     emit_startup_timing(&mut startup_timer, StartupStage::SessionReady);
 
     if !cli.no_tools {
-        let lua_cwd = std::env::current_dir().unwrap_or_default();
-        let user_config_dir = Config::user_config_dir();
-        options.lua_loader = Some(Box::new(move |tools| {
-            imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
-        }));
+        options.lua_loader = build_lua_loader(false, std::env::current_dir().unwrap_or_default());
     }
 
     let mut session = ImpSession::create(options)
@@ -3336,11 +3332,7 @@ async fn build_chat_session(
     };
 
     if !cli.no_tools {
-        let lua_cwd = cwd.clone();
-        let user_config_dir = Config::user_config_dir();
-        options.lua_loader = Some(Box::new(move |tools| {
-            imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
-        }));
+        options.lua_loader = build_lua_loader(false, cwd.clone());
     }
 
     ImpSession::create(options)

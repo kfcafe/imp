@@ -122,6 +122,9 @@ impl FileTracker {
     }
 }
 
+/// Cloneable runtime hook for loading Lua extension tools into a registry.
+pub type LuaToolLoader = Arc<dyn Fn(&mut ToolRegistry) + Send + Sync>;
+
 /// Context provided to tools during execution.
 pub struct ToolContext {
     pub cwd: PathBuf,
@@ -134,6 +137,8 @@ pub struct ToolContext {
     pub checkpoint_state: Arc<CheckpointState>,
     /// Tracks file reads for staleness detection and unread-edit warnings.
     pub file_tracker: Arc<std::sync::Mutex<FileTracker>>,
+    /// Cloneable Lua extension loader inherited from the parent runtime.
+    pub lua_tool_loader: Option<LuaToolLoader>,
     /// Active agent mode — determines which actions are permitted.
     pub mode: AgentMode,
     /// Max lines the read tool may return before truncating. 0 means unlimited.

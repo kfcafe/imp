@@ -63,6 +63,8 @@ pub enum SessionChoice {
     Open(PathBuf),
 }
 
+use crate::tools::LuaToolLoader;
+
 /// Configuration for creating an `ImpSession`.
 ///
 /// All fields have sensible defaults — only `cwd` is typically required.
@@ -110,8 +112,7 @@ pub struct SessionOptions {
     /// Lua extension loader. Called after native tools are registered.
     /// The binary crate typically provides this; library callers can
     /// pass `None` to skip Lua extensions.
-    #[allow(clippy::type_complexity)]
-    pub lua_loader: Option<Box<dyn FnOnce(&mut crate::tools::ToolRegistry) + Send>>,
+    pub lua_loader: Option<LuaToolLoader>,
 
     /// Custom UI implementation. Defaults to `NullInterface`.
     pub ui: Option<Arc<dyn UserInterface>>,
@@ -288,7 +289,7 @@ impl ImpSession {
                 builder = builder.system_prompt(prompt.clone());
             }
             if let Some(lua_loader) = options.lua_loader {
-                builder = builder.lua_tool_loader(lua_loader);
+                builder = builder.lua_tool_loader(move |tools| lua_loader(tools));
             }
 
             let (mut a, h) = builder.build()?;
