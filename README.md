@@ -28,7 +28,7 @@ imp -p "What does this project do?"
 imp @src/main.rs "Explain this code"
 
 # Run a mana unit headlessly
-imp work 5.1
+imp mana 5.1
 # `imp run 5.1` still works as a compatibility alias during migration
 
 # Continue your last session
@@ -296,7 +296,7 @@ export IMP_WEB_PROVIDER=exa
 | `auditor` | read, mana (read-only) | Inspect and report |
 
 ```bash
-IMP_MODE=worker imp run 5.1
+IMP_MODE=worker imp mana 5.1
 ```
 
 ## Delegating work with mana child jobs
@@ -404,7 +404,7 @@ imp is the native worker/runtime and orchestrator for [mana](https://github.com/
 Preferred execution framing:
 
 ```bash
-imp work <unit-id>
+imp mana <unit-id>
 ```
 
 `imp run <unit-id>` still works as a compatibility alias during migration.

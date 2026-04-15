@@ -299,9 +299,23 @@ struct Cli {
 }
 
 #[derive(Args, Debug, Clone)]
-struct HeadlessWorkArgs {
-    /// Unit ID to run
+struct HeadlessManaArgs {
+    /// Mana unit ID to run
     unit_id: String,
+    /// Explicit path to the .mana directory for canonical unit loading
+    #[arg(long)]
+    mana_dir: Option<PathBuf>,
+    /// Defer verify/close to compatibility orchestrators instead of verifying inline
+    #[arg(long)]
+    defer_verify: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+struct ManaNamespaceArgs {
+    /// Mana operator verb or unit ID
+    target: String,
+    /// Additional arguments for reserved mana namespace verbs
+    args: Vec<String>,
     /// Explicit path to the .mana directory for canonical unit loading
     #[arg(long)]
     mana_dir: Option<PathBuf>,
@@ -341,9 +355,11 @@ enum Commands {
     },
     /// Edit configuration
     Config,
-    /// Execute a mana unit headlessly through the canonical single-unit worker path.
-    #[command(alias = "run")]
-    Work(HeadlessWorkArgs),
+    /// Enter the mana-aware operator namespace. Use `imp mana <unit-id>` to run one unit.
+    Mana(ManaNamespaceArgs),
+    /// Compatibility alias for `imp mana <unit-id>` during migration.
+    #[command(hide = true)]
+    Run(HeadlessManaArgs),
     /// Usage reporting and export
     Usage {
         #[command(subcommand)]
@@ -639,7 +655,42 @@ pub async fn run() {
                 println!("{}", config_path.display());
                 return;
             }
-            Commands::Work(HeadlessWorkArgs {
+            Commands::Mana(ManaNamespaceArgs {
+                target,
+                args,
+                mana_dir,
+                defer_verify,
+            }) => {
+                match target.as_str() {
+                    "status" | "show" | "logs" | "run" => {
+                        if let Err(e) = run_reserved_mana_namespace_command(target, args).await {
+                            eprintln!("Error: {e}");
+                            std::process::exit(1);
+                        }
+                        return;
+                    }
+                    _ => {
+                        if !args.is_empty() {
+                            eprintln!(
+                                "Error: unexpected extra arguments after mana unit id `{target}`: {}",
+                                args.join(" ")
+                            );
+                            std::process::exit(1);
+                        }
+                        match run_headless_mode(&cli, target, mana_dir.as_deref(), *defer_verify)
+                            .await
+                        {
+                            Ok(true) => return,
+                            Ok(false) => std::process::exit(1),
+                            Err(e) => {
+                                eprintln!("Error: {e}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+            }
+            Commands::Run(HeadlessManaArgs {
                 unit_id,
                 mana_dir,
                 defer_verify,
@@ -1545,6 +1596,21 @@ fn format_timing_event(timing: &TimingEvent) -> String {
         timing.since_turn_start_ms,
         timing.since_llm_request_start_ms,
     )
+}
+
+async fn run_reserved_mana_namespace_command(
+    target: &str,
+    args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rendered_args = if args.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", args.join(" "))
+    };
+    Err(format!(
+        "`imp mana {target}{rendered_args}` is reserved for a future mana-aware operator command. For now, use `mana {target}{rendered_args}` directly or `imp mana <unit-id>` for single-unit worker execution."
+    )
+    .into())
 }
 
 fn determine_headless_output_mode(cli_mode: &str, stdout_is_terminal: bool) -> HeadlessOutputMode {
@@ -4021,29 +4087,53 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_work_subcommand_for_headless_worker() {
-        let cli = Cli::try_parse_from(["imp", "work", "5.1"]).expect("parse work subcommand");
+    fn cli_parses_mana_namespace_unit_target_for_headless_worker() {
+        let cli = Cli::try_parse_from(["imp", "mana", "5.1"]).expect("parse mana unit target");
         match cli.command {
-            Some(Commands::Work(args)) => {
-                assert_eq!(args.unit_id, "5.1");
+            Some(Commands::Mana(args)) => {
+                assert_eq!(args.target, "5.1");
+                assert!(args.args.is_empty());
                 assert!(args.mana_dir.is_none());
                 assert!(!args.defer_verify);
             }
-            other => panic!("expected work subcommand, got {other:?}"),
+            other => panic!("expected mana namespace subcommand, got {other:?}"),
         }
     }
 
     #[test]
-    fn cli_parses_run_as_alias_for_work_subcommand() {
+    fn cli_parses_run_as_compatibility_alias_for_headless_mana_worker() {
         let cli =
             Cli::try_parse_from(["imp", "run", "5.1", "--defer-verify"]).expect("parse run alias");
         match cli.command {
-            Some(Commands::Work(args)) => {
+            Some(Commands::Run(args)) => {
                 assert_eq!(args.unit_id, "5.1");
                 assert!(args.defer_verify);
             }
-            other => panic!("expected work subcommand via run alias, got {other:?}"),
+            other => panic!("expected run compatibility alias, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_parses_reserved_mana_namespace_verb_with_passthrough_args() {
+        let cli = Cli::try_parse_from(["imp", "mana", "show", "28.1"]).expect("parse mana show");
+        match cli.command {
+            Some(Commands::Mana(args)) => {
+                assert_eq!(args.target, "show");
+                assert_eq!(args.args, vec!["28.1".to_string()]);
+            }
+            other => panic!("expected mana namespace args, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reserved_mana_namespace_commands_error_clearly() {
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let err = rt
+            .block_on(run_reserved_mana_namespace_command("status", &[]))
+            .expect_err("reserved command should error for now");
+        let text = err.to_string();
+        assert!(text.contains("reserved for a future mana-aware operator command"));
+        assert!(text.contains("use `mana status` directly"));
     }
 
     #[test]
