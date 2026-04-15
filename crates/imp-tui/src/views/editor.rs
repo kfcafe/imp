@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::animation::{activity_label, ActivitySurface, AnimationState};
+use crate::animation::{activity_label, format_elapsed, ActivitySurface, AnimationState};
 use imp_core::config::AnimationLevel;
 use imp_llm::ThinkingLevel;
 use ratatui::buffer::Buffer;
@@ -293,7 +293,8 @@ impl EditorState {
         let (visual_line, visual_col) =
             cursor_visual_position_for_text(&self.content, cursor, inner_width);
         let x = inner_x.saturating_add(visual_col as u16);
-        let y = inner_y.saturating_add((visual_line as u16).saturating_sub(self.scroll_offset as u16));
+        let y =
+            inner_y.saturating_add((visual_line as u16).saturating_sub(self.scroll_offset as u16));
         let max_x = area.x.saturating_add(area.width.saturating_sub(2));
         let max_y = area.y.saturating_add(area.height.saturating_sub(2));
         (x.min(max_x), y.min(max_y))
@@ -429,27 +430,31 @@ impl Widget for EditorView<'_> {
             return;
         }
 
+        let prompt_activity_state = if self.has_queued {
+            AnimationState::Queued
+        } else {
+            self.activity_state
+        };
+
         let border_style = superbar_border_style(
             self.theme,
             self.thinking_level,
-            self.activity_state,
+            prompt_activity_state,
             self.tick,
             self.animation_level,
         );
 
         let top_left = build_identity_label(self.cwd, self.session_name, area.width);
-        let top_right = Vec::new();
+        let top_right = build_top_right_label(self.turn_elapsed, self.theme);
         let bottom_left = build_bottom_left_label(
-            self.activity_state,
+            prompt_activity_state,
             self.tick,
             self.animation_level,
-            self.has_queued,
         );
-        let activity = activity_label(
-            self.activity_state,
+        let activity = editor_activity_label(
+            prompt_activity_state,
             self.tick,
             self.animation_level,
-            ActivitySurface::Editor,
         );
 
         // Build bottom-right metadata cluster
@@ -577,22 +582,33 @@ fn build_identity_label(cwd: &str, session_name: &str, area_width: u16) -> Vec<S
     spans
 }
 
+fn build_top_right_label(turn_elapsed: Option<Duration>, theme: &Theme) -> Vec<Span<'static>> {
+    turn_elapsed
+        .map(|elapsed| vec![Span::styled(format_elapsed(elapsed), theme.muted_style())])
+        .unwrap_or_default()
+}
+
 fn build_bottom_left_label(
     activity_state: AnimationState,
     tick: u64,
     animation_level: AnimationLevel,
-    has_queued: bool,
 ) -> Vec<Span<'static>> {
-    let state = if has_queued {
-        AnimationState::Queued
-    } else {
-        activity_state
-    };
-    let label = activity_label(state, tick, animation_level, ActivitySurface::Editor);
+    let label = editor_activity_label(activity_state, tick, animation_level);
     if label.is_empty() {
         Vec::new()
     } else {
         vec![Span::raw(label)]
+    }
+}
+
+fn editor_activity_label(
+    activity_state: AnimationState,
+    tick: u64,
+    animation_level: AnimationLevel,
+) -> String {
+    match activity_state {
+        AnimationState::Thinking | AnimationState::WaitingForResponse => String::new(),
+        _ => activity_label(activity_state, tick, animation_level, ActivitySurface::Editor),
     }
 }
 
@@ -605,10 +621,24 @@ fn superbar_border_style(
 ) -> Style {
     let color = superbar_border_color(theme, thinking_level, activity_state, tick, animation_level);
     let mut style = Style::default().fg(color);
-    if activity_state != AnimationState::Idle && animation_level != AnimationLevel::None {
+    if superbar_border_is_animated(activity_state, animation_level) {
         style = style.add_modifier(ratatui::style::Modifier::BOLD);
     }
     style
+}
+
+fn superbar_border_is_animated(
+    activity_state: AnimationState,
+    animation_level: AnimationLevel,
+) -> bool {
+    if animation_level == AnimationLevel::None {
+        return false;
+    }
+
+    !matches!(
+        activity_state,
+        AnimationState::Idle | AnimationState::Thinking | AnimationState::WaitingForResponse
+    )
 }
 
 fn superbar_border_color(
@@ -619,7 +649,7 @@ fn superbar_border_color(
     animation_level: AnimationLevel,
 ) -> Color {
     let base = theme.thinking_border_color(thinking_level);
-    if activity_state == AnimationState::Idle || animation_level == AnimationLevel::None {
+    if !superbar_border_is_animated(activity_state, animation_level) {
         return base;
     }
 
@@ -663,7 +693,6 @@ fn mix_color(base: Color, target: Color, amount: f32) -> Color {
 fn mix_channel(base: u8, target: u8, amount: f32) -> u8 {
     (base as f32 + (target as f32 - base as f32) * amount).round() as u8
 }
-
 
 fn abbreviate_home(path: &str) -> String {
     if path == "/Users/asher" {
@@ -978,7 +1007,10 @@ mod tests {
     #[test]
     fn identity_label_prefers_tilde_path() {
         let rendered = build_identity_label("/Users/asher/tower/imp", "chat", 80);
-        let text: String = rendered.into_iter().map(|span| span.content.into_owned()).collect();
+        let text: String = rendered
+            .into_iter()
+            .map(|span| span.content.into_owned())
+            .collect();
         assert!(text.contains("~/tower/imp"));
         assert!(text.contains("chat"));
     }
@@ -989,10 +1021,33 @@ mod tests {
             AnimationState::ExecutingTools { active_tools: 2 },
             0,
             AnimationLevel::Minimal,
-            false,
         );
-        let text: String = rendered.into_iter().map(|span| span.content.into_owned()).collect();
+        let text: String = rendered
+            .into_iter()
+            .map(|span| span.content.into_owned())
+            .collect();
         assert!(text.contains("working"));
+    }
+
+    #[test]
+    fn top_right_label_renders_elapsed() {
+        let theme = Theme::default();
+        let rendered = build_top_right_label(Some(Duration::from_secs(75)), &theme);
+        let text: String = rendered
+            .into_iter()
+            .map(|span| span.content.into_owned())
+            .collect();
+        assert!(text.contains("1m15s"));
+    }
+
+    #[test]
+    fn bottom_left_label_hides_thinking_state() {
+        let rendered = build_bottom_left_label(
+            AnimationState::Thinking,
+            0,
+            AnimationLevel::Minimal,
+        );
+        assert!(rendered.is_empty());
     }
 
     #[test]
@@ -1003,6 +1058,19 @@ mod tests {
             ThinkingLevel::Medium,
             AnimationState::Idle,
             0,
+            AnimationLevel::Spinner,
+        );
+        assert_eq!(color, theme.thinking_border_color(ThinkingLevel::Medium));
+    }
+
+    #[test]
+    fn superbar_border_color_stays_base_when_thinking() {
+        let theme = Theme::default();
+        let color = superbar_border_color(
+            &theme,
+            ThinkingLevel::Medium,
+            AnimationState::Thinking,
+            6,
             AnimationLevel::Spinner,
         );
         assert_eq!(color, theme.thinking_border_color(ThinkingLevel::Medium));
