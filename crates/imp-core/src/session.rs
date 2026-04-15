@@ -203,7 +203,7 @@ impl SessionManager {
         let mut session_name = None;
         let mut session_summary = None;
 
-        for (line_num, line) in content.lines().enumerate() {
+        for (_line_num, line) in content.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
@@ -218,12 +218,9 @@ impl SessionManager {
                     }
                     entries.push(entry);
                 }
-                Err(e) => {
-                    eprintln!(
-                        "warning: skipping malformed line {} in {}: {e}",
-                        line_num + 1,
-                        path.display()
-                    );
+                Err(_e) => {
+                    // Keep session loading side-effect free for embedded callers like the TUI.
+                    // Malformed lines are skipped so resume/continue can still recover usable history.
                 }
             }
         }

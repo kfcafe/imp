@@ -150,6 +150,52 @@ impl Default for SessionOptions {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RuntimeConnectionIntent<'a> {
+    pub model_hint: Option<&'a str>,
+    pub config_model: Option<&'a str>,
+    pub provider_override: Option<&'a str>,
+    pub api_key_override_present: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRuntimeConnection {
+    pub model_id: String,
+    pub provider_name: String,
+}
+
+/// Resolve the model-first runtime connection (model id + provider route/surface)
+/// shared by CLI and session startup.
+pub fn resolve_runtime_connection(
+    intent: RuntimeConnectionIntent<'_>,
+    auth_store: &AuthStore,
+    registry: &ModelRegistry,
+) -> std::result::Result<ResolvedRuntimeConnection, String> {
+    let model_hint = intent.model_hint.or(intent.config_model).unwrap_or("sonnet");
+
+    let meta = registry
+        .resolve_meta(model_hint, intent.provider_override)
+        .ok_or_else(|| format!("Unknown model: {model_hint}"))?;
+
+    let mut provider_name = intent.provider_override.unwrap_or(&meta.provider).to_string();
+
+    if should_use_openai_chatgpt_route(
+        intent.provider_override,
+        intent.api_key_override_present,
+        auth_store,
+        registry,
+        &meta.id,
+        &provider_name,
+    ) {
+        provider_name = "openai-codex".to_string();
+    }
+
+    Ok(ResolvedRuntimeConnection {
+        model_id: meta.id.clone(),
+        provider_name,
+    })
+}
+
 // ── ImpSession ──────────────────────────────────────────────────
 
 /// A fully wired agent session.
@@ -206,34 +252,33 @@ impl ImpSession {
             let _ = key; // handled below
         }
 
-        // 3. Resolve model + provider
+        // 3. Resolve model + provider route
         let model_registry = ModelRegistry::with_builtins();
-        let model_hint = options
-            .model
-            .as_deref()
-            .or(config.model.as_deref())
-            .unwrap_or("sonnet");
-
-        let meta = model_registry
-            .resolve_meta(model_hint, options.provider.as_deref())
-            .ok_or_else(|| Error::Config(format!("Unknown model: {model_hint}")))?;
-
-        let mut provider_name = options
-            .provider
-            .as_deref()
-            .unwrap_or(&meta.provider)
-            .to_string();
-
-        // ChatGPT/Codex provider selection
-        if should_use_codex(
-            &options,
+        let runtime_connection = resolve_runtime_connection(
+            RuntimeConnectionIntent {
+                model_hint: options.model.as_deref(),
+                config_model: config.model.as_deref(),
+                provider_override: options.provider.as_deref(),
+                api_key_override_present: options.api_key.is_some(),
+            },
             &auth_store,
             &model_registry,
-            &meta.id,
-            &provider_name,
-        ) {
-            provider_name = "openai-codex".to_string();
-        }
+        )
+        .map_err(Error::Config)?;
+
+        let meta = model_registry
+            .resolve_meta(
+                &runtime_connection.model_id,
+                Some(&runtime_connection.provider_name),
+            )
+            .ok_or_else(|| {
+                Error::Config(format!(
+                    "Unknown model/provider route: {} via {}",
+                    runtime_connection.model_id, runtime_connection.provider_name
+                ))
+            })?;
+
+        let provider_name = runtime_connection.provider_name.clone();
 
         // Set runtime API key override now that we know the provider
         if let Some(ref key) = options.api_key {
@@ -664,29 +709,29 @@ async fn resolve_api_key(auth_store: &mut AuthStore, provider: &str) -> Result<A
     result.map_err(|e| Error::Config(format!("Auth failed for {provider}: {e}")))
 }
 
-/// Detect whether we should use the ChatGPT/Codex subscription provider
-/// instead of the regular OpenAI API key provider.
-fn should_use_codex(
-    options: &SessionOptions,
+fn should_use_openai_chatgpt_route(
+    provider_override: Option<&str>,
+    api_key_override_present: bool,
     auth_store: &AuthStore,
     registry: &ModelRegistry,
     model_id: &str,
     provider_name: &str,
 ) -> bool {
-    let provider_allows_fallback = match options.provider.as_deref() {
+    let provider_allows_fallback = match provider_override {
         None => true,
         Some("openai") => true,
         Some(_) => false,
     };
 
     provider_allows_fallback
-        && options.api_key.is_none()
+        && !api_key_override_present
         && provider_name == "openai"
         && auth_store.resolve_api_key_only("openai").is_err()
         && (auth_store.get_oauth("openai").is_some()
             || auth_store.get_oauth("openai-codex").is_some())
         && codex_supports_model(registry, model_id)
 }
+
 
 fn clone_model(model: &Model) -> Model {
     Model {
@@ -886,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn should_use_codex_returns_true_when_provider_forced_to_openai_and_oauth_exists() {
+    fn resolve_runtime_connection_prefers_openai_chatgpt_route_when_oauth_exists() {
         let dir = tempfile::tempdir().unwrap();
         let auth_path = dir.path().join("auth.json");
         let mut auth_store = AuthStore::new(auth_path);
@@ -901,39 +946,46 @@ mod tests {
             )
             .unwrap();
         let registry = ModelRegistry::with_builtins();
-        let options = SessionOptions {
-            provider: Some("openai".into()),
-            ..Default::default()
-        };
-        assert!(should_use_codex(
-            &options,
+
+        let resolved = resolve_runtime_connection(
+            RuntimeConnectionIntent {
+                model_hint: Some("gpt-5.4"),
+                config_model: None,
+                provider_override: Some("openai"),
+                api_key_override_present: false,
+            },
             &auth_store,
             &registry,
-            "gpt-5.4",
-            "openai"
-        ));
+        )
+        .unwrap();
+
+        assert_eq!(resolved.model_id, "gpt-5.4");
+        assert_eq!(resolved.provider_name, "openai-codex");
     }
 
     #[test]
-    fn should_use_codex_returns_false_when_provider_set_to_non_openai() {
+    fn resolve_runtime_connection_respects_forced_non_openai_provider() {
         let auth_path = PathBuf::from("/tmp/nonexistent-auth.json");
         let auth_store = AuthStore::new(auth_path);
         let registry = ModelRegistry::with_builtins();
-        let options = SessionOptions {
-            provider: Some("anthropic".into()),
-            ..Default::default()
-        };
-        assert!(!should_use_codex(
-            &options,
+
+        let resolved = resolve_runtime_connection(
+            RuntimeConnectionIntent {
+                model_hint: Some("gpt-5.4"),
+                config_model: None,
+                provider_override: Some("anthropic"),
+                api_key_override_present: false,
+            },
             &auth_store,
             &registry,
-            "gpt-5.4",
-            "openai"
-        ));
+        )
+        .unwrap();
+
+        assert_eq!(resolved.provider_name, "anthropic");
     }
 
     #[test]
-    fn should_use_codex_returns_false_when_model_is_not_codex_supported() {
+    fn resolve_runtime_connection_does_not_switch_when_model_is_not_codex_supported() {
         let dir = tempfile::tempdir().unwrap();
         let auth_path = dir.path().join("auth.json");
         let mut auth_store = AuthStore::new(auth_path);
@@ -948,35 +1000,54 @@ mod tests {
             )
             .unwrap();
         let registry = ModelRegistry::with_builtins();
-        let options = SessionOptions {
-            provider: Some("openai".into()),
-            ..Default::default()
-        };
-        assert!(!should_use_codex(
-            &options,
+
+        let resolved = resolve_runtime_connection(
+            RuntimeConnectionIntent {
+                model_hint: Some("gpt-4o"),
+                config_model: None,
+                provider_override: Some("openai"),
+                api_key_override_present: false,
+            },
             &auth_store,
             &registry,
-            "gpt-4o",
-            "openai"
-        ));
+        )
+        .unwrap();
+
+        assert_eq!(resolved.model_id, "gpt-4o");
+        assert_eq!(resolved.provider_name, "openai");
     }
 
     #[test]
-    fn should_use_codex_returns_false_when_api_key_set() {
-        let auth_path = PathBuf::from("/tmp/nonexistent-auth.json");
-        let auth_store = AuthStore::new(auth_path);
+    fn resolve_runtime_connection_does_not_switch_when_api_key_override_is_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let mut auth_store = AuthStore::new(auth_path);
+        auth_store
+            .store(
+                "openai",
+                imp_llm::auth::StoredCredential::OAuth(imp_llm::auth::OAuthCredential {
+                    access_token: "oauth-token".into(),
+                    refresh_token: "refresh-token".into(),
+                    expires_at: imp_llm::now() + 3600,
+                }),
+            )
+            .unwrap();
         let registry = ModelRegistry::with_builtins();
-        let options = SessionOptions {
-            api_key: Some("sk-test".into()),
-            ..Default::default()
-        };
-        assert!(!should_use_codex(
-            &options,
+
+        let resolved = resolve_runtime_connection(
+            RuntimeConnectionIntent {
+                model_hint: Some("gpt-5.4"),
+                config_model: None,
+                provider_override: None,
+                api_key_override_present: true,
+            },
             &auth_store,
             &registry,
-            "gpt-4o",
-            "openai"
-        ));
+        )
+        .unwrap();
+
+        assert_eq!(resolved.model_id, "gpt-5.4");
+        assert_eq!(resolved.provider_name, "openai");
     }
 
     #[tokio::test]

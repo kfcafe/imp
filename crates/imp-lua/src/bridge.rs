@@ -317,10 +317,9 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
         if let Some(list) = handlers.get::<Option<Table>>(name.as_str())? {
             for pair in list.sequence_values::<Function>() {
                 let handler = pair?;
-                // Errors in event handlers are caught and ignored (logged via eprintln)
-                if let Err(e) = handler.call::<()>(data.clone()) {
-                    eprintln!("[imp-lua] event handler error for '{}': {}", name, e);
-                }
+                // Errors in event handlers are caught and ignored so one bad
+                // extension callback cannot destabilize the host runtime.
+                let _ = handler.call::<()>(data.clone());
             }
         }
         Ok(())

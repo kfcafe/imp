@@ -211,6 +211,7 @@ async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Resu
             "status": status,
             "summary": summary,
             "verify_passed": outcome.verify_passed,
+            "verify_output": outcome.verify_output,
             "closed_after_verify": outcome.closed_after_verify,
             "model": outcome.result.model,
             "provider": params.get("provider").and_then(|v| v.as_str()),

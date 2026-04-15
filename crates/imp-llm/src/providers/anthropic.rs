@@ -683,9 +683,9 @@ fn parse_sse_event(data: &str) -> Result<Option<SseEvent>> {
     // Parse as JSON; unknown event types are caught by #[serde(other)].
     match serde_json::from_str(trimmed) {
         Ok(event) => Ok(Some(event)),
-        Err(e) => {
-            // Log but don't fail on unparseable events — forward compatibility
-            eprintln!("[imp-llm] SSE parse warning: {e} (data: {:.200})", trimmed);
+        Err(_e) => {
+            // Ignore unparseable events for forward compatibility without writing
+            // directly to stderr from library/runtime code.
             Ok(None)
         }
     }
@@ -971,9 +971,6 @@ fn stream_response(
                             return;
                         }
                         had_401 = true;
-                        eprintln!(
-                            "[imp-llm] HTTP 401, retrying once (credentials may have expired)"
-                        );
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         continue;
                     }
@@ -983,12 +980,6 @@ fn stream_response(
                         // Honor retry-after header if present
                         let delay =
                             retry_after_delay(r.headers()).unwrap_or_else(|| retry_delay(attempt));
-                        eprintln!(
-                            "[imp-llm] HTTP {status}, retrying in {}s (attempt {}/{})",
-                            delay.as_secs(),
-                            attempt + 1,
-                            MAX_RETRIES
-                        );
                         tokio::time::sleep(delay).await;
                         attempt += 1;
                         continue;
@@ -1004,12 +995,6 @@ fn stream_response(
                     let is_transient = e.is_connect() || e.is_timeout() || e.is_request();
                     if is_transient && attempt < MAX_RETRIES {
                         let delay = retry_delay(attempt);
-                        eprintln!(
-                            "[imp-llm] Connection error: {e}, retrying in {}s (attempt {}/{})",
-                            delay.as_secs(),
-                            attempt + 1,
-                            MAX_RETRIES
-                        );
                         tokio::time::sleep(delay).await;
                         attempt += 1;
                         continue;

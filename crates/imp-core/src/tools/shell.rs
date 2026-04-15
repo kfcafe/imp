@@ -364,10 +364,9 @@ pub fn load_shell_tools(dir: &Path, registry: &mut ToolRegistry) -> Result<()> {
         let content = std::fs::read_to_string(entry.path())?;
         match toml::from_str::<ShellToolDef>(&content) {
             Ok(def) => registry.register(Arc::new(ShellTool::new(def))),
-            Err(err) => eprintln!(
-                "warning: skipping invalid shell tool definition {}: {err}",
-                entry.path().display()
-            ),
+            Err(_err) => {
+                // Keep shell tool discovery side-effect free for embedded callers.
+            }
         }
     }
 

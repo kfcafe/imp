@@ -30,20 +30,19 @@ pub fn init_lua_extensions(
 
     let rt = match LuaRuntime::new() {
         Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("[imp-lua] failed to create Lua runtime: {e}");
+        Err(_e) => {
             return None;
         }
     };
-    if let Err(e) = setup_host_api(&rt) {
-        eprintln!("[imp-lua] failed to set up host API: {e}");
+    if let Err(_e) = setup_host_api(&rt) {
         return None;
     }
 
     let results = load_extensions(&rt, &extensions);
-    for (name, result) in &results {
-        if let Err(e) = result {
-            eprintln!("[imp-lua] extension '{name}' failed to load: {e}");
+    for (_name, result) in &results {
+        if let Err(_e) = result {
+            // Keep extension bootstrap silent in embedded runtimes; failed extensions
+            // simply do not register their tools.
         }
     }
 

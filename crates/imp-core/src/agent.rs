@@ -18,6 +18,7 @@ use crate::hooks::{HookBackgroundEvent, HookEvent, HookRunner};
 use crate::mana_review::{ManaReviewState, TurnManaReview, TurnManaReviewAccumulator};
 use crate::roles::Role;
 use crate::tools::{LuaToolLoader, ToolRegistry};
+use crate::ui::NotifyLevel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimingStage {
@@ -596,7 +597,10 @@ impl Agent {
                             self.api_key = new_key;
                         }
                         Err(e) => {
-                            eprintln!("[imp] OAuth token refresh failed: {e}");
+                            let message = format!(
+                                "OAuth token refresh failed before request: {e}. Continuing with existing credentials."
+                            );
+                            let _ = self.ui.notify(&message, NotifyLevel::Warning).await;
                         }
                     }
                 }

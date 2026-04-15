@@ -286,6 +286,7 @@ pub struct WorkerRunOutcome {
     pub prefilled_files: Vec<PathBuf>,
     pub prefill_warnings: Vec<String>,
     pub estimated_prefill_tokens: usize,
+    pub verify_output: Option<String>,
 }
 
 pub async fn prepare_worker_run(
@@ -381,6 +382,7 @@ pub async fn finalize_worker_run(
     } else {
         WorkerStatus::Completed
     };
+    let mut verify_output = None;
     let mut error = None;
 
     if !batch_verify {
@@ -390,8 +392,9 @@ pub async fn finalize_worker_run(
             .map(str::trim)
             .filter(|verify| !verify.is_empty())
         {
-            let passed = run_verify_command(verify, &assignment.workspace_root).await?;
+            let (passed, output) = run_verify_command(verify, &assignment.workspace_root).await?;
             verify_passed = Some(passed);
+            verify_output = output;
             if passed {
                 status = WorkerStatus::Completed;
                 let close_result = std::process::Command::new("mana")
@@ -457,6 +460,7 @@ pub async fn finalize_worker_run(
         prefilled_files,
         prefill_warnings,
         estimated_prefill_tokens,
+        verify_output,
     })
 }
 
@@ -478,21 +482,27 @@ pub async fn run_worker_assignment(
     finalize_worker_run(prepared).await
 }
 
-async fn run_verify_command(verify: &str, cwd: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+async fn run_verify_command(
+    verify: &str,
+    cwd: &Path,
+) -> Result<(bool, Option<String>), Box<dyn std::error::Error>> {
     let output = run_shell_command(verify, cwd).output().await?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        if !stderr.trim().is_empty() {
-            eprintln!("{stderr}");
-        } else if !stdout.trim().is_empty() {
-            eprintln!("{stdout}");
+    let verify_output = if output.status.success() {
+        None
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !stderr.is_empty() {
+            Some(stderr)
+        } else if !stdout.is_empty() {
+            Some(stdout)
+        } else {
+            None
         }
-    }
+    };
 
-    Ok(output.status.success())
+    Ok((output.status.success(), verify_output))
 }
 
 fn run_shell_command(command: &str, cwd: &Path) -> TokioCommand {
@@ -787,6 +797,26 @@ mod tests {
         let content = "---\ntitle: Test\n---\n\nBody text here.";
         let body = extract_markdown_body(content).unwrap();
         assert!(body.contains("Body text here."));
+    }
+
+    #[tokio::test]
+    async fn run_verify_command_captures_stderr_without_printing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (passed, output) = run_verify_command("printf 'boom' >&2; exit 1", dir.path())
+            .await
+            .unwrap();
+        assert!(!passed);
+        assert_eq!(output.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn run_verify_command_falls_back_to_stdout_when_stderr_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let (passed, output) = run_verify_command("printf 'nope'; exit 1", dir.path())
+            .await
+            .unwrap();
+        assert!(!passed);
+        assert_eq!(output.as_deref(), Some("nope"));
     }
 
     #[test]

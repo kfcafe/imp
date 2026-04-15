@@ -92,7 +92,10 @@ use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use imp_core::config::{AnimationLevel, Config, ToolOutputDisplay};
 use imp_core::tools::web::types::SearchProvider;
 
-use imp_core::imp_session::{ImpSession, SessionChoice, SessionOptions};
+use imp_core::imp_session::{
+    resolve_runtime_connection, ImpSession, ResolvedRuntimeConnection, RuntimeConnectionIntent,
+    SessionChoice, SessionOptions,
+};
 use imp_core::personality::{
     default_soul_markdown, generated_tunable_line, replace_tunable_line, soul_identity_text,
     tunable_state_for_label, SoulTunableState,
@@ -1408,61 +1411,27 @@ fn parse_thinking_level(s: &str) -> ThinkingLevel {
     }
 }
 
-fn model_supports_provider(registry: &ModelRegistry, provider: &str, model_id: &str) -> bool {
-    if provider == "openai-codex" {
-        return imp_llm::model::builtin_openai_codex_models()
-            .iter()
-            .any(|model| model.id == model_id);
-    }
-
-    registry
-        .list_by_provider(provider)
-        .iter()
-        .any(|model| model.id == model_id)
-}
-
-fn should_use_chatgpt_provider(
-    cli: &Cli,
-    auth_store: &AuthStore,
-    registry: &ModelRegistry,
-    model_id: &str,
-    provider_name: &str,
-) -> bool {
-    cli.provider.is_none()
-        && cli.api_key.is_none()
-        && provider_name == "openai"
-        && auth_store.resolve_api_key_only("openai").is_err()
-        && (auth_store.get_oauth("openai").is_some()
-            || auth_store.get_oauth("openai-codex").is_some())
-        && model_supports_provider(registry, "openai-codex", model_id)
-}
-
 fn resolve_model_and_provider(
     cli: &Cli,
     config: &Config,
     registry: &ModelRegistry,
     auth_store: &AuthStore,
 ) -> Result<(String, String), String> {
-    let model_hint = cli
-        .model
-        .as_deref()
-        .or(config.model.as_deref())
-        .unwrap_or("sonnet");
+    let ResolvedRuntimeConnection {
+        model_id,
+        provider_name,
+    } = resolve_runtime_connection(
+        RuntimeConnectionIntent {
+            model_hint: cli.model.as_deref(),
+            config_model: config.model.as_deref(),
+            provider_override: cli.provider.as_deref(),
+            api_key_override_present: cli.api_key.is_some(),
+        },
+        auth_store,
+        registry,
+    )?;
 
-    let meta = registry
-        .resolve_meta(model_hint, cli.provider.as_deref())
-        .ok_or_else(|| format!("Unknown model: {model_hint}"))?;
-
-    let mut provider_name = cli
-        .provider
-        .as_deref()
-        .unwrap_or(&meta.provider)
-        .to_string();
-    if should_use_chatgpt_provider(cli, auth_store, registry, &meta.id, &provider_name) {
-        provider_name = "openai-codex".to_string();
-    }
-
-    Ok((meta.id.clone(), provider_name))
+    Ok((model_id, provider_name))
 }
 
 async fn resolve_provider_api_key(
