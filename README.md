@@ -54,7 +54,7 @@ imp is the native worker/runtime and orchestrator designed to use mana well. In 
 
 **Context management** — As conversations grow, imp first masks old tool outputs and can now compact older history behind an explicit branch-local compaction boundary. `/compact` preserves recent working turns verbatim, summarizes older work into a structured handoff, and makes future turns use the compacted active history rather than the full raw transcript. Raw session entries remain on disk for replay/fork/export. This complements the mana happy path: keep durable handoff rich when cheap to capture, but reveal context selectively rather than flooding future workers with unnecessary raw history.
 
-**Modes** — Control what the agent can do. `full` for interactive use, `worker` for scoped tasks, `orchestrator` for planning and delegation, `reviewer` for read-only analysis. Enforced at both tool registration and execution time — disallowed tools never appear in the prompt. When delegating, imp should use mana child jobs as the worker substrate rather than inventing a separate subtask model. In worker mode especially, imp should behave like a native runtime for mana-shaped work rather than a generic chat assistant.
+**Modes** — Control what the agent can do. `full` for interactive use, `worker` for scoped tasks, `orchestrator` for planning and worker spawning, `reviewer` for read-only analysis. Enforced at both tool registration and execution time — disallowed tools never appear in the prompt. When spawning workers, imp should use mana child jobs as the worker substrate rather than inventing a separate subtask model. In worker mode especially, imp should behave like a native runtime for mana-shaped work rather than a generic chat assistant.
 
 **Sessions** — Every message, tool call, and result is persisted to append-only JSONL. Resume any session, fork from any point, navigate between branches.
 
@@ -290,7 +290,7 @@ export IMP_WEB_PROVIDER=exa
 |------|--------------|---------|
 | `full` | everything | Interactive use |
 | `worker` | read, write, bash, ask | Execute a scoped task |
-| `orchestrator` | read, mana, ask | Plan and delegate |
+| `orchestrator` | read, mana, ask | Plan and spawn workers |
 | `planner` | read, mana (create), ask | Decompose work |
 | `reviewer` | read, ask | Read-only analysis |
 | `auditor` | read, mana (read-only) | Inspect and report |
@@ -299,9 +299,9 @@ export IMP_WEB_PROVIDER=exa
 IMP_MODE=worker imp mana 5.1
 ```
 
-## Delegating work with mana child jobs
+## Spawning workers with mana child jobs
 
-When `imp` delegates work, it should create **mana child jobs** under the parent job instead of inventing a second todo or planning system.
+When `imp` spawns workers for durable work, it should create **mana child jobs** under the parent job instead of inventing a second todo or planning system.
 
 Use a concise child-job description with:
 - goal plus current-state framing
@@ -311,7 +311,7 @@ Use a concise child-job description with:
 - important files or subsystem focus when known
 - a concrete done condition and verify expectation
 
-The full delegated child-job contract and reusable template live in `ARCHITECTURE.md`.
+The full child-job contract and reusable template live in `ARCHITECTURE.md`.
 
 ## Lua extensions
 
@@ -366,7 +366,7 @@ imp/
 
 **imp-llm** is standalone — you can use it as a Rust library for streaming LLM access without the agent engine.
 
-See `ARCHITECTURE.md` for design notes, including the delegated mana child-job contract for planner/orchestrator-authored work.
+See `ARCHITECTURE.md` for design notes, including the mana child-job contract for planner/orchestrator-authored work.
 
 ## Benchmarks
 

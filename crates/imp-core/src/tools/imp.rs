@@ -18,11 +18,11 @@ impl Tool for ImpTool {
     }
 
     fn label(&self) -> &str {
-        "Delegate Work"
+        "Spawn Worker"
     }
 
     fn description(&self) -> &str {
-        "Delegate work to another imp worker. Supports durable mana-unit delegation and bounded ad hoc helper delegation."
+        "Spawn another imp worker. Supports durable mana-unit worker runs and bounded ad hoc helper sessions."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -31,13 +31,13 @@ impl Tool for ImpTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["delegate"],
-                    "description": "Delegate work to another imp worker"
+                    "enum": ["spawn", "delegate"],
+                    "description": "Preferred: spawn another imp worker. `delegate` remains accepted as a compatibility alias during migration."
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["unit", "ad_hoc"],
-                    "description": "Delegation mode. 'unit' executes a tracked mana unit; 'ad_hoc' runs a bounded transient helper session."
+                    "description": "Worker mode. 'unit' runs a tracked mana unit; 'ad_hoc' runs a bounded transient helper session."
                 },
                 "unit_id": {
                     "type": "string",
@@ -88,16 +88,16 @@ impl Tool for ImpTool {
         }
 
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        if action != "delegate" {
+        if !matches!(action, "spawn" | "delegate") {
             return Ok(ToolOutput::error(
-                "Unsupported imp action. Expected action='delegate'.",
+                "Unsupported imp action. Expected action='spawn' (preferred) or action='delegate' (compatibility alias).",
             ));
         }
 
         let mode = params.get("mode").and_then(|v| v.as_str()).unwrap_or("");
         match mode {
-            "unit" => execute_unit_delegate(params, ctx).await,
-            "ad_hoc" => execute_ad_hoc_delegate(params, ctx).await,
+            "unit" => execute_unit_spawn(params, ctx).await,
+            "ad_hoc" => execute_ad_hoc_spawn(params, ctx).await,
             _ => Ok(ToolOutput::error(
                 "Unsupported imp mode. Expected mode='unit' or mode='ad_hoc'.",
             )),
@@ -105,7 +105,7 @@ impl Tool for ImpTool {
     }
 }
 
-async fn execute_unit_delegate(params: serde_json::Value, ctx: ToolContext) -> Result<ToolOutput> {
+async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Result<ToolOutput> {
     let unit_id = params
         .get("unit_id")
         .and_then(|v| v.as_str())
@@ -173,29 +173,29 @@ async fn execute_unit_delegate(params: serde_json::Value, ctx: ToolContext) -> R
         .result
         .summary
         .clone()
-        .unwrap_or_else(|| format!("Delegated unit {} finished.", assignment.id));
+        .unwrap_or_else(|| format!("Spawned worker for unit {} finished.", assignment.id));
 
     let content = match outcome.result.status {
         tower_contracts::worker::WorkerStatus::Completed => {
-            format!("Delegated unit {} completed successfully.", assignment.id)
+            format!("Spawned worker for unit {} completed successfully.", assignment.id)
         }
         tower_contracts::worker::WorkerStatus::AwaitingVerify => {
             format!(
-                "Delegated unit {} completed and is awaiting verify.",
+                "Spawned worker for unit {} completed and is awaiting verify.",
                 assignment.id
             )
         }
         tower_contracts::worker::WorkerStatus::Failed => {
             format!(
-                "Delegated unit {} finished but verify failed.",
+                "Spawned worker for unit {} finished but verify failed.",
                 assignment.id
             )
         }
         tower_contracts::worker::WorkerStatus::Blocked => {
-            format!("Delegated unit {} is blocked.", assignment.id)
+            format!("Spawned worker for unit {} is blocked.", assignment.id)
         }
         tower_contracts::worker::WorkerStatus::Cancelled => {
-            format!("Delegated unit {} was cancelled.", assignment.id)
+            format!("Spawned worker for unit {} was cancelled.", assignment.id)
         }
     };
 
@@ -203,7 +203,8 @@ async fn execute_unit_delegate(params: serde_json::Value, ctx: ToolContext) -> R
         content: vec![ContentBlock::Text { text: content }],
         details: json!({
             "tool": "imp",
-            "action": "delegate",
+            "action": "spawn",
+            "spawn_mode": "unit",
             "delegation_mode": "unit",
             "durable": true,
             "unit_id": assignment.id,
@@ -220,7 +221,7 @@ async fn execute_unit_delegate(params: serde_json::Value, ctx: ToolContext) -> R
     })
 }
 
-async fn execute_ad_hoc_delegate(
+async fn execute_ad_hoc_spawn(
     params: serde_json::Value,
     ctx: ToolContext,
 ) -> Result<ToolOutput> {
@@ -283,15 +284,16 @@ async fn execute_ad_hoc_delegate(
     let summary = final_text
         .clone()
         .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| "Transient helper run completed.".to_string());
+        .unwrap_or_else(|| "Transient helper worker completed.".to_string());
 
     Ok(ToolOutput {
         content: vec![ContentBlock::Text {
-            text: "Transient helper run completed.".to_string(),
+            text: "Transient helper worker completed.".to_string(),
         }],
         details: json!({
             "tool": "imp",
-            "action": "delegate",
+            "action": "spawn",
+            "spawn_mode": "ad_hoc",
             "delegation_mode": "ad_hoc",
             "durable": false,
             "status": "completed",
@@ -395,7 +397,7 @@ mod tests {
         let result = tool
             .execute(
                 "call-1",
-                json!({"action": "delegate", "mode": "unit"}),
+                json!({"action": "spawn", "mode": "unit"}),
                 test_ctx(AgentMode::Orchestrator),
             )
             .await;
@@ -411,7 +413,7 @@ mod tests {
         let result = tool
             .execute(
                 "call-1",
-                json!({"action": "delegate", "mode": "ad_hoc"}),
+                json!({"action": "spawn", "mode": "ad_hoc"}),
                 test_ctx(AgentMode::Orchestrator),
             )
             .await;
@@ -427,7 +429,7 @@ mod tests {
         let out = tool
             .execute(
                 "call-1",
-                json!({"action": "delegate", "mode": "unit", "unit_id": "123"}),
+                json!({"action": "spawn", "mode": "unit", "unit_id": "123"}),
                 test_ctx(AgentMode::Worker),
             )
             .await
@@ -438,17 +440,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delegate_action_remains_accepted_as_compatibility_alias() {
+        let tool = ImpTool;
+        let result = tool
+            .execute(
+                "call-1",
+                json!({"action": "delegate", "mode": "unit"}),
+                test_ctx(AgentMode::Orchestrator),
+            )
+            .await;
+        match result {
+            Ok(_) => panic!("expected missing unit_id to return an error"),
+            Err(err) => assert!(err.to_string().contains("unit_id")),
+        }
+    }
+
+    #[tokio::test]
     async fn ad_hoc_returns_transient_details() {
         let tool = ImpTool;
         let out = tool
             .execute(
                 "call-1",
-                json!({"action": "delegate", "mode": "ad_hoc", "prompt": "Say only the word transient."}),
+                json!({"action": "spawn", "mode": "ad_hoc", "prompt": "Say only the word transient."}),
                 test_ctx(AgentMode::Orchestrator),
             )
             .await
             .unwrap();
         assert!(!out.is_error);
+        assert_eq!(
+            out.details.get("spawn_mode").and_then(|v| v.as_str()),
+            Some("ad_hoc")
+        );
         assert_eq!(
             out.details.get("delegation_mode").and_then(|v| v.as_str()),
             Some("ad_hoc")

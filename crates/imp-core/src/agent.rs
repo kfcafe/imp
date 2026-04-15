@@ -1790,16 +1790,17 @@ fn mana_skill_follow_up_hint(
     let lower = prompt.to_ascii_lowercase();
 
     let orchestration_signal = [
+        "spawn",
         "delegate",
-        "delegation",
         "decompose",
         "decomposition",
         "split this",
         "break this up",
         "break it up",
         "parallel",
-        "worker",
-        "workers",
+        "spawn workers",
+        "spawn worker",
+        "worker spawn",
         "orchestrate",
         "orchestration",
         "create a unit",

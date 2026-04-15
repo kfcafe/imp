@@ -198,7 +198,7 @@ impl AgentMode {
                 Encode unresolved questions as decisions instead of burying ambiguity in prose. \
                 When the conversation itself is producing durable plans, architecture, migrations, or implementation structure, externalize that structure into mana during the conversation rather than waiting until the end. \
                 Prefer native mana actions, including scope-aware and append-style updates, over shell or direct file edits for maintaining the work graph. \
-                You may not read or write files directly — delegate all file work to worker agents via mana. \
+                You may not read or write files directly — spawn worker agents via mana for all file work. \
                 Update units with concrete failure context and do not retry unchanged failed plans. \
                 You are responsible for unit structure, completeness, and verify quality.",
             ),
