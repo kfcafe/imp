@@ -288,16 +288,7 @@ impl ImpSession {
         let provider = create_provider(&provider_name)
             .ok_or_else(|| Error::Config(format!("Unknown provider: {provider_name}")))?;
 
-        // 4. Resolve API key. In no-tools sessions we allow the shell/session
-        // to come up without provider auth so local commands like settings/help
-        // can run before any model-backed prompt is attempted.
-        let api_key = if options.no_tools {
-            resolve_api_key(&mut auth_store, &provider_name)
-                .await
-                .unwrap_or_default()
-        } else {
-            resolve_api_key(&mut auth_store, &provider_name).await?
-        };
+        let api_key = resolve_api_key(&mut auth_store, &provider_name).await?;
 
         let model = Model {
             meta,
@@ -702,9 +693,9 @@ impl ImpSession {
 /// Resolve the API key for a provider, handling OAuth refresh.
 async fn resolve_api_key(auth_store: &mut AuthStore, provider: &str) -> Result<ApiKey> {
     let result = match provider {
-        "openai" => auth_store.resolve_api_key_only(provider),
         "openai-codex" => auth_store.resolve_chatgpt_oauth().await,
-        _ => auth_store.resolve_with_refresh(provider).await,
+        "anthropic" => auth_store.resolve_with_refresh(provider).await,
+        _ => auth_store.resolve(provider),
     };
     result.map_err(|e| Error::Config(format!("Auth failed for {provider}: {e}")))
 }
@@ -1048,6 +1039,34 @@ mod tests {
 
         assert_eq!(resolved.model_id, "gpt-5.4");
         assert_eq!(resolved.provider_name, "openai");
+    }
+
+    #[tokio::test]
+    async fn no_tools_session_surfaces_auth_failure_instead_of_empty_api_key() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let auth_path = tmp.path().join("auth.json");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let result = ImpSession::create(SessionOptions {
+            cwd: cwd.clone(),
+            auth_path: Some(auth_path),
+            provider: Some("openai-codex".into()),
+            model: Some("gpt-5.4".into()),
+            no_tools: true,
+            session: SessionChoice::InMemory,
+            ..Default::default()
+        })
+        .await;
+
+        match result {
+            Ok(_) => panic!("missing auth should fail clearly"),
+            Err(Error::Config(message)) => {
+                assert!(message.contains("Auth failed for openai-codex"));
+                assert!(!message.contains("Incorrect API key provided: ''"));
+            }
+            Err(other) => panic!("expected config error, got {other:?}"),
+        }
     }
 
     #[tokio::test]

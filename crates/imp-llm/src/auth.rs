@@ -183,8 +183,15 @@ impl AuthStore {
     }
 
     /// Set a runtime override (not persisted).
+    /// Empty or whitespace-only values are treated as absent.
     pub fn set_runtime_key(&mut self, provider: &str, key: String) {
-        self.runtime_keys.insert(provider.to_string(), key);
+        let trimmed = key.trim();
+        if trimmed.is_empty() {
+            self.runtime_keys.remove(provider);
+            return;
+        }
+        self.runtime_keys
+            .insert(provider.to_string(), trimmed.to_string());
     }
 
     /// Check whether credentials exist for a provider without producing an error.
@@ -898,6 +905,19 @@ mod tests {
         store.set_runtime_key("anthropic", "runtime-key".into());
         let key = store.resolve("anthropic").unwrap();
         assert_eq!(key, "runtime-key");
+    }
+
+    #[test]
+    fn test_set_runtime_key_ignores_empty_or_whitespace_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = test_store(path);
+
+        store.set_runtime_key("openai", "runtime-key".into());
+        assert_eq!(store.resolve("openai").unwrap(), "runtime-key");
+
+        store.set_runtime_key("openai", "   ".into());
+        assert!(store.resolve("openai").is_err());
     }
 
     #[test]

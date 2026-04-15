@@ -1439,9 +1439,9 @@ async fn resolve_provider_api_key(
     provider_name: &str,
 ) -> Result<imp_llm::auth::ApiKey, imp_llm::Error> {
     match provider_name {
-        "openai" => auth_store.resolve_api_key_only(provider_name),
         "openai-codex" => auth_store.resolve_chatgpt_oauth().await,
-        _ => auth_store.resolve_with_refresh(provider_name).await,
+        "anthropic" => auth_store.resolve_with_refresh(provider_name).await,
+        _ => auth_store.resolve(provider_name),
     }
 }
 
