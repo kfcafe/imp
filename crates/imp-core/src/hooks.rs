@@ -6,6 +6,44 @@ use imp_llm::{AssistantMessage, ContentBlock, Message, ToolResultMessage};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
+/// Reports outcomes from background non-blocking hook execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookBackgroundEvent {
+    NonBlockingHookFailed {
+        event: String,
+        command: String,
+        error: String,
+    },
+    NonBlockingHookPanicked {
+        event: String,
+        command: String,
+        error: String,
+    },
+}
+
+impl std::fmt::Display for HookBackgroundEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonBlockingHookFailed {
+                event,
+                command,
+                error,
+            } => write!(
+                f,
+                "Non-blocking hook failed for event '{event}' while running `{command}`: {error}"
+            ),
+            Self::NonBlockingHookPanicked {
+                event,
+                command,
+                error,
+            } => write!(
+                f,
+                "Non-blocking hook panicked for event '{event}' while running `{command}`: {error}"
+            ),
+        }
+    }
+}
+
 /// Hook definition from TOML config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookDef {
@@ -50,6 +88,7 @@ pub struct HookDefinition {
 }
 
 /// Runtime hook events.
+#[derive(Clone)]
 pub enum HookEvent<'a> {
     AfterFileWrite {
         file: &'a Path,
@@ -112,6 +151,8 @@ pub struct HookRunner {
     toml_hooks: Vec<HookDefinition>,
     /// Programmatically registered hooks (fire after TOML hooks, in registration order).
     programmatic_hooks: Vec<HookDefinition>,
+    /// Optional observer for background non-blocking hook failures.
+    background_reporter: Option<Arc<dyn Fn(HookBackgroundEvent) + Send + Sync>>,
 }
 
 impl HookRunner {
@@ -119,6 +160,7 @@ impl HookRunner {
         Self {
             toml_hooks: Vec::new(),
             programmatic_hooks: Vec::new(),
+            background_reporter: None,
         }
     }
 
@@ -149,6 +191,14 @@ impl HookRunner {
     /// Returns true if no hooks are registered.
     pub fn is_empty(&self) -> bool {
         self.toml_hooks.is_empty() && self.programmatic_hooks.is_empty()
+    }
+
+    /// Register an observer for background non-blocking hook failures.
+    pub fn set_background_reporter(
+        &mut self,
+        reporter: Arc<dyn Fn(HookBackgroundEvent) + Send + Sync>,
+    ) {
+        self.background_reporter = Some(reporter);
     }
 
     /// Register a callback hook for a specific event.
@@ -186,17 +236,14 @@ impl HookRunner {
                 let result = execute_hook(hook, event).await;
                 results.push(result);
             } else {
-                // Fire-and-forget: spawn the command but don't wait for it
+                // Keep non-blocking hooks asynchronous, but supervise failures.
                 if let HookAction::Shell { command } = &hook.action {
                     let cmd = interpolate_command(command, event);
-                    tokio::spawn(async move {
-                        let _ = Command::new("sh")
-                            .arg("-c")
-                            .arg(&cmd)
-                            .stdin(std::process::Stdio::null())
-                            .output()
-                            .await;
-                    });
+                    run_non_blocking_shell_hook(
+                        hook_event_label(event),
+                        cmd,
+                        self.background_reporter.clone(),
+                    );
                 }
                 // Non-blocking hooks don't contribute results
             }
@@ -212,7 +259,79 @@ impl Default for HookRunner {
     }
 }
 
-/// Convert a raw TOML HookDef into a resolved HookDefinition.
+fn hook_event_label(event: &HookEvent<'_>) -> String {
+    event.event_name().to_string()
+}
+
+fn report_non_blocking_hook_outcome(
+    join_result: Result<std::io::Result<std::process::Output>, tokio::task::JoinError>,
+    event_name: String,
+    command_for_report: String,
+    reporter: Arc<dyn Fn(HookBackgroundEvent) + Send + Sync>,
+) {
+    match join_result {
+        Ok(Ok(output)) => {
+            if !output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let error = if !stderr.is_empty() {
+                    stderr
+                } else if !stdout.is_empty() {
+                    stdout
+                } else {
+                    format!(
+                        "command exited with status {}",
+                        output
+                            .status
+                            .code()
+                            .map(|code| code.to_string())
+                            .unwrap_or_else(|| "terminated by signal".into())
+                    )
+                };
+                reporter(HookBackgroundEvent::NonBlockingHookFailed {
+                    event: event_name,
+                    command: command_for_report,
+                    error,
+                });
+            }
+        }
+        Ok(Err(error)) => reporter(HookBackgroundEvent::NonBlockingHookFailed {
+            event: event_name,
+            command: command_for_report,
+            error: error.to_string(),
+        }),
+        Err(join_error) => reporter(HookBackgroundEvent::NonBlockingHookPanicked {
+            event: event_name,
+            command: command_for_report,
+            error: join_error.to_string(),
+        }),
+    }
+}
+
+fn run_non_blocking_shell_hook(
+    event_name: String,
+    command: String,
+    reporter: Option<Arc<dyn Fn(HookBackgroundEvent) + Send + Sync>>,
+) {
+    tokio::spawn(async move {
+        let command_for_run = command.clone();
+        let command_for_report = command;
+        let join_result = tokio::spawn(async move {
+            Command::new("sh")
+                .arg("-c")
+                .arg(&command_for_run)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .await
+        })
+        .await;
+
+        if let Some(reporter) = reporter {
+            report_non_blocking_hook_outcome(join_result, event_name, command_for_report, reporter);
+        }
+    });
+}
+
 fn resolve_hook_def(def: HookDef) -> Option<HookDefinition> {
     let action = match def.action.as_str() {
         "shell" => {
@@ -414,6 +533,7 @@ async fn execute_hook(hook: &HookDefinition, event: &HookEvent<'_>) -> HookResul
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Mutex;
 
     #[test]
     fn hook_def_toml_parsing() {
@@ -665,9 +785,97 @@ threshold = 0.8
         }]);
 
         let event = HookEvent::OnSessionStart;
+        let started = std::time::Instant::now();
         let results = runner.fire(&event).await;
         // Non-blocking hooks don't return results
         assert!(results.is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn hook_non_blocking_failure_is_reported() {
+        let mut runner = HookRunner::new();
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let reported_clone = Arc::clone(&reported);
+        runner.set_background_reporter(Arc::new(move |event| {
+            reported_clone.lock().unwrap().push(event);
+        }));
+        runner.load_from_config(vec![HookDef {
+            event: "on_session_start".into(),
+            match_pattern: None,
+            action: "shell".into(),
+            command: Some("exit 7".into()),
+            blocking: false,
+            threshold: None,
+        }]);
+
+        let event = HookEvent::OnSessionStart;
+        let results = runner.fire(&event).await;
+        assert!(results.is_empty());
+
+        for _ in 0..20 {
+            if !reported.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        let reported = reported.lock().unwrap();
+        assert_eq!(reported.len(), 1);
+        match &reported[0] {
+            HookBackgroundEvent::NonBlockingHookFailed { event, command, .. } => {
+                assert_eq!(event, "on_session_start");
+                assert_eq!(command, "exit 7");
+            }
+            other => panic!("expected non-blocking hook failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn report_non_blocking_hook_outcome_maps_join_failure_to_panic_event() {
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let reported_clone = Arc::clone(&reported);
+        let reporter: Arc<dyn Fn(HookBackgroundEvent) + Send + Sync> = Arc::new(move |event| {
+            reported_clone.lock().unwrap().push(event);
+        });
+
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let join_error = runtime.block_on(async {
+            tokio::spawn(async move {
+                panic!("intentional join failure for reporting test");
+            })
+            .await
+            .unwrap_err()
+        });
+        drop(runtime);
+
+        let _ = std::panic::take_hook();
+        std::panic::set_hook(previous_hook);
+
+        report_non_blocking_hook_outcome(
+            Err(join_error),
+            "on_session_start".into(),
+            "test command".into(),
+            reporter,
+        );
+
+        let reported = reported.lock().unwrap();
+        assert_eq!(reported.len(), 1);
+        match &reported[0] {
+            HookBackgroundEvent::NonBlockingHookPanicked {
+                event,
+                command,
+                error,
+            } => {
+                assert_eq!(event, "on_session_start");
+                assert_eq!(command, "test command");
+                assert!(error.contains("panic") || error.contains("cancelled"));
+            }
+            other => panic!("expected non-blocking hook panic, got {other:?}"),
+        }
     }
 
     #[tokio::test]

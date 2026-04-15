@@ -780,7 +780,11 @@ fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
                 push_mana_detail_line(&mut lines, "id", tc.details.get("id"));
                 push_mana_detail_line(&mut lines, "notes", tc.details.get("notes"));
                 push_mana_detail_line(&mut lines, "description", tc.details.get("description"));
-                push_mana_detail_line(&mut lines, "resolve_decisions", tc.details.get("resolve_decisions"));
+                push_mana_detail_line(
+                    &mut lines,
+                    "resolve_decisions",
+                    tc.details.get("resolve_decisions"),
+                );
                 if let Some(unit) = tc.details.get("unit") {
                     push_mana_detail_line(&mut lines, "unit", Some(unit));
                 }
@@ -1215,7 +1219,9 @@ mod tests {
         assert!(lines.iter().any(|l| l == "id: 1"));
         assert!(lines.iter().any(|l| l == "description: Choose retry limit"));
         assert!(lines.iter().any(|l| l == "unit: 1 · Test unit · open"));
-        assert!(lines.iter().any(|l| l.contains("mana delta: decision added on 1 · Test unit")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("mana delta: decision added on 1 · Test unit")));
     }
 
     #[test]

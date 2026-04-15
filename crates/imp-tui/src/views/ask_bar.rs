@@ -1,5 +1,7 @@
 use crate::theme::Theme;
-use crate::views::editor::{clamp_cursor_to_boundary, cursor_visual_position_for_text, wrapped_lines_for_width};
+use crate::views::editor::{
+    clamp_cursor_to_boundary, cursor_visual_position_for_text, wrapped_lines_for_width,
+};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};

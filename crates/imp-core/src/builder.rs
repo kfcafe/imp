@@ -291,15 +291,17 @@ impl AgentBuilder {
 /// This is the canonical list — update here when adding or removing tools.
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
-        ask::AskTool, bash::BashTool, edit::EditTool, extend::ExtendTool, imp::ImpTool,
-        mana::ManaTool, memory::MemoryTool, multi_edit::MultiEditTool, read::ReadTool,
-        scan::ScanTool, session_search::SessionSearchTool, web::WebTool, write::WriteTool,
+        ask::AskTool, bash::BashTool, edit::EditTool, extend::ExtendTool, git::GitTool,
+        imp::ImpTool, mana::ManaTool, memory::MemoryTool, multi_edit::MultiEditTool,
+        read::ReadTool, scan::ScanTool, session_search::SessionSearchTool, web::WebTool,
+        write::WriteTool,
     };
 
     tools.register(Arc::new(AskTool));
     tools.register(Arc::new(BashTool));
     tools.register(Arc::new(EditTool));
     tools.register(Arc::new(ExtendTool));
+    tools.register(Arc::new(GitTool));
     tools.register(Arc::new(ImpTool));
     tools.register(Arc::new(ManaTool::default()));
     tools.register(Arc::new(MemoryTool));
@@ -320,10 +322,10 @@ mod tests {
     use async_trait::async_trait;
     use futures_core::Stream;
     use imp_llm::{
-        Context, Model, RequestOptions, StreamEvent,
         auth::{ApiKey, AuthStore},
         model::{Capabilities, ModelMeta, ModelPricing},
         provider::Provider,
+        Context, Model, RequestOptions, StreamEvent,
     };
 
     struct MockProvider;
@@ -525,6 +527,7 @@ mod tests {
 
         assert!(agent.tools.get("memory").is_some());
         assert!(agent.tools.get("session_search").is_some());
+        assert!(agent.tools.get("git").is_some());
     }
 
     #[test]

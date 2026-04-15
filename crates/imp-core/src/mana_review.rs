@@ -453,7 +453,11 @@ impl TurnManaReviewAccumulator {
                         aggregate.roles.insert(ManaUnitRole::Child);
                     } else if let Some(parent_id) = unit.parent.as_ref() {
                         aggregate.parent_unit.get_or_insert_with(|| {
-                            ManaUnitRef::new(parent_id.clone(), parent_id.clone(), Some("epic".into()))
+                            ManaUnitRef::new(
+                                parent_id.clone(),
+                                parent_id.clone(),
+                                Some("epic".into()),
+                            )
                         });
                         aggregate.roles.insert(ManaUnitRole::Child);
                     }
@@ -555,7 +559,10 @@ impl TurnManaReviewAccumulator {
 
                 if aggregate.created_in_turn {
                     if let (Some(parent), Some(after)) = (&aggregate.parent_unit, final_unit) {
-                        if matches!(after.kind, ManaReviewUnitKind::Epic | ManaReviewUnitKind::Job) {
+                        if matches!(
+                            after.kind,
+                            ManaReviewUnitKind::Epic | ManaReviewUnitKind::Job
+                        ) {
                             proposed_children.push(TurnManaProposedChild {
                                 unit: unit_ref,
                                 parent: parent.clone(),
@@ -596,17 +603,19 @@ impl TurnManaReviewAccumulator {
                 .then(a.decision_text.cmp(&b.decision_text))
         });
 
-        let anchor_unit = derive_anchor_unit(&aggregates, &created_and_deleted, &proposed_children, &touched_units);
+        let anchor_unit = derive_anchor_unit(
+            &aggregates,
+            &created_and_deleted,
+            &proposed_children,
+            &touched_units,
+        );
         let next_question = unresolved_consequential_choices
             .first()
             .and_then(|choice| choice.suggested_question.clone())
             .or_else(|| {
-                unresolved_consequential_choices.first().map(|choice| {
-                    format!(
-                        "{} · {}",
-                        choice.unit.id, choice.decision_text
-                    )
-                })
+                unresolved_consequential_choices
+                    .first()
+                    .map(|choice| format!("{} · {}", choice.unit.id, choice.decision_text))
             });
 
         let state = if touched_units.is_empty()
@@ -774,16 +783,20 @@ impl UnitAggregate {
         self.decision_event_order
             .iter()
             .filter(|event| match event.event_kind {
-                ManaDecisionEventKind::Added => remaining_added
-                    .get(&event.decision_text)
-                    .copied()
-                    .unwrap_or_default()
-                    > 0,
-                ManaDecisionEventKind::Resolved => remaining_resolved
-                    .get(&event.decision_text)
-                    .copied()
-                    .unwrap_or_default()
-                    > 0,
+                ManaDecisionEventKind::Added => {
+                    remaining_added
+                        .get(&event.decision_text)
+                        .copied()
+                        .unwrap_or_default()
+                        > 0
+                }
+                ManaDecisionEventKind::Resolved => {
+                    remaining_resolved
+                        .get(&event.decision_text)
+                        .copied()
+                        .unwrap_or_default()
+                        > 0
+                }
             })
             .cloned()
             .collect()
@@ -907,10 +920,15 @@ fn derive_anchor_unit(
                 .and_modify(|(_, count)| *count += 1)
                 .or_insert((&child.parent, 1));
         }
-        if let Some((parent_id, (parent_ref, _))) = parent_counts.into_iter().max_by_key(|(_, (_, count))| *count) {
+        if let Some((parent_id, (parent_ref, _))) = parent_counts
+            .into_iter()
+            .max_by_key(|(_, (_, count))| *count)
+        {
             let created_in_turn = aggregates
                 .get(&parent_id)
-                .map(|aggregate| aggregate.created_in_turn && !created_and_deleted.contains(&parent_id))
+                .map(|aggregate| {
+                    aggregate.created_in_turn && !created_and_deleted.contains(&parent_id)
+                })
                 .unwrap_or(false);
             return Some(TurnManaAnchorUnit {
                 unit: parent_ref.clone(),
@@ -987,18 +1005,12 @@ fn classify_consequential_choice(
             ManaConsequentialChoiceCategory::ExecutionLaunch,
             "changes whether or how execution should start".to_string(),
         )
-    } else if contains_any(
-        &lower,
-        &["scope", "split", "phase", "defer", "cut"],
-    ) {
+    } else if contains_any(&lower, &["scope", "split", "phase", "defer", "cut"]) {
         (
             ManaConsequentialChoiceCategory::ScopeChange,
             "changes preserved scope or decomposition".to_string(),
         )
-    } else if contains_any(
-        &lower,
-        &["delete", "prune", "remove", "archive"],
-    ) {
+    } else if contains_any(&lower, &["delete", "prune", "remove", "archive"]) {
         (
             ManaConsequentialChoiceCategory::PruneOrDelete,
             "changes whether captured structure should be removed".to_string(),

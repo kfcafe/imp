@@ -14,7 +14,7 @@ use imp_llm::provider::RetryPolicy;
 use crate::config::{AgentMode, ContextConfig, ContinuePolicy};
 use crate::error::Result;
 use crate::guardrails::{self, GuardrailConfig, GuardrailLevel, GuardrailProfile};
-use crate::hooks::{HookEvent, HookRunner};
+use crate::hooks::{HookBackgroundEvent, HookEvent, HookRunner};
 use crate::mana_review::{ManaReviewState, TurnManaReview, TurnManaReviewAccumulator};
 use crate::roles::Role;
 use crate::tools::{LuaToolLoader, ToolRegistry};
@@ -303,7 +303,10 @@ impl PostTurnAssessment {
                 no_progress: self.runtime.no_progress,
             },
             mana: NextActionManaEvidence {
-                stop_reason: self.mana.stop_reason.map(|reason| reason.as_str().to_string()),
+                stop_reason: self
+                    .mana
+                    .stop_reason
+                    .map(|reason| reason.as_str().to_string()),
             },
             text_fallback: NextActionTextFallbackEvidence {
                 planner_stop_reason: self
@@ -315,13 +318,12 @@ impl PostTurnAssessment {
                     .execution_stop_reason
                     .map(|reason| reason.as_str().to_string()),
             },
-            continue_recommendation: self
-                .continue_recommendation
-                .clone()
-                .map(|recommendation| NextActionContinueRecommendation {
+            continue_recommendation: self.continue_recommendation.clone().map(|recommendation| {
+                NextActionContinueRecommendation {
                     prompt: recommendation.prompt,
                     reason: recommendation.reason.as_str().to_string(),
-                }),
+                }
+            }),
             chosen_action,
         }
     }
@@ -412,6 +414,18 @@ impl Agent {
     pub fn new(model: Model, cwd: PathBuf) -> (Self, AgentHandle) {
         let (event_tx, event_rx) = mpsc::channel(256);
         let (command_tx, command_rx) = mpsc::channel(32);
+        let mut hooks = HookRunner::new();
+        let background_event_tx = event_tx.clone();
+        hooks.set_background_reporter(Arc::new(move |event: HookBackgroundEvent| {
+            let background_event_tx = background_event_tx.clone();
+            tokio::spawn(async move {
+                let _ = background_event_tx
+                    .send(AgentEvent::Error {
+                        error: event.to_string(),
+                    })
+                    .await;
+            });
+        }));
 
         let agent = Self {
             model,
@@ -423,7 +437,7 @@ impl Agent {
             max_turns: 50,
             max_tokens: None,
             role: None,
-            hooks: HookRunner::new(),
+            hooks,
             api_key: String::new(),
             ui: Arc::new(crate::ui::NullInterface),
             context_config: ContextConfig::default(),
@@ -950,11 +964,7 @@ impl Agent {
                     })
                     .await;
             }
-            AgentEvent::TurnEnd {
-                index,
-                message,
-                ..
-            } => {
+            AgentEvent::TurnEnd { index, message, .. } => {
                 self.hooks
                     .fire(&HookEvent::OnTurnEnd {
                         index: *index,
@@ -1350,7 +1360,10 @@ fn should_queue_mana_externalization_follow_up(
         return false;
     }
 
-    if !matches!(mode, AgentMode::Full | AgentMode::Planner | AgentMode::Orchestrator) {
+    if !matches!(
+        mode,
+        AgentMode::Full | AgentMode::Planner | AgentMode::Orchestrator
+    ) {
         return false;
     }
 
@@ -1401,7 +1414,10 @@ fn should_queue_confidence_continue_follow_up(
         return false;
     }
 
-    if !matches!(mode, AgentMode::Full | AgentMode::Planner | AgentMode::Orchestrator) {
+    if !matches!(
+        mode,
+        AgentMode::Full | AgentMode::Planner | AgentMode::Orchestrator
+    ) {
         return false;
     }
 
@@ -1431,9 +1447,15 @@ fn should_queue_confidence_continue_follow_up(
     .filter(|needle| lower.contains(**needle))
     .count();
 
-    let blocker_signal = ["blocked", "unclear", "need your input", "which should", "approval"]
-        .iter()
-        .any(|needle| lower.contains(needle));
+    let blocker_signal = [
+        "blocked",
+        "unclear",
+        "need your input",
+        "which should",
+        "approval",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
 
     if blocker_signal {
         return false;
@@ -1469,7 +1491,10 @@ fn tool_results_indicate_execution_blocker(
     tool_results: &[imp_llm::ToolResultMessage],
     mode: AgentMode,
 ) -> Option<NextActionStopReason> {
-    if !matches!(mode, AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker) {
+    if !matches!(
+        mode,
+        AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker
+    ) {
         return None;
     }
 
@@ -1480,7 +1505,9 @@ fn tool_results_indicate_execution_blocker(
     for result in tool_results {
         let action = result.details.get("action").and_then(|v| v.as_str());
 
-        if action == Some("verify") && result.details.get("passed").and_then(|v| v.as_bool()) == Some(false) {
+        if action == Some("verify")
+            && result.details.get("passed").and_then(|v| v.as_bool()) == Some(false)
+        {
             return Some(NextActionStopReason::ExecutionBlocked);
         }
 
@@ -1505,11 +1532,15 @@ fn tool_results_indicate_execution_blocker(
                 || command.contains("cargo test")
                 || command.contains("cargo check");
 
-            if looks_like_check && (timed_out || cancelled || exit_code.is_some_and(|code| code != 0)) {
+            if looks_like_check
+                && (timed_out || cancelled || exit_code.is_some_and(|code| code != 0))
+            {
                 return Some(NextActionStopReason::ExecutionBlocked);
             }
 
-            if saw_edit_like_success && (timed_out || cancelled || exit_code.is_some_and(|code| code != 0)) {
+            if saw_edit_like_success
+                && (timed_out || cancelled || exit_code.is_some_and(|code| code != 0))
+            {
                 return Some(NextActionStopReason::ExecutionBlocked);
             }
         }
@@ -1522,7 +1553,10 @@ fn tool_results_indicate_work_completed(
     tool_results: &[imp_llm::ToolResultMessage],
     mode: AgentMode,
 ) -> bool {
-    if !matches!(mode, AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker) {
+    if !matches!(
+        mode,
+        AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker
+    ) {
         return false;
     }
 
@@ -1562,7 +1596,9 @@ fn tool_results_indicate_work_completed(
 
         match action {
             Some("close") => return true,
-            Some("verify") if result.details.get("passed").and_then(|v| v.as_bool()) == Some(true) => {
+            Some("verify")
+                if result.details.get("passed").and_then(|v| v.as_bool()) == Some(true) =>
+            {
                 return true;
             }
             _ if has_closed_unit => return true,
@@ -1610,14 +1646,17 @@ fn execution_stop_reason(
     message: &AssistantMessage,
     mode: AgentMode,
 ) -> Option<NextActionStopReason> {
-    if !matches!(mode, AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker) {
+    if !matches!(
+        mode,
+        AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker
+    ) {
         return None;
     }
 
     match classify_stop_reason_from_text(message, false) {
-        Some(reason @ (NextActionStopReason::UserBlocker | NextActionStopReason::WorkCompleted)) => {
-            Some(reason)
-        }
+        Some(
+            reason @ (NextActionStopReason::UserBlocker | NextActionStopReason::WorkCompleted),
+        ) => Some(reason),
         _ => None,
     }
 }
@@ -2318,10 +2357,7 @@ mod tests {
         agent.has_mana_skill = true;
         agent.mode = AgentMode::Planner;
 
-        agent
-            .run("Plan the rollout".to_string())
-            .await
-            .unwrap();
+        agent.run("Plan the rollout".to_string()).await.unwrap();
 
         let user_texts: Vec<String> = agent
             .messages
@@ -2342,7 +2378,10 @@ mod tests {
 
     #[tokio::test]
     async fn turn_assessment_debug_view_reports_execution_blocker() {
-        let (agent, _handle) = Agent::new(test_model(Arc::new(MockProvider::new(vec![]))), PathBuf::from("/tmp"));
+        let (agent, _handle) = Agent::new(
+            test_model(Arc::new(MockProvider::new(vec![]))),
+            PathBuf::from("/tmp"),
+        );
         let assessment = agent.assess_post_turn(
             &AssistantMessage {
                 content: vec![ContentBlock::Text {
@@ -2371,7 +2410,10 @@ mod tests {
         );
 
         let debug = assessment.debug_view();
-        assert_eq!(debug.runtime.execution_stop_reason.as_deref(), Some("execution_blocked"));
+        assert_eq!(
+            debug.runtime.execution_stop_reason.as_deref(),
+            Some("execution_blocked")
+        );
         assert_eq!(
             debug.chosen_action,
             NextActionDebugView::Stop {
@@ -2440,7 +2482,10 @@ mod tests {
         });
 
         let assessment = assessment.expect("turn assessment emitted");
-        assert_eq!(assessment.runtime.execution_stop_reason.as_deref(), Some("execution_blocked"));
+        assert_eq!(
+            assessment.runtime.execution_stop_reason.as_deref(),
+            Some("execution_blocked")
+        );
         assert_eq!(
             assessment.chosen_action,
             NextActionDebugView::Stop {
@@ -2473,7 +2518,8 @@ mod tests {
                                 arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
                             },
                             ContentBlock::Text {
-                                text: "Done. Updated mana and next step is ready to continue.".to_string(),
+                                text: "Done. Updated mana and next step is ready to continue."
+                                    .to_string(),
                             },
                         ],
                         usage: Some(Usage {
@@ -2494,7 +2540,9 @@ mod tests {
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.mode = AgentMode::Planner;
         agent.continue_policy = ContinuePolicy::Balanced;
-        agent.tools.register(Arc::new(crate::tools::mana::ManaTool::default()));
+        agent
+            .tools
+            .register(Arc::new(crate::tools::mana::ManaTool::default()));
 
         let events_task = tokio::spawn(collect_events(handle));
         agent.run("Do the next thing".to_string()).await.unwrap();
@@ -2673,7 +2721,10 @@ mod tests {
             timestamp: 0,
         };
 
-        assert!(tool_results_indicate_work_completed(&[result], AgentMode::Full));
+        assert!(tool_results_indicate_work_completed(
+            &[result],
+            AgentMode::Full
+        ));
     }
 
     #[test]
@@ -2707,8 +2758,16 @@ mod tests {
             anchor_unit: None,
             touched_units: Vec::new(),
             proposed_children: vec![crate::mana_review::TurnManaProposedChild {
-                unit: crate::mana_review::ManaUnitRef::new("28.6.1", "child", Some("job".to_string())),
-                parent: crate::mana_review::ManaUnitRef::new("28.6", "parent", Some("epic".to_string())),
+                unit: crate::mana_review::ManaUnitRef::new(
+                    "28.6.1",
+                    "child",
+                    Some("job".to_string()),
+                ),
+                parent: crate::mana_review::ManaUnitRef::new(
+                    "28.6",
+                    "parent",
+                    Some("epic".to_string()),
+                ),
                 child_kind: crate::mana_review::ManaReviewUnitKind::Job,
                 child_origin: crate::mana_review::ManaUnitOrigin::CreatedInTurn,
             }],
@@ -2738,10 +2797,7 @@ mod tests {
         agent.mode = AgentMode::Planner;
         agent.has_mana_skill = true;
 
-        agent
-            .run("Plan the rollout".to_string())
-            .await
-            .unwrap();
+        agent.run("Plan the rollout".to_string()).await.unwrap();
 
         let user_texts: Vec<String> = agent
             .messages
@@ -2771,10 +2827,7 @@ mod tests {
         agent.mode = AgentMode::Planner;
         agent.has_mana_skill = true;
 
-        agent
-            .run("Plan the rollout".to_string())
-            .await
-            .unwrap();
+        agent.run("Plan the rollout".to_string()).await.unwrap();
 
         let user_texts: Vec<String> = agent
             .messages
@@ -2815,7 +2868,8 @@ mod tests {
                                 arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
                             },
                             ContentBlock::Text {
-                                text: "Done. Updated mana and next step is ready to continue.".to_string(),
+                                text: "Done. Updated mana and next step is ready to continue."
+                                    .to_string(),
                             },
                         ],
                         usage: Some(Usage {
@@ -2836,12 +2890,11 @@ mod tests {
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.mode = AgentMode::Planner;
         agent.continue_policy = ContinuePolicy::Balanced;
-        agent.tools.register(Arc::new(crate::tools::mana::ManaTool::default()));
-
         agent
-            .run("Do the next thing".to_string())
-            .await
-            .unwrap();
+            .tools
+            .register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        agent.run("Do the next thing".to_string()).await.unwrap();
 
         let user_texts: Vec<String> = agent
             .messages
@@ -2883,7 +2936,8 @@ mod tests {
                                 arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
                             },
                             ContentBlock::Text {
-                                text: "Done. Updated mana and next step is ready to continue.".to_string(),
+                                text: "Done. Updated mana and next step is ready to continue."
+                                    .to_string(),
                             },
                         ],
                         usage: Some(Usage {
@@ -2904,12 +2958,11 @@ mod tests {
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.mode = AgentMode::Planner;
         agent.continue_policy = ContinuePolicy::Disabled;
-        agent.tools.register(Arc::new(crate::tools::mana::ManaTool::default()));
-
         agent
-            .run("Do the next thing".to_string())
-            .await
-            .unwrap();
+            .tools
+            .register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        agent.run("Do the next thing".to_string()).await.unwrap();
 
         let user_texts: Vec<String> = agent
             .messages
@@ -2929,7 +2982,13 @@ mod tests {
     #[tokio::test]
     async fn agent_does_not_queue_externalization_follow_up_after_mana_tool_turn() {
         let provider = Arc::new(MockProvider::new(vec![
-            tool_call_response("call_1", "mana", serde_json::json!({"action": "status"}), 100, 20),
+            tool_call_response(
+                "call_1",
+                "mana",
+                serde_json::json!({"action": "status"}),
+                100,
+                20,
+            ),
             text_response("Done after mana", 120, 25),
         ]));
 
@@ -2937,12 +2996,11 @@ mod tests {
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.has_mana_skill = true;
         agent.mode = AgentMode::Planner;
-        agent.tools.register(Arc::new(crate::tools::mana::ManaTool::default()));
-
         agent
-            .run("Plan the rollout".to_string())
-            .await
-            .unwrap();
+            .tools
+            .register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        agent.run("Plan the rollout".to_string()).await.unwrap();
 
         let user_texts: Vec<String> = agent
             .messages
@@ -3399,7 +3457,9 @@ mod tests {
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.mode = AgentMode::Full;
-        agent.tools.register(Arc::new(crate::tools::mana::ManaTool::default()));
+        agent
+            .tools
+            .register(Arc::new(crate::tools::mana::ManaTool::default()));
 
         agent.run("Verify the unit".to_string()).await.unwrap();
 
@@ -3434,7 +3494,9 @@ mod tests {
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.mode = AgentMode::Full;
-        agent.tools.register(Arc::new(crate::tools::mana::ManaTool::default()));
+        agent
+            .tools
+            .register(Arc::new(crate::tools::mana::ManaTool::default()));
 
         agent.run("Close the unit".to_string()).await.unwrap();
 
@@ -4835,7 +4897,8 @@ mod integration {
         assert!(fourth.is_error);
         assert!(fourth_text.contains("Blocked: identical tool call repeated 4 times"));
         assert_eq!(
-            agent.messages
+            agent
+                .messages
                 .iter()
                 .filter(|message| matches!(message, Message::User(_)))
                 .count(),
@@ -4850,7 +4913,8 @@ mod integration {
             tool_call_id: "call_repeat".to_string(),
             tool_name: "read".to_string(),
             content: vec![ContentBlock::Text {
-                text: "Blocked: identical tool call repeated 4 times in a row for 'read'.".to_string(),
+                text: "Blocked: identical tool call repeated 4 times in a row for 'read'."
+                    .to_string(),
             }],
             is_error: true,
             details: serde_json::Value::Null,
@@ -5450,9 +5514,7 @@ mod mode_tests {
             "Full mode should not mention orchestrator"
         );
         assert!(
-            !full_result
-                .text
-                .contains("You are a worker agent."),
+            !full_result.text.contains("You are a worker agent."),
             "Full mode should not include worker mode instructions"
         );
 

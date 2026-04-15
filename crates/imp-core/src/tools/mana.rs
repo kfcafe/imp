@@ -46,15 +46,13 @@ fn resolve_mana_dir(
         } else {
             cwd.join(path)
         };
-        return Ok(if resolved
-            .file_name()
-            .and_then(|name| name.to_str())
-            == Some(".mana")
-        {
-            resolved
-        } else {
-            resolved.join(".mana")
-        });
+        return Ok(
+            if resolved.file_name().and_then(|name| name.to_str()) == Some(".mana") {
+                resolved
+            } else {
+                resolved.join(".mana")
+            },
+        );
     }
 
     match scope {
@@ -769,9 +767,7 @@ fn make_follow_up_summary(scope: &str, view: &RunView) -> String {
         ));
     }
 
-    summary.push_str(
-        " Inspect with mana(action=\"run_state\") or mana(action=\"evaluate\").",
-    );
+    summary.push_str(" Inspect with mana(action=\"run_state\") or mana(action=\"evaluate\").");
     summary
 }
 
@@ -909,8 +905,11 @@ fn spawn_background_run(
     let scope = scope_from_target(&run_args.target);
 
     tokio::spawn(async move {
-        ui.set_status("mana", Some(&format!("mana orchestration: running {scope}")))
-            .await;
+        ui.set_status(
+            "mana",
+            Some(&format!("mana orchestration: running {scope}")),
+        )
+        .await;
         ui.set_widget(
             "mana",
             Some(mana_widget_lines(
@@ -1267,8 +1266,14 @@ impl Tool for ManaTool {
             "mana_dir".into(),
             json!({ "type": "string", "description": "Alias for path; explicit .mana or project directory to target" }),
         );
-        properties.insert("from_id".into(), json!({ "type": "string", "description": "Source unit ID for dependency updates" }));
-        properties.insert("dep_id".into(), json!({ "type": "string", "description": "Dependency unit ID to add or remove" }));
+        properties.insert(
+            "from_id".into(),
+            json!({ "type": "string", "description": "Source unit ID for dependency updates" }),
+        );
+        properties.insert(
+            "dep_id".into(),
+            json!({ "type": "string", "description": "Dependency unit ID to add or remove" }),
+        );
         properties.insert(
             "run_id".into(),
             json!({ "type": "string", "description": "Native in-session mana run ID, returned by action=run" }),
@@ -1312,7 +1317,8 @@ impl Tool for ManaTool {
         decisions["description"] = json!("Blocking decisions to record on the unit");
         properties.insert("decisions".into(), decisions);
         let mut resolve_decisions = string_or_array();
-        resolve_decisions["description"] = json!("Decision entries or indexes to resolve during update");
+        resolve_decisions["description"] =
+            json!("Decision entries or indexes to resolve during update");
         properties.insert("resolve_decisions".into(), resolve_decisions);
         properties.insert("status".into(), json!({ "type": "string" }));
         properties.insert("priority".into(), json!({ "type": "integer" }));
@@ -2303,7 +2309,7 @@ mod tests {
 
     use super::{evaluate_run_output, stream_event_line, ManaRunStore, ManaTool, NativeRunState};
     use crate::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
-    use crate::ui::{NullInterface, NotifyLevel, WidgetContent};
+    use crate::ui::{NotifyLevel, NullInterface, WidgetContent};
 
     enum ManaResult {
         ModeBlocked(String),
@@ -2392,7 +2398,9 @@ mod tests {
             mode: crate::config::AgentMode::from_name(mode_name)
                 .unwrap_or(crate::config::AgentMode::Full),
             read_max_lines: 500,
-            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
         };
 
         let tool = ManaTool::default();
@@ -2455,7 +2463,9 @@ mod tests {
             lua_tool_loader: None,
             mode,
             read_max_lines: 500,
-            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
         };
         (ctx, tempfile::tempdir().unwrap())
     }
@@ -2493,7 +2503,9 @@ mod tests {
             lua_tool_loader: None,
             mode,
             read_max_lines: 500,
-            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
         };
         (ctx, tempfile::tempdir().unwrap(), widgets)
     }
@@ -2620,7 +2632,10 @@ mod tests {
         assert_eq!(unit["paths"][0], "src/lib.rs");
         assert_eq!(unit["requires"][0], "auth-api");
         assert_eq!(unit["produces"][0], "auth-fix");
-        assert_eq!(unit["decisions"][0], "Confirm whether auth should stay sync");
+        assert_eq!(
+            unit["decisions"][0],
+            "Confirm whether auth should stay sync"
+        );
         assert_eq!(unit["feature"], true);
         assert_eq!(unit["fail_first"], true);
         assert_eq!(unit["verify_timeout"], 12);
@@ -2709,10 +2724,15 @@ mod tests {
             lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
-            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
         };
         let tool = ManaTool::default();
-        let reopened = tool.execute("call_reopen", json!({ "action": "reopen", "id": "1" }), ctx).await.unwrap();
+        let reopened = tool
+            .execute("call_reopen", json!({ "action": "reopen", "id": "1" }), ctx)
+            .await
+            .unwrap();
         assert_eq!(reopened.details["unit"]["status"], "open");
 
         let dir2 = tempfile::tempdir().unwrap();
@@ -2737,9 +2757,18 @@ mod tests {
             lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
-            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
         };
-        let verify = tool.execute("call_verify", json!({ "action": "verify", "id": "1" }), ctx2).await.unwrap();
+        let verify = tool
+            .execute(
+                "call_verify",
+                json!({ "action": "verify", "id": "1" }),
+                ctx2,
+            )
+            .await
+            .unwrap();
         assert_eq!(verify.details["passed"], true);
 
         let dir3 = tempfile::tempdir().unwrap();
@@ -2760,7 +2789,9 @@ mod tests {
             lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
-            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
         };
         let fact = tool.execute("call_fact", json!({ "action": "fact_create", "fact_title": "Auth fact", "verify": "test -d .mana", "description": "fact body", "ttl_days": 7 }), ctx3).await.unwrap();
         assert_eq!(fact.details["unit"]["unit_type"], "fact");
@@ -2785,7 +2816,10 @@ mod tests {
             .unwrap();
         let unit = &result.details["unit"];
         assert_eq!(unit["title"], "Test unit");
-        assert!(unit["notes"].as_str().unwrap_or("").contains("diagnosis from turn 2"));
+        assert!(unit["notes"]
+            .as_str()
+            .unwrap_or("")
+            .contains("diagnosis from turn 2"));
     }
 
     #[tokio::test]
@@ -2825,7 +2859,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let decisions = resolved.details["unit"]["decisions"].as_array().cloned().unwrap_or_default();
+        let decisions = resolved.details["unit"]["decisions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         assert!(decisions.is_empty());
     }
 
@@ -2842,7 +2879,11 @@ mod tests {
         let project = tower.path().join("imp");
         let project_mana = project.join(".mana");
         std::fs::create_dir_all(&project_mana).unwrap();
-        std::fs::write(project_mana.join("config.yaml"), "project: nested\nnext_id: 2\n").unwrap();
+        std::fs::write(
+            project_mana.join("config.yaml"),
+            "project: nested\nnext_id: 2\n",
+        )
+        .unwrap();
         std::fs::write(
             project_mana.join("1-project-unit.md"),
             "---\nid: '1'\ntitle: Project unit\nstatus: open\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\n---\n\nbody\n",
@@ -2863,7 +2904,9 @@ mod tests {
             lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
-            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -2883,7 +2926,11 @@ mod tests {
         let target_project = outside.path().join("other-project");
         let target_mana = target_project.join(".mana");
         std::fs::create_dir_all(&target_mana).unwrap();
-        std::fs::write(target_mana.join("config.yaml"), "project: other\nnext_id: 2\n").unwrap();
+        std::fs::write(
+            target_mana.join("config.yaml"),
+            "project: other\nnext_id: 2\n",
+        )
+        .unwrap();
         std::fs::write(
             target_mana.join("1-other-unit.md"),
             "---\nid: '1'\ntitle: Other unit\nstatus: open\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nverify: test -n \"ok\"\n---\n\nbody\n",
@@ -2907,7 +2954,9 @@ mod tests {
             lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
-            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -3136,7 +3185,9 @@ mod tests {
             lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
-            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
         };
 
         let tool = ManaTool::default();
@@ -3156,7 +3207,10 @@ mod tests {
 
         match follow_up {
             crate::agent::AgentCommand::FollowUp(text) => {
-                assert!(text.contains("Native mana orchestration finished"), "text was: {text}");
+                assert!(
+                    text.contains("Native mana orchestration finished"),
+                    "text was: {text}"
+                );
                 assert!(
                     text.contains("Inspect with mana(action=\"run_state\")"),
                     "text was: {text}"
@@ -3186,8 +3240,8 @@ mod tests {
             .await
             .unwrap();
 
-        let follow_up = tokio::time::timeout(std::time::Duration::from_millis(700), cmd_rx.recv())
-            .await;
+        let follow_up =
+            tokio::time::timeout(std::time::Duration::from_millis(700), cmd_rx.recv()).await;
         match follow_up {
             Err(_) | Ok(None) => {}
             Ok(Some(msg)) => panic!(
@@ -3276,7 +3330,10 @@ mod tests {
             eval_text.contains("Native mana orchestration run ") && eval_text.contains("finished"),
             "eval_text was: {eval_text}"
         );
-        assert!(eval_text.contains("Worker runtime:"), "eval_text was: {eval_text}");
+        assert!(
+            eval_text.contains("Worker runtime:"),
+            "eval_text was: {eval_text}"
+        );
     }
 
     #[test]

@@ -308,7 +308,9 @@ mod tests {
             lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
-            turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
+            turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
         };
 
         let provider = resolve_provider(&serde_json::json!({}), &ctx);

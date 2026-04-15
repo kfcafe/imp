@@ -28,7 +28,7 @@ use imp_llm::{
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::Line;
-use ratatui::widgets::{Clear};
+use ratatui::widgets::Clear;
 use ratatui::Frame;
 
 use crate::animation::AnimationState;
@@ -4037,9 +4037,9 @@ impl App {
                     .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
                 let thinking = state.thinking_level;
                 let provider_id = state
-            .selected_provider_id()
-            .unwrap_or("anthropic")
-            .to_string();
+                    .selected_provider_id()
+                    .unwrap_or("anthropic")
+                    .to_string();
                 let resolved_key = state.resolved_key.clone();
                 let resolved_web_provider = state.resolved_web_provider.clone();
                 let resolved_web_key = state.resolved_web_key.clone();

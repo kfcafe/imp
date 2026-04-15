@@ -190,13 +190,13 @@ impl Tool for BashTool {
         "Bash"
     }
     fn description(&self) -> &str {
-        "Execute a shell command in the workspace or an optional working directory. Use it for search, file discovery, builds, tests, git, scripts, and other shell-native tasks."
+        "Execute a shell command in the workspace or an optional working directory. Use it for search, file discovery, builds, tests, scripts, package managers, and other shell-native tasks."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "Shell command to execute, such as grep, find, ls, git, cargo, python, or project scripts" },
+                "command": { "type": "string", "description": "Shell command to execute, such as grep, find, ls, cargo, python, or project scripts" },
                 "timeout": { "type": "number", "description": "Optional timeout in seconds" },
                 "workdir": { "type": "string", "description": "Optional working directory for this command; defaults to the session cwd" }
             },
@@ -322,8 +322,16 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
             .map_err(|e| crate::error::Error::Tool(format!("failed to spawn command: {e}")))?
     };
 
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
+    let stdout = child.stdout.take().ok_or_else(|| {
+        crate::error::Error::Tool(
+            "failed to capture child stdout despite stdout being piped".to_string(),
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        crate::error::Error::Tool(
+            "failed to capture child stderr despite stderr being piped".to_string(),
+        )
+    })?;
 
     // Merge stdout and stderr into a single stream.
     let mut stdout_reader = BufReader::new(stdout).lines();
@@ -519,7 +527,9 @@ mod tests {
             lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
-            turn_mana_review: Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
         };
         (ctx, rx)
     }

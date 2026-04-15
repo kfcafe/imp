@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use imp_llm::{AssistantMessage, ContentBlock};
 use imp_llm::ThinkingLevel;
+use imp_llm::{AssistantMessage, ContentBlock};
 use serde_json::json;
 
 use super::{Tool, ToolContext, ToolOutput};
@@ -87,10 +87,7 @@ impl Tool for ImpTool {
             ));
         }
 
-        let action = params
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
         if action != "delegate" {
             return Ok(ToolOutput::error(
                 "Unsupported imp action. Expected action='delegate'.",
@@ -108,10 +105,7 @@ impl Tool for ImpTool {
     }
 }
 
-async fn execute_unit_delegate(
-    params: serde_json::Value,
-    ctx: ToolContext,
-) -> Result<ToolOutput> {
+async fn execute_unit_delegate(params: serde_json::Value, ctx: ToolContext) -> Result<ToolOutput> {
     let unit_id = params
         .get("unit_id")
         .and_then(|v| v.as_str())
@@ -124,12 +118,9 @@ async fn execute_unit_delegate(
         .and_then(|v| v.as_str())
         .map(|raw| super::resolve_path(&ctx.cwd, raw));
 
-    let assignment = mana_worker::load_assignment_with_mana_dir(
-        &ctx.cwd,
-        unit_id,
-        mana_dir_override.as_deref(),
-    )
-    .map_err(|e| Error::Tool(e.to_string()))?;
+    let assignment =
+        mana_worker::load_assignment_with_mana_dir(&ctx.cwd, unit_id, mana_dir_override.as_deref())
+            .map_err(|e| Error::Tool(e.to_string()))?;
 
     let options = WorkerRunOptions {
         cwd: ctx.cwd.clone(),
@@ -189,10 +180,16 @@ async fn execute_unit_delegate(
             format!("Delegated unit {} completed successfully.", assignment.id)
         }
         tower_contracts::worker::WorkerStatus::AwaitingVerify => {
-            format!("Delegated unit {} completed and is awaiting verify.", assignment.id)
+            format!(
+                "Delegated unit {} completed and is awaiting verify.",
+                assignment.id
+            )
         }
         tower_contracts::worker::WorkerStatus::Failed => {
-            format!("Delegated unit {} finished but verify failed.", assignment.id)
+            format!(
+                "Delegated unit {} finished but verify failed.",
+                assignment.id
+            )
         }
         tower_contracts::worker::WorkerStatus::Blocked => {
             format!("Delegated unit {} is blocked.", assignment.id)
@@ -452,8 +449,14 @@ mod tests {
             .await
             .unwrap();
         assert!(!out.is_error);
-        assert_eq!(out.details.get("delegation_mode").and_then(|v| v.as_str()), Some("ad_hoc"));
-        assert_eq!(out.details.get("durable").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            out.details.get("delegation_mode").and_then(|v| v.as_str()),
+            Some("ad_hoc")
+        );
+        assert_eq!(
+            out.details.get("durable").and_then(|v| v.as_bool()),
+            Some(false)
+        );
         assert!(out.details.get("final_text").is_some());
     }
 }

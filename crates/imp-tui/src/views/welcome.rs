@@ -330,7 +330,8 @@ impl WelcomeState {
     }
 
     pub fn selected_web_provider(&self) -> Option<&WebProviderStatus> {
-        self.web_providers.get(self.normalized_web_provider_selected())
+        self.web_providers
+            .get(self.normalized_web_provider_selected())
     }
 
     pub fn web_provider_up(&mut self) {
@@ -447,7 +448,11 @@ impl Widget for WelcomeView<'_> {
 
         Clear.render(area, buf);
 
-        let step_indicator = format!(" Welcome ({}/{}) ", self.state.normalized_step() + 1, STEPS.len());
+        let step_indicator = format!(
+            " Welcome ({}/{}) ",
+            self.state.normalized_step() + 1,
+            STEPS.len()
+        );
         let block = Block::default()
             .title(step_indicator)
             .borders(Borders::ALL)
@@ -579,12 +584,16 @@ impl WelcomeView<'_> {
         row += 1;
 
         let Some(selected) = self.state.selected_provider() else {
-            let line = Line::from(Span::styled("  No providers available", self.theme.muted_style()));
+            let line = Line::from(Span::styled(
+                "  No providers available",
+                self.theme.muted_style(),
+            ));
             buf.set_line(x, area.y + row, &line, area.width);
             return;
         };
         if !selected.has_auth() {
-            let prompt_line = Line::from(vec![Span::styled("  API Key: ", self.theme.muted_style())]);
+            let prompt_line =
+                Line::from(vec![Span::styled("  API Key: ", self.theme.muted_style())]);
             buf.set_line(x, area.y + row, &prompt_line, area.width);
             row += 1;
 
@@ -614,14 +623,18 @@ impl WelcomeView<'_> {
 
             let url_line = Line::from(vec![
                 Span::styled("  Get a key: ", self.theme.muted_style()),
-                Span::styled(selected.meta.docs_url, Style::default().fg(self.theme.accent)),
+                Span::styled(
+                    selected.meta.docs_url,
+                    Style::default().fg(self.theme.accent),
+                ),
             ]);
             buf.set_line(x, area.y + row, &url_line, area.width);
             row += 1;
 
             if let Some(ref error) = self.state.key_error {
                 row += 1;
-                let error_line = Line::from(Span::styled(format!("  {error}"), self.theme.error_style()));
+                let error_line =
+                    Line::from(Span::styled(format!("  {error}"), self.theme.error_style()));
                 buf.set_line(x, area.y + row, &error_line, area.width);
             }
         } else {
@@ -811,7 +824,8 @@ impl WelcomeView<'_> {
             return;
         };
         if selected.id != "none" && !selected.has_auth() {
-            let prompt_line = Line::from(vec![Span::styled("  API Key: ", self.theme.muted_style())]);
+            let prompt_line =
+                Line::from(vec![Span::styled("  API Key: ", self.theme.muted_style())]);
             buf.set_line(x, area.y + row, &prompt_line, area.width);
             row += 1;
 
@@ -847,7 +861,10 @@ impl WelcomeView<'_> {
         } else if selected.id == "none" {
             let ready = Line::from(vec![
                 Span::styled("  ↷ ", self.theme.muted_style()),
-                Span::styled("Skipping web search setup for now.", self.theme.muted_style()),
+                Span::styled(
+                    "Skipping web search setup for now.",
+                    self.theme.muted_style(),
+                ),
             ]);
             buf.set_line(x, area.y + row, &ready, area.width);
         } else {
@@ -880,7 +897,9 @@ impl WelcomeView<'_> {
 
         let header = Line::from(Span::styled(
             "  ✓ You're all set.",
-            Style::default().fg(self.theme.success).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(self.theme.success)
+                .add_modifier(Modifier::BOLD),
         ));
         buf.set_line(x, area.y + row, &header, area.width);
         row += 2;

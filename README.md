@@ -28,7 +28,8 @@ imp -p "What does this project do?"
 imp @src/main.rs "Explain this code"
 
 # Run a mana unit headlessly
-imp run 5.1
+imp work 5.1
+# `imp run 5.1` still works as a compatibility alias during migration
 
 # Continue your last session
 imp -c
@@ -403,8 +404,10 @@ imp is the native worker/runtime and orchestrator for [mana](https://github.com/
 Preferred execution framing:
 
 ```bash
-imp run <unit-id>
+imp work <unit-id>
 ```
+
+`imp run <unit-id>` still works as a compatibility alias during migration.
 
 In that model, imp reads the unit's title, description, verify command, and relevant mana state, works through the task, and reports back. The verify gate must pass for the unit to close.
 

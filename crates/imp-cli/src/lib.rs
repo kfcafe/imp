@@ -109,13 +109,11 @@ use imp_llm::oauth::chatgpt::ChatGptOAuth;
 use imp_llm::provider::ThinkingLevel;
 use imp_llm::providers::create_provider;
 use imp_llm::{truncate_chars_with_suffix, Message, Model, StreamEvent};
+use imp_tui::animation::{activity_label as tui_activity_label, ActivitySurface, AnimationState};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::{mpsc, oneshot, Mutex};
-use imp_tui::animation::{
-    activity_label as tui_activity_label, ActivitySurface, AnimationState,
-};
 use tokio::task::JoinHandle;
 
 mod usage_report;
@@ -152,7 +150,11 @@ impl ShellLiveness {
             return;
         }
         let padded = if self.visible_len > label.len() {
-            format!("{label}{:width$}", "", width = self.visible_len - label.len())
+            format!(
+                "{label}{:width$}",
+                "",
+                width = self.visible_len - label.len()
+            )
         } else {
             label.clone()
         };
@@ -214,7 +216,6 @@ fn clear_shell_liveness_for_output(
         *printed_trailing_newline = true;
     }
 }
-
 
 /// A coding agent engine
 #[derive(Parser)]
@@ -297,7 +298,19 @@ struct Cli {
     command: Option<Commands>,
 }
 
-#[derive(Subcommand)]
+#[derive(Args, Debug, Clone)]
+struct HeadlessWorkArgs {
+    /// Unit ID to run
+    unit_id: String,
+    /// Explicit path to the .mana directory for canonical unit loading
+    #[arg(long)]
+    mana_dir: Option<PathBuf>,
+    /// Defer verify/close to compatibility orchestrators instead of verifying inline
+    #[arg(long)]
+    defer_verify: bool,
+}
+
+#[derive(Subcommand, Debug)]
 enum Commands {
     /// Start the CLI-first interactive chat shell
     Chat,
@@ -328,17 +341,9 @@ enum Commands {
     },
     /// Edit configuration
     Config,
-    /// Run a mana unit headlessly through the canonical single-unit execution path.
-    Run {
-        /// Unit ID to run
-        unit_id: String,
-        /// Explicit path to the .mana directory for canonical unit loading
-        #[arg(long)]
-        mana_dir: Option<PathBuf>,
-        /// Defer verify/close to compatibility orchestrators instead of verifying inline
-        #[arg(long)]
-        defer_verify: bool,
-    },
+    /// Execute a mana unit headlessly through the canonical single-unit worker path.
+    #[command(alias = "run")]
+    Work(HeadlessWorkArgs),
     /// Usage reporting and export
     Usage {
         #[command(subcommand)]
@@ -363,7 +368,7 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum SecretsCommand {
     /// List configured secret providers/services
     List,
@@ -396,7 +401,7 @@ enum SecretsCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum UsageCommand {
     /// Show overall usage totals
     Summary(UsageReportArgs),
@@ -634,18 +639,20 @@ pub async fn run() {
                 println!("{}", config_path.display());
                 return;
             }
-            Commands::Run {
+            Commands::Work(HeadlessWorkArgs {
                 unit_id,
                 mana_dir,
                 defer_verify,
-            } => match run_headless_mode(&cli, unit_id, mana_dir.as_deref(), *defer_verify).await {
-                Ok(true) => return,
-                Ok(false) => std::process::exit(1),
-                Err(e) => {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
+            }) => {
+                match run_headless_mode(&cli, unit_id, mana_dir.as_deref(), *defer_verify).await {
+                    Ok(true) => return,
+                    Ok(false) => std::process::exit(1),
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
                 }
-            },
+            }
             Commands::Usage { command } => {
                 if let Err(e) = usage_report::run_usage_command(command) {
                     eprintln!("Error: {e}");
@@ -1229,10 +1236,7 @@ async fn run_setup_mode() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             println!("Get a key at: {}", provider.docs_url);
             let value = prompt_input_line("api_key> ")?;
-            save_auth_secret_fields(
-                provider.id,
-                HashMap::from([("api_key".to_string(), value)]),
-            )?;
+            save_auth_secret_fields(provider.id, HashMap::from([("api_key".to_string(), value)]))?;
         }
     }
 
@@ -1276,7 +1280,11 @@ async fn run_setup_mode() -> Result<(), Box<dyn std::error::Error>> {
         "4" => ThinkingLevel::Medium,
         "5" => ThinkingLevel::High,
         "6" => ThinkingLevel::XHigh,
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid thinking selection").into()),
+        _ => {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidInput, "Invalid thinking selection").into(),
+            )
+        }
     });
 
     println!();
@@ -1293,12 +1301,20 @@ async fn run_setup_mode() -> Result<(), Box<dyn std::error::Error>> {
         "3" => Some(SearchProvider::Exa),
         "4" => Some(SearchProvider::Linkup),
         "5" => Some(SearchProvider::Perplexity),
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid web provider selection").into()),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid web provider selection",
+            )
+            .into())
+        }
     };
 
     if let Some(web_provider) = config.web.search_provider {
         let web_provider_name = web_provider.name();
-        let web_has_auth = auth_store.resolve_secret_field(web_provider_name, "api_key").is_ok()
+        let web_has_auth = auth_store
+            .resolve_secret_field(web_provider_name, "api_key")
+            .is_ok()
             || std::env::var(web_provider.env_key_name()).is_ok();
         if !web_has_auth {
             println!("No key detected for web provider {}.", web_provider_name);
@@ -1319,10 +1335,7 @@ async fn run_setup_mode() -> Result<(), Box<dyn std::error::Error>> {
     println!("Model: {}", model.id);
     println!(
         "Thinking: {}",
-        config
-            .thinking
-            .map(thinking_level_label)
-            .unwrap_or("off")
+        config.thinking.map(thinking_level_label).unwrap_or("off")
     );
     println!(
         "Web search: {}",
@@ -1425,7 +1438,8 @@ async fn run_headless_mode(
 
     // Load the unit via canonical mana-core APIs for the primary single-unit
     // imp-run path instead of ad hoc markdown scanning.
-    let assignment = imp_core::mana_worker::load_assignment_with_mana_dir(&cwd, unit_id, mana_dir_override)?;
+    let assignment =
+        imp_core::mana_worker::load_assignment_with_mana_dir(&cwd, unit_id, mana_dir_override)?;
     let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
     emit_startup_timing(&mut startup_timer, StartupStage::ConfigResolved);
     emit_startup_timing(&mut startup_timer, StartupStage::ModelRegistryReady);
@@ -1499,18 +1513,12 @@ async fn run_headless_mode(
     Ok(outcome.verify_passed.unwrap_or(true))
 }
 
-fn build_lua_loader(
-    no_tools: bool,
-    cwd: PathBuf,
-) -> Option<imp_core::tools::LuaToolLoader> {
+fn build_lua_loader(no_tools: bool, cwd: PathBuf) -> Option<imp_core::tools::LuaToolLoader> {
     if no_tools {
         return None;
     }
 
-    fn init_lua_tools(
-        cwd: PathBuf,
-        tools: &mut imp_core::tools::ToolRegistry,
-    ) {
+    fn init_lua_tools(cwd: PathBuf, tools: &mut imp_core::tools::ToolRegistry) {
         let user_config_dir = Config::user_config_dir();
         imp_lua::init_lua_extensions(&user_config_dir, Some(&cwd), tools);
     }
@@ -1646,11 +1654,7 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
             "index": index,
             "assessment": next_action_assessment_to_json(assessment),
         }),
-        AgentEvent::TurnEnd {
-            index,
-            message,
-            ..
-        } => {
+        AgentEvent::TurnEnd { index, message, .. } => {
             json!({ "type": "turn_end", "index": index, "message": message })
         }
         AgentEvent::MessageStart { message } => {
@@ -2298,11 +2302,7 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             "index": index,
             "assessment": next_action_assessment_to_json(assessment),
         }),
-        AgentEvent::TurnEnd {
-            index,
-            message,
-            ..
-        } => {
+        AgentEvent::TurnEnd { index, message, .. } => {
             json!({ "type": "turn_end", "index": index, "message": message })
         }
         AgentEvent::MessageStart { message } => {
@@ -2690,7 +2690,9 @@ enum ChatShellCommand {
 }
 
 fn parse_chat_shell_command(input: &str) -> Option<ChatShellCommand> {
-    let raw = input.strip_prefix(':').or_else(|| input.strip_prefix('/'))?;
+    let raw = input
+        .strip_prefix(':')
+        .or_else(|| input.strip_prefix('/'))?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Some(ChatShellCommand::Help(None));
@@ -2787,7 +2789,10 @@ fn save_user_config(config: &Config) -> Result<PathBuf, Box<dyn std::error::Erro
 fn print_settings_summary(config: &Config, config_path: &Path) {
     println!("Settings ({})", config_path.display());
     println!("================");
-    println!("1. model               {}", config.model.as_deref().unwrap_or("(unset)"));
+    println!(
+        "1. model               {}",
+        config.model.as_deref().unwrap_or("(unset)")
+    );
     println!(
         "2. thinking            {}",
         config
@@ -2902,11 +2907,7 @@ fn open_in_editor(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn print_personality_builder(
-    scope: PersonalityScopeCli,
-    path: &Path,
-    content: &str,
-) {
+fn print_personality_builder(scope: PersonalityScopeCli, path: &Path, content: &str) {
     println!();
     println!("Personality — builder mode");
     println!("scope: {}", scope.label());
@@ -2938,11 +2939,7 @@ fn print_personality_builder(
     println!("q. quit without saving");
 }
 
-fn print_personality_source(
-    scope: PersonalityScopeCli,
-    path: &Path,
-    content: &str,
-) {
+fn print_personality_source(scope: PersonalityScopeCli, path: &Path, content: &str) {
     println!();
     println!("Personality — source mode");
     println!("scope: {}", scope.label());
@@ -3134,7 +3131,8 @@ fn run_settings_mode() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "6" => {
-                let value = prompt_input_line("web_search_provider [none|tavily|exa|linkup|perplexity]> ")?;
+                let value =
+                    prompt_input_line("web_search_provider [none|tavily|exa|linkup|perplexity]> ")?;
                 match value.trim().to_lowercase().as_str() {
                     "" | "none" => {
                         config.web.search_provider = None;
@@ -3465,9 +3463,7 @@ async fn execute_chat_shell_command(
         }
         ChatShellCommand::Compact => {
             println!("Compaction isn't available in the shell yet.");
-            println!(
-                "For now, use `imp tui` or inspect session history with `imp view sessions`."
-            );
+            println!("For now, use `imp tui` or inspect session history with `imp view sessions`.");
             println!("A shell-native compaction flow is planned.");
             Ok(true)
         }
@@ -3562,7 +3558,6 @@ async fn run_chat_prompt(
     let mut active_tools = 0u32;
     let mut liveness = ShellLiveness::new();
     let mut turn_summary = ChatTurnSummaryState::default();
-
 
     while let Some(event) = session.recv_event().await {
         bump_shell_liveness(
@@ -3692,10 +3687,7 @@ async fn run_chat_mode(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn run_view_mode(
-    _cli: &Cli,
-    area: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_view_mode(_cli: &Cli, area: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let session_dir = Config::session_dir();
 
@@ -3717,7 +3709,10 @@ async fn run_view_mode(
                 println!("   path: {}", session.path.display());
                 println!("   messages: {}", session.message_count);
                 if let Some(summary) = &session.summary {
-                    println!("   summary: {}", truncate_chars_with_suffix(summary, 120, "…"));
+                    println!(
+                        "   summary: {}",
+                        truncate_chars_with_suffix(summary, 120, "…")
+                    );
                 }
             }
             if sessions.len() > 20 {
@@ -3726,8 +3721,13 @@ async fn run_view_mode(
             Ok(())
         }
         "tree" => {
-            let session = SessionManager::continue_recent(&cwd, &session_dir)?
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No recent session found for this working directory."))?;
+            let session =
+                SessionManager::continue_recent(&cwd, &session_dir)?.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "No recent session found for this working directory.",
+                    )
+                })?;
             let tree = session.get_tree();
             if tree.is_empty() {
                 println!("No session history yet.");
@@ -3739,8 +3739,13 @@ async fn run_view_mode(
             Ok(())
         }
         "logs" => {
-            let session = SessionManager::continue_recent(&cwd, &session_dir)?
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No recent session found for this working directory."))?;
+            let session =
+                SessionManager::continue_recent(&cwd, &session_dir)?.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "No recent session found for this working directory.",
+                    )
+                })?;
             println!("Session log\n===========");
             for entry in session.entries().iter().rev().take(40).rev() {
                 println!("{}", summarize_session_entry(entry));
@@ -3748,8 +3753,13 @@ async fn run_view_mode(
             Ok(())
         }
         "checkpoints" => {
-            let session = SessionManager::continue_recent(&cwd, &session_dir)?
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No recent session found for this working directory."))?;
+            let session =
+                SessionManager::continue_recent(&cwd, &session_dir)?.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "No recent session found for this working directory.",
+                    )
+                })?;
             let checkpoints = session.checkpoint_records();
             if checkpoints.is_empty() {
                 println!("No checkpoints recorded in the most recent session for this working directory.");
@@ -3803,7 +3813,10 @@ fn print_tree_nodes(nodes: &[imp_core::session::TreeNode], depth: usize) {
             ),
             SessionEntry::Message { message, .. } => summarize_message_for_view(message),
             SessionEntry::Compaction { summary, .. } => {
-                format!("compaction {}", truncate_chars_with_suffix(summary, 60, "…"))
+                format!(
+                    "compaction {}",
+                    truncate_chars_with_suffix(summary, 60, "…")
+                )
             }
             SessionEntry::Label { label, .. } => format!("label {label}"),
             SessionEntry::Custom { custom_type, .. } => format!("custom {custom_type}"),
@@ -3829,16 +3842,20 @@ fn summarize_message_for_view(message: &Message) -> String {
     match message {
         Message::User(user) => format!(
             "user {}",
-            truncate_chars_with_suffix(&text_content(message).unwrap_or_else(|| {
-                user.content
-                    .iter()
-                    .filter_map(|block| match block {
-                        imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            }), 80, "…")
+            truncate_chars_with_suffix(
+                &text_content(message).unwrap_or_else(|| {
+                    user.content
+                        .iter()
+                        .filter_map(|block| match block {
+                            imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }),
+                80,
+                "…"
+            )
         ),
         Message::Assistant(_) => format!(
             "assistant {}",
@@ -3846,7 +3863,11 @@ fn summarize_message_for_view(message: &Message) -> String {
         ),
         Message::ToolResult(result) => format!(
             "tool-result {}",
-            truncate_chars_with_suffix(&text_content(message).unwrap_or_else(|| result.tool_call_id.clone()), 80, "…")
+            truncate_chars_with_suffix(
+                &text_content(message).unwrap_or_else(|| result.tool_call_id.clone()),
+                80,
+                "…"
+            )
         ),
     }
 }
@@ -3861,7 +3882,10 @@ fn summarize_session_entry(entry: &SessionEntry) -> String {
         ),
         SessionEntry::Message { message, .. } => summarize_message_for_view(message),
         SessionEntry::Compaction { summary, .. } => {
-            format!("compaction {}", truncate_chars_with_suffix(summary, 100, "…"))
+            format!(
+                "compaction {}",
+                truncate_chars_with_suffix(summary, 100, "…")
+            )
         }
         SessionEntry::Label { label, .. } => format!("label {label}"),
         SessionEntry::Custom { custom_type, .. } => format!("custom {custom_type}"),
@@ -3869,38 +3893,46 @@ fn summarize_session_entry(entry: &SessionEntry) -> String {
 }
 
 async fn run_interactive(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = std::env::current_dir()?;
-    let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+    let interactive_result = async {
+        let cwd = std::env::current_dir()?;
+        let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
 
-    let registry = ModelRegistry::with_builtins();
+        let registry = ModelRegistry::with_builtins();
 
-    let session = if cli.no_session {
-        SessionManager::in_memory()
-    } else if cli.cont {
-        // Continue most recent session
-        SessionManager::continue_recent(&cwd, &Config::session_dir())?
-            .unwrap_or_else(|| SessionManager::new(&cwd, &Config::session_dir()).unwrap())
-    } else if let Some(ref path) = cli.session {
-        SessionManager::open(path)?
-    } else {
-        // New persistent session
-        SessionManager::new(&cwd, &Config::session_dir())?
-    };
+        let session = if cli.no_session {
+            SessionManager::in_memory()
+        } else if cli.cont {
+            // Continue most recent session
+            match SessionManager::continue_recent(&cwd, &Config::session_dir())? {
+                Some(session) => session,
+                None => SessionManager::new(&cwd, &Config::session_dir())?,
+            }
+        } else if let Some(ref path) = cli.session {
+            SessionManager::open(path)?
+        } else {
+            // New persistent session
+            SessionManager::new(&cwd, &Config::session_dir())?
+        };
 
-    let mut runner = imp_tui::interactive::InteractiveRunner::new(config, session, registry, cwd)?;
+        let mut runner =
+            imp_tui::interactive::InteractiveRunner::new(config, session, registry, cwd)?;
 
-    // Apply CLI overrides
-    if let Some(ref model) = cli.model {
-        runner.app_mut().model_name = model.clone();
+        // Apply CLI overrides
+        if let Some(ref model) = cli.model {
+            runner.app_mut().model_name = model.clone();
+        }
+        if let Some(ref thinking) = cli.thinking {
+            runner.app_mut().thinking_level = parse_thinking_level(thinking);
+        }
+        if cli.max_turns.is_some() {
+            runner.app_mut().max_turns_override = cli.max_turns;
+        }
+
+        runner.run_guarded().await.map_err(Into::into)
     }
-    if let Some(ref thinking) = cli.thinking {
-        runner.app_mut().thinking_level = parse_thinking_level(thinking);
-    }
-    if cli.max_turns.is_some() {
-        runner.app_mut().max_turns_override = cli.max_turns;
-    }
+    .await;
 
-    runner.run().await
+    interactive_result
 }
 
 /// Expand @file arguments into file content blocks.
@@ -3986,6 +4018,32 @@ mod tests {
 
     fn empty_auth_store() -> AuthStore {
         AuthStore::new(std::path::PathBuf::from("auth.json"))
+    }
+
+    #[test]
+    fn cli_parses_work_subcommand_for_headless_worker() {
+        let cli = Cli::try_parse_from(["imp", "work", "5.1"]).expect("parse work subcommand");
+        match cli.command {
+            Some(Commands::Work(args)) => {
+                assert_eq!(args.unit_id, "5.1");
+                assert!(args.mana_dir.is_none());
+                assert!(!args.defer_verify);
+            }
+            other => panic!("expected work subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_run_as_alias_for_work_subcommand() {
+        let cli =
+            Cli::try_parse_from(["imp", "run", "5.1", "--defer-verify"]).expect("parse run alias");
+        match cli.command {
+            Some(Commands::Work(args)) => {
+                assert_eq!(args.unit_id, "5.1");
+                assert!(args.defer_verify);
+            }
+            other => panic!("expected work subcommand via run alias, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4108,7 +4166,10 @@ mod tests {
 
     #[test]
     fn parse_tool_output_display_accepts_known_values() {
-        assert_eq!(parse_tool_output_display("full"), Some(ToolOutputDisplay::Full));
+        assert_eq!(
+            parse_tool_output_display("full"),
+            Some(ToolOutputDisplay::Full)
+        );
         assert_eq!(
             parse_tool_output_display("compact"),
             Some(ToolOutputDisplay::Compact)
@@ -4123,15 +4184,15 @@ mod tests {
     #[test]
     fn web_search_provider_label_formats_none_and_provider_names() {
         assert_eq!(web_search_provider_label(None), "none");
-        assert_eq!(
-            web_search_provider_label(Some(SearchProvider::Exa)),
-            "exa"
-        );
+        assert_eq!(web_search_provider_label(Some(SearchProvider::Exa)), "exa");
     }
 
     #[test]
     fn parse_thinking_level_strict_rejects_unknown_values() {
-        assert_eq!(parse_thinking_level_strict("medium"), Some(ThinkingLevel::Medium));
+        assert_eq!(
+            parse_thinking_level_strict("medium"),
+            Some(ThinkingLevel::Medium)
+        );
         assert_eq!(parse_thinking_level_strict("turbo"), None);
     }
 
@@ -4141,11 +4202,17 @@ mod tests {
         assert!(matches!(shell_session_choice(&cli), SessionChoice::New));
 
         cli.no_session = true;
-        assert!(matches!(shell_session_choice(&cli), SessionChoice::InMemory));
+        assert!(matches!(
+            shell_session_choice(&cli),
+            SessionChoice::InMemory
+        ));
 
         cli.no_session = false;
         cli.cont = true;
-        assert!(matches!(shell_session_choice(&cli), SessionChoice::Continue));
+        assert!(matches!(
+            shell_session_choice(&cli),
+            SessionChoice::Continue
+        ));
 
         cli.cont = false;
         cli.session = Some(PathBuf::from("session.jsonl"));
@@ -4547,7 +4614,10 @@ mod tests {
         assert_eq!(context.title, "Fix the widget");
         assert_eq!(context.acceptance.as_deref(), Some("Widget tests pass"));
         assert_eq!(context.verify.as_deref(), Some("cargo test -p imp-cli"));
-        assert_eq!(context.context_paths, vec!["imp/crates/imp-cli/src/main.rs"]);
+        assert_eq!(
+            context.context_paths,
+            vec!["imp/crates/imp-cli/src/main.rs"]
+        );
         assert!(context
             .constraints
             .iter()

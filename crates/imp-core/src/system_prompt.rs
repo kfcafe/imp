@@ -3,7 +3,7 @@ use std::fmt;
 use crate::config::AgentMode;
 use crate::context::estimate_tokens;
 use crate::guardrails::{self, GuardrailProfile};
-use crate::personality::{PersonalityBand, PersonalityProfile, soul_identity_text};
+use crate::personality::{soul_identity_text, PersonalityBand, PersonalityProfile};
 use crate::resources::{AgentsMd, Skill, SoulDoc};
 use crate::roles::Role;
 use crate::tools::ToolRegistry;
@@ -212,7 +212,10 @@ fn identity_layer(
     }
 
     s.push_str("\nTool usage guide:\n");
-    s.push_str("- Use `bash` for search, file discovery, directory listing, builds, tests, git, scripts, package managers, and other shell-native tasks.\n");
+    s.push_str("- Use `bash` for search, file discovery, directory listing, builds, tests, scripts, package managers, and other shell-native tasks.\n");
+    if defs.iter().any(|def| def.name == "git") {
+        s.push_str("- Use `git` for local repo/worktree operations; use `bash` for uncovered git commands.\n");
+    }
     if defs.iter().any(|def| def.name == "mana") {
         s.push_str("- Prefer the native `mana` tool over `bash` for mana operations when an equivalent action exists; use `bash` only for mana-adjacent shell work with no native mana action.\n");
     }
@@ -751,11 +754,9 @@ mod tests {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(result.text.contains("Execution discipline:"));
-        assert!(
-            result.text.contains(
-                "Never claim repository facts that you have not inspected in this session."
-            )
-        );
+        assert!(result
+            .text
+            .contains("Never claim repository facts that you have not inspected in this session."));
         assert!(result.text.contains(
             "For analysis-only requests, stay read-only unless the user asks for changes."
         ));
@@ -769,11 +770,9 @@ mod tests {
             "During planning and design conversations, proactively externalize durable structure as it appears."
         ));
         assert!(result.text.contains("epic, child job, note, or decision"));
-        assert!(
-            result
-                .text
-                .contains("Do not ask permission merely to capture plan artifacts in mana.")
-        );
+        assert!(result
+            .text
+            .contains("Do not ask permission merely to capture plan artifacts in mana."));
         assert!(result.text.contains(
             "If durable planning state changed this turn, make the between-turn mana update before the substantive reply"
         ));
@@ -788,9 +787,9 @@ mod tests {
             1,
             "between-turn mana update guidance should appear once"
         );
-        assert!(!result.text.contains(
-            "include a concise mana delta summary in the response"
-        ));
+        assert!(!result
+            .text
+            .contains("include a concise mana delta summary in the response"));
     }
 
     #[test]
@@ -800,11 +799,9 @@ mod tests {
         assert!(result.text.contains("You are imp, a coding agent."));
         assert!(result.text.contains("- read: Read file contents"));
         assert!(result.text.contains("- write: Write content to a file"));
-        assert!(
-            result
-                .text
-                .contains("- edit: Edit a file by replacing exact text")
-        );
+        assert!(result
+            .text
+            .contains("- edit: Edit a file by replacing exact text"));
         assert!(result.text.contains("- bash: Run shell commands"));
     }
 
@@ -876,11 +873,9 @@ mod tests {
         let reg = make_registry();
         let personality = make_personality();
         let result = test_assemble(&reg, &[], &[], &[], Some(&personality), None, None);
-        assert!(
-            result
-                .text
-                .contains("You are Nova, a careful, direct, research assistant.")
-        );
+        assert!(result
+            .text
+            .contains("You are Nova, a careful, direct, research assistant."));
     }
 
     #[test]
@@ -892,24 +887,18 @@ mod tests {
         assert!(result.text.contains(
             "Prefer confirmation before acting when requirements or consequences are unclear."
         ));
-        assert!(
-            result
-                .text
-                .contains("Be concise by default, but explain important tradeoffs when useful.")
-        );
+        assert!(result
+            .text
+            .contains("Be concise by default, but explain important tradeoffs when useful."));
         assert!(result.text.contains(
             "Be highly conservative with risky changes: verify assumptions and avoid acting on weak evidence."
         ));
-        assert!(
-            result
-                .text
-                .contains("Use a warm, supportive tone without becoming verbose.")
-        );
-        assert!(
-            result
-                .text
-                .contains("Favor immediate execution on the most obvious next step.")
-        );
+        assert!(result
+            .text
+            .contains("Use a warm, supportive tone without becoming verbose."));
+        assert!(result
+            .text
+            .contains("Favor immediate execution on the most obvious next step."));
     }
 
     #[test]
@@ -937,11 +926,9 @@ mod tests {
             learning_enabled: false,
             guardrail_profile: None,
         });
-        assert!(
-            result
-                .text
-                .contains("You are Sol, a tuned and reflective collaborator.")
-        );
+        assert!(result
+            .text
+            .contains("You are Sol, a tuned and reflective collaborator."));
         assert!(result.text.contains("Soul:"));
         assert!(result.text.contains("## Tunables"));
         assert!(!result.text.contains("Working style:"));
@@ -963,11 +950,9 @@ mod tests {
         let agents = vec![make_agents_md("# Rules\n\nUse snake_case everywhere.")];
         let result = test_assemble(&reg, &agents, &[], &[], None, None, None);
         assert!(result.text.contains("# Project Context"));
-        assert!(
-            result
-                .text
-                .contains("# Rules\n\nUse snake_case everywhere.")
-        );
+        assert!(result
+            .text
+            .contains("# Rules\n\nUse snake_case everywhere."));
     }
 
     #[test]
@@ -1007,21 +992,15 @@ mod tests {
             ),
         ];
         let result = test_assemble(&reg, &[], &skills, &[], None, None, None);
-        assert!(
-            result
-                .text
-                .contains("Available skills (use read to load when relevant):")
-        );
-        assert!(
-            result
-                .text
-                .contains("- rust: Conventions for Rust code [/home/.imp/skills/rust/SKILL.md]")
-        );
-        assert!(
-            result
-                .text
-                .contains("- testing: Write and review tests [/home/.imp/skills/testing/SKILL.md]")
-        );
+        assert!(result
+            .text
+            .contains("Available skills (use read to load when relevant):"));
+        assert!(result
+            .text
+            .contains("- rust: Conventions for Rust code [/home/.imp/skills/rust/SKILL.md]"));
+        assert!(result
+            .text
+            .contains("- testing: Write and review tests [/home/.imp/skills/testing/SKILL.md]"));
     }
 
     #[test]
@@ -1207,16 +1186,12 @@ mod tests {
         ];
         let result = test_assemble(&reg, &[], &[], &facts, None, None, None);
         assert!(result.text.contains("Project facts:"));
-        assert!(
-            result
-                .text
-                .contains("\"Uses JWT for auth\" [verified 2h ago]")
-        );
-        assert!(
-            result
-                .text
-                .contains("\"Test suite requires Docker\" [verified 1d ago]")
-        );
+        assert!(result
+            .text
+            .contains("\"Uses JWT for auth\" [verified 2h ago]"));
+        assert!(result
+            .text
+            .contains("\"Test suite requires Docker\" [verified 1d ago]"));
     }
 
     #[test]
@@ -1305,11 +1280,9 @@ mod tests {
 
         let facts_pos = result.text.find("Project facts:").unwrap();
         let status_pos = result.text.find("Project memory status:").unwrap();
-        assert!(
-            result
-                .text
-                .contains("\"Uses JWT for auth\" [verified 2h ago]")
-        );
+        assert!(result
+            .text
+            .contains("\"Uses JWT for auth\" [verified 2h ago]"));
         assert!(result.text.contains("Warnings:"));
         assert!(result.text.contains("Working on:"));
         assert!(facts_pos < status_pos);
@@ -1335,17 +1308,13 @@ mod tests {
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("## Task"));
         assert!(result.text.contains("Title: Fix the failing auth test"));
-        assert!(
-            result
-                .text
-                .contains("Description: The JWT validation test panics")
-        );
+        assert!(result
+            .text
+            .contains("Description: The JWT validation test panics"));
         assert!(result.text.contains("Verify: cargo test auth::jwt_test"));
-        assert!(
-            result.text.contains(
-                "Treat the verify command as the primary completion check for this task."
-            )
-        );
+        assert!(result
+            .text
+            .contains("Treat the verify command as the primary completion check for this task."));
     }
 
     #[test]
@@ -1379,16 +1348,12 @@ mod tests {
         assert!(result.text.contains(
             "Do not repeat a failed approach unchanged; use the attempt history to adjust your plan."
         ));
-        assert!(
-            result
-                .text
-                .contains("Attempt 1 (failed): Tried X, got error Y")
-        );
-        assert!(
-            result
-                .text
-                .contains("Attempt 2 (failed): Tried Z, still broken")
-        );
+        assert!(result
+            .text
+            .contains("Attempt 1 (failed): Tried X, got error Y"));
+        assert!(result
+            .text
+            .contains("Attempt 2 (failed): Tried Z, still broken"));
     }
 
     #[test]
@@ -1415,11 +1380,9 @@ mod tests {
         assert!(result.text.contains(
             "Respect dependency state when sequencing work; unresolved dependencies are potential blockers."
         ));
-        assert!(
-            result
-                .text
-                .contains("- Schema types (completed): defined in src/schema.rs")
-        );
+        assert!(result
+            .text
+            .contains("- Schema types (completed): defined in src/schema.rs"));
     }
 
     #[test]
@@ -1441,20 +1404,16 @@ mod tests {
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
         assert!(result.text.contains("Notes:"));
-        assert!(
-            result
-                .text
-                .contains("Prefer touching only auth paths unless necessary")
-        );
+        assert!(result
+            .text
+            .contains("Prefer touching only auth paths unless necessary"));
         assert!(result.text.contains("## Referenced files"));
         assert!(result.text.contains("- src/auth.rs"));
         assert!(result.text.contains("- tests/auth.rs"));
         assert!(result.text.contains("## Constraints"));
-        assert!(
-            result
-                .text
-                .contains("Scope changes to auth-related files unless broader edits are necessary")
-        );
+        assert!(result
+            .text
+            .contains("Scope changes to auth-related files unless broader edits are necessary"));
     }
 
     #[test]
@@ -1503,11 +1462,9 @@ mod tests {
         let reg = make_registry();
         let role = make_readonly_role();
         let result = test_assemble(&reg, &[], &[], &[], None, None, Some(&role));
-        assert!(
-            result
-                .text
-                .contains("Review code carefully. Do not modify files.")
-        );
+        assert!(result
+            .text
+            .contains("Review code carefully. Do not modify files."));
     }
 
     #[test]

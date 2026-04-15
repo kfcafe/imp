@@ -446,16 +446,10 @@ impl Widget for EditorView<'_> {
 
         let top_left = build_identity_label(self.cwd, self.session_name, area.width);
         let top_right = build_top_right_label(self.turn_elapsed, self.theme);
-        let bottom_left = build_bottom_left_label(
-            prompt_activity_state,
-            self.tick,
-            self.animation_level,
-        );
-        let activity = editor_activity_label(
-            prompt_activity_state,
-            self.tick,
-            self.animation_level,
-        );
+        let bottom_left =
+            build_bottom_left_label(prompt_activity_state, self.tick, self.animation_level);
+        let activity =
+            editor_activity_label(prompt_activity_state, self.tick, self.animation_level);
 
         // Build bottom-right metadata cluster
         let thinking_label = match self.thinking_level {
@@ -608,7 +602,12 @@ fn editor_activity_label(
 ) -> String {
     match activity_state {
         AnimationState::Thinking | AnimationState::WaitingForResponse => String::new(),
-        _ => activity_label(activity_state, tick, animation_level, ActivitySurface::Editor),
+        _ => activity_label(
+            activity_state,
+            tick,
+            animation_level,
+            ActivitySurface::Editor,
+        ),
     }
 }
 
@@ -1042,11 +1041,8 @@ mod tests {
 
     #[test]
     fn bottom_left_label_hides_thinking_state() {
-        let rendered = build_bottom_left_label(
-            AnimationState::Thinking,
-            0,
-            AnimationLevel::Minimal,
-        );
+        let rendered =
+            build_bottom_left_label(AnimationState::Thinking, 0, AnimationLevel::Minimal);
         assert!(rendered.is_empty());
     }
 

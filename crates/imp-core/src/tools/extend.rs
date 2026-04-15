@@ -110,7 +110,9 @@ impl Tool for ExtendTool {
                         patch_skill(&agent_skills_dir, name, old_text, new_text)
                     }
                     "delete" => delete_skill(&agent_skills_dir, name),
-                    _ => unreachable!(),
+                    other => Ok(ToolOutput::error(format!(
+                        "Unknown skill action \"{other}\". Use: create, patch, delete"
+                    ))),
                 }
             }
             "" => Ok(ToolOutput::error("Missing required parameter: action")),
@@ -296,7 +298,9 @@ mod tests {
             lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
-            turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(crate::mana_review::TurnManaReviewAccumulator::default())),
+            turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
         }
     }
 

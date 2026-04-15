@@ -44,14 +44,32 @@ impl AgentMode {
                 "edit",
                 "multi_edit",
                 "bash",
+                "git",
                 "mana",
                 "memory",
                 "ask",
             ],
-            AgentMode::Orchestrator => &["read", "scan", "web", "session_search", "mana", "ask", "imp"],
-            AgentMode::Planner => &["read", "scan", "web", "session_search", "mana", "ask"],
-            AgentMode::Reviewer => &["read", "scan", "web", "session_search", "ask"],
-            AgentMode::Auditor => &["read", "scan", "web", "session_search", "mana"],
+            AgentMode::Orchestrator => &[
+                "read",
+                "scan",
+                "web",
+                "session_search",
+                "mana",
+                "git",
+                "ask",
+                "imp",
+            ],
+            AgentMode::Planner => &[
+                "read",
+                "scan",
+                "web",
+                "session_search",
+                "git",
+                "mana",
+                "ask",
+            ],
+            AgentMode::Reviewer => &["read", "scan", "web", "session_search", "git", "ask"],
+            AgentMode::Auditor => &["read", "scan", "web", "session_search", "git", "mana"],
         }
     }
 
@@ -1249,6 +1267,7 @@ model = "sonnet"
         assert!(mode.allows_tool("read"));
         assert!(mode.allows_tool("scan"));
         assert!(mode.allows_tool("web"));
+        assert!(mode.allows_tool("git"));
         assert!(mode.allows_tool("session_search"));
         assert!(mode.allows_tool("mana"));
         assert!(mode.allows_tool("ask"));
@@ -1283,6 +1302,7 @@ model = "sonnet"
         assert!(mode.allows_mana_action("status"));
         assert!(mode.allows_mana_action("list"));
         assert!(mode.allows_mana_action("show"));
+        assert!(mode.allows_tool("git"));
     }
 
     #[test]
@@ -1291,6 +1311,7 @@ model = "sonnet"
         assert!(!mode.allows_mana_action("close"));
         assert!(!mode.allows_mana_action("run"));
         assert!(!mode.allows_mana_action("update"));
+        assert!(mode.allows_tool("git"));
     }
 
     #[test]
@@ -1299,6 +1320,7 @@ model = "sonnet"
         assert!(!mode.allows_mana_action("create"));
         assert!(!mode.allows_mana_action("run"));
         assert!(!mode.allows_mana_action("close"));
+        assert!(mode.allows_tool("git"));
     }
 
     #[test]
@@ -1320,6 +1342,7 @@ model = "sonnet"
         assert!(!mode.allows_mana_action("run"));
         // Reviewer also has no mana tool access
         assert!(!mode.allows_tool("mana"));
+        assert!(mode.allows_tool("git"));
     }
 
     #[test]
@@ -1332,6 +1355,7 @@ model = "sonnet"
         assert!(!mode.allows_mana_action("close"));
         assert!(!mode.allows_mana_action("run"));
         assert!(!mode.allows_mana_action("update"));
+        assert!(mode.allows_tool("git"));
     }
 
     #[test]

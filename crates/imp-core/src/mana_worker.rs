@@ -23,15 +23,13 @@ use std::path::{Path, PathBuf};
 use imp_llm::ThinkingLevel;
 use mana_core::api;
 use tokio::process::Command as TokioCommand;
-pub use tower_contracts::worker::{
-    WorkerAssignment, WorkerAttempt, WorkerResult, WorkerStatus,
-};
+pub use tower_contracts::worker::{WorkerAssignment, WorkerAttempt, WorkerResult, WorkerStatus};
 
 use crate::context_prefill::{self, AssembledContext, FileSpec, PrefillConfig};
 use crate::imp_session::{ImpSession, SessionChoice, SessionOptions};
 use crate::mana_prompt_context;
-use crate::tools::LuaToolLoader;
 use crate::system_prompt::{Attempt, Dependency, Fact, TaskContext};
+use crate::tools::LuaToolLoader;
 
 // ---------------------------------------------------------------------------
 // Shared contract re-exports
@@ -77,18 +75,14 @@ pub fn load_assignment_with_mana_dir(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| cwd.to_path_buf());
 
-    let unit = api::get_unit(&mana_dir, unit_id).map_err(|e| {
-        format!("Failed to load mana unit {unit_id}: {e}")
-    })?;
+    let unit = api::get_unit(&mana_dir, unit_id)
+        .map_err(|e| format!("Failed to load mana unit {unit_id}: {e}"))?;
 
     // Read the unit file body (description may be in the markdown body
     // after the frontmatter, which mana-core merges into unit.description).
     // mana-core's Unit already handles frontmatter+body merging in from_file(),
     // so unit.description contains the full combined text.
-    let description = unit
-        .description
-        .clone()
-        .unwrap_or_default();
+    let description = unit.description.clone().unwrap_or_default();
 
     // Also read the markdown body from the unit file for any content
     // after the frontmatter that mana-core stores separately.
@@ -117,10 +111,7 @@ pub fn load_assignment_with_mana_dir(
         .map(|record| WorkerAttempt {
             number: record.num,
             outcome: format!("{:?}", record.outcome).to_lowercase(),
-            summary: record
-                .notes
-                .clone()
-                .unwrap_or_default(),
+            summary: record.notes.clone().unwrap_or_default(),
         })
         .collect();
 
@@ -161,8 +152,7 @@ fn derive_task_constraints(assignment: &WorkerAssignment) -> Vec<String> {
 
     if assignment.verify.is_some() {
         constraints.push(
-            "Treat the verify command as the primary completion gate for this task."
-                .to_string(),
+            "Treat the verify command as the primary completion gate for this task.".to_string(),
         );
     } else {
         constraints.push(
@@ -188,9 +178,7 @@ fn derive_task_constraints(assignment: &WorkerAssignment) -> Vec<String> {
     constraints
 }
 
-pub fn build_task_context(
-    assignment: &WorkerAssignment,
-) -> TaskContext {
+pub fn build_task_context(assignment: &WorkerAssignment) -> TaskContext {
     let description = assignment.description.trim().to_string();
 
     let notes = assignment
@@ -425,7 +413,10 @@ pub async fn finalize_worker_run(
     let summary = Some(match status {
         WorkerStatus::Completed => {
             if closed_after_verify {
-                format!("Unit {} completed and closed after verify pass.", assignment.id)
+                format!(
+                    "Unit {} completed and closed after verify pass.",
+                    assignment.id
+                )
             } else if verify_passed == Some(true) {
                 format!("Unit {} completed successfully.", assignment.id)
             } else {
@@ -487,10 +478,7 @@ pub async fn run_worker_assignment(
     finalize_worker_run(prepared).await
 }
 
-async fn run_verify_command(
-    verify: &str,
-    cwd: &Path,
-) -> Result<bool, Box<dyn std::error::Error>> {
+async fn run_verify_command(verify: &str, cwd: &Path) -> Result<bool, Box<dyn std::error::Error>> {
     let output = run_shell_command(verify, cwd).output().await?;
 
     if !output.status.success() {
@@ -586,10 +574,7 @@ pub fn build_task_prompt(assignment: &WorkerAssignment) -> String {
 }
 
 /// Assemble context prefill messages from the assignment's file references.
-pub fn assemble_prefill(
-    assignment: &WorkerAssignment,
-    cwd: &Path,
-) -> AssembledContext {
+pub fn assemble_prefill(assignment: &WorkerAssignment, cwd: &Path) -> AssembledContext {
     let file_specs = if !assignment.files.is_empty() {
         assignment
             .files
@@ -760,14 +745,14 @@ mod tests {
         assert_eq!(ctx.title, "Refactor module");
         assert_eq!(ctx.acceptance.as_deref(), Some("All tests pass"));
         assert_eq!(ctx.verify.as_deref(), Some("cargo test"));
-        assert_eq!(ctx.notes.as_deref(), Some("Prefer touching parser and module wiring first"));
+        assert_eq!(
+            ctx.notes.as_deref(),
+            Some("Prefer touching parser and module wiring first")
+        );
         assert_eq!(ctx.decisions, vec!["Use mod.rs or inline?"]);
         assert_eq!(ctx.context_paths, vec!["src/lib.rs", "src/parser.rs"]);
         assert!(ctx.constraints.iter().any(|c| c.contains("Scope changes")));
-        assert!(ctx
-            .constraints
-            .iter()
-            .any(|c| c.contains("verify command")));
+        assert!(ctx.constraints.iter().any(|c| c.contains("verify command")));
     }
 
     #[test]
