@@ -45,7 +45,8 @@ fn resolve_api_key(
 
     let auth_path = auth_path
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| crate::config::Config::user_config_dir().join("auth.json"));
+        .or_else(crate::storage::existing_global_auth_path)
+        .unwrap_or_else(crate::storage::global_auth_path);
     let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
 
     auth_store

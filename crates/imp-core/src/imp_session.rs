@@ -44,6 +44,7 @@ use crate::builder::AgentBuilder;
 use crate::config::{AgentMode, Config};
 use crate::error::{Error, Result};
 use crate::session::{SessionCheckpointRecord, SessionEntry, SessionManager};
+use crate::storage;
 use crate::system_prompt::{Fact, TaskContext};
 use crate::ui::UserInterface;
 
@@ -227,6 +228,8 @@ impl ImpSession {
     pub async fn create(options: SessionOptions) -> Result<Self> {
         let cwd = options.cwd.clone();
 
+        let _ = storage::reconcile_legacy_into_global_root();
+
         // 1. Load config (user + project, merged)
         let mut config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
 
@@ -242,7 +245,8 @@ impl ImpSession {
         let auth_path = options
             .auth_path
             .clone()
-            .unwrap_or_else(|| Config::user_config_dir().join("auth.json"));
+            .or_else(storage::existing_global_auth_path)
+            .unwrap_or_else(storage::global_auth_path);
         let mut auth_store =
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
 
@@ -340,7 +344,7 @@ impl ImpSession {
 
 
         // 6. Set up session persistence
-        let session_dir = Config::session_dir();
+        let session_dir = storage::global_sessions_dir();
         let session_mgr = match options.session {
             SessionChoice::New => SessionManager::new(&cwd, &session_dir)?,
             SessionChoice::InMemory => SessionManager::in_memory(),

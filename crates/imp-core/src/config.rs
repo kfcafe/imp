@@ -5,6 +5,7 @@ use imp_llm::ThinkingLevel;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+use crate::storage;
 use crate::guardrails::GuardrailConfig;
 use crate::hooks::HookDef;
 use crate::personality::PersonalityConfig;
@@ -717,12 +718,12 @@ impl Config {
 
     /// Default user config directory.
     pub fn user_config_dir() -> PathBuf {
-        dirs_path("config")
+        storage::global_root()
     }
 
     /// Default session directory.
     pub fn session_dir() -> PathBuf {
-        dirs_path("data").join("sessions")
+        storage::global_sessions_dir()
     }
 
     /// Save config to a TOML file. Creates parent directories if needed.
@@ -738,31 +739,7 @@ impl Config {
 
     /// Path to the user config.toml file.
     pub fn user_config_path() -> PathBuf {
-        Self::user_config_dir().join("config.toml")
-    }
-}
-
-fn dirs_path(kind: &str) -> PathBuf {
-    match kind {
-        "config" => {
-            if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
-                PathBuf::from(dir).join("imp")
-            } else if let Ok(home) = std::env::var("HOME") {
-                PathBuf::from(home).join(".config").join("imp")
-            } else {
-                PathBuf::from(".config").join("imp")
-            }
-        }
-        "data" => {
-            if let Ok(dir) = std::env::var("XDG_DATA_HOME") {
-                PathBuf::from(dir).join("imp")
-            } else if let Ok(home) = std::env::var("HOME") {
-                PathBuf::from(home).join(".local").join("share").join("imp")
-            } else {
-                PathBuf::from(".local").join("share").join("imp")
-            }
-        }
-        _ => PathBuf::from("."),
+        storage::global_config_path()
     }
 }
 

@@ -922,6 +922,7 @@ fn prompt_for_secret_fields(
 }
 
 async fn run_web_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = imp_core::storage::reconcile_legacy_into_global_root();
     let provider = search_provider_from_name(provider_name).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -931,7 +932,7 @@ async fn run_web_login(provider_name: &str) -> Result<(), Box<dyn std::error::Er
         )
     })?;
 
-    let auth_path = Config::user_config_dir().join("auth.json");
+    let auth_path = imp_core::storage::global_auth_path();
     let mut auth_store =
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
 
@@ -982,7 +983,8 @@ async fn run_secrets_command(
 }
 
 fn run_secrets_list() -> Result<(), Box<dyn std::error::Error>> {
-    let auth_path = Config::user_config_dir().join("auth.json");
+    let _ = imp_core::storage::reconcile_legacy_into_global_root();
+    let auth_path = imp_core::storage::global_auth_path();
     let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
 
     if auth_store.stored.is_empty() {
@@ -1067,7 +1069,8 @@ fn run_secrets_list() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_secrets_show(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let auth_path = Config::user_config_dir().join("auth.json");
+    let _ = imp_core::storage::reconcile_legacy_into_global_root();
+    let auth_path = imp_core::storage::global_auth_path();
     let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
     let registry = ProviderRegistry::with_builtins();
 
@@ -1098,7 +1101,8 @@ fn run_secrets_show(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_secrets_remove(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let auth_path = Config::user_config_dir().join("auth.json");
+    let _ = imp_core::storage::reconcile_legacy_into_global_root();
+    let auth_path = imp_core::storage::global_auth_path();
     let mut auth_store =
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
     auth_store.remove(provider)?;
@@ -1107,7 +1111,8 @@ fn run_secrets_remove(provider: &str) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 async fn run_secrets_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let auth_path = Config::user_config_dir().join("auth.json");
+    let _ = imp_core::storage::reconcile_legacy_into_global_root();
+    let auth_path = imp_core::storage::global_auth_path();
     let mut auth_store =
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
 
@@ -1123,7 +1128,8 @@ async fn run_secrets_login(provider_name: &str) -> Result<(), Box<dyn std::error
 }
 
 async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let auth_path = Config::user_config_dir().join("auth.json");
+    let _ = imp_core::storage::reconcile_legacy_into_global_root();
+    let auth_path = imp_core::storage::global_auth_path();
     let mut auth_store =
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
 
@@ -1236,7 +1242,8 @@ fn save_auth_secret_fields(
     provider: &str,
     fields: HashMap<String, String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let auth_path = Config::user_config_dir().join("auth.json");
+    let _ = imp_core::storage::reconcile_legacy_into_global_root();
+    let auth_path = imp_core::storage::global_auth_path();
     let mut auth_store =
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
     auth_store.store_secret_fields(provider, fields)?;
@@ -1244,9 +1251,10 @@ fn save_auth_secret_fields(
 }
 
 async fn run_setup_mode() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = imp_core::storage::reconcile_legacy_into_global_root();
     let cwd = std::env::current_dir()?;
-    let mut config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
-    let auth_path = Config::user_config_dir().join("auth.json");
+    let mut config = Config::resolve(&imp_core::storage::global_root(), Some(&cwd))?;
+    let auth_path = imp_core::storage::global_auth_path();
     let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
     let provider_registry = ProviderRegistry::with_builtins();
     let model_registry = ModelRegistry::with_builtins();
@@ -1460,7 +1468,7 @@ async fn run_headless_mode(
     // imp-run path instead of ad hoc markdown scanning.
     let assignment =
         imp_core::mana_worker::load_assignment_with_mana_dir(&cwd, unit_id, mana_dir_override)?;
-    let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+    let config = Config::resolve(&imp_core::storage::global_root(), Some(&cwd))?;
     emit_startup_timing(&mut startup_timer, StartupStage::ConfigResolved);
     emit_startup_timing(&mut startup_timer, StartupStage::ModelRegistryReady);
     emit_startup_timing(&mut startup_timer, StartupStage::AuthLoaded);
@@ -1932,7 +1940,7 @@ async fn run_rpc_mode(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     emit_startup_timing(&mut startup_timer, StartupStage::ProcessStart);
     let cwd = std::env::current_dir()?;
     emit_startup_timing(&mut startup_timer, StartupStage::CwdResolved);
-    let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+    let config = Config::resolve(&imp_core::storage::global_root(), Some(&cwd))?;
     emit_startup_timing(&mut startup_timer, StartupStage::ConfigResolved);
     let registry = ModelRegistry::with_builtins();
     emit_startup_timing(&mut startup_timer, StartupStage::ModelRegistryReady);
@@ -2139,7 +2147,7 @@ fn create_rpc_agent(
 ) -> Result<(Agent, AgentHandle), Box<dyn std::error::Error>> {
     let mut startup_timer = StartupTimer::new(cli.verbose);
     emit_startup_timing(&mut startup_timer, StartupStage::ProcessStart);
-    let auth_path = Config::user_config_dir().join("auth.json");
+    let auth_path = imp_core::storage::global_auth_path();
     let mut auth_store =
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
     emit_startup_timing(&mut startup_timer, StartupStage::AuthLoaded);
@@ -2454,7 +2462,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
     emit_startup_timing(&mut startup_timer, StartupStage::ProcessStart);
     let cwd = std::env::current_dir()?;
     emit_startup_timing(&mut startup_timer, StartupStage::CwdResolved);
-    let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+    let config = Config::resolve(&imp_core::storage::global_root(), Some(&cwd))?;
     emit_startup_timing(&mut startup_timer, StartupStage::ConfigResolved);
 
     emit_startup_timing(&mut startup_timer, StartupStage::ModelRegistryReady);
@@ -2818,7 +2826,7 @@ fn prompt_optional_input_line(prompt: &str) -> Result<Option<String>, Box<dyn st
 }
 
 fn save_user_config(config: &Config) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let path = Config::user_config_path();
+    let path = imp_core::storage::global_config_path();
     config
         .save(&path)
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
@@ -3102,8 +3110,8 @@ fn run_personality_mode() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_settings_mode() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
-    let config_path = Config::user_config_path();
-    let mut config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+    let config_path = imp_core::storage::global_config_path();
+    let mut config = Config::resolve(&imp_core::storage::global_root(), Some(&cwd))?;
 
     loop {
         println!();
@@ -3391,7 +3399,7 @@ async fn build_chat_session(
     session_choice: SessionChoice,
 ) -> Result<ImpSession, Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
-    let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+    let config = Config::resolve(&imp_core::storage::global_root(), Some(&cwd))?;
 
     let mut options = SessionOptions {
         cwd: cwd.clone(),
@@ -3728,7 +3736,7 @@ async fn run_chat_mode(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run_view_mode(_cli: &Cli, area: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
-    let session_dir = Config::session_dir();
+    let session_dir = imp_core::storage::global_sessions_dir();
 
     match area.unwrap_or("sessions") {
         "sessions" => {
@@ -3934,7 +3942,7 @@ fn summarize_session_entry(entry: &SessionEntry) -> String {
 async fn run_interactive(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let interactive_result = async {
         let cwd = std::env::current_dir()?;
-        let config = Config::resolve(&Config::user_config_dir(), Some(&cwd))?;
+        let config = Config::resolve(&imp_core::storage::global_root(), Some(&cwd))?;
 
         let registry = ModelRegistry::with_builtins();
 
@@ -3942,15 +3950,15 @@ async fn run_interactive(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             SessionManager::in_memory()
         } else if cli.cont {
             // Continue most recent session
-            match SessionManager::continue_recent(&cwd, &Config::session_dir())? {
+            match SessionManager::continue_recent(&cwd, &imp_core::storage::global_sessions_dir())? {
                 Some(session) => session,
-                None => SessionManager::new(&cwd, &Config::session_dir())?,
+                None => SessionManager::new(&cwd, &imp_core::storage::global_sessions_dir())?,
             }
         } else if let Some(ref path) = cli.session {
             SessionManager::open(path)?
         } else {
             // New persistent session
-            SessionManager::new(&cwd, &Config::session_dir())?
+            SessionManager::new(&cwd, &imp_core::storage::global_sessions_dir())?
         };
 
         let mut runner =

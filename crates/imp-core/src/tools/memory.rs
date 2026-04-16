@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::{Tool, ToolContext, ToolOutput};
-use crate::config::Config;
 use crate::error::Result;
 use crate::memory::MemoryStore;
+use crate::storage;
 
 const DEFAULT_MEMORY_LIMIT: usize = 2200;
 const DEFAULT_USER_LIMIT: usize = 1400;
@@ -74,10 +74,9 @@ impl Tool for MemoryTool {
             return Ok(ToolOutput::error("Missing required parameter: target"));
         }
 
-        let config_dir = Config::user_config_dir();
         let (path, char_limit) = match target {
-            "memory" => (config_dir.join("memory.md"), DEFAULT_MEMORY_LIMIT),
-            "user" => (config_dir.join("user.md"), DEFAULT_USER_LIMIT),
+            "memory" => (storage::global_memory_path(), DEFAULT_MEMORY_LIMIT),
+            "user" => (storage::global_user_path(), DEFAULT_USER_LIMIT),
             other => {
                 return Ok(ToolOutput::error(format!(
                     "Unknown target \"{other}\". Use \"memory\" or \"user\"."

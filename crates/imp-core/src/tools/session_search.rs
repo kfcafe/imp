@@ -4,6 +4,7 @@ use serde_json::json;
 use super::{Tool, ToolContext, ToolOutput};
 use crate::error::Result;
 use crate::session_index::SessionIndex;
+use crate::storage;
 
 pub struct SessionSearchTool;
 
@@ -109,25 +110,17 @@ impl Tool for SessionSearchTool {
 
 /// Default path for the session index database.
 fn index_db_path() -> std::path::PathBuf {
-    // Use XDG data dir on Linux, ~/Library on macOS, or fallback to ~/.local/share
-    let base = if cfg!(target_os = "macos") {
-        std::env::var("HOME")
-            .map(|h| {
-                std::path::PathBuf::from(h)
-                    .join("Library")
-                    .join("Application Support")
-            })
-            .unwrap_or_else(|_| std::path::PathBuf::from(".local/share"))
-    } else {
-        std::env::var("XDG_DATA_HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| {
-                std::env::var("HOME")
-                    .map(|h| std::path::PathBuf::from(h).join(".local/share"))
-                    .unwrap_or_else(|_| std::path::PathBuf::from(".local/share"))
-            })
-    };
-    base.join("imp").join("session_index.db")
+    if let Some(path) = storage::existing_global_file(storage::global_session_index_path, "session_index.db") {
+        return path;
+    }
+    if let Some(path) = storage::legacy_data_roots()
+        .into_iter()
+        .map(|root| root.join("session_index.db"))
+        .find(|path| path.exists())
+    {
+        return path;
+    }
+    storage::global_session_index_path()
 }
 
 /// Format a unix timestamp into a human-readable date.

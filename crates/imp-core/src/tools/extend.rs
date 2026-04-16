@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::{Tool, ToolContext, ToolOutput};
-use crate::config::Config;
 use crate::error::Result;
+use crate::storage;
 
 const LUA_REFERENCE: &str = include_str!("../../skills/lua-tools/SKILL.md");
 const SKILL_REFERENCE: &str = include_str!("../../skills/writing-skills/REFERENCE.md");
@@ -87,7 +87,7 @@ impl Tool for ExtendTool {
                     return Ok(ToolOutput::error(reason));
                 }
 
-                let agent_skills_dir = Config::user_config_dir().join("skills").join("agent");
+                let agent_skills_dir = storage::global_skills_dir().join("agent");
 
                 match action {
                     "create" => {

@@ -559,12 +559,13 @@ impl App {
     }
 
     fn prepare_for_interactive(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let _ = imp_core::storage::reconcile_legacy_into_global_root();
         // Load Lua extensions (for slash commands and tool registration)
         self.reload_lua_extensions();
 
         // Check for first-run welcome flow
         let config_dir = Config::user_config_dir();
-        let auth_path = config_dir.join("auth.json");
+        let auth_path = imp_core::storage::global_auth_path();
         if needs_welcome(&config_dir, &auth_path) {
             let all_models = self.model_registry.list().to_vec();
             self.mode = UiMode::Welcome(WelcomeState::new(&all_models));
@@ -1421,7 +1422,7 @@ impl App {
     }
 
     fn current_oauth_display_info(&self) -> Option<imp_llm::auth::OAuthDisplayInfo> {
-        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_path = imp_core::storage::global_auth_path();
         let auth_store = AuthStore::load(&auth_path).ok()?;
         let meta = self.model_registry.resolve_meta(&self.model_name, None)?;
         let mut provider_name = meta.provider.clone();
@@ -1432,7 +1433,7 @@ impl App {
     }
 
     fn current_model_meta_for_persistence(&self) -> Option<ModelMeta> {
-        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_path = imp_core::storage::global_auth_path();
         let auth_store = AuthStore::load(&auth_path).ok();
         let mut meta = self.model_registry.resolve_meta(&self.model_name, None)?;
 
@@ -1876,7 +1877,7 @@ impl App {
                 };
                 if let Some(id) = selected_id {
                     let path =
-                        Config::session_dir().join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+                        imp_core::storage::global_sessions_dir().join(format!("{}.jsonl", uuid::Uuid::new_v4()));
                     match self.session.fork(&id, &path) {
                         Ok(forked) => {
                             self.session = forked;
@@ -2432,7 +2433,7 @@ impl App {
     // ── Commands ────────────────────────────────────────────────
 
     fn spawn_agent_for_prompt(&mut self, prompt: &str) -> Result<(), String> {
-        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_path = imp_core::storage::global_auth_path();
         let mut auth_store =
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
 
@@ -2678,7 +2679,7 @@ impl App {
                 self.open_personality();
             }
             "resume" => {
-                let session_dir = Config::session_dir();
+                let session_dir = imp_core::storage::global_sessions_dir();
                 match SessionManager::list(&session_dir) {
                     Ok(sessions) if !sessions.is_empty() => {
                         let state = SessionPickerState::new(sessions, Some(&self.cwd));
@@ -2761,7 +2762,7 @@ impl App {
             }
             "fork" => {
                 let leaf = self.session.leaf_id().unwrap_or_default().to_string();
-                let path = Config::session_dir().join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+                let path = imp_core::storage::global_sessions_dir().join(format!("{}.jsonl", uuid::Uuid::new_v4()));
                 match self.session.fork(&leaf, &path) {
                     Ok(forked) => {
                         self.session = forked;
@@ -3193,7 +3194,7 @@ impl App {
         self.mode = UiMode::Normal;
         self.push_system_msg(status_message);
 
-        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_path = imp_core::storage::global_auth_path();
         let provider = provider.to_string();
         let task = tokio::spawn(async move {
             let login_result = match provider.as_str() {
@@ -3259,7 +3260,7 @@ impl App {
     }
 
     fn open_secrets_picker(&mut self) {
-        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_path = imp_core::storage::global_auth_path();
         let auth_store =
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
         let providers = secret_providers(&ProviderRegistry::with_builtins())
@@ -3273,7 +3274,7 @@ impl App {
     }
 
     fn open_login_picker(&mut self) {
-        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_path = imp_core::storage::global_auth_path();
         let auth_store =
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
         let providers = login_providers(&ProviderRegistry::with_builtins())
@@ -3289,7 +3290,7 @@ impl App {
 
     fn open_settings(&mut self) {
         let models = self.filtered_models();
-        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_path = imp_core::storage::global_auth_path();
         let auth_store =
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
         let state = SettingsState::new(&self.config, &self.model_name, &models, &auth_store);
@@ -3644,7 +3645,7 @@ impl App {
                     return;
                 }
 
-                let auth_path = Config::user_config_dir().join("auth.json");
+                let auth_path = imp_core::storage::global_auth_path();
                 let mut auth_store = AuthStore::load(&auth_path)
                     .unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
                 match auth_store.store_secret_fields(&provider, values) {
@@ -4087,7 +4088,7 @@ impl App {
         }
 
         // Save config.toml
-        let config_path = Config::user_config_path();
+        let config_path = imp_core::storage::global_config_path();
         if let Err(e) = self.config.save(&config_path) {
             self.messages.push(DisplayMessage {
                 role: MessageRole::Error,
@@ -4100,7 +4101,7 @@ impl App {
             });
         }
 
-        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_path = imp_core::storage::global_auth_path();
         let mut auth_store =
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
 
@@ -4199,7 +4200,7 @@ impl App {
             self.context_window = meta.context_window;
         }
 
-        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_path = imp_core::storage::global_auth_path();
         let mut auth_store =
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
         let mut auth_notes = Vec::new();
@@ -4234,7 +4235,7 @@ impl App {
         }
 
         // Persist to user config.toml
-        let config_path = Config::user_config_path();
+        let config_path = imp_core::storage::global_config_path();
         match self.config.save(&config_path) {
             Ok(()) => {
                 if let UiMode::Settings(ref mut s) = self.mode {
@@ -4279,7 +4280,7 @@ impl App {
         let all = self.model_registry.list();
 
         // Load auth store to check which providers have credentials
-        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_path = imp_core::storage::global_auth_path();
         let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
 
         match &self.config.enabled_models {
@@ -4416,7 +4417,7 @@ impl App {
             return;
         }
 
-        let auth_path = Config::user_config_dir().join("auth.json");
+        let auth_path = imp_core::storage::global_auth_path();
         let mut auth_store =
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
 

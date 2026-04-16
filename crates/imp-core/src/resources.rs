@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
+use crate::storage;
 
 /// Discovered AGENTS.md content.
 #[derive(Debug, Clone)]
@@ -49,7 +50,7 @@ pub struct SoulDoc {
 pub fn discover_project_soul(cwd: &Path) -> Option<SoulDoc> {
     let mut dir = Some(cwd);
     while let Some(d) = dir {
-        let path = d.join(".imp").join("soul.md");
+        let path = storage::project_soul_path(d);
         if let Ok(content) = std::fs::read_to_string(&path) {
             return Some(SoulDoc { path, content });
         }
@@ -73,12 +74,13 @@ pub fn suggested_project_soul_path(cwd: &Path) -> PathBuf {
             || d.join("AGENTS.md").exists()
             || d.join("CLAUDE.md").exists();
         if looks_like_project_root {
-            return d.join(".imp").join("soul.md");
+            return storage::project_soul_path(d);
         }
         dir = d.parent();
     }
 
     cwd.join(".imp").join("soul.md")
+
 }
 
 /// Discover the active soul document.
@@ -100,23 +102,39 @@ pub fn discover_soul(cwd: &Path, user_config_dir: &Path) -> Option<SoulDoc> {
         })
 }
 
-/// Discover all AGENTS.md files by walking up from cwd.
+fn global_agents_candidates(user_config_dir: &Path) -> [PathBuf; 3] {
+    [
+        user_config_dir.join("agents.md"),
+        user_config_dir.join("AGENTS.md"),
+        user_config_dir.join("CLAUDE.md"),
+    ]
+}
+
+fn project_agents_candidates(project_dir: &Path) -> [PathBuf; 3] {
+    [
+        storage::project_agents_path(project_dir),
+        project_dir.join("AGENTS.md"),
+        project_dir.join("CLAUDE.md"),
+    ]
+}
+
+/// Discover instruction documents by walking up from cwd.
+///
+/// Canonical imp-native files are `.imp/agents.md` at global and project scope.
+/// Legacy compatibility files (`AGENTS.md`, `CLAUDE.md`) are still read after the
+/// canonical file at each scope level.
 pub fn discover_agents_md(cwd: &Path, user_config_dir: &Path) -> Vec<AgentsMd> {
     let mut results = Vec::new();
 
-    // User global
-    for name in &["AGENTS.md", "CLAUDE.md"] {
-        let path = user_config_dir.join(name);
+    for path in global_agents_candidates(user_config_dir) {
         if let Ok(content) = std::fs::read_to_string(&path) {
             results.push(AgentsMd { path, content });
         }
     }
 
-    // Walk up from cwd
     let mut dir = Some(cwd);
     while let Some(d) = dir {
-        for name in &["AGENTS.md", "CLAUDE.md"] {
-            let path = d.join(name);
+        for path in project_agents_candidates(d) {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 results.push(AgentsMd { path, content });
             }
@@ -135,7 +153,7 @@ pub fn discover_skills(cwd: &Path, user_config_dir: &Path) -> Vec<Skill> {
     let mut ancestry = Vec::new();
     let mut dir = Some(cwd);
     while let Some(current) = dir {
-        ancestry.push(current.join(".imp").join("skills"));
+        ancestry.push(storage::project_skills_dir(current));
         dir = current.parent();
     }
     ancestry.reverse();
@@ -178,7 +196,7 @@ pub fn discover_prompts(cwd: &Path, user_config_dir: &Path) -> Result<Vec<Prompt
 
     let dirs = [
         user_config_dir.join("prompts"),
-        cwd.join(".imp").join("prompts"),
+        storage::project_prompts_dir(cwd),
     ];
 
     for dir in &dirs {
@@ -367,6 +385,36 @@ mod tests {
     }
 
     #[test]
+    fn resource_discover_agents_md_reads_global_imp_agents_file() {
+        let dir = TempDir::new().unwrap();
+        let user_dir = dir.path().join("config");
+        fs::create_dir_all(&user_dir).unwrap();
+        fs::write(user_dir.join("agents.md"), "global-imp").unwrap();
+
+        let cwd = dir.path().join("project");
+        fs::create_dir_all(&cwd).unwrap();
+
+        let results = discover_agents_md(&cwd, &user_dir);
+        assert!(results.iter().any(|a| a.content == "global-imp"));
+    }
+
+    #[test]
+    fn resource_discover_agents_md_prefers_project_imp_agents_file() {
+        let dir = TempDir::new().unwrap();
+        let user_dir = dir.path().join("config");
+        let project = dir.path().join("project");
+        fs::create_dir_all(&user_dir).unwrap();
+        fs::create_dir_all(project.join(".imp")).unwrap();
+        fs::write(project.join(".imp").join("agents.md"), "project-imp").unwrap();
+        fs::write(project.join("AGENTS.md"), "project-legacy").unwrap();
+
+        let results = discover_agents_md(&project, &user_dir);
+        let canonical_idx = results.iter().position(|a| a.content == "project-imp").unwrap();
+        let legacy_idx = results.iter().position(|a| a.content == "project-legacy").unwrap();
+        assert!(canonical_idx < legacy_idx);
+    }
+
+    #[test]
     fn resource_discover_agents_md_empty_when_no_files() {
         let dir = TempDir::new().unwrap();
         let user_dir = dir.path().join("config");
@@ -375,11 +423,7 @@ mod tests {
         fs::create_dir_all(&cwd).unwrap();
 
         let results = discover_agents_md(&cwd, &user_dir);
-        // May have results from walk-up finding nothing — just not our test files
-        // In temp dir there should be no AGENTS.md above it
-        assert!(results
-            .iter()
-            .all(|a| { a.path.starts_with(dir.path()) || !a.path.exists() }));
+        assert!(results.is_empty());
     }
 
     // -- Skills discovery --
