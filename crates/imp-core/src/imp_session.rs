@@ -296,52 +296,48 @@ impl ImpSession {
         };
 
         // 5. Build agent
-        let (agent, handle) = if options.no_tools {
-            let (mut a, h) = Agent::new(clone_model(&model), cwd.clone());
-            a.api_key = api_key;
-            a.thinking_level = config.thinking.unwrap_or(ThinkingLevel::Off);
+        let mut builder =
+            AgentBuilder::new(config.clone(), cwd.clone(), clone_model(&model), api_key);
+
+        if let Some(task) = &options.task {
+            builder = builder.task(task.clone());
+        }
+        if !options.facts.is_empty() {
+            builder = builder.facts(options.facts.clone());
+        }
+        if let Some(prompt) = &options.system_prompt {
+            builder = builder.system_prompt(prompt.clone());
+        }
+        if let Some(lua_loader) = options.lua_loader {
+            builder = builder.lua_tool_loader(move |tools| lua_loader(tools));
+        }
+
+        let (mut agent, handle) = builder.build()?;
+
+        if options.no_tools {
+            agent.tools.retain(|_| false);
+        }
+
+        if options.no_tools {
+            agent.thinking_level = config.thinking.unwrap_or(ThinkingLevel::Off);
             if let Some(max_turns) = options.max_turns.or(config.max_turns) {
-                a.max_turns = max_turns;
+                agent.max_turns = max_turns;
             }
             if let Some(max_tokens) = options.max_tokens.or(config.max_tokens) {
-                a.max_tokens = Some(max_tokens);
+                agent.max_tokens = Some(max_tokens);
             }
-            a.system_prompt = options.system_prompt.clone().unwrap_or_default();
-            if let Some(ui) = &options.ui {
-                a.ui = Arc::clone(ui);
-            }
-            (a, h)
         } else {
-            let mut builder =
-                AgentBuilder::new(config.clone(), cwd.clone(), clone_model(&model), api_key);
-
-            if let Some(task) = &options.task {
-                builder = builder.task(task.clone());
-            }
-            if !options.facts.is_empty() {
-                builder = builder.facts(options.facts.clone());
-            }
-            if let Some(prompt) = &options.system_prompt {
-                builder = builder.system_prompt(prompt.clone());
-            }
-            if let Some(lua_loader) = options.lua_loader {
-                builder = builder.lua_tool_loader(move |tools| lua_loader(tools));
-            }
-
-            let (mut a, h) = builder.build()?;
-
             if let Some(max_turns) = options.max_turns {
-                a.max_turns = max_turns;
+                agent.max_turns = max_turns;
             }
             if let Some(max_tokens) = options.max_tokens {
-                a.max_tokens = Some(max_tokens);
+                agent.max_tokens = Some(max_tokens);
             }
-            if let Some(ui) = &options.ui {
-                a.ui = Arc::clone(ui);
-            }
+        }
+        if let Some(ui) = &options.ui {
+            agent.ui = Arc::clone(ui);
+        }
 
-            (a, h)
-        };
 
         // 6. Set up session persistence
         let session_dir = Config::session_dir();
@@ -1067,6 +1063,55 @@ mod tests {
             }
             Err(other) => panic!("expected config error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn no_tools_session_builds_assembled_system_prompt_when_task_present() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let auth_path = tmp.path().join("auth.json");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let mut auth_store = AuthStore::new(auth_path.clone());
+        auth_store
+            .store(
+                "openai",
+                imp_llm::auth::StoredCredential::OAuth(imp_llm::auth::OAuthCredential {
+                    access_token: "oauth-token".into(),
+                    refresh_token: "refresh-token".into(),
+                    expires_at: imp_llm::now() + 3600,
+                }),
+            )
+            .unwrap();
+
+        let session = ImpSession::create(SessionOptions {
+            cwd: cwd.clone(),
+            auth_path: Some(auth_path),
+            provider: Some("openai".into()),
+            model: Some("gpt-5.4".into()),
+            no_tools: true,
+            session: SessionChoice::InMemory,
+            task: Some(TaskContext {
+                title: "Test task".into(),
+                description: "Verify headless prompt assembly".into(),
+                acceptance: Some("Prompt includes task guidance".into()),
+                verify: None,
+                notes: None,
+                attempts: vec![],
+                dependencies: vec![],
+                decisions: vec![],
+                context_paths: vec![],
+                constraints: vec![],
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("no-tools session should build with saved auth");
+
+        let prompt = session.agent.as_ref().expect("agent present").system_prompt.clone();
+        assert!(!prompt.trim().is_empty());
+        assert!(prompt.contains("Test task"));
+        assert!(prompt.contains("Verify headless prompt assembly"));
     }
 
     #[tokio::test]
