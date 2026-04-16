@@ -743,7 +743,7 @@ impl App {
     fn present_agent_failure(&mut self, error: String) {
         self.completed_turns_in_run = 0;
         self.is_streaming = false;
-        if let Some(last) = self.messages.last_mut() {
+        if let Some(last) = self.latest_streaming_message_mut() {
             last.is_streaming = false;
         }
         self.push_error_msg(&parse_api_error(&error));
@@ -839,9 +839,11 @@ impl App {
                     let _ = confirm_reply.send(result.map(|idx| idx == 0));
                 });
             }
-            UiRequest::Notify { message, level: _ } => {
-                self.push_system_msg(&message);
-            }
+            UiRequest::Notify { message, level } => match level {
+                imp_core::ui::NotifyLevel::Error => self.push_error_msg(&message),
+                imp_core::ui::NotifyLevel::Warning => self.push_warning_msg(&message),
+                imp_core::ui::NotifyLevel::Info => self.push_system_msg(&message),
+            },
             UiRequest::SetStatus { key, text } => {
                 if let Some(t) = text {
                     self.status_items.insert(key, t);
@@ -4358,8 +4360,20 @@ impl App {
     // ── Helpers ──────────────────────────────────────────────────
 
     fn push_system_msg(&mut self, content: &str) {
+        self.push_message(MessageRole::System, content);
+    }
+
+    fn push_warning_msg(&mut self, content: &str) {
+        self.push_message(MessageRole::System, content);
+    }
+
+    fn push_error_msg(&mut self, content: &str) {
+        self.push_message(MessageRole::Error, content);
+    }
+
+    fn push_message(&mut self, role: MessageRole, content: &str) {
         self.messages.push(DisplayMessage {
-            role: MessageRole::System,
+            role,
             content: content.to_string(),
             thinking: None,
             tool_calls: Vec::new(),
@@ -4370,17 +4384,17 @@ impl App {
         self.invalidate_chat_render_cache();
     }
 
-    fn push_error_msg(&mut self, content: &str) {
-        self.messages.push(DisplayMessage {
-            role: MessageRole::Error,
-            content: content.to_string(),
-            thinking: None,
-            tool_calls: Vec::new(),
-            assistant_blocks: Vec::new(),
-            is_streaming: false,
-            timestamp: imp_llm::now(),
-        });
-        self.invalidate_chat_render_cache();
+    fn latest_streaming_message_mut(&mut self) -> Option<&mut DisplayMessage> {
+        self.messages.iter_mut().rev().find(|msg| msg.is_streaming)
+    }
+
+    fn find_tool_call_mut(&mut self, tool_call_id: &str) -> Option<&mut DisplayToolCall> {
+        for msg in self.messages.iter_mut().rev() {
+            if let Some(tc) = msg.tool_calls.iter_mut().find(|tc| tc.id == tool_call_id) {
+                return Some(tc);
+            }
+        }
+        None
     }
 
     fn run_manual_compaction(&mut self) {
@@ -4637,7 +4651,7 @@ impl App {
                 self.is_streaming = false;
 
                 // Mark last streaming message as done
-                if let Some(last) = self.messages.last_mut() {
+                if let Some(last) = self.latest_streaming_message_mut() {
                     last.is_streaming = false;
                 }
                 self.invalidate_chat_render_cache();
@@ -4657,7 +4671,8 @@ impl App {
                 }
             }
             AgentEvent::MessageDelta { delta } => {
-                if let Some(last) = self.messages.last_mut() {
+                let tools_expanded = self.tools_expanded;
+                if let Some(last) = self.latest_streaming_message_mut() {
                     match delta {
                         StreamEvent::TextDelta { text } => {
                             last.push_assistant_text_delta(&text);
@@ -4678,7 +4693,7 @@ impl App {
                                 output: None,
                                 details: serde_json::Value::Null,
                                 is_error: false,
-                                expanded: self.tools_expanded,
+                                expanded: tools_expanded,
                                 streaming_lines: Vec::new(),
                                 streaming_output: String::new(),
                             });
@@ -4700,12 +4715,8 @@ impl App {
                 self.turn_tracker
                     .record_tool_start(&tool_call_id, &tool_name, &args);
                 // Find the matching tool call and update it
-                if let Some(last) = self.messages.last_mut() {
-                    if let Some(tc) = last.tool_calls.last_mut() {
-                        if tc.name == tool_name {
-                            tc.args_summary = DisplayToolCall::make_args_summary(&tool_name, &args);
-                        }
-                    }
+                if let Some(tc) = self.find_tool_call_mut(&tool_call_id) {
+                    tc.args_summary = DisplayToolCall::make_args_summary(&tool_name, &args);
                 }
                 self.invalidate_chat_render_cache();
                 // Sidebar: auto-follow the new tool call
@@ -4730,26 +4741,21 @@ impl App {
                 }
             }
             AgentEvent::ToolOutputDelta { tool_call_id, text } => {
+                let streaming_lines_limit = self.config.ui.streaming_lines;
                 // Feed streaming output into the tool call's rolling buffer
-                for msg in self.messages.iter_mut().rev() {
-                    for tc in &mut msg.tool_calls {
-                        if tc.id == tool_call_id && tc.output.is_none() {
-                            // Append text to the full live transcript.
-                            if !tc.streaming_output.is_empty() {
-                                tc.streaming_output.push('\n');
-                            }
-                            tc.streaming_output.push_str(&text);
-                            // Append text and keep configured rolling tail for chat.
-                            for line in text.lines() {
-                                tc.streaming_lines.push(line.to_string());
-                            }
-                            if tc.streaming_lines.len() > self.config.ui.streaming_lines {
-                                let excess =
-                                    tc.streaming_lines.len() - self.config.ui.streaming_lines;
-                                tc.streaming_lines.drain(..excess);
-                            }
-                            break;
-                        }
+                if let Some(tc) = self.find_tool_call_mut(&tool_call_id) {
+                    // Append text to the full live transcript.
+                    if !tc.streaming_output.is_empty() {
+                        tc.streaming_output.push('\n');
+                    }
+                    tc.streaming_output.push_str(&text);
+                    // Append text and keep configured rolling tail for chat.
+                    for line in text.lines() {
+                        tc.streaming_lines.push(line.to_string());
+                    }
+                    if tc.streaming_lines.len() > streaming_lines_limit {
+                        let excess = tc.streaming_lines.len() - streaming_lines_limit;
+                        tc.streaming_lines.drain(..excess);
                     }
                 }
                 self.invalidate_chat_render_cache();
@@ -4774,21 +4780,16 @@ impl App {
                     .collect::<Vec<_>>()
                     .join("");
                 // Attach result to the matching display tool call
-                for msg in self.messages.iter_mut().rev() {
-                    for tc in &mut msg.tool_calls {
-                        if tc.id == tool_call_id {
-                            tc.output = Some(output_text.clone());
-                            if tc.streaming_output.is_empty() {
-                                tc.streaming_output = output_text.clone();
-                            }
-                            tc.details = result.details.clone();
-                            tc.is_error = is_error;
-                            // Auto-expand failed tool calls so the error is immediately visible
-                            if is_error {
-                                tc.expanded = true;
-                            }
-                            break;
-                        }
+                if let Some(tc) = self.find_tool_call_mut(&tool_call_id) {
+                    tc.output = Some(output_text.clone());
+                    if tc.streaming_output.is_empty() {
+                        tc.streaming_output = output_text.clone();
+                    }
+                    tc.details = result.details.clone();
+                    tc.is_error = is_error;
+                    // Auto-expand failed tool calls so the error is immediately visible
+                    if is_error {
+                        tc.expanded = true;
                     }
                 }
 
@@ -4796,6 +4797,9 @@ impl App {
 
                 // Persist tool result to session so resume has full conversation
                 let _ = self.session.append_tool_result_message(result);
+            }
+            AgentEvent::Warning { message } => {
+                self.push_warning_msg(&message);
             }
             AgentEvent::Timing { timing } => {
                 self.status_items.insert(
@@ -4839,7 +4843,7 @@ impl App {
                 self.completed_turns_in_run = 0;
                 // Stop streaming — errors can be terminal (no AgentEnd follows)
                 self.is_streaming = false;
-                if let Some(last) = self.messages.last_mut() {
+                if let Some(last) = self.latest_streaming_message_mut() {
                     last.is_streaming = false;
                 }
                 self.invalidate_chat_render_cache();
@@ -5533,6 +5537,87 @@ mod session_lifecycle {
         }
     }
 
+    #[test]
+    fn warning_notify_uses_system_role_not_error_role() {
+        let mut app = make_app();
+        app.handle_ui_request(crate::tui_interface::UiRequest::Notify {
+            message: "Heads up".into(),
+            level: imp_core::ui::NotifyLevel::Warning,
+        });
+
+        let last = app.messages.last().expect("warning message");
+        assert_eq!(last.role, MessageRole::System);
+        assert_eq!(last.content, "Heads up");
+    }
+
+    #[test]
+    fn tool_updates_target_streaming_assistant_not_latest_message() {
+        let mut app = make_app();
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: vec![DisplayToolCall {
+                id: "tool-1".into(),
+                name: "ask".into(),
+                args_summary: "question=Pick one".into(),
+                output: None,
+                details: serde_json::Value::Null,
+                is_error: false,
+                expanded: false,
+                streaming_lines: Vec::new(),
+                streaming_output: String::new(),
+            }],
+            assistant_blocks: Vec::new(),
+            is_streaming: true,
+            timestamp: imp_llm::now(),
+        });
+        app.messages.push(DisplayMessage {
+            role: MessageRole::System,
+            content: "transient note".into(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: false,
+            timestamp: imp_llm::now(),
+        });
+
+        app.handle_agent_event(AgentEvent::ToolExecutionStart {
+            tool_call_id: "tool-1".into(),
+            tool_name: "ask".into(),
+            args: serde_json::json!({"question": "Pick one"}),
+        });
+        app.handle_agent_event(AgentEvent::ToolOutputDelta {
+            tool_call_id: "tool-1".into(),
+            text: "selected option".into(),
+        });
+        app.handle_agent_event(AgentEvent::ToolExecutionEnd {
+            tool_call_id: "tool-1".into(),
+            result: imp_llm::ToolResultMessage {
+                tool_call_id: "tool-1".into(),
+                tool_name: "ask".into(),
+                content: vec![ContentBlock::Text {
+                    text: "selected option".into(),
+                }],
+                is_error: false,
+                details: serde_json::json!({}),
+                timestamp: imp_llm::now(),
+            },
+        });
+
+        let assistant = app
+            .messages
+            .iter()
+            .find(|msg| msg.role == MessageRole::Assistant)
+            .expect("assistant message");
+        assert_eq!(assistant.tool_calls.len(), 1);
+        assert_eq!(assistant.tool_calls[0].output.as_deref(), Some("selected option"));
+        assert!(!assistant.tool_calls[0].is_error);
+
+        let system = app.messages.last().expect("system message remains");
+        assert_eq!(system.role, MessageRole::System);
+        assert_eq!(system.content, "transient note");
+    }
     #[test]
     fn tui_integration_slash_personality_opens_overlay() {
         let mut app = make_app();

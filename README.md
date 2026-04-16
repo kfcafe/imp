@@ -341,6 +341,8 @@ end)
 
 ## Hooks
 
+Shell hook commands support placeholder interpolation. If a placeholder may contain shell-sensitive text, quote the placeholder itself in the template — for example `'{command}'` or `"{command}"` — so imp can escape it as one shell argument before executing `sh -c`.
+
 | Event | When |
 |-------|------|
 | `before_tool_call` | Before tool executes — can block |

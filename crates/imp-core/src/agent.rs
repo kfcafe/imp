@@ -94,6 +94,9 @@ pub enum AgentEvent {
         tool_call_id: String,
         result: imp_llm::ToolResultMessage,
     },
+    Warning {
+        message: String,
+    },
     Timing {
         timing: TimingEvent,
     },
@@ -421,8 +424,8 @@ impl Agent {
             let background_event_tx = background_event_tx.clone();
             tokio::spawn(async move {
                 let _ = background_event_tx
-                    .send(AgentEvent::Error {
-                        error: event.to_string(),
+                    .send(AgentEvent::Warning {
+                        message: event.to_string(),
                     })
                     .await;
             });
@@ -4034,6 +4037,7 @@ mod tests {
                 AgentEvent::MessageDelta { .. } => "MessageDelta",
                 AgentEvent::ToolExecutionStart { .. } => "ToolExecStart",
                 AgentEvent::ToolExecutionEnd { .. } => "ToolExecEnd",
+                AgentEvent::Warning { .. } => "Warning",
                 AgentEvent::Error { .. } => "Error",
                 _ => "Other",
             })

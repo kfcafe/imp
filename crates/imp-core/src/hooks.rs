@@ -412,23 +412,20 @@ fn interpolate_command(command: &str, event: &HookEvent<'_>) -> String {
 
     match event {
         HookEvent::AfterFileWrite { file } => {
-            result = result.replace("{file}", &file.to_string_lossy());
+            result = replace_placeholder(&result, "file", &file.to_string_lossy());
         }
         HookEvent::BeforeToolCall { tool_name, .. } => {
-            result = result.replace("{tool_name}", tool_name);
+            result = replace_placeholder(&result, "tool_name", tool_name);
         }
         HookEvent::AfterToolCall {
             tool_name,
             result: tool_result,
         } => {
-            result = result.replace("{tool_name}", tool_name);
-            result = result.replace(
-                "{is_error}",
-                if tool_result.is_error {
-                    "true"
-                } else {
-                    "false"
-                },
+            result = replace_placeholder(&result, "tool_name", tool_name);
+            result = replace_placeholder(
+                &result,
+                "is_error",
+                if tool_result.is_error { "true" } else { "false" },
             );
             // Extract exit_code from details if present (bash tool sets this)
             let exit_code = tool_result
@@ -437,7 +434,7 @@ fn interpolate_command(command: &str, event: &HookEvent<'_>) -> String {
                 .and_then(|v| v.as_i64())
                 .map(|c| c.to_string())
                 .unwrap_or_default();
-            result = result.replace("{exit_code}", &exit_code);
+            result = replace_placeholder(&result, "exit_code", &exit_code);
             // First line of output for summary
             let output_first = tool_result
                 .content
@@ -449,25 +446,56 @@ fn interpolate_command(command: &str, event: &HookEvent<'_>) -> String {
                 .next()
                 .and_then(|t| t.lines().next())
                 .unwrap_or("");
-            result = result.replace("{output_first_line}", output_first);
+            result = replace_placeholder(&result, "output_first_line", output_first);
             // Extract command from details (bash tool stores it)
             let command = tool_result
                 .details
                 .get("command")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            result = result.replace("{command}", command);
+            result = replace_placeholder(&result, "command", command);
         }
         HookEvent::OnContextThreshold { ratio } => {
-            result = result.replace("{ratio}", &ratio.to_string());
+            result = replace_placeholder(&result, "ratio", &ratio.to_string());
         }
         HookEvent::OnTurnEnd { index, .. } => {
-            result = result.replace("{index}", &index.to_string());
+            result = replace_placeholder(&result, "index", &index.to_string());
         }
         _ => {}
     }
 
     result
+}
+
+fn replace_placeholder(template: &str, name: &str, value: &str) -> String {
+    let raw = format!("{{{name}}}");
+    let single_marker = format!("\u{0}__imp_hook_single_{name}__\u{0}");
+    let double_marker = format!("\u{0}__imp_hook_double_{name}__\u{0}");
+
+    let mut result = template.replace(&format!("'{raw}'"), &single_marker);
+    result = result.replace(&format!("\"{raw}\""), &double_marker);
+    result = result.replace(&raw, value);
+    result = result.replace(&single_marker, &shell_single_quote(value));
+    result = result.replace(&double_marker, &shell_double_quote(value));
+    result
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn shell_double_quote(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' | '"' | '$' | '`' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    format!("\"{escaped}\"")
 }
 
 /// Execute a single hook and return its result.
@@ -592,6 +620,43 @@ threshold = 0.8
         };
         let result = interpolate_command("echo {tool_name}", &event);
         assert_eq!(result, "echo bash");
+    }
+
+    #[test]
+    fn hook_interpolation_quoted_placeholder() {
+        let command_text = "pwd && egrep '(^|/)(README|VISION)\\.md$' && printf '$HOME'";
+        let result_msg = ToolResultMessage {
+            tool_call_id: "call_quoted".into(),
+            tool_name: "bash".into(),
+            content: vec![ContentBlock::Text {
+                text: "ok".into(),
+            }],
+            is_error: true,
+            details: serde_json::json!({
+                "exit_code": 2,
+                "command": command_text,
+            }),
+            timestamp: 0,
+        };
+        let event = HookEvent::AfterToolCall {
+            tool_name: "bash",
+            result: &result_msg,
+        };
+
+        let interpolated = interpolate_command(
+            "hook '{is_error}' '{exit_code}' '{command}' \"{command}\" {command}",
+            &event,
+        );
+
+        assert_eq!(
+            interpolated,
+            format!(
+                "hook 'true' '2' {} {} {}",
+                shell_single_quote(command_text),
+                shell_double_quote(command_text),
+                command_text
+            )
+        );
     }
 
     #[test]
@@ -829,6 +894,74 @@ threshold = 0.8
             }
             other => panic!("expected non-blocking hook failure, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn hook_after_tool_call_nonblocking_quoted_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let output_path = temp.path().join("hook-args.txt");
+        let script_path = temp.path().join("capture.sh");
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n%s\\n%s\\n' \"$1\" \"$2\" \"$3\" > {}\n",
+                output_path.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        let mut runner = HookRunner::new();
+        runner.load_from_config(vec![HookDef {
+            event: "after_tool_call".into(),
+            match_pattern: Some("bash".into()),
+            action: "shell".into(),
+            command: Some(format!(
+                "{} '{{is_error}}' '{{exit_code}}' '{{command}}'",
+                script_path.display()
+            )),
+            blocking: false,
+            threshold: None,
+        }]);
+
+        let original_command = "pwd && egrep '(^|/)(README|VISION)\\.md$' | sort && printf '$HOME'";
+        let result_msg = ToolResultMessage {
+            tool_call_id: "call_1".into(),
+            tool_name: "bash".into(),
+            content: vec![ContentBlock::Text { text: "failed".into() }],
+            is_error: true,
+            details: serde_json::json!({
+                "exit_code": 2,
+                "command": original_command,
+            }),
+            timestamp: 0,
+        };
+        let event = HookEvent::AfterToolCall {
+            tool_name: "bash",
+            result: &result_msg,
+        };
+
+        let results = runner.fire(&event).await;
+        assert!(results.is_empty());
+
+        for _ in 0..40 {
+            if output_path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        let captured = std::fs::read_to_string(&output_path).unwrap();
+        let mut lines = captured.lines();
+        assert_eq!(lines.next(), Some("true"));
+        assert_eq!(lines.next(), Some("2"));
+        assert_eq!(lines.next(), Some(original_command));
     }
 
     #[test]
