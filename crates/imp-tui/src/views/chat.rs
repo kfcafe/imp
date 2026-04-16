@@ -25,6 +25,7 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+    Warning,
     Compaction,
     Error,
 }
@@ -763,6 +764,18 @@ fn build_chat_lines(
                     ));
                 }
             }
+            MessageRole::Warning => {
+                for line in msg.content.lines() {
+                    all_lines.extend(wrap_text_with_prefix(
+                        &format!("Warning: {line}"),
+                        &[],
+                        &[],
+                        theme.warning_style(),
+                        width,
+                        word_wrap,
+                    ));
+                }
+            }
             MessageRole::Compaction => {
                 all_lines.extend(wrap_text_with_prefix(
                     &format!("  [context compacted] {}", msg.content),
@@ -1416,6 +1429,40 @@ mod tests {
 
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
         assert!(rendered.iter().any(|line| line.contains("responding")));
+    }
+
+    #[test]
+    fn warning_messages_render_with_prefix() {
+        let theme = Theme::default();
+        let highlighter = Highlighter::new();
+        let messages = vec![DisplayMessage {
+            role: MessageRole::Warning,
+            content: "line 1\nline 2".into(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: false,
+            timestamp: 0,
+        }];
+
+        let (lines, _) = build_chat_lines(
+            &messages,
+            &theme,
+            &highlighter,
+            80,
+            0,
+            None,
+            true,
+            ChatToolDisplay::Interleaved,
+            5,
+            false,
+            AnimationLevel::Minimal,
+            AnimationState::Idle,
+        );
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(rendered.iter().any(|line| line.contains("Warning: line 1")));
+        assert!(rendered.iter().any(|line| line.contains("Warning: line 2")));
     }
 
     #[test]

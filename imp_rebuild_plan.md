@@ -14,7 +14,7 @@ The primary recommendation remains:
 
 ## Mission
 
-`imp` should remain the live worker runtime for Tower.
+`imp` should remain the flagship Rust-native agent product for Tower.
 
 It should own:
 - context assembly
@@ -23,9 +23,10 @@ It should own:
 - tool invocation
 - local planning and adaptation during a run
 - operator-facing execution UX
-- runtime policy enforcement
+- the explicit `/ask /plan /work /improve` product workflow
+- runtime policy enforcement at the agent/product layer
 
-It should stop being the accidental long-term home for durable workflow truth that another worker must inherit cold.
+It should stop being the accidental long-term home for durable workflow truth that another worker must inherit cold, and it should stop being treated as if it must own the entire lower platform/runtime substrate.
 
 ---
 
@@ -51,18 +52,24 @@ Large central files should stop accumulating unrelated concerns.
 
 The UI should consume cleaner seams, not define them.
 
+### 6. No deep rewrite is required to preserve imp's role
+
+The current direction is to clarify ownership, not to hollow out `imp` into a thin client. Mana should own the lower substrate/runtime concerns while `imp` remains the flagship product and agent runtime experience.
+
 ---
 
 ## Required end-state inside `imp`
 
-`imp` should become legible as a set of bounded runtime concerns:
-- runtime / turn loop
+`imp` should become legible as a set of bounded agent/product runtime concerns:
+- agent runtime / turn loop
 - context assembly and compaction
 - tool contracts and registry
 - capability and runtime policy
 - worker runtime for mana assignments
 - extension / guest runtime boundary
 - TUI and CLI adapters
+- future GUI/operator surfaces when justified
+- explicit workflow support for `/ask /plan /work /improve`
 
 The exact crate count can evolve, but these seams should become visible in code.
 

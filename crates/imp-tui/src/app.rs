@@ -2855,7 +2855,12 @@ impl App {
                     .messages
                     .iter()
                     .rev()
-                    .find(|m| m.role == MessageRole::Assistant || m.role == MessageRole::Error)
+                    .find(|m| {
+                        matches!(
+                            m.role,
+                            MessageRole::Assistant | MessageRole::Warning | MessageRole::Error
+                        )
+                    })
                 {
                     let text = last.content.clone();
                     self.copy_to_clipboard(&text);
@@ -4364,7 +4369,7 @@ impl App {
     }
 
     fn push_warning_msg(&mut self, content: &str) {
-        self.push_message(MessageRole::System, content);
+        self.push_message(MessageRole::Warning, content);
     }
 
     fn push_error_msg(&mut self, content: &str) {
@@ -4618,6 +4623,7 @@ impl App {
                 MessageRole::User => "**You:**",
                 MessageRole::Assistant => "**Assistant:**",
                 MessageRole::System | MessageRole::Compaction => "*System:*",
+                MessageRole::Warning => "*Warning:*",
                 MessageRole::Error => "**Error:**",
             };
             writeln!(f, "{role}\n{}\n", msg.content)?;
@@ -5546,7 +5552,7 @@ mod session_lifecycle {
         });
 
         let last = app.messages.last().expect("warning message");
-        assert_eq!(last.role, MessageRole::System);
+        assert_eq!(last.role, MessageRole::Warning);
         assert_eq!(last.content, "Heads up");
     }
 

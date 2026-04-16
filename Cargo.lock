@@ -1549,6 +1549,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "imp-install"
+version = "0.1.0"
+dependencies = [
+ "imp-cli",
+ "tokio",
+]
+
+[[package]]
 name = "imp-llm"
 version = "0.1.0"
 dependencies = [

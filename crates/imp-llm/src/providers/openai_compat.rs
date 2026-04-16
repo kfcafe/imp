@@ -412,6 +412,7 @@ fn stream_response(
         let mut usage = Usage::default();
         let mut stop_reason = StopReason::EndTurn;
         let mut buf = String::new();
+        let mut saw_finish_reason = false;
 
         use futures::StreamExt;
         let mut byte_stream = resp.bytes_stream();
@@ -495,6 +496,7 @@ fn stream_response(
 
                                         // Finish reason
                                         if let Some(reason) = choice.finish_reason {
+                                            saw_finish_reason = true;
                                             stop_reason = match reason.as_str() {
                                                 "stop" => StopReason::EndTurn,
                                                 "tool_calls" => StopReason::ToolUse,
@@ -518,6 +520,91 @@ fn stream_response(
                     return;
                 }
             }
+        }
+
+        let trimmed = buf.trim();
+        if let Some(data) = trimmed.strip_prefix("data: ") {
+            match parse_sse_chunk(data) {
+                Ok(Some(chunk)) => {
+                    if let Some(u) = chunk.usage {
+                        usage.input_tokens = u.prompt_tokens;
+                        usage.output_tokens = u.completion_tokens;
+                    }
+
+                    for choice in chunk.choices {
+                        let delta = choice.delta;
+
+                        if let Some(reasoning) = delta.reasoning_content {
+                            if !reasoning.is_empty()
+                                && tx
+                                    .unbounded_send(Ok(StreamEvent::ThinkingDelta {
+                                        text: reasoning,
+                                    }))
+                                    .is_err()
+                            {
+                                return;
+                            }
+                        }
+
+                        if let Some(text) = delta.content {
+                            if !text.is_empty() {
+                                content_buf.push(ContentBlock::Text { text: text.clone() });
+                                if tx
+                                    .unbounded_send(Ok(StreamEvent::TextDelta { text }))
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
+
+                        if let Some(tc_deltas) = delta.tool_calls {
+                            for tc in tc_deltas {
+                                let entry = tool_accum
+                                    .entry(tc.index)
+                                    .or_insert_with(|| ToolCallAccum {
+                                        id: String::new(),
+                                        name: String::new(),
+                                        arguments: String::new(),
+                                    });
+                                if let Some(id) = tc.id {
+                                    entry.id = id;
+                                }
+                                if let Some(func) = tc.function {
+                                    if let Some(name) = func.name {
+                                        entry.name = name;
+                                    }
+                                    if let Some(args) = func.arguments {
+                                        entry.arguments.push_str(&args);
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(reason) = choice.finish_reason {
+                            saw_finish_reason = true;
+                            stop_reason = match reason.as_str() {
+                                "stop" => StopReason::EndTurn,
+                                "tool_calls" => StopReason::ToolUse,
+                                "length" => StopReason::MaxTokens,
+                                other => StopReason::Error(other.to_string()),
+                            };
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = tx.unbounded_send(Err(e));
+                    return;
+                }
+            }
+        }
+
+        if !saw_finish_reason {
+            let _ = tx.unbounded_send(Err(Error::Stream(
+                "OpenAI-compatible stream ended before finish_reason".into(),
+            )));
+            return;
         }
 
         // Emit complete tool calls after stream ends.

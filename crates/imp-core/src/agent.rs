@@ -637,6 +637,7 @@ impl Agent {
             let mut saw_first_stream_event = false;
             let mut saw_first_text_delta = false;
             let mut saw_first_tool_call = false;
+            let mut saw_provider_message_end = false;
             let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
             while let Some(event_result) = stream.next().await {
@@ -717,6 +718,7 @@ impl Agent {
                                 tool_calls.push((id, name, arguments));
                             }
                             StreamEvent::MessageEnd { message } => {
+                                saw_provider_message_end = true;
                                 self.emit_timing(
                                     turn,
                                     TimingStage::MessageEnd,
@@ -794,9 +796,31 @@ impl Agent {
                 break;
             }
 
-            // Use the MessageEnd message if provided, otherwise build from accumulated parts
-            let msg = assistant_msg
-                .unwrap_or_else(|| build_assistant_message(&ordered_content, &tool_calls, None));
+            // Use the MessageEnd message if provided; otherwise the provider
+            // stream ended without a terminal completion event and should be
+            // treated as an error rather than silently synthesized as success.
+            let msg = match assistant_msg {
+                Some(message) => message,
+                None if !saw_provider_message_end => {
+                    let error = format!(
+                        "Provider stream ended before terminal completion event (collected {} content blocks, {} tool calls)",
+                        ordered_content.len(),
+                        tool_calls.len()
+                    );
+                    self.emit(AgentEvent::Error {
+                        error: error.clone(),
+                    })
+                    .await;
+                    let cost = total_usage.cost(&self.model.meta.pricing);
+                    self.emit(AgentEvent::AgentEnd {
+                        usage: total_usage,
+                        cost,
+                    })
+                    .await;
+                    return Err(crate::error::Error::Llm(imp_llm::Error::Stream(error)));
+                }
+                None => build_assistant_message(&ordered_content, &tool_calls, None),
+            };
 
             self.messages.push(Message::Assistant(msg.clone()));
 
@@ -3270,6 +3294,49 @@ mod tests {
         assert!(text_delta.unwrap() < error_idx.unwrap());
     }
 
+    #[tokio::test]
+    async fn agent_treats_silent_eof_without_message_end_as_error() {
+        let provider = Arc::new(MockProvider::new_results(vec![vec![
+            Ok(StreamEvent::TextDelta {
+                text: "partial".to_string(),
+            }),
+        ]]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        let result = agent.run("Fail with silent eof".to_string()).await;
+        drop(agent);
+
+        assert!(result.is_err());
+
+        let events = events_task.await.unwrap();
+        let text_delta = events.iter().position(|e| {
+            matches!(
+                e,
+                AgentEvent::MessageDelta {
+                    delta: StreamEvent::TextDelta { text }
+                } if text == "partial"
+            )
+        });
+        let error_idx = events.iter().position(|e| {
+            matches!(
+                e,
+                AgentEvent::Error { error }
+                if error.contains("terminal completion event")
+            )
+        });
+        let turn_end_idx = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::TurnEnd { .. }));
+
+        assert!(text_delta.is_some());
+        assert!(error_idx.is_some());
+        assert!(turn_end_idx.is_none());
+        assert!(text_delta.unwrap() < error_idx.unwrap());
+    }
+
     // ── Test 1: Simple text response ───────────────────────────────
 
     #[tokio::test]
@@ -3817,6 +3884,29 @@ mod tests {
             .filter(|e| matches!(e, AgentEvent::TurnStart { .. }))
             .collect();
         assert!(turn_starts.len() <= 1);
+    }
+
+    #[tokio::test]
+    async fn single_text_turn_with_max_turns_one_exits_cleanly() {
+        let provider = Arc::new(MockProvider::new(vec![text_response("SMOKE_OK", 50, 10)]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.max_turns = 1;
+
+        let events_task = tokio::spawn(collect_events(handle));
+        let result = agent.run("Reply once and stop".to_string()).await;
+        drop(agent);
+
+        assert!(result.is_ok());
+
+        let events = events_task.await.unwrap();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Error { error } if error.contains("Max turns exceeded")
+        )));
     }
 
     // ── Test 5: Max turns exceeded ─────────────────────────────────

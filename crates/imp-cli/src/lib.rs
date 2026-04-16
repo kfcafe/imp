@@ -1726,6 +1726,7 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
             "since_turn_start_ms": timing.since_turn_start_ms,
             "since_llm_request_start_ms": timing.since_llm_request_start_ms,
         }),
+        AgentEvent::Warning { message } => json!({ "type": "warning", "message": message }),
         AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
         AgentEvent::ToolOutputDelta { .. } => return Ok(()), // handled in TUI only
     };
@@ -2374,6 +2375,9 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             "since_turn_start_ms": timing.since_turn_start_ms,
             "since_llm_request_start_ms": timing.since_llm_request_start_ms,
         }),
+        AgentEvent::Warning { message } => {
+            json!({ "type": "warning", "message": message })
+        }
         AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
         AgentEvent::ToolOutputDelta { tool_call_id, text } => {
             json!({ "type": "tool_output_delta", "tool_call_id": tool_call_id, "text": text })

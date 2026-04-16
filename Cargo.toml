@@ -1,5 +1,28 @@
+[package]
+name = "imp-install"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Source-install shim so `cargo install --path .` and `uu install` work from the imp repo root"
+publish = false
+
+[[bin]]
+name = "imp"
+path = "src/main.rs"
+
+[dependencies]
+imp-cli.workspace = true
+tokio.workspace = true
+
 [workspace]
 resolver = "2"
+default-members = [
+    "crates/imp-llm",
+    "crates/imp-core",
+    "crates/imp-lua",
+    "crates/imp-tui",
+    "crates/imp-cli",
+]
 members = [
     "crates/imp-llm",
     "crates/imp-core",
@@ -46,3 +69,4 @@ imp-llm = { path = "crates/imp-llm" }
 imp-core = { path = "crates/imp-core" }
 imp-lua = { path = "crates/imp-lua" }
 imp-tui = { path = "crates/imp-tui" }
+imp-cli = { path = "crates/imp-cli" }

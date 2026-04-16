@@ -662,6 +662,30 @@ fn stream_response(
                 }
             }
         }
+
+        let trimmed = buffer.trim();
+        if let Some(data) = trimmed.strip_prefix("data: ") {
+            match parse_sse_event(data) {
+                Ok(Some(response)) => {
+                    for event in process_response(response, &mut state) {
+                        if tx.unbounded_send(Ok(event)).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = tx.unbounded_send(Err(error));
+                    return;
+                }
+            }
+        }
+
+        if !state.finished {
+            let _ = tx.unbounded_send(Err(Error::Stream(
+                "Google stream ended before terminal finishReason".into(),
+            )));
+        }
     });
 
     Box::pin(rx)

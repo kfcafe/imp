@@ -362,6 +362,7 @@ struct StreamState {
     content: Vec<ContentBlock>,
     usage: Usage,
     stop_reason: StopReason,
+    finished: bool,
 }
 
 impl StreamState {
@@ -372,6 +373,7 @@ impl StreamState {
             content: Vec::new(),
             usage: Usage::default(),
             stop_reason: StopReason::EndTurn,
+            finished: false,
         }
     }
 }
@@ -792,6 +794,7 @@ fn process_sse_event(event: SseEvent, state: &mut StreamState) -> Vec<StreamEven
             }
         }
         SseEvent::MessageStop => {
+            state.finished = true;
             let message = AssistantMessage {
                 content: std::mem::take(&mut state.content),
                 usage: Some(state.usage.clone()),
@@ -1045,6 +1048,30 @@ fn stream_response(
                     return;
                 }
             }
+        }
+
+        let trimmed = buf.trim();
+        if let Some(data) = trimmed.strip_prefix("data: ") {
+            match parse_sse_event(data) {
+                Ok(Some(sse)) => {
+                    for ev in process_sse_event(sse, &mut state) {
+                        if tx.unbounded_send(Ok(ev)).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = tx.unbounded_send(Err(e));
+                    return;
+                }
+            }
+        }
+
+        if !state.finished {
+            let _ = tx.unbounded_send(Err(Error::Stream(
+                "Anthropic stream ended before message_stop".into(),
+            )));
         }
     });
 

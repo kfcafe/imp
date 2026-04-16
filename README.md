@@ -1,6 +1,6 @@
 # imp
 
-An AI coding agent that runs in your terminal. Give it a task, it thinks through it, calls tools, and gets work done.
+An opinionated Rust-native coding agent with strong built-in tools, explicit workflow support, and deep mana integration when you want it.
 
 ```
 brew tap kfcafe/tap && brew install imp
@@ -43,12 +43,22 @@ Notable slash commands:
 - `/new` — start a fresh in-memory session
 - `/compact` — summarize older branch history into a structured handoff while preserving recent turns verbatim for future model context
 - `/personality` — edit identity/behavior/profile settings
+- `/ask` — clarify the request, constraints, or missing inputs
+- `/plan` — shape approach, decomposition, and verify path before larger work
+- `/work` — focus on execution when the path is clear
+- `/improve` — review, refine, harden, and verify the result after the first pass
 
 ## What it does
 
-imp is an agent engine — not a wrapper around an LLM API. It runs a full ReAct loop (think → act → observe → repeat), manages context intelligently, and gives the model real tools to work with.
+imp is an agent product and engine — not a wrapper around an LLM API. It runs a full ReAct loop (think → act → observe → repeat), manages context intelligently, and gives the model real tools to work with.
 
-imp is the native worker/runtime and orchestrator designed to use mana well. In the happy path, mana is the cross-agent durable substrate, imp reads mana-shaped work directly, executes it live, and writes a rich durable result back so future workers can inherit selectively from mana instead of reconstructing everything from transcripts.
+imp is the flagship Rust-native agent product and the native agent runtime experience designed to use mana well. In the happy path, mana is the cross-agent durable substrate, imp reads mana-shaped work directly, executes it live, and writes a rich durable result back so future workers can inherit selectively from mana instead of reconstructing everything from transcripts.
+
+imp should increasingly be understood through an explicit software-work loop:
+- `/ask` — clarify goals, scope, and constraints
+- `/plan` — shape the approach, task boundaries, and verification path
+- `/work` — execute the task with tools, edits, and delegation when needed
+- `/improve` — review, verify, harden, and refine the first result
 
 **Tools** — File I/O, shell execution, code search (grep, find, AST scan), web search, diff preview/apply, user prompts, mana unit management, persistent memory, session search across past conversations, and built-in multi-edit for coordinated file changes. Readonly tools run in parallel. Prefer native tools over shell wrappers when available; for mana operations, use the built-in `mana` tool instead of `bash` for equivalent actions.
 
@@ -58,7 +68,33 @@ imp is the native worker/runtime and orchestrator designed to use mana well. In 
 
 **Sessions** — Every message, tool call, and result is persisted to append-only JSONL. Resume any session, fork from any point, navigate between branches.
 
-**Extensions** — Drop a Lua script in `~/.config/imp/lua/` and it loads automatically. Register custom tools, hook into events, add slash commands. One extension crashing doesn't affect others.
+## Future-facing direction
+
+This README still describes the current shipped `imp` behavior.
+
+For future-facing platform work, the naming direction is now:
+- `mana` = platform
+- `imp` = flagship Rust-native agent product + default human-facing environment on mana
+- `runtime` = live execution layer
+- `graph` = durable layer
+- `extension` = packaged extensibility
+- `action` = preferred system behavior term
+- `task` = preferred work term
+
+That means future architecture work should increasingly treat:
+- `mana` as the owner of the lower platform/runtime substrate
+- `imp` as the flagship agent product, agent runtime experience, and default human-facing environment on top of mana
+
+This direction does **not** require an immediate deep refactor that hollows out `imp` or reduces it to a thin client.
+
+Current shipped reality to keep in mind:
+- `imp` still ships today as the agent engine and native worker/runtime experience
+- Lua extensions are the current shipped extension path
+- TypeScript extensions are the preferred future direction, not current released behavior
+
+See:
+- `imp_ontology.md`
+- `../docs/architecture/mana-platform-target-architecture.md`
 
 ## TUI
 
@@ -439,8 +475,26 @@ sudo mv imp-0.1.0-aarch64-unknown-linux-gnu/imp /usr/local/bin/
 ```bash
 git clone https://github.com/kfcafe/imp.git
 cd imp
-cargo install --path crates/imp-cli
+cargo install --path .
 ```
+
+`uu install` now works from the repo root too because it resolves to the same root install target.
+
+## macOS local install note
+
+If a locally installed `imp` binary at a replaced path is killed immediately after install, re-sign it ad hoc:
+
+```bash
+bash tools/imp-fix-signature.sh ~/.local/imp-current/bin/imp
+```
+
+or directly:
+
+```bash
+codesign --force --sign - ~/.local/imp-current/bin/imp
+```
+
+The repo root source-install target is now intentionally installable so root-level `cargo install --path .` and `uu install` no longer hit the virtual-workspace-manifest error.
 
 ## License
 
