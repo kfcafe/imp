@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use imp_core::ui::WidgetContent;
 
+use imp_lua::loader::discover_extensions;
 use imp_lua::LuaRuntime;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -57,6 +58,9 @@ use crate::views::settings::{SettingsState, SettingsView};
 use crate::views::sidebar::{
     build_detail_render_data, build_detail_text_surface_from_plain_lines, build_stream_lines,
     sidebar_sub_areas, Sidebar, SidebarDetailRenderData, SidebarView,
+};
+use crate::views::startup::{
+    summarize_lines, truncate_preview, StartupPanelData, StartupPanelView, StartupSection,
 };
 use crate::views::status::StatusInfo;
 use crate::views::tools::DisplayToolCall;
@@ -139,6 +143,44 @@ fn prompt_text_for_secret_provider(provider: &str) -> String {
     lines.push(String::new());
     lines.push("First enter a comma-separated field list (default: api_key).".into());
     lines.push("Then imp will prompt for each field value.".into());
+    lines.join("\n")
+}
+
+fn build_generated_prompt_preview(
+    visible_prompt_tools: &[String],
+    mode: imp_core::config::AgentMode,
+    cwd: &std::path::Path,
+    learning_enabled: bool,
+    guardrail_profile: imp_core::guardrails::GuardrailProfile,
+    personality: &imp_core::personality::PersonalityProfile,
+    provider_id: Option<&str>,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push(personality.identity.render_sentence());
+    lines.push(String::new());
+    lines.push("Available tools:".to_string());
+    for tool in visible_prompt_tools {
+        lines.push(format!("- {tool}"));
+    }
+    lines.push(String::new());
+    lines.push("Execution discipline and tool-usage doctrine are active.".to_string());
+    lines.push(format!("Mode: {:?}", mode));
+    lines.push(format!("Guardrails: {guardrail_profile:?}"));
+    lines.push(format!(
+        "Learning enabled: {}",
+        if learning_enabled { "yes" } else { "no" }
+    ));
+    if let Some(provider) = provider_id {
+        lines.push(format!("Resolved provider context: {provider}"));
+    }
+    lines.push(format!(
+        "Environment: cwd={}, os={}, home={}",
+        cwd.display(),
+        std::env::consts::OS,
+        std::env::var("HOME").unwrap_or_default()
+    ));
+    lines.push(String::new());
+    lines.push("Excluded from this preview: AGENTS.md / CLAUDE.md, skill files, soul.md, mana facts, project memory status, and other file-backed prompt context.".to_string());
     lines.join("\n")
 }
 
@@ -240,6 +282,11 @@ struct SidebarDetailCacheKey {
 struct SidebarDetailCache {
     key: SidebarDetailCacheKey,
     render: SidebarDetailRenderData,
+}
+
+#[derive(Debug, Clone)]
+struct StartupSurfaceData {
+    panel: StartupPanelData,
 }
 
 pub struct App {
@@ -1085,6 +1132,190 @@ impl App {
             .render
     }
 
+    fn build_startup_surface(&self) -> StartupSurfaceData {
+        let user_config_dir = imp_core::config::Config::user_config_dir();
+        let skills = imp_core::resources::discover_skills(&self.cwd, &user_config_dir);
+        let skill_lines = summarize_lines(
+            skills
+                .iter()
+                .map(|skill| {
+                    if skill.description.trim().is_empty() {
+                        format!("• {}", skill.name)
+                    } else {
+                        format!("• {} — {}", skill.name, skill.description)
+                    }
+                })
+                .collect(),
+            8,
+        );
+
+        let lua_extensions = discover_extensions(&user_config_dir, Some(&self.cwd));
+        let extension_lines = summarize_lines(
+            lua_extensions
+                .iter()
+                .map(|ext| format!("• {}", ext.name))
+                .collect(),
+            6,
+        );
+
+        let (lua_tool_lines, command_lines) = match &self.lua_runtime {
+            Some(runtime) => match runtime.lock() {
+                Ok(rt) => {
+                    let mut tools = rt.tool_names();
+                    tools.sort();
+                    let mut commands = rt.command_names();
+                    commands.sort();
+                    (
+                        summarize_lines(
+                            tools.into_iter().map(|name| format!("• {name}")).collect(),
+                            6,
+                        ),
+                        summarize_lines(
+                            commands
+                                .into_iter()
+                                .map(|name| format!("• /{name}"))
+                                .collect(),
+                            6,
+                        ),
+                    )
+                }
+                Err(_) => (
+                    vec!["• unavailable (runtime lock error)".to_string()],
+                    vec!["• unavailable (runtime lock error)".to_string()],
+                ),
+            },
+            None => (
+                vec!["• none loaded".to_string()],
+                vec!["• none loaded".to_string()],
+            ),
+        };
+
+        let auth_path = imp_core::storage::global_auth_path();
+        let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
+        let provider_meta = self.current_model_meta_for_persistence();
+        let provider_id = provider_meta
+            .as_ref()
+            .map(|meta| meta.provider.as_str())
+            .unwrap_or("unknown");
+        let provider_auth = if auth_store.has_credentials(provider_id) {
+            "ready"
+        } else {
+            "needs auth"
+        };
+        let web_summary = self
+            .config
+            .web
+            .search_provider
+            .map(|provider| {
+                let status = if auth_store.has_credentials(provider.name()) {
+                    "ready"
+                } else {
+                    "needs key"
+                };
+                format!("{} ({status})", provider.name())
+            })
+            .unwrap_or_else(|| "disabled".to_string());
+        let mode = format!("{:?}", self.config.mode).to_lowercase();
+        let session_name = self
+            .session
+            .name()
+            .map(str::to_string)
+            .or_else(|| self.session.title(48))
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "new chat".to_string());
+        let session_lines = vec![
+            format!("• model: {}", self.model_name),
+            format!("• provider: {provider_id} ({provider_auth})"),
+            format!("• mode: {mode}"),
+            format!("• thinking: {:?}", self.thinking_level),
+            format!("• web: {web_summary}"),
+            format!("• session: {session_name}"),
+            format!("• cwd: {}", self.cwd.display()),
+        ];
+
+        let visible_prompt_tools = {
+            let mut registry = imp_core::tools::ToolRegistry::new();
+            imp_core::builder::register_native_tools(&mut registry);
+            let mut names = registry
+                .definitions_for_mode(&self.config.mode)
+                .into_iter()
+                .map(|def| def.name)
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+
+        let generated_prompt_preview = build_generated_prompt_preview(
+            &visible_prompt_tools,
+            self.config.mode,
+            self.cwd.as_path(),
+            self.config.learning.enabled,
+            self.config.guardrails.resolve_effective_profile(&self.cwd),
+            &self.config.personality.profile,
+            self.current_model_meta_for_persistence()
+                .as_ref()
+                .map(|meta| meta.provider.as_str()),
+        );
+        let prompt_preview = truncate_preview(&generated_prompt_preview, 18, 1800);
+        let prompt_tokens = imp_core::context::estimate_tokens(&generated_prompt_preview);
+
+        let sections = vec![
+            StartupSection {
+                title: "tools".to_string(),
+                lines: summarize_lines(
+                    visible_prompt_tools
+                        .iter()
+                        .map(|name| format!("• {name}"))
+                        .collect(),
+                    10,
+                ),
+            },
+            StartupSection {
+                title: "skills".to_string(),
+                lines: if skill_lines.is_empty() {
+                    vec!["• none discovered".to_string()]
+                } else {
+                    skill_lines
+                },
+            },
+            StartupSection {
+                title: "extensions".to_string(),
+                lines: {
+                    let mut lines = Vec::new();
+                    lines.extend(if extension_lines.is_empty() {
+                        vec!["• lua files: none".to_string()]
+                    } else {
+                        let mut prefixed = vec!["lua files:".to_string()];
+                        prefixed.extend(extension_lines);
+                        prefixed
+                    });
+                    lines.push(String::new());
+                    lines.push("registered tools:".to_string());
+                    lines.extend(lua_tool_lines);
+                    lines.push(String::new());
+                    lines.push("slash commands:".to_string());
+                    lines.extend(command_lines);
+                    lines
+                },
+            },
+            StartupSection {
+                title: "session".to_string(),
+                lines: session_lines,
+            },
+        ];
+
+        StartupSurfaceData {
+            panel: StartupPanelData {
+                headline: "imp is ready with this access surface.".to_string(),
+                subtitle: "Tools, skills, Lua extensions, and runtime context available in this session.".to_string(),
+                hint: "Use /help for commands, Ctrl+L to switch model, and start typing to ask imp to work.".to_string(),
+                sections,
+                prompt_preview,
+                prompt_tokens,
+            },
+        }
+    }
+
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
         frame.render_widget(Clear, area);
@@ -1172,14 +1403,23 @@ impl App {
             .clone()
         };
 
-        let chat = RenderedChatView::new(&chat_lines).scroll(self.scroll_offset);
-        frame.render_widget(chat, chat_area);
+        if matches!(self.mode, UiMode::Normal) && self.messages.is_empty() {
+            let startup = self.build_startup_surface();
+            frame.render_widget(
+                StartupPanelView::new(&startup.panel, &self.theme),
+                chat_area,
+            );
+            self.chat_surface = None;
+        } else {
+            let chat = RenderedChatView::new(&chat_lines).scroll(self.scroll_offset);
+            frame.render_widget(chat, chat_area);
 
-        self.chat_surface = Some(build_text_surface_from_lines(
-            &chat_lines,
-            chat_area,
-            self.scroll_offset,
-        ));
+            self.chat_surface = Some(build_text_surface_from_lines(
+                &chat_lines,
+                chat_area,
+                self.scroll_offset,
+            ));
+        }
 
         // Sidebar
         if let Some(sidebar_area) = sidebar_area {

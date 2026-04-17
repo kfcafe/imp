@@ -10,6 +10,7 @@ pub mod secrets_picker;
 pub mod session_picker;
 pub mod settings;
 pub mod sidebar;
+pub mod startup;
 pub mod status;
 pub mod tool_output;
 pub mod tools;
