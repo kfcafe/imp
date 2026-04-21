@@ -93,6 +93,7 @@ Current shipped reality to keep in mind:
 - TypeScript extensions are the preferred future direction, not current released behavior
 
 See:
+- `vNext.md`
 - `imp_ontology.md`
 - `../docs/architecture/mana-platform-target-architecture.md`
 

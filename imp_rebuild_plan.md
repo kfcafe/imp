@@ -6,6 +6,8 @@ Scope: `~/tower/imp`
 
 This file converts `imp_rebuild_strategy.md` into an execution plan with a strict order of operations.
 
+For product/runtime prioritization layered on top of this rebuild order, see `vNext.md`.
+
 The primary recommendation remains:
 
 > do not rewrite `imp`; refactor it in place around clearer seams
