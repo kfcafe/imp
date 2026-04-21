@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use imp_core::format_error_for_display;
 use imp_core::ui::WidgetContent;
 
 use imp_lua::loader::discover_extensions;
@@ -794,7 +795,7 @@ impl App {
         if let Some(last) = self.latest_streaming_message_mut() {
             last.is_streaming = false;
         }
-        self.push_error_msg(&parse_api_error(&error));
+        self.push_error_msg(&format_error_for_display(&error));
     }
 
     fn maybe_notify_agent_completion(&mut self) {
@@ -5096,7 +5097,7 @@ impl App {
                 self.invalidate_chat_render_cache();
 
                 // Parse the error for a cleaner display
-                let display_error = parse_api_error(&error);
+                let display_error = format_error_for_display(&error);
 
                 self.messages.push(DisplayMessage {
                     role: MessageRole::Error,
@@ -5111,122 +5112,6 @@ impl App {
             }
             _ => {}
         }
-    }
-}
-
-// ── Error parsing ───────────────────────────────────────────────
-
-/// Extract a human-readable message from API error strings.
-/// Input: "Provider error: HTTP 401 Unauthorized: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired...\"}}"
-/// Output: "OAuth token has expired. Please obtain a new token or refresh your existing token. (use /login)"
-fn parse_api_error(raw: &str) -> String {
-    // Try to extract JSON from the error string.
-    if let Some(json_start) = raw.find('{') {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw[json_start..]) {
-            // Anthropic error format: {"type":"error","error":{"type":"...","message":"..."}}
-            if let Some(msg) = parsed
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-            {
-                let hint = if msg.contains("expired") || msg.contains("token") {
-                    " (use /login to refresh)"
-                } else {
-                    ""
-                };
-                return format!("{msg}{hint}");
-            }
-            // Simple {"message":"..."} format
-            if let Some(msg) = parsed.get("message").and_then(|m| m.as_str()) {
-                return msg.to_string();
-            }
-        }
-    }
-
-    // Some gateways / auth layers return full HTML error pages. Showing raw HTML
-    // in the chat transcript is noisy and unhelpful, so collapse it to a short
-    // summary instead.
-    if looks_like_html_error(raw) {
-        let status = extract_http_status(raw);
-        let title = extract_html_title(raw);
-
-        return match (status, title) {
-            (Some(status), Some(title)) => format!(
-                "Provider returned an HTML error page ({status}: {title}). This usually means an auth, gateway, proxy, or rate-limit issue."
-            ),
-            (Some(status), None) => format!(
-                "Provider returned an HTML error page ({status}). This usually means an auth, gateway, proxy, or rate-limit issue."
-            ),
-            (None, Some(title)) => format!(
-                "Provider returned an HTML error page ({title}). This usually means an auth, gateway, proxy, or rate-limit issue."
-            ),
-            (None, None) => "Provider returned an HTML error page. This usually means an auth, gateway, proxy, or rate-limit issue.".to_string(),
-        };
-    }
-
-    raw.to_string()
-}
-
-fn looks_like_html_error(raw: &str) -> bool {
-    let lower = raw.to_ascii_lowercase();
-    lower.contains("<!doctype html")
-        || lower.contains("<html")
-        || lower.contains("<head")
-        || lower.contains("<body")
-        || lower.contains("<title")
-}
-
-fn extract_http_status(raw: &str) -> Option<String> {
-    let start = raw.find("HTTP ")?;
-    let rest = &raw[start..];
-    let end = rest
-        .find(|c: char| c == ':' || c == '\n' || c == '<')
-        .unwrap_or(rest.len());
-    let status = rest[..end].trim();
-    (!status.is_empty()).then(|| status.to_string())
-}
-
-fn extract_html_title(raw: &str) -> Option<String> {
-    let lower = raw.to_ascii_lowercase();
-    let title_start = lower.find("<title")?;
-    let open_end = lower[title_start..].find('>')? + title_start + 1;
-    let close_start = lower[open_end..].find("</title>")? + open_end;
-    let title = raw[open_end..close_start].trim();
-    (!title.is_empty()).then(|| title.to_string())
-}
-
-#[cfg(test)]
-mod parse_api_error_tests {
-    use super::parse_api_error;
-
-    #[test]
-    fn extracts_nested_json_error_message() {
-        let raw = "Provider error: HTTP 401 Unauthorized: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired\"}}";
-        assert_eq!(
-            parse_api_error(raw),
-            "OAuth token has expired (use /login to refresh)"
-        );
-    }
-
-    #[test]
-    fn extracts_simple_json_message() {
-        let raw = "Provider error: HTTP 429 Too Many Requests: {\"message\":\"Rate limited\"}";
-        assert_eq!(parse_api_error(raw), "Rate limited");
-    }
-
-    #[test]
-    fn collapses_html_error_pages_to_summary() {
-        let raw = "Provider error: HTTP 403 Forbidden: <!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title></head><body>blocked</body></html>";
-        assert_eq!(
-            parse_api_error(raw),
-            "Provider returned an HTML error page (HTTP 403 Forbidden: Attention Required! | Cloudflare). This usually means an auth, gateway, proxy, or rate-limit issue."
-        );
-    }
-
-    #[test]
-    fn leaves_plain_text_errors_alone() {
-        let raw = "Provider error: connection reset by peer";
-        assert_eq!(parse_api_error(raw), raw);
     }
 }
 

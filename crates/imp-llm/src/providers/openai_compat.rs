@@ -560,9 +560,8 @@ fn stream_response(
 
                         if let Some(tc_deltas) = delta.tool_calls {
                             for tc in tc_deltas {
-                                let entry = tool_accum
-                                    .entry(tc.index)
-                                    .or_insert_with(|| ToolCallAccum {
+                                let entry =
+                                    tool_accum.entry(tc.index).or_insert_with(|| ToolCallAccum {
                                         id: String::new(),
                                         name: String::new(),
                                         arguments: String::new(),

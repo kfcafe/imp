@@ -425,7 +425,11 @@ fn interpolate_command(command: &str, event: &HookEvent<'_>) -> String {
             result = replace_placeholder(
                 &result,
                 "is_error",
-                if tool_result.is_error { "true" } else { "false" },
+                if tool_result.is_error {
+                    "true"
+                } else {
+                    "false"
+                },
             );
             // Extract exit_code from details if present (bash tool sets this)
             let exit_code = tool_result
@@ -628,9 +632,7 @@ threshold = 0.8
         let result_msg = ToolResultMessage {
             tool_call_id: "call_quoted".into(),
             tool_name: "bash".into(),
-            content: vec![ContentBlock::Text {
-                text: "ok".into(),
-            }],
+            content: vec![ContentBlock::Text { text: "ok".into() }],
             is_error: true,
             details: serde_json::json!({
                 "exit_code": 2,
@@ -934,7 +936,9 @@ threshold = 0.8
         let result_msg = ToolResultMessage {
             tool_call_id: "call_1".into(),
             tool_name: "bash".into(),
-            content: vec![ContentBlock::Text { text: "failed".into() }],
+            content: vec![ContentBlock::Text {
+                text: "failed".into(),
+            }],
             is_error: true,
             details: serde_json::json!({
                 "exit_code": 2,

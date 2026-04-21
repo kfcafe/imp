@@ -172,13 +172,19 @@ pub fn resolve_runtime_connection(
     auth_store: &AuthStore,
     registry: &ModelRegistry,
 ) -> std::result::Result<ResolvedRuntimeConnection, String> {
-    let model_hint = intent.model_hint.or(intent.config_model).unwrap_or("sonnet");
+    let model_hint = intent
+        .model_hint
+        .or(intent.config_model)
+        .unwrap_or("sonnet");
 
     let meta = registry
         .resolve_meta(model_hint, intent.provider_override)
         .ok_or_else(|| format!("Unknown model: {model_hint}"))?;
 
-    let mut provider_name = intent.provider_override.unwrap_or(&meta.provider).to_string();
+    let mut provider_name = intent
+        .provider_override
+        .unwrap_or(&meta.provider)
+        .to_string();
 
     if should_use_openai_chatgpt_route(
         intent.provider_override,
@@ -341,7 +347,6 @@ impl ImpSession {
         if let Some(ui) = &options.ui {
             agent.ui = Arc::clone(ui);
         }
-
 
         // 6. Set up session persistence
         let session_dir = storage::global_sessions_dir();
@@ -722,7 +727,6 @@ fn should_use_openai_chatgpt_route(
             || auth_store.get_oauth("openai-codex").is_some())
         && codex_supports_model(registry, model_id)
 }
-
 
 fn clone_model(model: &Model) -> Model {
     Model {
@@ -1112,7 +1116,12 @@ mod tests {
         .await
         .expect("no-tools session should build with saved auth");
 
-        let prompt = session.agent.as_ref().expect("agent present").system_prompt.clone();
+        let prompt = session
+            .agent
+            .as_ref()
+            .expect("agent present")
+            .system_prompt
+            .clone();
         assert!(!prompt.trim().is_empty());
         assert!(prompt.contains("Test task"));
         assert!(prompt.contains("Verify headless prompt assembly"));

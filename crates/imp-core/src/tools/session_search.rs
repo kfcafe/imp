@@ -110,7 +110,9 @@ impl Tool for SessionSearchTool {
 
 /// Default path for the session index database.
 fn index_db_path() -> std::path::PathBuf {
-    if let Some(path) = storage::existing_global_file(storage::global_session_index_path, "session_index.db") {
+    if let Some(path) =
+        storage::existing_global_file(storage::global_session_index_path, "session_index.db")
+    {
         return path;
     }
     if let Some(path) = storage::legacy_data_roots()

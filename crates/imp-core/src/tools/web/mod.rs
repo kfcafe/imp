@@ -50,15 +50,15 @@ impl Tool for WebTool {
         "Web"
     }
     fn description(&self) -> &str {
-        "Web search or page reading. search: query a search engine. read: fetch and extract content."
+        "Search the web or read a page."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "action": { "type": "string", "enum": ["search", "read"] },
-                "query": { "type": "string", "description": "Search query" },
-                "url": { "type": "string", "description": "URL to read" },
+                "query": { "type": "string" },
+                "url": { "type": "string" },
                 "provider": { "type": "string", "enum": ["tavily", "exa", "linkup", "perplexity"] },
                 "maxResults": { "type": "number" }
             },

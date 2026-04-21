@@ -90,6 +90,7 @@ use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use imp_core::config::{AnimationLevel, Config, ToolOutputDisplay};
+use imp_core::format_error_for_display;
 use imp_core::tools::web::types::SearchProvider;
 
 use imp_core::imp_session::{
@@ -663,36 +664,33 @@ pub async fn run() {
                 args,
                 mana_dir,
                 defer_verify,
-            }) => {
-                match target.as_str() {
-                    "status" | "show" | "logs" | "run" => {
-                        if let Err(e) = run_reserved_mana_namespace_command(target, args).await {
+            }) => match target.as_str() {
+                "status" | "show" | "logs" | "run" => {
+                    if let Err(e) = run_reserved_mana_namespace_command(target, args).await {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                    return;
+                }
+                _ => {
+                    if !args.is_empty() {
+                        eprintln!(
+                            "Error: unexpected extra arguments after mana unit id `{target}`: {}",
+                            args.join(" ")
+                        );
+                        std::process::exit(1);
+                    }
+                    match run_headless_mode(&cli, target, mana_dir.as_deref(), *defer_verify).await
+                    {
+                        Ok(true) => return,
+                        Ok(false) => std::process::exit(1),
+                        Err(e) => {
                             eprintln!("Error: {e}");
                             std::process::exit(1);
                         }
-                        return;
-                    }
-                    _ => {
-                        if !args.is_empty() {
-                            eprintln!(
-                                "Error: unexpected extra arguments after mana unit id `{target}`: {}",
-                                args.join(" ")
-                            );
-                            std::process::exit(1);
-                        }
-                        match run_headless_mode(&cli, target, mana_dir.as_deref(), *defer_verify)
-                            .await
-                        {
-                            Ok(true) => return,
-                            Ok(false) => std::process::exit(1),
-                            Err(e) => {
-                                eprintln!("Error: {e}");
-                                std::process::exit(1);
-                            }
-                        }
                     }
                 }
-            }
+            },
             Commands::Run(HeadlessManaArgs {
                 unit_id,
                 mana_dir,
@@ -1664,7 +1662,7 @@ fn print_headless_human_event(
             }
         }
         AgentEvent::Error { error } => {
-            eprintln!("Error: {error}");
+            eprintln!("Error: {}", format_error_for_display(error));
         }
         AgentEvent::Timing { timing } => {
             if verbose {
@@ -2577,7 +2575,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                 }
             }
             AgentEvent::Error { error } => {
-                eprintln!("Error: {error}");
+                eprintln!("Error: {}", format_error_for_display(&error));
             }
             AgentEvent::Timing { timing } => {
                 if cli.verbose {
@@ -3674,7 +3672,7 @@ async fn run_chat_prompt(
             }
             AgentEvent::Error { error } => {
                 clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
-                eprintln!("error: {error}");
+                eprintln!("error: {}", format_error_for_display(&error));
             }
             AgentEvent::Timing { timing } => {
                 if cli.verbose {
@@ -3950,7 +3948,8 @@ async fn run_interactive(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             SessionManager::in_memory()
         } else if cli.cont {
             // Continue most recent session
-            match SessionManager::continue_recent(&cwd, &imp_core::storage::global_sessions_dir())? {
+            match SessionManager::continue_recent(&cwd, &imp_core::storage::global_sessions_dir())?
+            {
                 Some(session) => session,
                 None => SessionManager::new(&cwd, &imp_core::storage::global_sessions_dir())?,
             }

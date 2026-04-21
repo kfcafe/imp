@@ -190,15 +190,15 @@ impl Tool for BashTool {
         "Bash"
     }
     fn description(&self) -> &str {
-        "Execute a shell command in the workspace or an optional working directory. Use it for search, file discovery, builds, tests, scripts, package managers, and other shell-native tasks."
+        "Run a shell command in the workspace or an optional workdir."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "Shell command to execute, such as grep, find, ls, cargo, python, or project scripts" },
-                "timeout": { "type": "number", "description": "Optional timeout in seconds" },
-                "workdir": { "type": "string", "description": "Optional working directory for this command; defaults to the session cwd" }
+                "command": { "type": "string" },
+                "timeout": { "type": "number" },
+                "workdir": { "type": "string" }
             },
             "required": ["command"]
         })

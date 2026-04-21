@@ -747,6 +747,87 @@ fn animation_label(level: AnimationLevel) -> &'static str {
     }
 }
 
+enum SettingsRow {
+    Header,
+    Field(usize),
+    Save,
+}
+
+fn visit_settings_rows(mut visit: impl FnMut(SettingsRow, u16)) {
+    let mut row: u16 = 0;
+    visit(SettingsRow::Header, row);
+    row += 2;
+
+    for field_idx in 0..=5 {
+        visit(SettingsRow::Field(field_idx), row);
+        row += 1;
+    }
+
+    row += 1;
+
+    for field_idx in 6..=7 {
+        visit(SettingsRow::Field(field_idx), row);
+        row += 1;
+    }
+
+    row += 1;
+
+    for field_idx in 8..=29 {
+        visit(SettingsRow::Field(field_idx), row);
+        row += 1;
+    }
+
+    row += 1;
+    visit(SettingsRow::Save, row);
+}
+
+fn total_settings_rows() -> u16 {
+    let mut total = 0;
+    visit_settings_rows(|_, row| {
+        total = row.saturating_add(1);
+    });
+    total
+}
+
+fn selected_settings_row(selected: usize) -> u16 {
+    let selected = selected.min(FIELDS.len().saturating_sub(1));
+    let mut selected_row = 0;
+    visit_settings_rows(|entry, row| match entry {
+        SettingsRow::Field(field_idx) if field_idx == selected => selected_row = row,
+        SettingsRow::Save if selected == FIELDS.len().saturating_sub(1) => selected_row = row,
+        _ => {}
+    });
+    selected_row
+}
+
+fn settings_scroll_offset(selected: usize, visible_rows: u16) -> u16 {
+    if visible_rows == 0 {
+        return 0;
+    }
+
+    let total_rows = total_settings_rows();
+    if total_rows <= visible_rows {
+        return 0;
+    }
+
+    let selected_row = selected_settings_row(selected);
+    let desired = selected_row.saturating_sub(visible_rows.saturating_sub(1));
+    desired.min(total_rows.saturating_sub(visible_rows))
+}
+
+fn scrolled_screen_y(inner: Rect, logical_row: u16, scroll_offset: u16) -> Option<u16> {
+    if logical_row < scroll_offset {
+        return None;
+    }
+
+    let visible_row = logical_row - scroll_offset;
+    if visible_row >= inner.height {
+        return None;
+    }
+
+    Some(inner.y + visible_row)
+}
+
 /// Settings overlay widget.
 pub struct SettingsView<'a> {
     state: &'a SettingsState,
@@ -779,22 +860,26 @@ impl Widget for SettingsView<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
+        let total_rows = total_settings_rows();
+        let scroll_offset = settings_scroll_offset(self.state.normalized_selected(), inner.height);
+
         let mut row: u16 = 0;
 
-        // Instructions
         let header = Line::from(Span::styled(
-            "  ←/→ change value  Enter edit  Esc close",
+            "  ↑/↓ move  ←/→ change  Enter edit  Esc close",
             self.theme.muted_style(),
         ));
-        buf.set_line(inner.x, inner.y + row, &header, inner.width);
+        if let Some(y) = scrolled_screen_y(inner, row, scroll_offset) {
+            buf.set_line(inner.x, y, &header, inner.width);
+        }
         row += 2;
 
-        // Model
         render_field(
             self.state,
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             0,
             "Model",
@@ -813,6 +898,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             1,
             "Chosen models",
@@ -825,6 +911,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             2,
             "Theme",
@@ -832,12 +919,12 @@ impl Widget for SettingsView<'_> {
             "← →",
         );
 
-        // Thinking
         render_field(
             self.state,
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             3,
             "Thinking level",
@@ -845,7 +932,6 @@ impl Widget for SettingsView<'_> {
             "← →",
         );
 
-        // Max tokens
         let max_tokens_val = if self.state.editing_number
             && self.state.current_field() == SettingsField::MaxTokens
         {
@@ -858,6 +944,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             4,
             "Max tokens",
@@ -865,7 +952,6 @@ impl Widget for SettingsView<'_> {
             "← → / type",
         );
 
-        // Max turns
         let max_turns_val =
             if self.state.editing_number && self.state.current_field() == SettingsField::MaxTurns {
                 format!("{}▎", self.state.edit_buffer)
@@ -877,6 +963,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             5,
             "Max turns",
@@ -884,10 +971,8 @@ impl Widget for SettingsView<'_> {
             "← → / type",
         );
 
-        // Spacer before context section
         row += 1;
 
-        // Observation mask
         let obs_val = if self.state.editing_number
             && self.state.current_field() == SettingsField::ObservationMask
         {
@@ -900,6 +985,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             6,
             "Observation mask",
@@ -907,12 +993,12 @@ impl Widget for SettingsView<'_> {
             "← →",
         );
 
-        // Shell backend
         render_field(
             self.state,
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             7,
             "Shell backend",
@@ -920,10 +1006,8 @@ impl Widget for SettingsView<'_> {
             "← →",
         );
 
-        // Spacer before UI section
         row += 1;
 
-        // Sidebar style
         let sidebar_label = match self.state.sidebar_style {
             SidebarStyle::Stream => "stream",
             SidebarStyle::Split => "split",
@@ -933,6 +1017,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             8,
             "Sidebar style",
@@ -940,7 +1025,6 @@ impl Widget for SettingsView<'_> {
             "← →",
         );
 
-        // Tool output
         let tool_output_label = match self.state.tool_output {
             ToolOutputDisplay::Full => "full",
             ToolOutputDisplay::Compact => "compact",
@@ -951,6 +1035,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             9,
             "Tool output",
@@ -958,7 +1043,6 @@ impl Widget for SettingsView<'_> {
             "← →",
         );
 
-        // Tool output lines
         let tol_val = if self.state.editing_number
             && self.state.current_field() == SettingsField::ToolOutputLines
         {
@@ -971,6 +1055,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             10,
             "Tool output lines",
@@ -990,6 +1075,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             11,
             "Read max lines",
@@ -997,7 +1083,6 @@ impl Widget for SettingsView<'_> {
             "← → / type (0 = no limit)",
         );
 
-        // Sidebar width
         let sw_val = if self.state.editing_number
             && self.state.current_field() == SettingsField::SidebarWidth
         {
@@ -1010,6 +1095,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             12,
             "Sidebar width",
@@ -1017,12 +1103,12 @@ impl Widget for SettingsView<'_> {
             "← → / type",
         );
 
-        // Word wrap
         render_field(
             self.state,
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             13,
             "Word wrap",
@@ -1035,6 +1121,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             14,
             "Animations",
@@ -1047,6 +1134,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             15,
             "Chat tool display",
@@ -1062,6 +1150,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             16,
             "Auto-open sidebar",
@@ -1085,6 +1174,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             17,
             "Auto-open width",
@@ -1104,6 +1194,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             18,
             "Thinking lines",
@@ -1123,6 +1214,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             19,
             "Streaming lines",
@@ -1142,6 +1234,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             20,
             "Mouse scroll",
@@ -1161,6 +1254,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             21,
             "Keyboard scroll",
@@ -1173,6 +1267,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             22,
             "Show timestamps",
@@ -1188,6 +1283,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             23,
             "Show cost",
@@ -1199,6 +1295,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             24,
             "Show context",
@@ -1215,6 +1312,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             25,
             "Bell on done",
@@ -1231,6 +1329,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             26,
             "Auto-continue",
@@ -1248,6 +1347,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             27,
             "Web provider",
@@ -1278,6 +1378,7 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             28,
             "Tavily API key",
@@ -1302,18 +1403,17 @@ impl Widget for SettingsView<'_> {
             self.theme,
             buf,
             inner,
+            scroll_offset,
             &mut row,
             29,
             "Exa API key",
             &exa_val,
             "Enter to edit",
         );
-        // Spacer before save
         row += 1;
 
-        // Save button
-        if row < inner.height {
-            let is_save = self.state.selected == FIELDS.len() - 1;
+        if let Some(y) = scrolled_screen_y(inner, row, scroll_offset) {
+            let is_save = self.state.normalized_selected() == FIELDS.len() - 1;
             let save_style = if is_save {
                 Style::default()
                     .fg(self.theme.accent)
@@ -1332,7 +1432,17 @@ impl Widget for SettingsView<'_> {
                 Span::styled("[ Save to config.toml ]", save_style),
                 Span::styled(dirty_hint, self.theme.warning_style()),
             ]);
-            buf.set_line(inner.x, inner.y + row, &line, inner.width);
+            buf.set_line(inner.x, y, &line, inner.width);
+        }
+
+        if scroll_offset > 0 {
+            let hint = Line::from(Span::styled("↑ more", self.theme.muted_style()));
+            buf.set_line(inner.x + inner.width.saturating_sub(7), inner.y, &hint, 7);
+        }
+        if scroll_offset + inner.height < total_rows {
+            let hint = Line::from(Span::styled("↓ more", self.theme.muted_style()));
+            let y = inner.y + inner.height.saturating_sub(1);
+            buf.set_line(inner.x + inner.width.saturating_sub(7), y, &hint, 7);
         }
     }
 }
@@ -1344,16 +1454,20 @@ fn render_field(
     theme: &Theme,
     buf: &mut Buffer,
     inner: Rect,
+    scroll_offset: u16,
     row: &mut u16,
     field_idx: usize,
     label: &str,
     value: &str,
     hint: &str,
 ) {
-    if *row >= inner.height {
+    let logical_row = *row;
+    let Some(screen_y) = scrolled_screen_y(inner, logical_row, scroll_offset) else {
+        *row += 1;
         return;
-    }
-    let is_selected = field_idx == state.selected;
+    };
+
+    let is_selected = field_idx == state.normalized_selected();
     let marker = if is_selected { "▸ " } else { "  " };
 
     let label_style = if is_selected {
@@ -1377,7 +1491,7 @@ fn render_field(
         Span::raw("  "),
         Span::styled(hint, theme.muted_style()),
     ]);
-    buf.set_line(inner.x, inner.y + *row, &line, inner.width);
+    buf.set_line(inner.x, screen_y, &line, inner.width);
     *row += 1;
 }
 
@@ -1387,6 +1501,20 @@ mod tests {
     use imp_core::config::Config;
     use imp_llm::auth::AuthStore;
     use imp_llm::model::ModelRegistry;
+
+    #[test]
+    fn save_field_scrolls_into_view_on_short_panels() {
+        assert_eq!(selected_settings_row(FIELDS.len() - 1), 35);
+        assert_eq!(total_settings_rows(), 36);
+        assert_eq!(settings_scroll_offset(FIELDS.len() - 1, 10), 26);
+    }
+
+    #[test]
+    fn top_fields_do_not_scroll_when_visible() {
+        assert_eq!(selected_settings_row(0), 2);
+        assert_eq!(settings_scroll_offset(0, 10), 0);
+        assert_eq!(settings_scroll_offset(5, 10), 0);
+    }
 
     #[test]
     fn current_field_clamps_stale_selection() {

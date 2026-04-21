@@ -734,7 +734,9 @@ impl Agent {
                             StreamEvent::MessageStart { .. } => {}
                             StreamEvent::Error { error } => {
                                 self.emit(AgentEvent::Error {
-                                    error: error.clone(),
+                                    error: format!(
+                                        "Provider stream failed after partial output: {error}"
+                                    ),
                                 })
                                 .await;
                                 // Build a minimal error message to push
@@ -765,8 +767,14 @@ impl Agent {
                         }
                     }
                     Err(e) => {
+                        let error = match &e {
+                            imp_llm::Error::Stream(message) => {
+                                format!("Provider stream failed after partial output: {message}")
+                            }
+                            _ => e.to_string(),
+                        };
                         self.emit(AgentEvent::Error {
-                            error: e.to_string(),
+                            error: error.clone(),
                         })
                         .await;
                         let cost = total_usage.cost(&self.model.meta.pricing);
@@ -803,7 +811,7 @@ impl Agent {
                 Some(message) => message,
                 None if !saw_provider_message_end => {
                     let error = format!(
-                        "Provider stream ended before terminal completion event (collected {} content blocks, {} tool calls)",
+                        "Provider stream ended unexpectedly before completing the message (missing terminal completion event after {} content block(s) and {} tool call(s))",
                         ordered_content.len(),
                         tool_calls.len()
                     );
@@ -3285,9 +3293,14 @@ mod tests {
                 } if text == "partial"
             )
         });
-        let error_idx = events.iter().position(
-            |e| matches!(e, AgentEvent::Error { error } if error.contains("mid-stream failure")),
-        );
+        let error_idx = events.iter().position(|e| {
+            matches!(
+                e,
+                AgentEvent::Error { error }
+                if error.contains("Provider stream failed after partial output")
+                    && error.contains("mid-stream failure")
+            )
+        });
 
         assert!(text_delta.is_some());
         assert!(error_idx.is_some());
@@ -3296,11 +3309,11 @@ mod tests {
 
     #[tokio::test]
     async fn agent_treats_silent_eof_without_message_end_as_error() {
-        let provider = Arc::new(MockProvider::new_results(vec![vec![
-            Ok(StreamEvent::TextDelta {
+        let provider = Arc::new(MockProvider::new_results(vec![vec![Ok(
+            StreamEvent::TextDelta {
                 text: "partial".to_string(),
-            }),
-        ]]));
+            },
+        )]]));
 
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
@@ -3324,7 +3337,7 @@ mod tests {
             matches!(
                 e,
                 AgentEvent::Error { error }
-                if error.contains("terminal completion event")
+                if error.contains("missing terminal completion event")
             )
         });
         let turn_end_idx = events

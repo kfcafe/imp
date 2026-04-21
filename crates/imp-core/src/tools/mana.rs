@@ -1232,7 +1232,7 @@ impl Tool for ManaTool {
         "Mana"
     }
     fn description(&self) -> &str {
-        "Work coordination substrate. Prefer this over bash for equivalent mana operations: inspect/create/update/claim/release units, inspect orchestration logs/agents/next/tree, and run orchestration natively with canonical target selection (`id`, `targets`, or all ready work), background runs, and in-session run state. Use it for complex tasks or delegation. Load the `mana` skill when coordinating multi-step work or delegation to learn the workflow."
+        "Native mana work coordination: inspect, update, create, and run units or orchestration state. Prefer it over bash for equivalent mana actions."
     }
     fn parameters(&self) -> serde_json::Value {
         let string_or_array = || {

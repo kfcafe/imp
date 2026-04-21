@@ -177,7 +177,10 @@ async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Resu
 
     let content = match outcome.result.status {
         tower_contracts::worker::WorkerStatus::Completed => {
-            format!("Spawned worker for unit {} completed successfully.", assignment.id)
+            format!(
+                "Spawned worker for unit {} completed successfully.",
+                assignment.id
+            )
         }
         tower_contracts::worker::WorkerStatus::AwaitingVerify => {
             format!(
@@ -222,10 +225,7 @@ async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Resu
     })
 }
 
-async fn execute_ad_hoc_spawn(
-    params: serde_json::Value,
-    ctx: ToolContext,
-) -> Result<ToolOutput> {
+async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Result<ToolOutput> {
     let prompt = params
         .get("prompt")
         .and_then(|v| v.as_str())

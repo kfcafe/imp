@@ -71,17 +71,17 @@ impl Tool for ScanTool {
     }
 
     fn description(&self) -> &str {
-        "Analyze code structure and extract code blocks with tree-sitter. Use it to inspect types, functions, impls, and related symbols, or to extract code at file:line, file:start-end, or file#symbol."
+        "Scan code structure or extract code blocks with tree-sitter."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["extract", "build", "scan"], "description": "scan = summarize code structure in a directory; build = build structure for specific files; extract = extract code by position or symbol" },
-                "files": { "type": "array", "description": "For build: file paths. For extract: targets like path:line, path:start-end, or path#symbol.", "items": { "type": "string" } },
-                "directory": { "type": "string", "description": "Directory to scan for supported source files" },
-                "task": { "type": "string", "description": "Optional context to help prioritize relevant structures" }
+                "action": { "type": "string", "enum": ["extract", "build", "scan"] },
+                "files": { "type": "array", "items": { "type": "string" } },
+                "directory": { "type": "string" },
+                "task": { "type": "string" }
             },
             "required": ["action"]
         })

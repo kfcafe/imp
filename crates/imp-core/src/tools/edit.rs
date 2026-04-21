@@ -17,16 +17,16 @@ impl Tool for EditTool {
         "Edit File"
     }
     fn description(&self) -> &str {
-        "Edit an existing file with structured find/replace operations. Supports single edits and sequential multi-edits, with safer behavior than shell text substitution."
+        "Edit a file with exact find/replace or sequential edits."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Path to the file to edit" },
-                "oldText": { "type": "string", "description": "Text to find and replace for a single edit" },
-                "newText": { "type": "string", "description": "Replacement text for a single edit" },
-                "edits": { "type": "array", "description": "Array of {oldText, newText} edits applied sequentially", "items": { "type": "object", "properties": { "oldText": { "type": "string" }, "newText": { "type": "string" } }, "required": ["oldText", "newText"] } }
+                "path": { "type": "string" },
+                "oldText": { "type": "string" },
+                "newText": { "type": "string" },
+                "edits": { "type": "array", "items": { "type": "object", "properties": { "oldText": { "type": "string" }, "newText": { "type": "string" } }, "required": ["oldText", "newText"] } }
             },
             "required": ["path"]
         })

@@ -7,6 +7,7 @@ pub mod config;
 pub mod context;
 pub mod context_prefill;
 pub mod error;
+pub mod error_display;
 pub mod guardrails;
 pub mod hooks;
 pub mod imp_session;
@@ -20,6 +21,7 @@ pub mod personality;
 pub mod resources;
 pub mod retry;
 pub mod roles;
+pub mod sdk;
 pub mod session;
 pub mod session_index;
 pub mod storage;
@@ -30,7 +32,9 @@ pub mod usage;
 
 pub use agent::{TimingEvent, TimingStage};
 pub use error::{Error, Result};
+pub use error_display::format_error_for_display;
 pub use mana_review::{ManaReviewState, TurnManaReview};
+pub use sdk::*;
 
 // Re-export imp-llm for downstream crates
 pub use imp_llm;

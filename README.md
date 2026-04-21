@@ -137,6 +137,46 @@ The interactive terminal UI gives you:
 
 You can also define shell tools via TOML config, or register tools from Lua extensions.
 
+## Rust SDK preview
+
+`imp-core` already exposes the seed of an embeddable Rust SDK.
+The new curated entry point is `imp_core::sdk`, which re-exports the main host-facing pieces:
+
+- `ImpSession` — create a session, prompt, steer, follow up, cancel, and wait
+- `SessionOptions` / `SessionChoice` — configure persistence, model hints, mode, UI, and task context
+- `AgentEvent` — consume the runtime event stream
+- `UserInterface` — bridge host UI interactions like confirm/input/select/status/widget/custom
+- `ThinkingLevel`, `Model`, and the core `Result` / `Error` types
+
+Example:
+
+```rust,no_run
+use imp_core::sdk::{AgentEvent, ImpSession, Result, SessionOptions};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut session = ImpSession::create(SessionOptions {
+        cwd: std::env::current_dir()?,
+        ..Default::default()
+    })
+    .await?;
+
+    session.prompt("Summarize this repository.").await?;
+
+    while let Some(event) = session.recv_event().await {
+        match event {
+            AgentEvent::AgentEnd { .. } => break,
+            _ => {}
+        }
+    }
+
+    session.wait().await
+}
+```
+
+See `crates/imp-core/examples/sdk_session.rs` for a small working example.
+This first SDK slice intentionally stays close to the existing `ImpSession` runtime rather than inventing a second parallel abstraction. A higher-level host runtime wrapper may come later.
+
 ## Providers
 
 imp works with 11 LLM providers out of the box. Native integrations for Anthropic, OpenAI, and Google, plus any provider that speaks the OpenAI Chat Completions protocol.

@@ -6,10 +6,7 @@ const IMP_DIR_NAME: &str = ".imp";
 const LEGACY_APP_NAME: &str = "imp";
 
 pub fn global_root() -> PathBuf {
-    global_root_from_env(
-        std::env::var_os("HOME"),
-        std::env::var_os("USERPROFILE"),
-    )
+    global_root_from_env(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
 }
 
 fn global_root_from_env(
@@ -278,14 +275,22 @@ pub fn reconcile_legacy_into_global_root() -> io::Result<Vec<PathBuf>> {
         global_session_index_path(),
         legacy_data_roots()
             .into_iter()
-            .flat_map(|root| [root.join("indexes").join("session_index.db"), root.join("session_index.db")])
+            .flat_map(|root| {
+                [
+                    root.join("indexes").join("session_index.db"),
+                    root.join("session_index.db"),
+                ]
+            })
             .collect(),
     )?);
 
     Ok(migrated)
 }
 
-fn reconcile_file_candidates(target: PathBuf, candidates: Vec<PathBuf>) -> io::Result<Vec<PathBuf>> {
+fn reconcile_file_candidates(
+    target: PathBuf,
+    candidates: Vec<PathBuf>,
+) -> io::Result<Vec<PathBuf>> {
     if target.exists() {
         return Ok(Vec::new());
     }
@@ -346,8 +351,12 @@ fn xdg_data_root() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
         return Some(PathBuf::from(dir).join(LEGACY_APP_NAME));
     }
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".local").join("share").join(LEGACY_APP_NAME))
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join(LEGACY_APP_NAME)
+    })
 }
 
 fn macos_application_support_root() -> Option<PathBuf> {
@@ -388,7 +397,10 @@ mod tests {
 
     #[test]
     fn project_root_uses_dot_imp_directory() {
-        assert_eq!(project_root(Path::new("/tmp/project")), PathBuf::from("/tmp/project/.imp"));
+        assert_eq!(
+            project_root(Path::new("/tmp/project")),
+            PathBuf::from("/tmp/project/.imp")
+        );
     }
 
     #[test]
@@ -426,7 +438,11 @@ mod tests {
         fs::create_dir_all(&legacy).unwrap();
         fs::write(legacy.join("SKILL.md"), "# Skill\n").unwrap();
 
-        let migrated = reconcile_dir_candidates(target.clone(), vec![temp.path().join("legacy").join("skills")]).unwrap();
+        let migrated = reconcile_dir_candidates(
+            target.clone(),
+            vec![temp.path().join("legacy").join("skills")],
+        )
+        .unwrap();
         assert_eq!(migrated, vec![target.clone()]);
         assert!(target.join("my-skill").join("SKILL.md").exists());
     }

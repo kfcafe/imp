@@ -5,11 +5,11 @@ use imp_llm::ThinkingLevel;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::storage;
 use crate::guardrails::GuardrailConfig;
 use crate::hooks::HookDef;
 use crate::personality::PersonalityConfig;
 use crate::roles::RoleDef;
+use crate::storage;
 use crate::tools::web::types::WebConfig;
 
 /// Agent mode — controls which tools and mana actions the agent may use.
@@ -595,6 +595,33 @@ impl Default for LearningConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AutoCompactionMode {
+    /// Automatic context compaction is disabled; manual `/compact` only.
+    #[default]
+    Disabled,
+    /// Reserved placeholder for future near-threshold auto-compaction.
+    NearThreshold,
+    /// Reserved placeholder for future aggressive auto-compaction.
+    Aggressive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AutoCompactionConfig {
+    /// Placeholder mode selection for future auto-compaction design.
+    #[serde(default)]
+    pub mode: AutoCompactionMode,
+}
+
+impl Default for AutoCompactionConfig {
+    fn default() -> Self {
+        Self {
+            mode: AutoCompactionMode::Disabled,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContextConfig {
     /// Mask old tool outputs at this ratio (default: 0.6).
@@ -602,6 +629,10 @@ pub struct ContextConfig {
 
     /// Keep last N turns unmasked (default: 10).
     pub mask_window: usize,
+
+    /// Placeholder auto-compaction settings. Disabled by default.
+    #[serde(default)]
+    pub auto_compaction: AutoCompactionConfig,
 }
 
 impl Default for ContextConfig {
@@ -609,6 +640,7 @@ impl Default for ContextConfig {
         Self {
             observation_mask_threshold: 0.6,
             mask_window: 10,
+            auto_compaction: AutoCompactionConfig::default(),
         }
     }
 }
@@ -788,6 +820,10 @@ mod tests {
         assert!(config.hooks.is_empty());
         assert!((config.context.observation_mask_threshold - 0.6).abs() < f64::EPSILON);
         assert_eq!(config.context.mask_window, 10);
+        assert_eq!(
+            config.context.auto_compaction.mode,
+            AutoCompactionMode::Disabled
+        );
         assert_eq!(config.guardrails, GuardrailConfig::default());
     }
 
@@ -843,6 +879,10 @@ search_provider = "exa"
         );
         assert!((config.context.observation_mask_threshold - 0.5).abs() < f64::EPSILON);
         assert_eq!(config.context.mask_window, 5);
+        assert_eq!(
+            config.context.auto_compaction.mode,
+            AutoCompactionMode::Disabled
+        );
     }
 
     #[test]
@@ -1026,6 +1066,9 @@ role = "assistant"
             context: ContextConfig {
                 observation_mask_threshold: 0.5,
                 mask_window: 5,
+                auto_compaction: AutoCompactionConfig {
+                    mode: AutoCompactionMode::NearThreshold,
+                },
             },
             ..Default::default()
         };
@@ -1033,6 +1076,10 @@ role = "assistant"
         base.merge(overlay);
         assert!((base.context.observation_mask_threshold - 0.5).abs() < f64::EPSILON);
         assert_eq!(base.context.mask_window, 5);
+        assert_eq!(
+            base.context.auto_compaction.mode,
+            AutoCompactionMode::NearThreshold
+        );
     }
 
     #[test]
@@ -1083,6 +1130,9 @@ max_turns = 20
 [context]
 observation_mask_threshold = 0.55
 mask_window = 9
+
+[context.auto_compaction]
+mode = "disabled"
 "#,
         )
         .unwrap();
@@ -1096,6 +1146,9 @@ model = "sonnet"
 [context]
 observation_mask_threshold = 0.5
 mask_window = 5
+
+[context.auto_compaction]
+mode = "disabled"
 "#,
         )
         .unwrap();

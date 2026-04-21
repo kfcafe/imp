@@ -80,7 +80,6 @@ pub fn suggested_project_soul_path(cwd: &Path) -> PathBuf {
     }
 
     cwd.join(".imp").join("soul.md")
-
 }
 
 /// Discover the active soul document.
@@ -409,8 +408,14 @@ mod tests {
         fs::write(project.join("AGENTS.md"), "project-legacy").unwrap();
 
         let results = discover_agents_md(&project, &user_dir);
-        let canonical_idx = results.iter().position(|a| a.content == "project-imp").unwrap();
-        let legacy_idx = results.iter().position(|a| a.content == "project-legacy").unwrap();
+        let canonical_idx = results
+            .iter()
+            .position(|a| a.content == "project-imp")
+            .unwrap();
+        let legacy_idx = results
+            .iter()
+            .position(|a| a.content == "project-legacy")
+            .unwrap();
         assert!(canonical_idx < legacy_idx);
     }
 
