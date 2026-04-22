@@ -1544,6 +1544,7 @@ async fn run_headless_mode(
 
     let options = imp_core::mana_worker::WorkerRunOptions {
         cwd: cwd.clone(),
+        model_override: None,
         model: cli.model.clone().or_else(|| assignment.model.clone()),
         provider: cli.provider.clone(),
         api_key: cli.api_key.clone(),
@@ -4108,9 +4109,17 @@ fn build_full_prompt(prompt: &str, file_context: &str, stdin: &Option<String>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use futures_util::Stream;
     use imp_llm::auth::{OAuthCredential, StoredCredential};
-    use imp_llm::provider::ThinkingLevel;
+    use imp_llm::message::{AssistantMessage, ContentBlock, StopReason};
+    use imp_llm::provider::{Context as ProviderContext, Provider, RequestOptions, ThinkingLevel};
+    use imp_llm::stream::StreamEvent;
+    use imp_llm::{Model, ModelMeta};
+    use mana_core::unit::Unit;
     use serde_json::json;
+    use std::pin::Pin;
+    use std::sync::Arc;
 
     /// Helper: build a minimal Cli struct with defaults for testing.
     fn default_cli() -> Cli {
@@ -4139,6 +4148,92 @@ mod tests {
 
     fn empty_auth_store() -> AuthStore {
         AuthStore::new(std::path::PathBuf::from("auth.json"))
+    }
+
+    struct StaticTestProvider {
+        text: String,
+    }
+
+    #[async_trait]
+    impl Provider for StaticTestProvider {
+        fn stream(
+            &self,
+            model: &Model,
+            _context: ProviderContext,
+            _options: RequestOptions,
+            _api_key: &str,
+        ) -> Pin<Box<dyn Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
+            let message = AssistantMessage {
+                content: vec![ContentBlock::Text {
+                    text: self.text.clone(),
+                }],
+                usage: None,
+                stop_reason: StopReason::EndTurn,
+                timestamp: 0,
+            };
+            let events = vec![
+                Ok(StreamEvent::MessageStart {
+                    model: model.meta.id.clone(),
+                }),
+                Ok(StreamEvent::TextDelta {
+                    text: self.text.clone(),
+                }),
+                Ok(StreamEvent::MessageEnd { message }),
+            ];
+            Box::pin(futures_util::stream::iter(events))
+        }
+
+        async fn resolve_auth(
+            &self,
+            _auth: &AuthStore,
+        ) -> imp_llm::Result<imp_llm::auth::ApiKey> {
+            Ok("test-key".to_string())
+        }
+
+        fn id(&self) -> &str {
+            "test-provider"
+        }
+
+        fn models(&self) -> &[ModelMeta] {
+            &[]
+        }
+    }
+
+    fn static_test_model(text: &str) -> Model {
+        Model {
+            meta: ModelMeta {
+                id: "test-model".to_string(),
+                provider: "test-provider".to_string(),
+                name: "Test Model".to_string(),
+                context_window: 4096,
+                max_output_tokens: 1024,
+                pricing: Default::default(),
+                capabilities: Default::default(),
+            },
+            provider: Arc::new(StaticTestProvider {
+                text: text.to_string(),
+            }),
+        }
+    }
+
+    fn write_test_mana_unit(
+        root: &std::path::Path,
+        id: &str,
+        title_slug: &str,
+        title: &str,
+        description: &str,
+        verify: &str,
+    ) {
+        let mana_dir = root.join(".mana");
+        std::fs::create_dir_all(&mana_dir).unwrap();
+        std::fs::write(mana_dir.join("config.yaml"), "project: test\nnext_id: 2\n").unwrap();
+
+        let mut unit = Unit::new(id, title);
+        unit.description = Some(description.to_string());
+        unit.verify = Some(verify.to_string());
+        unit.updated_at = unit.created_at;
+        unit.to_file(&mana_dir.join(format!("{id}-{title_slug}.md")))
+            .unwrap();
     }
 
     #[test]
@@ -4208,6 +4303,64 @@ mod tests {
         assert!(!worker_status_counts_as_success(
             imp_core::mana_worker::WorkerStatus::Cancelled
         ));
+    }
+
+    #[tokio::test]
+    async fn worker_run_end_to_end_with_model_override_closes_verified_unit() {
+        let temp = tempfile::tempdir().unwrap();
+        write_test_mana_unit(
+            temp.path(),
+            "1",
+            "test-unit",
+            "Test unit",
+            "Say hi and finish.",
+            "test -n ok",
+        );
+
+        let assignment = imp_core::mana_worker::load_assignment_with_mana_dir(
+            temp.path(),
+            "1",
+            Some(temp.path().join(".mana").as_path()),
+        )
+        .expect("load assignment");
+
+        let options = imp_core::mana_worker::WorkerRunOptions {
+            cwd: temp.path().to_path_buf(),
+            model_override: Some(static_test_model("done")),
+            model: None,
+            provider: None,
+            api_key: None,
+            system_prompt: None,
+            thinking: Some(ThinkingLevel::Off),
+            max_turns: Some(2),
+            max_tokens: None,
+            no_tools: false,
+            mana_dir_override: Some(temp.path().join(".mana")),
+            defer_verify: false,
+            lua_loader: None,
+        };
+
+        let mut prepared = imp_core::mana_worker::prepare_worker_run(assignment, options)
+            .await
+            .expect("prepare worker run");
+        prepared
+            .session
+            .prompt(&prepared.prompt)
+            .await
+            .expect("prompt session");
+        prepared.session.wait().await.expect("wait for session");
+        let outcome = imp_core::mana_worker::finalize_worker_run(prepared)
+            .await
+            .expect("finalize worker run");
+
+        assert_eq!(outcome.result.status, imp_core::mana_worker::WorkerStatus::Completed);
+        assert_eq!(outcome.verify_passed, Some(true));
+        assert!(outcome.closed_after_verify);
+
+        let archived = mana_core::ops::show::get(&temp.path().join(".mana"), "1")
+            .expect("show closed unit");
+        assert!(archived.unit.is_archived);
+        assert_eq!(archived.unit.status.to_string(), "closed");
     }
 
     #[test]

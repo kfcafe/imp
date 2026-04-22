@@ -25,6 +25,9 @@ use mana_core::api;
 use mana_core::ops::close::{CloseOpts, CloseOutcome, VerifyFailureResult};
 use tokio::process::Command as TokioCommand;
 pub use tower_contracts::worker::{WorkerAssignment, WorkerAttempt, WorkerResult, WorkerStatus};
+use tower_contracts::evidence::{
+    ArtifactKind, ArtifactRef, VerifierResult, VerifierStatus,
+};
 
 use crate::context_prefill::{self, AssembledContext, FileSpec, PrefillConfig};
 use crate::imp_session::{ImpSession, SessionChoice, SessionOptions};
@@ -254,6 +257,7 @@ pub fn build_task_context(assignment: &WorkerAssignment) -> TaskContext {
 
 pub struct WorkerRunOptions {
     pub cwd: PathBuf,
+    pub model_override: Option<imp_llm::Model>,
     pub model: Option<String>,
     pub provider: Option<String>,
     pub api_key: Option<String>,
@@ -288,6 +292,7 @@ pub struct WorkerRunOutcome {
     pub prefill_warnings: Vec<String>,
     pub estimated_prefill_tokens: usize,
     pub verify_output: Option<String>,
+    pub verifier_result: Option<VerifierResult>,
 }
 
 struct MappedCloseOutcome {
@@ -296,6 +301,7 @@ struct MappedCloseOutcome {
     error: Option<String>,
     closed_after_verify: bool,
     verify_output: Option<String>,
+    verifier_result: Option<VerifierResult>,
 }
 
 pub async fn prepare_worker_run(
@@ -316,6 +322,7 @@ pub async fn prepare_worker_run(
 
     let session_options = SessionOptions {
         cwd: options.cwd,
+        model_override: options.model_override,
         model: options.model,
         provider: options.provider,
         api_key: options.api_key,
@@ -393,6 +400,7 @@ pub async fn finalize_worker_run(
     };
     let mut summary_override = None;
     let mut verify_output = None;
+    let mut verifier_result = None;
     let mut error = None;
 
     if !batch_verify {
@@ -412,6 +420,7 @@ pub async fn finalize_worker_run(
                 closed_after_verify = mapped.closed_after_verify;
                 summary_override = Some(mapped.summary);
                 verify_output = mapped.verify_output.or(verify_output);
+                verifier_result = mapped.verifier_result;
             } else {
                 status = WorkerStatus::Failed;
                 error = Some(format!("Verify command failed: {verify}"));
@@ -469,6 +478,7 @@ pub async fn finalize_worker_run(
         prefill_warnings,
         estimated_prefill_tokens,
         verify_output,
+        verifier_result,
     })
 }
 
@@ -496,6 +506,7 @@ fn map_close_outcome(unit_id: &str, outcome: CloseOutcome) -> MappedCloseOutcome
             error: None,
             closed_after_verify: true,
             verify_output: None,
+            verifier_result: None,
         },
         CloseOutcome::DeferredVerify { .. } => MappedCloseOutcome {
             status: WorkerStatus::AwaitingVerify,
@@ -503,6 +514,7 @@ fn map_close_outcome(unit_id: &str, outcome: CloseOutcome) -> MappedCloseOutcome
             error: None,
             closed_after_verify: false,
             verify_output: None,
+            verifier_result: None,
         },
         CloseOutcome::VerifyFailed(result) => map_verify_failed_close_outcome(unit_id, result),
         CloseOutcome::RejectedByHook { unit_id } => MappedCloseOutcome {
@@ -511,6 +523,7 @@ fn map_close_outcome(unit_id: &str, outcome: CloseOutcome) -> MappedCloseOutcome
             error: Some("Pre-close hook rejected close.".to_string()),
             closed_after_verify: false,
             verify_output: None,
+            verifier_result: None,
         },
         CloseOutcome::FeatureRequiresHuman { unit_id, title, .. } => MappedCloseOutcome {
             status: WorkerStatus::Blocked,
@@ -518,6 +531,7 @@ fn map_close_outcome(unit_id: &str, outcome: CloseOutcome) -> MappedCloseOutcome
             error: Some("Feature unit requires human close.".to_string()),
             closed_after_verify: false,
             verify_output: None,
+            verifier_result: None,
         },
         CloseOutcome::CircuitBreakerTripped {
             unit_id,
@@ -532,6 +546,7 @@ fn map_close_outcome(unit_id: &str, outcome: CloseOutcome) -> MappedCloseOutcome
             error: Some("Circuit breaker tripped during close.".to_string()),
             closed_after_verify: false,
             verify_output: None,
+            verifier_result: None,
         },
         CloseOutcome::MergeConflict { files, .. } => MappedCloseOutcome {
             status: WorkerStatus::Blocked,
@@ -542,6 +557,7 @@ fn map_close_outcome(unit_id: &str, outcome: CloseOutcome) -> MappedCloseOutcome
             error: Some(format!("Merge conflict during close: {}", files.join(", "))),
             closed_after_verify: false,
             verify_output: None,
+            verifier_result: None,
         },
         CloseOutcome::VerifyFrozenViolation { unit_id, .. } => MappedCloseOutcome {
             status: WorkerStatus::Blocked,
@@ -549,6 +565,7 @@ fn map_close_outcome(unit_id: &str, outcome: CloseOutcome) -> MappedCloseOutcome
             error: Some("Verify frozen violation during close.".to_string()),
             closed_after_verify: false,
             verify_output: None,
+            verifier_result: None,
         },
     }
 }
@@ -571,12 +588,49 @@ fn map_verify_failed_close_outcome(
         ))
     };
 
+    let verifier_result = build_verify_failure_verifier_result(unit_id, &result);
+
     MappedCloseOutcome {
         status: WorkerStatus::Failed,
         summary,
         error,
         closed_after_verify: false,
         verify_output: Some(result.output),
+        verifier_result: Some(verifier_result),
+    }
+}
+
+fn build_verify_failure_verifier_result(
+    unit_id: &str,
+    result: &VerifyFailureResult,
+) -> VerifierResult {
+    let mut artifact_refs = Vec::new();
+    if !result.output.trim().is_empty() {
+        artifact_refs.push(ArtifactRef {
+            artifact_id: format!("{unit_id}:verify-output"),
+            kind: ArtifactKind::VerifyOutput,
+            locator: format!("verify-output://{unit_id}"),
+            run_id: None,
+            unit_id: Some(unit_id.to_string()),
+            stage: Some("verify".to_string()),
+        });
+    }
+
+    VerifierResult {
+        verifier_name: "unit.verify".to_string(),
+        status: VerifierStatus::Failed,
+        command: Some(result.verify_command.clone()),
+        exit_code: result.exit_code,
+        summary: Some(if result.timed_out {
+            "verify timed out".to_string()
+        } else {
+            "verify failed".to_string()
+        }),
+        artifact_refs,
+        started_at: None,
+        finished_at: None,
+        run_id: None,
+        unit_id: Some(unit_id.to_string()),
     }
 }
 
@@ -1002,7 +1056,34 @@ mod tests {
         );
         assert_eq!(mapped.status, WorkerStatus::Failed);
         assert_eq!(mapped.verify_output.as_deref(), Some("boom"));
+        let verifier = mapped.verifier_result.expect("verifier result");
+        assert_eq!(verifier.status, VerifierStatus::Failed);
+        assert_eq!(verifier.command.as_deref(), Some("cargo test"));
+        assert_eq!(verifier.unit_id.as_deref(), Some("9"));
+        assert_eq!(verifier.artifact_refs.len(), 1);
+        assert_eq!(verifier.artifact_refs[0].kind, ArtifactKind::VerifyOutput);
         assert!(mapped.error.unwrap().contains("cargo test"));
+    }
+
+    #[test]
+    fn build_verify_failure_verifier_result_omits_artifact_when_output_empty() {
+        let verifier = build_verify_failure_verifier_result(
+            "11",
+            &VerifyFailureResult {
+                unit: mana_core::unit::Unit::new("11", "Verify fail"),
+                attempt_number: 1,
+                exit_code: Some(124),
+                output: String::new(),
+                timed_out: true,
+                on_fail_action_taken: None,
+                verify_command: "cargo test slow".to_string(),
+                timeout_secs: Some(30),
+                warnings: Vec::new(),
+            },
+        );
+        assert_eq!(verifier.status, VerifierStatus::Failed);
+        assert_eq!(verifier.summary.as_deref(), Some("verify timed out"));
+        assert!(verifier.artifact_refs.is_empty());
     }
 
     #[test]

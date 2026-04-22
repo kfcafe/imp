@@ -187,6 +187,7 @@ async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Resu
 
     let options = WorkerRunOptions {
         cwd: ctx.cwd.clone(),
+        model_override: None,
         model: params
             .get("model")
             .and_then(|v| v.as_str())
@@ -284,6 +285,7 @@ async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Resu
                 "unit_id": assignment.id,
                 "verify_passed": outcome.verify_passed,
                 "verify_output": outcome.verify_output,
+                "verifier_result": outcome.verifier_result,
                 "closed_after_verify": outcome.closed_after_verify,
                 "prefilled_file_count": outcome.prefilled_files.len(),
             }),
@@ -307,6 +309,7 @@ async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Re
 
     let session_options = SessionOptions {
         cwd: ctx.cwd.clone(),
+        model_override: None,
         model: params
             .get("model")
             .and_then(|v| v.as_str())

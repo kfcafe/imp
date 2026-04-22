@@ -73,6 +73,10 @@ pub struct SessionOptions {
     /// Working directory. Tools resolve paths relative to this.
     pub cwd: PathBuf,
 
+    /// Prebuilt model override for deterministic tests or embedded callers.
+    /// When set, ImpSession skips runtime model/provider/auth resolution.
+    pub model_override: Option<Model>,
+
     /// Model hint — alias ("sonnet") or full ID. Resolved against the
     /// model registry. Falls back to config, then "sonnet".
     pub model: Option<String>,
@@ -131,6 +135,7 @@ impl Default for SessionOptions {
     fn default() -> Self {
         Self {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            model_override: None,
             model: None,
             provider: None,
             api_key: None,
@@ -264,45 +269,51 @@ impl ImpSession {
 
         // 3. Resolve model + provider route
         let model_registry = ModelRegistry::with_builtins();
-        let runtime_connection = resolve_runtime_connection(
-            RuntimeConnectionIntent {
-                model_hint: options.model.as_deref(),
-                config_model: config.model.as_deref(),
-                provider_override: options.provider.as_deref(),
-                api_key_override_present: options.api_key.is_some(),
-            },
-            &auth_store,
-            &model_registry,
-        )
-        .map_err(Error::Config)?;
-
-        let meta = model_registry
-            .resolve_meta(
-                &runtime_connection.model_id,
-                Some(&runtime_connection.provider_name),
+        let (model, _provider_name, api_key) = if let Some(model) = options.model_override.as_ref() {
+            (clone_model(model), model.meta.provider.clone(), String::new())
+        } else {
+            let runtime_connection = resolve_runtime_connection(
+                RuntimeConnectionIntent {
+                    model_hint: options.model.as_deref(),
+                    config_model: config.model.as_deref(),
+                    provider_override: options.provider.as_deref(),
+                    api_key_override_present: options.api_key.is_some(),
+                },
+                &auth_store,
+                &model_registry,
             )
-            .ok_or_else(|| {
-                Error::Config(format!(
-                    "Unknown model/provider route: {} via {}",
-                    runtime_connection.model_id, runtime_connection.provider_name
-                ))
-            })?;
+            .map_err(Error::Config)?;
 
-        let provider_name = runtime_connection.provider_name.clone();
+            let meta = model_registry
+                .resolve_meta(
+                    &runtime_connection.model_id,
+                    Some(&runtime_connection.provider_name),
+                )
+                .ok_or_else(|| {
+                    Error::Config(format!(
+                        "Unknown model/provider route: {} via {}",
+                        runtime_connection.model_id, runtime_connection.provider_name
+                    ))
+                })?;
 
-        // Set runtime API key override now that we know the provider
-        if let Some(ref key) = options.api_key {
-            auth_store.set_runtime_key(&provider_name, key.clone());
-        }
+            let provider_name = runtime_connection.provider_name.clone();
 
-        let provider = create_provider(&provider_name)
-            .ok_or_else(|| Error::Config(format!("Unknown provider: {provider_name}")))?;
+            if let Some(ref key) = options.api_key {
+                auth_store.set_runtime_key(&provider_name, key.clone());
+            }
 
-        let api_key = resolve_api_key(&mut auth_store, &provider_name).await?;
+            let provider = create_provider(&provider_name)
+                .ok_or_else(|| Error::Config(format!("Unknown provider: {provider_name}")))?;
 
-        let model = Model {
-            meta,
-            provider: Arc::from(provider),
+            let api_key = resolve_api_key(&mut auth_store, &provider_name).await?;
+            (
+                Model {
+                    meta,
+                    provider: Arc::from(provider),
+                },
+                provider_name,
+                api_key,
+            )
         };
 
         // 5. Build agent
