@@ -105,6 +105,33 @@ impl Tool for ImpTool {
     }
 }
 
+struct AdHocSpawnOutcome {
+    status: &'static str,
+    summary: String,
+    content: String,
+    success: bool,
+    final_text: Option<String>,
+}
+
+fn build_ad_hoc_spawn_outcome(final_text: Option<String>) -> AdHocSpawnOutcome {
+    match final_text.filter(|text| !text.trim().is_empty()) {
+        Some(text) => AdHocSpawnOutcome {
+            status: "completed",
+            summary: text.clone(),
+            content: text.clone(),
+            success: true,
+            final_text: Some(text),
+        },
+        None => AdHocSpawnOutcome {
+            status: "completed_no_output",
+            summary: "Transient helper worker completed with no final text.".to_string(),
+            content: "Transient helper worker completed with no final text.".to_string(),
+            success: true,
+            final_text: None,
+        },
+    }
+}
+
 fn unit_worker_status_is_error(status: tower_contracts::worker::WorkerStatus) -> bool {
     matches!(
         status,
@@ -294,14 +321,11 @@ async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Re
         .map_err(|e| Error::Tool(e.to_string()))?;
 
     let final_text = extract_final_assistant_text(&session);
-    let summary = final_text
-        .clone()
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| "Transient helper worker completed.".to_string());
+    let outcome = build_ad_hoc_spawn_outcome(final_text);
 
     Ok(ToolOutput {
         content: vec![ContentBlock::Text {
-            text: "Transient helper worker completed.".to_string(),
+            text: outcome.content,
         }],
         details: json!({
             "tool": "imp",
@@ -309,9 +333,10 @@ async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Re
             "spawn_mode": "ad_hoc",
             "delegation_mode": "ad_hoc",
             "durable": false,
-            "status": "completed",
-            "summary": summary,
-            "final_text": final_text,
+            "status": outcome.status,
+            "success": outcome.success,
+            "summary": outcome.summary,
+            "final_text": outcome.final_text,
             "model": session.model().meta.id.clone(),
             "provider": session.model().meta.provider.clone(),
             "idempotency_key": idempotency_key,
@@ -465,6 +490,28 @@ mod tests {
             Ok(_) => panic!("expected missing unit_id to return an error"),
             Err(err) => assert!(err.to_string().contains("unit_id")),
         }
+    }
+
+    #[test]
+    fn build_ad_hoc_spawn_outcome_uses_final_text_when_present() {
+        let outcome = build_ad_hoc_spawn_outcome(Some("transient result".to_string()));
+
+        assert_eq!(outcome.status, "completed");
+        assert!(outcome.success);
+        assert_eq!(outcome.summary, "transient result");
+        assert_eq!(outcome.content, "transient result");
+        assert_eq!(outcome.final_text.as_deref(), Some("transient result"));
+    }
+
+    #[test]
+    fn build_ad_hoc_spawn_outcome_distinguishes_missing_final_text() {
+        let outcome = build_ad_hoc_spawn_outcome(None);
+
+        assert_eq!(outcome.status, "completed_no_output");
+        assert!(outcome.success);
+        assert!(outcome.summary.contains("no final text"));
+        assert!(outcome.content.contains("no final text"));
+        assert!(outcome.final_text.is_none());
     }
 
     #[test]
