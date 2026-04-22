@@ -105,6 +105,15 @@ impl Tool for ImpTool {
     }
 }
 
+fn unit_worker_status_is_error(status: tower_contracts::worker::WorkerStatus) -> bool {
+    matches!(
+        status,
+        tower_contracts::worker::WorkerStatus::Failed
+            | tower_contracts::worker::WorkerStatus::Blocked
+            | tower_contracts::worker::WorkerStatus::Cancelled
+    )
+}
+
 async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Result<ToolOutput> {
     let unit_id = params
         .get("unit_id")
@@ -222,8 +231,9 @@ async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Resu
             "provider": params.get("provider").and_then(|v| v.as_str()),
             "prefilled_file_count": outcome.prefilled_files.len(),
             "idempotency_key": idempotency_key,
+            "success": !unit_worker_status_is_error(outcome.result.status),
         }),
-        is_error: false,
+        is_error: unit_worker_status_is_error(outcome.result.status),
     })
 }
 
@@ -455,6 +465,25 @@ mod tests {
             Ok(_) => panic!("expected missing unit_id to return an error"),
             Err(err) => assert!(err.to_string().contains("unit_id")),
         }
+    }
+
+    #[test]
+    fn unit_worker_status_is_error_for_failed_blocked_and_cancelled_only() {
+        assert!(!unit_worker_status_is_error(
+            tower_contracts::worker::WorkerStatus::Completed
+        ));
+        assert!(!unit_worker_status_is_error(
+            tower_contracts::worker::WorkerStatus::AwaitingVerify
+        ));
+        assert!(unit_worker_status_is_error(
+            tower_contracts::worker::WorkerStatus::Failed
+        ));
+        assert!(unit_worker_status_is_error(
+            tower_contracts::worker::WorkerStatus::Blocked
+        ));
+        assert!(unit_worker_status_is_error(
+            tower_contracts::worker::WorkerStatus::Cancelled
+        ));
     }
 
     #[test]
