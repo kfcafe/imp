@@ -113,6 +113,33 @@ struct AdHocSpawnOutcome {
     final_text: Option<String>,
 }
 
+fn build_spawn_details(
+    spawn_mode: &str,
+    durable: bool,
+    status: impl Into<String>,
+    success: bool,
+    summary: impl Into<String>,
+    model: serde_json::Value,
+    provider: serde_json::Value,
+    idempotency_key: Option<String>,
+    mode_details: serde_json::Value,
+) -> serde_json::Value {
+    json!({
+        "tool": "imp",
+        "action": "spawn",
+        "spawn_mode": spawn_mode,
+        "delegation_mode": spawn_mode,
+        "durable": durable,
+        "status": status.into(),
+        "success": success,
+        "summary": summary.into(),
+        "model": model,
+        "provider": provider,
+        "idempotency_key": idempotency_key,
+        "mode_details": mode_details,
+    })
+}
+
 fn build_ad_hoc_spawn_outcome(final_text: Option<String>) -> AdHocSpawnOutcome {
     match final_text.filter(|text| !text.trim().is_empty()) {
         Some(text) => AdHocSpawnOutcome {
@@ -240,27 +267,28 @@ async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Resu
             }
         });
 
+    let success = !unit_worker_status_is_error(outcome.result.status);
+
     Ok(ToolOutput {
         content: vec![ContentBlock::Text { text: content }],
-        details: json!({
-            "tool": "imp",
-            "action": "spawn",
-            "spawn_mode": "unit",
-            "delegation_mode": "unit",
-            "durable": true,
-            "unit_id": assignment.id,
-            "status": status,
-            "summary": summary,
-            "verify_passed": outcome.verify_passed,
-            "verify_output": outcome.verify_output,
-            "closed_after_verify": outcome.closed_after_verify,
-            "model": outcome.result.model,
-            "provider": params.get("provider").and_then(|v| v.as_str()),
-            "prefilled_file_count": outcome.prefilled_files.len(),
-            "idempotency_key": idempotency_key,
-            "success": !unit_worker_status_is_error(outcome.result.status),
-        }),
-        is_error: unit_worker_status_is_error(outcome.result.status),
+        details: build_spawn_details(
+            "unit",
+            true,
+            status,
+            success,
+            summary,
+            json!(outcome.result.model),
+            json!(params.get("provider").and_then(|v| v.as_str())),
+            idempotency_key,
+            json!({
+                "unit_id": assignment.id,
+                "verify_passed": outcome.verify_passed,
+                "verify_output": outcome.verify_output,
+                "closed_after_verify": outcome.closed_after_verify,
+                "prefilled_file_count": outcome.prefilled_files.len(),
+            }),
+        ),
+        is_error: !success,
     })
 }
 
@@ -327,20 +355,19 @@ async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Re
         content: vec![ContentBlock::Text {
             text: outcome.content,
         }],
-        details: json!({
-            "tool": "imp",
-            "action": "spawn",
-            "spawn_mode": "ad_hoc",
-            "delegation_mode": "ad_hoc",
-            "durable": false,
-            "status": outcome.status,
-            "success": outcome.success,
-            "summary": outcome.summary,
-            "final_text": outcome.final_text,
-            "model": session.model().meta.id.clone(),
-            "provider": session.model().meta.provider.clone(),
-            "idempotency_key": idempotency_key,
-        }),
+        details: build_spawn_details(
+            "ad_hoc",
+            false,
+            outcome.status,
+            outcome.success,
+            outcome.summary,
+            json!(session.model().meta.id.clone()),
+            json!(session.model().meta.provider.clone()),
+            idempotency_key,
+            json!({
+                "final_text": outcome.final_text,
+            }),
+        ),
         is_error: false,
     })
 }
@@ -490,6 +517,33 @@ mod tests {
             Ok(_) => panic!("expected missing unit_id to return an error"),
             Err(err) => assert!(err.to_string().contains("unit_id")),
         }
+    }
+
+    #[test]
+    fn build_spawn_details_keeps_shared_fields_and_groups_mode_specific_data() {
+        let details = build_spawn_details(
+            "ad_hoc",
+            false,
+            "completed",
+            true,
+            "summary",
+            json!("model-x"),
+            json!("provider-y"),
+            Some("idem-1".to_string()),
+            json!({"final_text": "hello"}),
+        );
+
+        assert_eq!(details.get("spawn_mode").and_then(|v| v.as_str()), Some("ad_hoc"));
+        assert_eq!(details.get("delegation_mode").and_then(|v| v.as_str()), Some("ad_hoc"));
+        assert_eq!(details.get("status").and_then(|v| v.as_str()), Some("completed"));
+        assert_eq!(details.get("success").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            details
+                .get("mode_details")
+                .and_then(|v| v.get("final_text"))
+                .and_then(|v| v.as_str()),
+            Some("hello")
+        );
     }
 
     #[test]
