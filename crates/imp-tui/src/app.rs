@@ -218,6 +218,61 @@ fn startup_format_age(updated_at: u64) -> String {
     }
 }
 
+fn startup_quickstart_lines(
+    repo_label: &str,
+    tool_count: usize,
+    skill_count: usize,
+    has_agents_docs: bool,
+    has_project_soul: bool,
+    has_mana: bool,
+    has_recent_sessions: bool,
+    needs_auth: bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if needs_auth {
+        lines.push("• first: run /setup so imp can connect to a provider".to_string());
+    }
+
+    lines.push(format!(
+        "• try: inspect {repo_label} and explain how this repo is organized"
+    ));
+
+    if has_agents_docs {
+        lines.push(
+            "• try: read the local instructions and tell me how to work well here".to_string(),
+        );
+    }
+
+    if has_project_soul {
+        lines.push(
+            "• try: summarize the project soul and what it changes in imp's behavior"
+                .to_string(),
+        );
+    }
+
+    if has_mana {
+        lines.push(
+            "• try: inspect mana and tell me what work is active or should happen next"
+                .to_string(),
+        );
+    }
+
+    if has_recent_sessions {
+        lines.push(
+            "• try: summarize the most relevant recent session before we continue"
+                .to_string(),
+        );
+    }
+
+    lines.push(format!(
+        "• available now: {tool_count} tools and {skill_count} discovered skills"
+    ));
+
+    lines.truncate(5);
+    lines
+}
+
 fn build_generated_prompt_preview(
     visible_prompt_tools: &[String],
     mode: imp_core::config::AgentMode,
@@ -1207,6 +1262,10 @@ impl App {
     fn build_startup_surface(&self) -> StartupSurfaceData {
         let user_config_dir = imp_core::config::Config::user_config_dir();
         let skills = imp_core::resources::discover_skills(&self.cwd, &user_config_dir);
+        let agents_docs = imp_core::resources::discover_agents_md(&self.cwd, &user_config_dir);
+        let has_agents_docs = !agents_docs.is_empty();
+        let has_project_soul = imp_core::resources::discover_project_soul(&self.cwd).is_some();
+        let has_mana = imp_core::mana_prompt_context::nearest_mana_dir(&self.cwd).is_some();
         let lua_extensions = discover_extensions(&user_config_dir, Some(&self.cwd));
         let repo_label = self
             .cwd
@@ -1258,6 +1317,7 @@ impl App {
         } else {
             "needs auth"
         };
+        let needs_auth = provider_auth != "ready";
         let web_summary = self
             .config
             .web
@@ -1315,6 +1375,7 @@ impl App {
         let prompt_tokens = imp_core::context::estimate_tokens(&generated_prompt_preview);
 
         let recent_sessions = startup_recent_sessions(&self.cwd);
+        let has_recent_sessions = !recent_sessions.is_empty();
         let recent_session_lines = if recent_sessions.is_empty() {
             vec!["• none yet — use /resume once you have saved chats".to_string()]
         } else {
@@ -1372,6 +1433,19 @@ impl App {
         ];
 
         let sections = vec![
+            StartupSection {
+                title: "quickstart".to_string(),
+                lines: startup_quickstart_lines(
+                    &repo_label,
+                    visible_prompt_tools.len(),
+                    skills.len(),
+                    has_agents_docs,
+                    has_project_soul,
+                    has_mana,
+                    has_recent_sessions,
+                    needs_auth,
+                ),
+            },
             StartupSection {
                 title: "what imp can do here".to_string(),
                 lines: vec![
@@ -1436,7 +1510,7 @@ impl App {
             panel: StartupPanelData {
                 headline: "imp is ready. start with an action, not a blank screen.".to_string(),
                 subtitle: "This launch view shows the fastest ways to begin, plus the runtime surface already available in this session.".to_string(),
-                hint: "Quarter-screen keeps only the essentials; wider layouts reveal more context and the generated prompt preview.".to_string(),
+                hint: "Quarter-screen keeps only essentials; wider layouts reveal quickstart suggestions, recent sessions, and the generated prompt preview.".to_string(),
                 actions,
                 sections,
                 prompt_preview,
