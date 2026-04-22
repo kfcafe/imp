@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use imp_llm::ThinkingLevel;
 use mana_core::api;
+use mana_core::ops::close::{CloseOpts, CloseOutcome, VerifyFailureResult};
 use tokio::process::Command as TokioCommand;
 pub use tower_contracts::worker::{WorkerAssignment, WorkerAttempt, WorkerResult, WorkerStatus};
 
@@ -289,6 +290,14 @@ pub struct WorkerRunOutcome {
     pub verify_output: Option<String>,
 }
 
+struct MappedCloseOutcome {
+    status: WorkerStatus,
+    summary: String,
+    error: Option<String>,
+    closed_after_verify: bool,
+    verify_output: Option<String>,
+}
+
 pub async fn prepare_worker_run(
     assignment: WorkerAssignment,
     options: WorkerRunOptions,
@@ -382,6 +391,7 @@ pub async fn finalize_worker_run(
     } else {
         WorkerStatus::Completed
     };
+    let mut summary_override = None;
     let mut verify_output = None;
     let mut error = None;
 
@@ -396,16 +406,12 @@ pub async fn finalize_worker_run(
             verify_passed = Some(passed);
             verify_output = output;
             if passed {
-                status = WorkerStatus::Completed;
-                let close_result = std::process::Command::new("mana")
-                    .args(["close", &assignment.id])
-                    .current_dir(&assignment.workspace_root)
-                    .output();
-                if let Ok(output) = close_result {
-                    if output.status.success() {
-                        closed_after_verify = true;
-                    }
-                }
+                let mapped = close_unit_after_verify(&assignment)?;
+                status = mapped.status;
+                error = mapped.error;
+                closed_after_verify = mapped.closed_after_verify;
+                summary_override = Some(mapped.summary);
+                verify_output = mapped.verify_output.or(verify_output);
             } else {
                 status = WorkerStatus::Failed;
                 error = Some(format!("Verify command failed: {verify}"));
@@ -413,31 +419,33 @@ pub async fn finalize_worker_run(
         }
     }
 
-    let summary = Some(match status {
-        WorkerStatus::Completed => {
-            if closed_after_verify {
-                format!(
-                    "Unit {} completed and closed after verify pass.",
-                    assignment.id
-                )
-            } else if verify_passed == Some(true) {
-                format!("Unit {} completed successfully.", assignment.id)
-            } else {
-                format!("Unit {} completed.", assignment.id)
+    let summary = summary_override.or_else(|| {
+        Some(match status {
+            WorkerStatus::Completed => {
+                if closed_after_verify {
+                    format!(
+                        "Unit {} completed and closed after verify pass.",
+                        assignment.id
+                    )
+                } else if verify_passed == Some(true) {
+                    format!("Unit {} completed successfully.", assignment.id)
+                } else {
+                    format!("Unit {} completed.", assignment.id)
+                }
             }
-        }
-        WorkerStatus::AwaitingVerify => {
-            format!("Unit {} completed and is awaiting verify.", assignment.id)
-        }
-        WorkerStatus::Failed => {
-            if verify_passed == Some(false) {
-                format!("Unit {} finished but verify failed.", assignment.id)
-            } else {
-                format!("Unit {} failed.", assignment.id)
+            WorkerStatus::AwaitingVerify => {
+                format!("Unit {} completed and is awaiting verify.", assignment.id)
             }
-        }
-        WorkerStatus::Blocked => format!("Unit {} is blocked.", assignment.id),
-        WorkerStatus::Cancelled => format!("Unit {} was cancelled.", assignment.id),
+            WorkerStatus::Failed => {
+                if verify_passed == Some(false) {
+                    format!("Unit {} finished but verify failed.", assignment.id)
+                } else {
+                    format!("Unit {} failed.", assignment.id)
+                }
+            }
+            WorkerStatus::Blocked => format!("Unit {} is blocked.", assignment.id),
+            WorkerStatus::Cancelled => format!("Unit {} was cancelled.", assignment.id),
+        })
     });
 
     let result = WorkerResult {
@@ -462,6 +470,114 @@ pub async fn finalize_worker_run(
         estimated_prefill_tokens,
         verify_output,
     })
+}
+
+fn close_unit_after_verify(
+    assignment: &WorkerAssignment,
+) -> Result<MappedCloseOutcome, Box<dyn std::error::Error>> {
+    let mana_dir = assignment.workspace_root.join(".mana");
+    let outcome = api::close_unit(
+        &mana_dir,
+        &assignment.id,
+        CloseOpts {
+            reason: None,
+            force: false,
+            defer_verify: false,
+        },
+    )?;
+    Ok(map_close_outcome(&assignment.id, outcome))
+}
+
+fn map_close_outcome(unit_id: &str, outcome: CloseOutcome) -> MappedCloseOutcome {
+    match outcome {
+        CloseOutcome::Closed(_) => MappedCloseOutcome {
+            status: WorkerStatus::Completed,
+            summary: format!("Unit {unit_id} completed and closed after verify pass."),
+            error: None,
+            closed_after_verify: true,
+            verify_output: None,
+        },
+        CloseOutcome::DeferredVerify { .. } => MappedCloseOutcome {
+            status: WorkerStatus::AwaitingVerify,
+            summary: format!("Unit {unit_id} completed and is awaiting verify."),
+            error: None,
+            closed_after_verify: false,
+            verify_output: None,
+        },
+        CloseOutcome::VerifyFailed(result) => map_verify_failed_close_outcome(unit_id, result),
+        CloseOutcome::RejectedByHook { unit_id } => MappedCloseOutcome {
+            status: WorkerStatus::Blocked,
+            summary: format!("Unit {unit_id} is blocked by a pre-close hook."),
+            error: Some("Pre-close hook rejected close.".to_string()),
+            closed_after_verify: false,
+            verify_output: None,
+        },
+        CloseOutcome::FeatureRequiresHuman { unit_id, title, .. } => MappedCloseOutcome {
+            status: WorkerStatus::Blocked,
+            summary: format!("Unit {unit_id} requires human review to close feature '{title}'."),
+            error: Some("Feature unit requires human close.".to_string()),
+            closed_after_verify: false,
+            verify_output: None,
+        },
+        CloseOutcome::CircuitBreakerTripped {
+            unit_id,
+            total_attempts,
+            max,
+            ..
+        } => MappedCloseOutcome {
+            status: WorkerStatus::Blocked,
+            summary: format!(
+                "Unit {unit_id} is blocked because the circuit breaker tripped ({total_attempts} >= {max})."
+            ),
+            error: Some("Circuit breaker tripped during close.".to_string()),
+            closed_after_verify: false,
+            verify_output: None,
+        },
+        CloseOutcome::MergeConflict { files, .. } => MappedCloseOutcome {
+            status: WorkerStatus::Blocked,
+            summary: format!(
+                "Unit {unit_id} is blocked by merge conflicts during close ({} file(s)).",
+                files.len()
+            ),
+            error: Some(format!("Merge conflict during close: {}", files.join(", "))),
+            closed_after_verify: false,
+            verify_output: None,
+        },
+        CloseOutcome::VerifyFrozenViolation { unit_id, .. } => MappedCloseOutcome {
+            status: WorkerStatus::Blocked,
+            summary: format!("Unit {unit_id} is blocked because the verify command changed since claim."),
+            error: Some("Verify frozen violation during close.".to_string()),
+            closed_after_verify: false,
+            verify_output: None,
+        },
+    }
+}
+
+fn map_verify_failed_close_outcome(
+    unit_id: &str,
+    result: VerifyFailureResult,
+) -> MappedCloseOutcome {
+    let summary = if result.timed_out {
+        format!("Unit {unit_id} failed during close because verify timed out.")
+    } else {
+        format!("Unit {unit_id} failed during close because verify failed.")
+    };
+    let error = if result.output.trim().is_empty() {
+        Some(format!("Verify command failed during close: {}", result.verify_command))
+    } else {
+        Some(format!(
+            "Verify command failed during close: {}\n{}",
+            result.verify_command, result.output
+        ))
+    };
+
+    MappedCloseOutcome {
+        status: WorkerStatus::Failed,
+        summary,
+        error,
+        closed_after_verify: false,
+        verify_output: Some(result.output),
+    }
 }
 
 pub async fn run_worker_assignment(
@@ -817,6 +933,76 @@ mod tests {
             .unwrap();
         assert!(!passed);
         assert_eq!(output.as_deref(), Some("nope"));
+    }
+
+    #[test]
+    fn map_close_outcome_closed_is_completed() {
+        let outcome = CloseOutcome::Closed(mana_core::ops::close::CloseResult {
+            unit: mana_core::unit::Unit::new("1", "Task"),
+            archive_path: PathBuf::from("/tmp/archive"),
+            auto_closed_parents: Vec::new(),
+            on_close_results: Vec::new(),
+            warnings: Vec::new(),
+            auto_commit_result: None,
+            evidence: None,
+        });
+
+        let mapped = map_close_outcome("1", outcome);
+        assert_eq!(mapped.status, WorkerStatus::Completed);
+        assert!(mapped.closed_after_verify);
+        assert!(mapped.error.is_none());
+    }
+
+    #[test]
+    fn map_close_outcome_deferred_verify_is_awaiting_verify() {
+        let mapped = map_close_outcome(
+            "42",
+            CloseOutcome::DeferredVerify {
+                unit_id: "42".to_string(),
+            },
+        );
+        assert_eq!(mapped.status, WorkerStatus::AwaitingVerify);
+        assert!(!mapped.closed_after_verify);
+    }
+
+    #[test]
+    fn map_close_outcome_feature_requires_human_is_blocked() {
+        let mapped = map_close_outcome(
+            "7",
+            CloseOutcome::FeatureRequiresHuman {
+                unit_id: "7".to_string(),
+                title: "Feature work".to_string(),
+                warnings: Vec::new(),
+            },
+        );
+        assert_eq!(mapped.status, WorkerStatus::Blocked);
+        assert!(mapped
+            .summary
+            .contains("requires human review to close feature"));
+        assert!(mapped.error.is_some());
+    }
+
+    #[test]
+    fn map_close_outcome_verify_failed_is_failed() {
+        let mut unit = mana_core::unit::Unit::new("9", "Verify fail");
+        unit.verify = Some("cargo test".to_string());
+        let mapped = map_close_outcome(
+            "9",
+            CloseOutcome::VerifyFailed(VerifyFailureResult {
+                unit,
+                attempt_number: 1,
+                exit_code: Some(1),
+                output: "boom".to_string(),
+                timed_out: false,
+                on_fail_action_taken: None,
+                verify_command: "cargo test".to_string(),
+                timeout_secs: None,
+                warnings: Vec::new(),
+            }),
+        );
+        assert_eq!(mapped.status, WorkerStatus::Failed);
+        assert_eq!(mapped.verify_output.as_deref(), Some("boom"));
+        assert!(mapped.error.unwrap().contains("cargo test"));
     }
 
     #[test]

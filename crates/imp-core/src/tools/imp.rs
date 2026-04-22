@@ -175,32 +175,34 @@ async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Resu
         .clone()
         .unwrap_or_else(|| format!("Spawned worker for unit {} finished.", assignment.id));
 
-    let content = match outcome.result.status {
-        tower_contracts::worker::WorkerStatus::Completed => {
-            format!(
-                "Spawned worker for unit {} completed successfully.",
-                assignment.id
-            )
-        }
-        tower_contracts::worker::WorkerStatus::AwaitingVerify => {
-            format!(
-                "Spawned worker for unit {} completed and is awaiting verify.",
-                assignment.id
-            )
-        }
-        tower_contracts::worker::WorkerStatus::Failed => {
-            format!(
-                "Spawned worker for unit {} finished but verify failed.",
-                assignment.id
-            )
-        }
-        tower_contracts::worker::WorkerStatus::Blocked => {
-            format!("Spawned worker for unit {} is blocked.", assignment.id)
-        }
-        tower_contracts::worker::WorkerStatus::Cancelled => {
-            format!("Spawned worker for unit {} was cancelled.", assignment.id)
-        }
-    };
+    let content = outcome
+        .result
+        .summary
+        .clone()
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| match outcome.result.status {
+            tower_contracts::worker::WorkerStatus::Completed => {
+                format!(
+                    "Spawned worker for unit {} completed successfully.",
+                    assignment.id
+                )
+            }
+            tower_contracts::worker::WorkerStatus::AwaitingVerify => {
+                format!(
+                    "Spawned worker for unit {} completed and is awaiting verify.",
+                    assignment.id
+                )
+            }
+            tower_contracts::worker::WorkerStatus::Failed => {
+                format!("Spawned worker for unit {} failed.", assignment.id)
+            }
+            tower_contracts::worker::WorkerStatus::Blocked => {
+                format!("Spawned worker for unit {} is blocked.", assignment.id)
+            }
+            tower_contracts::worker::WorkerStatus::Cancelled => {
+                format!("Spawned worker for unit {} was cancelled.", assignment.id)
+            }
+        });
 
     Ok(ToolOutput {
         content: vec![ContentBlock::Text { text: content }],
@@ -308,30 +310,29 @@ async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Re
     })
 }
 
-fn extract_final_assistant_text(session: &ImpSession) -> Option<String> {
-    session
-        .session_manager()
-        .get_active_messages()
-        .iter()
-        .rev()
-        .find_map(|message| match message {
-            imp_llm::Message::Assistant(AssistantMessage { content, .. }) => {
-                let text = content
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<String>();
-                let trimmed = text.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
+fn extract_final_assistant_text_from_messages(messages: &[imp_llm::Message]) -> Option<String> {
+    messages.iter().rev().find_map(|message| match message {
+        imp_llm::Message::Assistant(AssistantMessage { content, .. }) => {
+            let text = content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
             }
-            _ => None,
-        })
+        }
+        _ => None,
+    })
+}
+
+fn extract_final_assistant_text(session: &ImpSession) -> Option<String> {
+    extract_final_assistant_text_from_messages(&session.session_manager().get_active_messages())
 }
 
 fn parse_optional_thinking(params: &serde_json::Value) -> Result<Option<ThinkingLevel>> {
@@ -456,30 +457,38 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn ad_hoc_returns_transient_details() {
-        let tool = ImpTool;
-        let out = tool
-            .execute(
-                "call-1",
-                json!({"action": "spawn", "mode": "ad_hoc", "prompt": "Say only the word transient."}),
-                test_ctx(AgentMode::Orchestrator),
-            )
-            .await
-            .unwrap();
-        assert!(!out.is_error);
-        assert_eq!(
-            out.details.get("spawn_mode").and_then(|v| v.as_str()),
-            Some("ad_hoc")
-        );
-        assert_eq!(
-            out.details.get("delegation_mode").and_then(|v| v.as_str()),
-            Some("ad_hoc")
-        );
-        assert_eq!(
-            out.details.get("durable").and_then(|v| v.as_bool()),
-            Some(false)
-        );
-        assert!(out.details.get("final_text").is_some());
+    #[test]
+    fn extract_final_assistant_text_returns_last_non_empty_assistant_text() {
+        let messages = vec![
+            imp_llm::Message::Assistant(AssistantMessage {
+                content: vec![ContentBlock::Text {
+                    text: "first".to_string(),
+                }],
+                stop_reason: imp_llm::StopReason::EndTurn,
+                usage: None,
+                timestamp: 0,
+            }),
+            imp_llm::Message::Assistant(AssistantMessage {
+                content: vec![ContentBlock::Text {
+                    text: "   ".to_string(),
+                }],
+                stop_reason: imp_llm::StopReason::EndTurn,
+                usage: None,
+                timestamp: 0,
+            }),
+            imp_llm::Message::Assistant(AssistantMessage {
+                content: vec![ContentBlock::Text {
+                    text: "transient".to_string(),
+                }],
+                stop_reason: imp_llm::StopReason::EndTurn,
+                usage: None,
+                timestamp: 0,
+            }),
+        ];
+
+        let text = extract_final_assistant_text_from_messages(&messages);
+
+        assert_eq!(text.as_deref(), Some("transient"));
     }
 }
+

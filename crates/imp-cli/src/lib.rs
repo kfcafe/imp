@@ -1511,6 +1511,14 @@ async fn resolve_provider_api_key(
     }
 }
 
+fn worker_status_counts_as_success(status: imp_core::mana_worker::WorkerStatus) -> bool {
+    matches!(
+        status,
+        imp_core::mana_worker::WorkerStatus::Completed
+            | imp_core::mana_worker::WorkerStatus::AwaitingVerify
+    )
+}
+
 async fn run_headless_mode(
     cli: &Cli,
     unit_id: &str,
@@ -1596,7 +1604,14 @@ async fn run_headless_mode(
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
     let outcome = imp_core::mana_worker::finalize_worker_run(prepared).await?;
-    Ok(outcome.verify_passed.unwrap_or(true))
+    if let Some(summary) = &outcome.result.summary {
+        eprintln!("[worker] {summary}");
+    }
+    if let Some(error) = &outcome.result.error {
+        eprintln!("[worker error] {error}");
+    }
+
+    Ok(worker_status_counts_as_success(outcome.result.status))
 }
 
 fn build_lua_loader(no_tools: bool, cwd: PathBuf) -> Option<imp_core::tools::LuaToolLoader> {
@@ -4174,6 +4189,25 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("reserved for a future mana-aware operator command"));
         assert!(text.contains("use `mana status` directly"));
+    }
+
+    #[test]
+    fn worker_status_counts_as_success_for_completed_and_awaiting_verify_only() {
+        assert!(worker_status_counts_as_success(
+            imp_core::mana_worker::WorkerStatus::Completed
+        ));
+        assert!(worker_status_counts_as_success(
+            imp_core::mana_worker::WorkerStatus::AwaitingVerify
+        ));
+        assert!(!worker_status_counts_as_success(
+            imp_core::mana_worker::WorkerStatus::Failed
+        ));
+        assert!(!worker_status_counts_as_success(
+            imp_core::mana_worker::WorkerStatus::Blocked
+        ));
+        assert!(!worker_status_counts_as_success(
+            imp_core::mana_worker::WorkerStatus::Cancelled
+        ));
     }
 
     #[test]
