@@ -1458,8 +1458,8 @@ impl Tool for ManaTool {
                 let id = params["id"]
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("show requires 'id'".into()))?;
-                match mana_core::api::get_unit(&mana_dir, id) {
-                    Ok(unit) => Ok(json_output(&unit)),
+                match mana_core::ops::show::get(&mana_dir, id) {
+                    Ok(result) => Ok(json_output(&result.unit)),
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -2152,7 +2152,14 @@ impl Tool for ManaTool {
                             tree_lines(&tree, 0, &mut lines);
                             lines
                         }
-                        Err(e) => return Ok(ToolOutput::error(e.to_string())),
+                        Err(tree_err) => match mana_core::ops::show::get(&mana_dir, root_id) {
+                            Ok(result) if result.unit.is_archived => {
+                                return Ok(ToolOutput::error(format!(
+                                    "Archived unit {root_id} can be shown but not rendered in tree view. Tree only includes active units."
+                                )));
+                            }
+                            Ok(_) | Err(_) => return Ok(ToolOutput::error(tree_err.to_string())),
+                        },
                     }
                 } else {
                     match mana_core::api::load_index(&mana_dir) {
@@ -2864,6 +2871,86 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(decisions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn show_returns_archived_unit_when_active_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mana_dir = dir.path().join(".mana");
+        std::fs::create_dir_all(mana_dir.join("archive/2026/04")).unwrap();
+        std::fs::write(mana_dir.join("config.yaml"), "project: test\nnext_id: 2\n").unwrap();
+        std::fs::write(
+            mana_dir.join("archive/2026/04/1-archived-unit.md"),
+            "---\nid: '1'\ntitle: Archived unit\nstatus: closed\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nclosed_at: '2026-03-28T00:00:00Z'\nclose_reason: done\nis_archived: true\n---\n\nbody\n",
+        )
+        .unwrap();
+        let (tx, _rx) = mpsc::channel::<ToolUpdate>(1);
+        let (cmd_tx, _cmd_rx) = mpsc::channel(16);
+        let ctx = ToolContext {
+            cwd: dir.path().to_path_buf(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            command_tx: cmd_tx,
+            ui: Arc::new(NullInterface),
+            file_cache: Arc::new(FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
+            lua_tool_loader: None,
+            mode: crate::config::AgentMode::Full,
+            read_max_lines: 500,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
+        };
+        let tool = ManaTool::default();
+        let result = tool
+            .execute("call_show_archived", json!({ "action": "show", "id": "1" }), ctx)
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(result.details["title"], "Archived unit");
+        assert_eq!(result.details["is_archived"], true);
+    }
+
+    #[tokio::test]
+    async fn tree_reports_archived_root_as_active_only_limitation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mana_dir = dir.path().join(".mana");
+        std::fs::create_dir_all(mana_dir.join("archive/2026/04")).unwrap();
+        std::fs::write(mana_dir.join("config.yaml"), "project: test\nnext_id: 2\n").unwrap();
+        std::fs::write(
+            mana_dir.join("archive/2026/04/1-archived-unit.md"),
+            "---\nid: '1'\ntitle: Archived unit\nstatus: closed\npriority: 2\ncreated_at: '2026-03-28T00:00:00Z'\nupdated_at: '2026-03-28T00:00:00Z'\nclosed_at: '2026-03-28T00:00:00Z'\nclose_reason: done\nis_archived: true\n---\n\nbody\n",
+        )
+        .unwrap();
+        let (tx, _rx) = mpsc::channel::<ToolUpdate>(1);
+        let (cmd_tx, _cmd_rx) = mpsc::channel(16);
+        let ctx = ToolContext {
+            cwd: dir.path().to_path_buf(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            command_tx: cmd_tx,
+            ui: Arc::new(NullInterface),
+            file_cache: Arc::new(FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
+            lua_tool_loader: None,
+            mode: crate::config::AgentMode::Full,
+            read_max_lines: 500,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
+        };
+        let tool = ManaTool::default();
+        let result = tool
+            .execute("call_tree_archived", json!({ "action": "tree", "id": "1" }), ctx)
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        let text = result.text_content().unwrap_or("");
+        assert!(text.contains("Archived unit 1 can be shown but not rendered in tree view"));
     }
 
     #[tokio::test]

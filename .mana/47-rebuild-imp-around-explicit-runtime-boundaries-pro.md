@@ -5,7 +5,11 @@ slug: rebuild-imp-around-explicit-runtime-boundaries-pro
 status: open
 priority: 1
 created_at: '2026-04-08T10:18:34.356594Z'
-updated_at: '2026-04-08T10:18:34.356594Z'
+updated_at: '2026-04-22T15:58:30.584747Z'
+notes: |-
+  ---
+  2026-04-22T15:58:30.566631+00:00
+  Execution guidance: do not work the umbrella epic directly. Start from one bounded child track. Recommended entrypoints based on current conversation: (1) 47.6.1 if the goal is to make the rebuild sequence explicit before deeper design work, (2) 47.1.1 if the goal is to lock the mana↔imp protocol boundary first, (3) 47.3.2 if the goal is to push the opencode-inspired product layer around worktree UX now. Treat 47 itself as an orchestration/spec umbrella only.
 labels:
 - imp
 - refactor
@@ -14,6 +18,8 @@ labels:
 - architecture
 verify: test -n "imp-rebuild-umbrella-epic-tracked"
 kind: epic
+decisions:
+- The umbrella rebuild epic 47 should not be executed directly. Work should begin from a bounded child track, with the preferred starting units currently being 47.6.1 (migration ordering), 47.1.1 (mana↔imp protocol boundary), or 47.3.2 (user-facing worktree UX), depending on whether sequencing, contracts, or productized worktree UX is the immediate priority.
 ---
 
 This is the umbrella rebuild epic for imp. Goal: keep imp as a pure-Rust runtime and product, but refactor it so the implementation more literally matches Tower's intended architecture: mana owns durable truth, imp owns live execution, and workflow trust comes from explicit contracts, execution boundaries, verification artifacts, and review gates rather than from large implicit runtime objects.

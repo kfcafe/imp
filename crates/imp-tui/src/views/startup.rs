@@ -354,8 +354,10 @@ fn visible_section_count(width: u16, height: u16, total: usize) -> usize {
         total.min(1)
     } else if width < 72 || height < 16 {
         total.min(2)
-    } else {
+    } else if width < 110 || height < 22 {
         total.min(3)
+    } else {
+        total.min(4)
     }
 }
 
@@ -448,8 +450,9 @@ mod tests {
 
     #[test]
     fn narrow_layout_prioritizes_fewer_sections() {
-        assert_eq!(visible_section_count(44, 20, 3), 1);
-        assert_eq!(visible_section_count(68, 14, 3), 2);
-        assert_eq!(visible_section_count(100, 20, 3), 3);
+        assert_eq!(visible_section_count(44, 20, 4), 1);
+        assert_eq!(visible_section_count(68, 14, 4), 2);
+        assert_eq!(visible_section_count(100, 20, 4), 3);
+        assert_eq!(visible_section_count(120, 24, 4), 4);
     }
 }

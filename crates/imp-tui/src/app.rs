@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::hash::Hasher;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,7 @@ use imp_core::compaction::{
 };
 use imp_core::config::Config;
 use imp_core::personality::default_soul_markdown;
-use imp_core::session::{SessionEntry, SessionManager};
+use imp_core::session::{SessionEntry, SessionInfo, SessionManager};
 use imp_core::Error as ImpCoreError;
 use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelMeta, ModelRegistry, ProviderRegistry};
@@ -61,7 +61,8 @@ use crate::views::sidebar::{
     sidebar_sub_areas, Sidebar, SidebarDetailRenderData, SidebarView,
 };
 use crate::views::startup::{
-    summarize_lines, truncate_preview, StartupPanelData, StartupPanelView, StartupSection,
+    summarize_inline, truncate_preview, StartupAction, StartupPanelData, StartupPanelView,
+    StartupSection,
 };
 use crate::views::status::StatusInfo;
 use crate::views::tools::DisplayToolCall;
@@ -145,6 +146,76 @@ fn prompt_text_for_secret_provider(provider: &str) -> String {
     lines.push("First enter a comma-separated field list (default: api_key).".into());
     lines.push("Then imp will prompt for each field value.".into());
     lines.join("\n")
+}
+
+fn startup_recent_sessions(cwd: &Path) -> Vec<SessionInfo> {
+    let session_dir = imp_core::storage::global_sessions_dir();
+    let mut sessions = SessionManager::list(&session_dir).unwrap_or_default();
+    sessions.sort_by(|a, b| startup_session_sort_key(a, cwd).cmp(&startup_session_sort_key(b, cwd)));
+    sessions.truncate(3);
+    sessions
+}
+
+fn startup_session_sort_key(session: &SessionInfo, cwd: &Path) -> (u8, std::cmp::Reverse<u64>, std::cmp::Reverse<u64>) {
+    let session_path = Path::new(&session.cwd);
+    let same_project = if session.cwd == cwd.to_string_lossy() {
+        0
+    } else if session_path == cwd {
+        0
+    } else if session_path.starts_with(cwd) || cwd.starts_with(session_path) {
+        1
+    } else if session_path.file_name() == cwd.file_name() {
+        2
+    } else {
+        3
+    };
+    (
+        same_project,
+        std::cmp::Reverse(session.updated_at),
+        std::cmp::Reverse(session.created_at),
+    )
+}
+
+fn startup_session_preview_line(session: &SessionInfo, max_chars: usize) -> String {
+    let preview = session
+        .summary
+        .as_deref()
+        .filter(|summary| !summary.trim().is_empty())
+        .map(|summary| summary.trim().to_string())
+        .or_else(|| {
+            session
+                .first_message
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+        })
+        .unwrap_or_else(|| "(no summary yet)".to_string());
+    truncate_chars_with_suffix(&preview, max_chars, "…")
+}
+
+fn startup_project_label(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| ".".to_string())
+}
+
+fn startup_format_age(updated_at: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let delta = now.saturating_sub(updated_at);
+    if delta < 60 {
+        "just now".into()
+    } else if delta < 3600 {
+        format!("{}m ago", delta / 60)
+    } else if delta < 86400 {
+        format!("{}h ago", delta / 3600)
+    } else {
+        format!("{}d ago", delta / 86400)
+    }
 }
 
 fn build_generated_prompt_preview(
@@ -1136,58 +1207,42 @@ impl App {
     fn build_startup_surface(&self) -> StartupSurfaceData {
         let user_config_dir = imp_core::config::Config::user_config_dir();
         let skills = imp_core::resources::discover_skills(&self.cwd, &user_config_dir);
-        let skill_lines = summarize_lines(
-            skills
-                .iter()
-                .map(|skill| {
-                    if skill.description.trim().is_empty() {
-                        format!("• {}", skill.name)
-                    } else {
-                        format!("• {} — {}", skill.name, skill.description)
-                    }
-                })
-                .collect(),
-            8,
-        );
-
         let lua_extensions = discover_extensions(&user_config_dir, Some(&self.cwd));
-        let extension_lines = summarize_lines(
-            lua_extensions
-                .iter()
-                .map(|ext| format!("• {}", ext.name))
-                .collect(),
-            6,
-        );
+        let repo_label = self
+            .cwd
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("this project")
+            .to_string();
 
-        let (lua_tool_lines, command_lines) = match &self.lua_runtime {
+        let (command_lines, lua_extension_summary) = match &self.lua_runtime {
             Some(runtime) => match runtime.lock() {
                 Ok(rt) => {
-                    let mut tools = rt.tool_names();
-                    tools.sort();
                     let mut commands = rt.command_names();
                     commands.sort();
                     (
-                        summarize_lines(
-                            tools.into_iter().map(|name| format!("• {name}")).collect(),
-                            6,
-                        ),
-                        summarize_lines(
-                            commands
-                                .into_iter()
-                                .map(|name| format!("• /{name}"))
-                                .collect(),
-                            6,
+                        commands
+                            .into_iter()
+                            .map(|name| format!("• /{name}"))
+                            .collect::<Vec<_>>(),
+                        summarize_inline(
+                            lua_extensions.iter().map(|ext| ext.name.clone()).collect(),
+                            3,
                         ),
                     )
                 }
                 Err(_) => (
                     vec!["• unavailable (runtime lock error)".to_string()],
-                    vec!["• unavailable (runtime lock error)".to_string()],
+                    "unavailable (runtime lock error)".to_string(),
                 ),
             },
             None => (
                 vec!["• none loaded".to_string()],
-                vec!["• none loaded".to_string()],
+                summarize_inline(
+                    lua_extensions.iter().map(|ext| ext.name.clone()).collect(),
+                    3,
+                ),
             ),
         };
 
@@ -1225,13 +1280,12 @@ impl App {
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| "new chat".to_string());
         let session_lines = vec![
+            format!("• project: {repo_label}"),
             format!("• model: {}", self.model_name),
             format!("• provider: {provider_id} ({provider_auth})"),
-            format!("• mode: {mode}"),
             format!("• thinking: {:?}", self.thinking_level),
-            format!("• web: {web_summary}"),
             format!("• session: {session_name}"),
-            format!("• cwd: {}", self.cwd.display()),
+            format!("• web: {web_summary}"),
         ];
 
         let visible_prompt_tools = {
@@ -1260,56 +1314,130 @@ impl App {
         let prompt_preview = truncate_preview(&generated_prompt_preview, 18, 1800);
         let prompt_tokens = imp_core::context::estimate_tokens(&generated_prompt_preview);
 
+        let recent_sessions = startup_recent_sessions(&self.cwd);
+        let recent_session_lines = if recent_sessions.is_empty() {
+            vec!["• none yet — use /resume once you have saved chats".to_string()]
+        } else {
+            let mut lines = Vec::new();
+            for session in &recent_sessions {
+                let title = session
+                    .title(28)
+                    .unwrap_or_else(|| "(unnamed session)".to_string());
+                let meta = format!(
+                    "{} • {} msg • {}",
+                    startup_project_label(&session.cwd),
+                    session.message_count,
+                    startup_format_age(session.updated_at)
+                );
+                let preview = startup_session_preview_line(session, 56);
+                lines.push(format!("• {title}"));
+                lines.push(format!("  {meta}"));
+                lines.push(format!("  {preview}"));
+            }
+            lines.push("• /resume opens full browse + search".to_string());
+            lines
+        };
+
+        let actions = vec![
+            StartupAction {
+                trigger: "type".to_string(),
+                label: "ask imp to work".to_string(),
+                description: format!("inspect {repo_label}, explain code, or make a change"),
+            },
+            StartupAction {
+                trigger: "/resume".to_string(),
+                label: "pick up earlier work".to_string(),
+                description: "browse and search saved sessions".to_string(),
+            },
+            StartupAction {
+                trigger: "Ctrl+L".to_string(),
+                label: "choose a model".to_string(),
+                description: format!("current: {}", self.model_name),
+            },
+            StartupAction {
+                trigger: "/setup".to_string(),
+                label: "configure auth and defaults".to_string(),
+                description: format!("provider {provider_id}; web {web_summary}"),
+            },
+            StartupAction {
+                trigger: "/settings".to_string(),
+                label: "adjust runtime settings".to_string(),
+                description: format!("mode {mode}; thinking {:?}", self.thinking_level),
+            },
+            StartupAction {
+                trigger: "/help".to_string(),
+                label: "see commands and shortcuts".to_string(),
+                description: "discover memory, sessions, and other paths".to_string(),
+            },
+        ];
+
         let sections = vec![
             StartupSection {
-                title: "tools".to_string(),
-                lines: summarize_lines(
-                    visible_prompt_tools
-                        .iter()
-                        .map(|name| format!("• {name}"))
-                        .collect(),
-                    10,
-                ),
+                title: "what imp can do here".to_string(),
+                lines: vec![
+                    format!(
+                        "• built-in tools: {}",
+                        summarize_inline(
+                            visible_prompt_tools
+                                .iter()
+                                .take(6)
+                                .map(|name| name.to_string())
+                                .collect(),
+                            4,
+                        )
+                    ),
+                    format!(
+                        "• skills: {}",
+                        if skills.is_empty() {
+                            "none discovered".to_string()
+                        } else {
+                            summarize_inline(
+                                skills.iter().map(|skill| skill.name.clone()).collect(),
+                                3,
+                            )
+                        }
+                    ),
+                    "• sessions can be resumed or forked later".to_string(),
+                    "• planning and follow-up work can go into mana".to_string(),
+                ],
             },
             StartupSection {
-                title: "skills".to_string(),
-                lines: if skill_lines.is_empty() {
-                    vec!["• none discovered".to_string()]
-                } else {
-                    skill_lines
-                },
+                title: "loaded here".to_string(),
+                lines: vec![
+                    format!("• project: {repo_label}"),
+                    format!("• cwd: {}", self.cwd.display()),
+                    format!("• provider: {provider_id} ({provider_auth})"),
+                    format!("• web search: {web_summary}"),
+                    format!("• lua extensions: {lua_extension_summary}"),
+                    format!(
+                        "• slash commands: {}",
+                        summarize_inline(
+                            command_lines
+                                .iter()
+                                .filter_map(|line| line.trim().strip_prefix('•'))
+                                .map(|line| line.trim().to_string())
+                                .collect(),
+                            4,
+                        )
+                    ),
+                ],
             },
             StartupSection {
-                title: "extensions".to_string(),
-                lines: {
-                    let mut lines = Vec::new();
-                    lines.extend(if extension_lines.is_empty() {
-                        vec!["• lua files: none".to_string()]
-                    } else {
-                        let mut prefixed = vec!["lua files:".to_string()];
-                        prefixed.extend(extension_lines);
-                        prefixed
-                    });
-                    lines.push(String::new());
-                    lines.push("registered tools:".to_string());
-                    lines.extend(lua_tool_lines);
-                    lines.push(String::new());
-                    lines.push("slash commands:".to_string());
-                    lines.extend(command_lines);
-                    lines
-                },
+                title: "recent sessions".to_string(),
+                lines: recent_session_lines,
             },
             StartupSection {
-                title: "session".to_string(),
+                title: "session + runtime".to_string(),
                 lines: session_lines,
             },
         ];
 
         StartupSurfaceData {
             panel: StartupPanelData {
-                headline: "imp is ready with this access surface.".to_string(),
-                subtitle: "Tools, skills, Lua extensions, and runtime context available in this session.".to_string(),
-                hint: "Use /help for commands, Ctrl+L to switch model, and start typing to ask imp to work.".to_string(),
+                headline: "imp is ready. start with an action, not a blank screen.".to_string(),
+                subtitle: "This launch view shows the fastest ways to begin, plus the runtime surface already available in this session.".to_string(),
+                hint: "Quarter-screen keeps only the essentials; wider layouts reveal more context and the generated prompt preview.".to_string(),
+                actions,
                 sections,
                 prompt_preview,
                 prompt_tokens,
