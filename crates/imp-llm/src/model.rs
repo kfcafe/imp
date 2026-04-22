@@ -119,6 +119,14 @@ pub fn builtin_providers() -> Vec<ProviderMeta> {
             api_style: ApiStyle::OpenAiCompat,
         },
         ProviderMeta {
+            id: "moonshot",
+            name: "Moonshot / Kimi",
+            env_vars: &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
+            api_base_url: Some("https://api.moonshot.ai"),
+            docs_url: "platform.kimi.ai/console/api-keys",
+            api_style: ApiStyle::OpenAiCompat,
+        },
+        ProviderMeta {
             id: "groq",
             name: "Groq",
             env_vars: &["GROQ_API_KEY"],
@@ -431,6 +439,46 @@ fn builtin_models() -> Vec<ModelMeta> {
                 tool_use: false,
             },
         },
+        // -- Moonshot / Kimi --
+        ModelMeta {
+            id: "kimi-k2.6".into(),
+            provider: "moonshot".into(),
+            name: "Kimi K2.6".into(),
+            context_window: 256_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "kimi-k2.5".into(),
+            provider: "moonshot".into(),
+            name: "Kimi K2.5".into(),
+            context_window: 256_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "kimi-k2-thinking".into(),
+            provider: "moonshot".into(),
+            name: "Kimi K2 Thinking".into(),
+            context_window: 256_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
+                tool_use: true,
+            },
+        },
         // -- Groq --
         ModelMeta {
             id: "llama-3.3-70b-versatile".into(),
@@ -599,6 +647,10 @@ fn guess_provider_for_custom_model(model_name: &str) -> Option<&'static str> {
         return Some("google");
     }
 
+    if lower.starts_with("kimi") || lower.starts_with("moonshot") {
+        return Some("moonshot");
+    }
+
     None
 }
 
@@ -629,6 +681,19 @@ fn synthesize_custom_model_meta(model_id: &str, provider: &str) -> ModelMeta {
             name: model_id.into(),
             context_window: 1_048_576,
             max_output_tokens: 65_536,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        "moonshot" => ModelMeta {
+            id: model_id.into(),
+            provider: provider.into(),
+            name: model_id.into(),
+            context_window: 256_000,
+            max_output_tokens: 16_384,
             pricing: ModelPricing::default(),
             capabilities: Capabilities {
                 reasoning: true,
@@ -826,6 +891,12 @@ fn builtin_aliases() -> Vec<(String, String)> {
         ("deepseek".into(), "deepseek-chat".into()),
         ("deepseek-v3".into(), "deepseek-chat".into()),
         ("deepseek-r1".into(), "deepseek-reasoner".into()),
+        // Moonshot / Kimi
+        ("kimi".into(), "kimi-k2.6".into()),
+        ("kimi-k2.6".into(), "kimi-k2.6".into()),
+        ("kimi-k2.5".into(), "kimi-k2.5".into()),
+        ("kimi-thinking".into(), "kimi-k2-thinking".into()),
+        ("kimi-k2-thinking".into(), "kimi-k2-thinking".into()),
         // Groq
         ("llama-groq".into(), "llama-3.3-70b-versatile".into()),
     ]
@@ -920,6 +991,37 @@ mod tests {
     }
 
     #[test]
+    fn find_by_alias_resolves_kimi() {
+        let reg = ModelRegistry::with_builtins();
+        let model = reg
+            .find_by_alias("kimi")
+            .expect("kimi alias should resolve");
+        assert_eq!(model.id, "kimi-k2.6");
+        assert_eq!(model.provider, "moonshot");
+    }
+
+    #[test]
+    fn resolve_meta_guesses_moonshot_for_kimi_models() {
+        let reg = ModelRegistry::with_builtins();
+        let model = reg
+            .resolve_meta("kimi-k2-thinking-turbo", None)
+            .expect("kimi model should synthesize");
+        assert_eq!(model.id, "kimi-k2-thinking-turbo");
+        assert_eq!(model.provider, "moonshot");
+    }
+
+    #[test]
+    fn provider_registry_includes_moonshot() {
+        let registry = ProviderRegistry::with_builtins();
+        let provider = registry
+            .find("moonshot")
+            .expect("moonshot provider should exist");
+        assert_eq!(provider.name, "Moonshot / Kimi");
+        assert_eq!(provider.api_base_url, Some("https://api.moonshot.ai"));
+        assert_eq!(provider.env_vars, &["MOONSHOT_API_KEY", "KIMI_API_KEY"]);
+    }
+
+    #[test]
     fn find_by_alias_falls_back_to_exact_id() {
         let reg = ModelRegistry::with_builtins();
         let model = reg
@@ -946,6 +1048,9 @@ mod tests {
 
         let google = reg.list_by_provider("google");
         assert_eq!(google.len(), 2);
+
+        let moonshot = reg.list_by_provider("moonshot");
+        assert_eq!(moonshot.len(), 3);
     }
 
     #[test]

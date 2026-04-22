@@ -940,6 +940,24 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_env_secret_uses_moonshot_env_vars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let store = test_store(path);
+
+        std::env::remove_var("KIMI_API_KEY");
+        std::env::set_var("MOONSHOT_API_KEY", "moonshot-env-key");
+        let key = store.resolve("moonshot").unwrap();
+        assert_eq!(key, "moonshot-env-key");
+        std::env::remove_var("MOONSHOT_API_KEY");
+
+        std::env::set_var("KIMI_API_KEY", "kimi-env-key");
+        let key = store.resolve("moonshot").unwrap();
+        assert_eq!(key, "kimi-env-key");
+        std::env::remove_var("KIMI_API_KEY");
+    }
+
+    #[test]
     fn test_resolve_api_key_only_ignores_oauth_credentials() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("auth.json");
@@ -1062,6 +1080,18 @@ mod tests {
         std::env::remove_var("GOOGLE_API_KEY");
         let result = store.resolve("google");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_has_credentials_detects_kimi_env_var() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let store = test_store(path);
+
+        std::env::remove_var("MOONSHOT_API_KEY");
+        std::env::set_var("KIMI_API_KEY", "kimi-env-key");
+        assert!(store.has_credentials("moonshot"));
+        std::env::remove_var("KIMI_API_KEY");
     }
 
     #[test]

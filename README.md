@@ -180,7 +180,7 @@ This first SDK slice intentionally stays close to the existing `ImpSession` runt
 
 ## Providers
 
-imp works with 11 LLM providers out of the box. Native integrations for Anthropic, OpenAI, and Google, plus any provider that speaks the OpenAI Chat Completions protocol.
+imp works with 12 LLM providers out of the box. Native integrations for Anthropic, OpenAI, and Google, plus any provider that speaks the OpenAI Chat Completions protocol.
 
 | Provider | Models | Auth |
 |----------|--------|------|
@@ -188,6 +188,7 @@ imp works with 11 LLM providers out of the box. Native integrations for Anthropi
 | OpenAI | GPT-5.4, GPT-5.4 mini, GPT-5.4 nano, GPT-5.3 ChatGPT, GPT-5.3 Codex, plus custom model strings for preview/legacy models | `OPENAI_API_KEY` |
 | Google | Gemini 2.5 Pro, Flash | `GOOGLE_API_KEY` |
 | DeepSeek | DeepSeek V3, R1 | `DEEPSEEK_API_KEY` |
+| Moonshot / Kimi | Kimi K2.6, K2.5, K2 Thinking, plus custom `kimi-*` / `moonshot-*` model strings | `MOONSHOT_API_KEY` or `KIMI_API_KEY` |
 | Groq | Llama 3.3 70B | `GROQ_API_KEY` |
 | Cerebras | Llama 3.3 70B | `CEREBRAS_API_KEY` |
 | xAI | Grok 3, Grok 3 Mini | `XAI_API_KEY` |
@@ -252,8 +253,10 @@ Provider selection order for the `web` tool:
 # OAuth login
 imp login              # Anthropic OAuth
 imp login openai       # OpenAI / ChatGPT OAuth
+imp login kimi         # Guided Kimi API-key setup into imp's secure auth store
 
 # API/service secrets
+imp secrets moonshot     # Prompts for api_key
 imp secrets deepseek     # Prompts for api_key
 imp secrets exa          # Prompts for api_key
 imp secrets my-service   # Prompts for field names, then values
@@ -262,9 +265,12 @@ imp secrets show exa     # Inspect saved secret metadata (not values)
 imp secrets rm my-service # Remove saved credentials
 ```
 
+For Kimi API, imp uses the native secret store or env vars. Save a key with `imp login kimi` or `imp secrets moonshot`, or set `MOONSHOT_API_KEY` (or `KIMI_API_KEY`).
+
 For arbitrary services, `imp secrets <provider>` stores named secret fields in imp's secure auth store. The flow is generic: you enter field names first (default `api_key`), then imp prompts for each value. Lua extensions can then read them with `imp.secret("provider", "field")` or `imp.secret_fields("provider")` without relying on `.env` files.
 
 # Or just set the env var
+export MOONSHOT_API_KEY=sk-...
 export DEEPSEEK_API_KEY=sk-...
 
 # Switch models

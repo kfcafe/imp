@@ -345,9 +345,9 @@ enum Commands {
     Personality,
     /// Run the terminal-native setup wizard
     Setup,
-    /// Log in to an OAuth provider (Anthropic or OpenAI/ChatGPT)
+    /// Log in to a provider. OAuth is supported for Anthropic and OpenAI/ChatGPT; Kimi uses a guided API-key setup.
     Login {
-        /// OAuth provider to log in to (anthropic or openai). Defaults to anthropic.
+        /// Provider to configure (`anthropic`, `openai`, or `kimi`). Defaults to anthropic.
         provider: Option<String>,
     },
     /// Save, list, or remove API credentials in secure imp auth storage
@@ -846,6 +846,37 @@ fn oauth_login_success_message(auth_store: &AuthStore, provider: &str) -> String
         .unwrap_or_else(|| format!("Logged in to {provider} successfully."))
 }
 
+fn provider_alias(name: &str) -> String {
+    match name.trim().to_lowercase().as_str() {
+        "kimi" => "moonshot".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn kimi_api_login_success_message(auth_store: &AuthStore) -> String {
+    let registry = ProviderRegistry::with_builtins();
+    let provider = registry
+        .find("moonshot")
+        .expect("moonshot provider should exist");
+
+    let auth_kind = match auth_store.stored.get("moonshot") {
+        Some(StoredCredential::SecretFields { fields })
+            if fields.len() == 1 && fields.first().map(String::as_str) == Some("api_key") =>
+        {
+            "API key"
+        }
+        Some(StoredCredential::ApiKey { .. }) => "API key",
+        Some(StoredCredential::SecretFields { .. }) => "credentials",
+        Some(StoredCredential::OAuth(_)) => "credentials",
+        None => "credentials",
+    };
+
+    format!(
+        "Configured {} in imp's secure auth store using a {}. You can now run `imp -m kimi` or `imp -m kimi-k2.6`.",
+        provider.name, auth_kind
+    )
+}
+
 fn search_provider_from_name(name: &str) -> Option<SearchProvider> {
     match name.trim().to_lowercase().as_str() {
         "tavily" => Some(SearchProvider::Tavily),
@@ -1067,12 +1098,12 @@ fn run_secrets_list() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_secrets_show(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = imp_core::storage::reconcile_legacy_into_global_root();
+    let provider = provider_alias(provider);
     let auth_path = imp_core::storage::global_auth_path();
     let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
     let registry = ProviderRegistry::with_builtins();
 
-    let entry = auth_store.stored.get(provider).ok_or_else(|| {
+    let entry = auth_store.stored.get(&provider).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             format!("No saved credentials for {provider}."),
@@ -1080,7 +1111,7 @@ fn run_secrets_show(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     let display_name = registry
-        .find(provider)
+        .find(&provider)
         .map(|meta| meta.name.to_string())
         .unwrap_or_else(|| provider.to_string());
 
@@ -1099,11 +1130,12 @@ fn run_secrets_show(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_secrets_remove(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let provider = provider_alias(provider);
     let _ = imp_core::storage::reconcile_legacy_into_global_root();
     let auth_path = imp_core::storage::global_auth_path();
     let mut auth_store =
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
-    auth_store.remove(provider)?;
+    auth_store.remove(&provider)?;
     eprintln!("Removed saved credentials for {provider}.");
     Ok(())
 }
@@ -1114,13 +1146,16 @@ async fn run_secrets_login(provider_name: &str) -> Result<(), Box<dyn std::error
     let mut auth_store =
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
 
+    let canonical_provider = provider_alias(provider_name);
     let registry = ProviderRegistry::with_builtins();
-    let provider_meta = registry.find(provider_name);
-    let display_name = provider_meta.map(|p| p.name).unwrap_or(provider_name);
+    let provider_meta = registry.find(&canonical_provider);
+    let display_name = provider_meta
+        .map(|p| p.name)
+        .unwrap_or(&canonical_provider);
     let docs_hint = provider_meta.map(|p| p.docs_url).unwrap_or("");
 
-    let fields = prompt_for_secret_fields(provider_name, display_name, docs_hint)?;
-    auth_store.store_secret_fields(provider_name, fields)?;
+    let fields = prompt_for_secret_fields(&canonical_provider, display_name, docs_hint)?;
+    auth_store.store_secret_fields(&canonical_provider, fields)?;
     eprintln!("Credentials saved for {display_name}.");
     Ok(())
 }
@@ -1131,7 +1166,9 @@ async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>
     let mut auth_store =
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
 
-    if provider_name == "anthropic" {
+    let canonical_provider = provider_alias(provider_name);
+
+    if canonical_provider == "anthropic" {
         let oauth = AnthropicOAuth::new();
 
         eprintln!("Opening browser for Anthropic login...");
@@ -1162,7 +1199,7 @@ async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>
             imp_llm::auth::StoredCredential::OAuth(credential),
         )?;
         eprintln!("{}", oauth_login_success_message(&auth_store, "anthropic"));
-    } else if provider_name == "openai" || provider_name == "openai-codex" {
+    } else if canonical_provider == "openai" || canonical_provider == "openai-codex" {
         let oauth = ChatGptOAuth::new();
 
         eprintln!("Opening browser for OpenAI / ChatGPT login...");
@@ -1200,11 +1237,34 @@ async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>
             "{}",
             oauth_login_success_message(&auth_store, "openai-codex")
         );
+    } else if canonical_provider == "moonshot" {
+        let registry = ProviderRegistry::with_builtins();
+        let provider = registry
+            .find("moonshot")
+            .expect("moonshot provider should exist");
+
+        eprintln!("Kimi uses a generated API key, not an OAuth browser flow in imp.");
+        eprintln!(
+            "Open {} to create a key from Moonshot / Kimi or Kimi Code, then paste it below.",
+            provider.docs_url
+        );
+        let _ = open_url(&format!("https://{}", provider.docs_url));
+
+        let value = prompt_input_line("api_key> ")?;
+        if value.trim().is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "No api_key entered. Aborting.").into());
+        }
+        auth_store.store_secret_fields(
+            "moonshot",
+            HashMap::from([("api_key".to_string(), value)]),
+        )?;
+        eprintln!("{}", kimi_api_login_success_message(&auth_store));
     } else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "`imp login {provider_name}` is only for OAuth providers. Use `imp secrets {provider_name}` for API keys/secrets."
+                "`imp login {provider_name}` is not supported. Use one of: anthropic, openai, kimi. For API-only providers, use `imp secrets {}`.",
+                provider_alias(provider_name)
             ),
         )
         .into());
@@ -4217,6 +4277,17 @@ mod tests {
             .unwrap()
             .clone();
         assert!(provider_has_auth(&auth_store, &provider));
+    }
+
+    #[test]
+    fn kimi_provider_alias_maps_to_moonshot() {
+        assert_eq!(provider_alias("kimi"), "moonshot");
+        assert_eq!(provider_alias("moonshot"), "moonshot");
+    }
+
+    #[test]
+    fn run_secrets_show_accepts_kimi_alias() {
+        assert_eq!(provider_alias("kimi"), "moonshot");
     }
 
     #[test]
