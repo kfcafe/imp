@@ -212,17 +212,17 @@ fn identity_layer(
     }
 
     s.push_str("\nTool usage guide:\n");
-    s.push_str("- Use `bash` for search, file discovery, directory listing, builds, tests, scripts, package managers, and other shell-native tasks.\n");
+    s.push_str("- Use `shell` for search, file discovery, directory listing, builds, tests, scripts, package managers, and other shell-native tasks. Prefer `scan` for structural code understanding before broad text search when symbol relationships or code blocks matter.\n");
     if defs.iter().any(|def| def.name == "git") {
-        s.push_str("- Use `git` for local repo/worktree operations; use `bash` for uncovered git commands.\n");
+        s.push_str("- Use `git` for local repo/worktree operations; use `shell` for uncovered git commands.\n");
     }
     if defs.iter().any(|def| def.name == "mana") {
-        s.push_str("- Prefer the native `mana` tool over `bash` for mana operations when an equivalent action exists; use `bash` only for mana-adjacent shell work with no native mana action.\n");
+        s.push_str("- Prefer the native `mana` tool over `shell` for mana operations when an equivalent action exists; use `shell` only for mana-adjacent shell work with no native mana action.\n");
     }
     s.push_str("- Use `read` to inspect a specific file with stable line-oriented output.\n");
-    s.push_str("- Use `scan` for structural code understanding and for extracting code at file:line, file:start-end, or file#symbol.\n");
+    s.push_str("- Use `scan` for structural code understanding and for extracting code at file:line, file:start-end, or file#symbol. Prefer it over `shell`+search when you need symbols, call sites, or coherent code blocks.\n");
     s.push_str("- Use `edit` and `write` for file changes.\n");
-    s.push_str("- Use specialized tools like `mana`, `ask`, `web`, `extend`, `memory`, and `session_search` when the task calls for them.\n");
+    s.push_str("- Use specialized tools like `mana`, `ask`, `web`, `extend`, and `recall` when the task calls for them. Use `recall` when you need to search past conversations.\n");
 
     s.push_str("\nMana doctrine:\n");
     s.push_str("- Mana is imp's substrate for explicit work. Represent work in mana whenever structure, verification, retries, dependencies, or handoff would help. Any mana unit must be detailed enough for another agent to execute cold without guesswork, even if you end up doing the work yourself.\n");

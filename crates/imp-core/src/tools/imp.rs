@@ -14,7 +14,7 @@ pub struct ImpTool;
 #[async_trait]
 impl Tool for ImpTool {
     fn name(&self) -> &str {
-        "imp"
+        "spawn"
     }
 
     fn label(&self) -> &str {
@@ -22,7 +22,7 @@ impl Tool for ImpTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn another imp worker. Supports durable mana-unit worker runs and bounded ad hoc helper sessions."
+        "Spawn another agent worker. Supports durable mana-unit worker runs and bounded ad hoc helper sessions."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -83,14 +83,14 @@ impl Tool for ImpTool {
     ) -> Result<ToolOutput> {
         if !matches!(ctx.mode, AgentMode::Full | AgentMode::Orchestrator) {
             return Ok(ToolOutput::error(
-                "The imp tool is only available in Full or Orchestrator mode.",
+                "The spawn tool is only available in Full or Orchestrator mode.",
             ));
         }
 
         let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
         if !matches!(action, "spawn" | "delegate") {
             return Ok(ToolOutput::error(
-                "Unsupported imp action. Expected action='spawn' (preferred) or action='delegate' (compatibility alias).",
+                "Unsupported spawn action. Expected action='spawn' (preferred) or action='delegate' (compatibility alias).",
             ));
         }
 
@@ -125,7 +125,7 @@ fn build_spawn_details(
     mode_details: serde_json::Value,
 ) -> serde_json::Value {
     json!({
-        "tool": "imp",
+        "tool": "spawn",
         "action": "spawn",
         "spawn_mode": spawn_mode,
         "delegation_mode": spawn_mode,
@@ -536,9 +536,18 @@ mod tests {
             json!({"final_text": "hello"}),
         );
 
-        assert_eq!(details.get("spawn_mode").and_then(|v| v.as_str()), Some("ad_hoc"));
-        assert_eq!(details.get("delegation_mode").and_then(|v| v.as_str()), Some("ad_hoc"));
-        assert_eq!(details.get("status").and_then(|v| v.as_str()), Some("completed"));
+        assert_eq!(
+            details.get("spawn_mode").and_then(|v| v.as_str()),
+            Some("ad_hoc")
+        );
+        assert_eq!(
+            details.get("delegation_mode").and_then(|v| v.as_str()),
+            Some("ad_hoc")
+        );
+        assert_eq!(
+            details.get("status").and_then(|v| v.as_str()),
+            Some("completed")
+        );
         assert_eq!(details.get("success").and_then(|v| v.as_bool()), Some(true));
         assert_eq!(
             details
@@ -624,4 +633,3 @@ mod tests {
         assert_eq!(text.as_deref(), Some("transient"));
     }
 }
-

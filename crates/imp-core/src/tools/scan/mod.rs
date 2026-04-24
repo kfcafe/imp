@@ -71,17 +71,31 @@ impl Tool for ScanTool {
     }
 
     fn description(&self) -> &str {
-        "Scan code structure or extract code blocks with tree-sitter."
+        "Analyze code structure with tree-sitter. Use before broad text search when you need symbols, definitions, file outlines, or coherent code blocks; extract exact blocks with file:line, file:start-end, or file#symbol."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["extract", "build", "scan"] },
-                "files": { "type": "array", "items": { "type": "string" } },
-                "directory": { "type": "string" },
-                "task": { "type": "string" }
+                "action": {
+                    "type": "string",
+                    "enum": ["extract", "build", "scan"],
+                    "description": "Operation to perform: 'scan' outlines a directory, 'build' outlines specific files, and 'extract' returns exact code blocks from file:line, file:start-end, or file#symbol targets."
+                },
+                "files": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Files to analyze for action='build', or extraction targets for action='extract' such as src/lib.rs:42, src/lib.rs:40-80, or src/lib.rs#MyStruct."
+                },
+                "directory": {
+                    "type": "string",
+                    "description": "Directory to structurally scan when action='scan'. Defaults to the current workspace."
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Optional natural-language focus for the scan, e.g. 'find auth entrypoints' or 'summarize provider implementations'."
+                }
             },
             "required": ["action"]
         })

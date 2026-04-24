@@ -432,12 +432,14 @@ pub struct ToolUpdate {
 /// Registry of available tools.
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
+    aliases: HashMap<String, String>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            aliases: HashMap::new(),
         }
     }
 
@@ -446,14 +448,34 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
-    /// Get a tool by name.
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
-        self.tools.get(name)
+    /// Register a compatibility alias for an existing canonical tool name.
+    ///
+    /// Aliases resolve at execution time but are intentionally omitted from
+    /// tool definitions so models see the canonical surface only.
+    pub fn register_alias(&mut self, alias: impl Into<String>, canonical: impl Into<String>) {
+        self.aliases.insert(alias.into(), canonical.into());
     }
 
-    /// Get a cloned map of all tools (for passing to extension runtimes).
+    /// Get a tool by canonical name or compatibility alias.
+    pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
+        if let Some(tool) = self.tools.get(name) {
+            return Some(tool);
+        }
+
+        self.aliases
+            .get(name)
+            .and_then(|canonical| self.tools.get(canonical))
+    }
+
+    /// Get a cloned map of all tools, including compatibility aliases.
     pub fn tools_map(&self) -> HashMap<String, Arc<dyn Tool>> {
-        self.tools.clone()
+        let mut map = self.tools.clone();
+        for (alias, canonical) in &self.aliases {
+            if let Some(tool) = self.tools.get(canonical) {
+                map.insert(alias.clone(), Arc::clone(tool));
+            }
+        }
+        map
     }
 
     /// Get all tool definitions (for LLM context).
@@ -501,6 +523,8 @@ impl ToolRegistry {
         F: Fn(&str) -> bool,
     {
         self.tools.retain(|name, _| predicate(name));
+        self.aliases
+            .retain(|_, canonical| self.tools.contains_key(canonical));
     }
 
     /// Get tool definitions filtered to those allowed by an agent mode.

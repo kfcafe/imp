@@ -11,16 +11,15 @@ pub struct SessionSearchTool;
 #[async_trait]
 impl Tool for SessionSearchTool {
     fn name(&self) -> &str {
-        "session_search"
+        "recall"
     }
 
     fn label(&self) -> &str {
-        "Session Search"
+        "Recall"
     }
 
     fn description(&self) -> &str {
-        "Search past conversations. Use when you need to recall something \
-         discussed in a previous session."
+        "Search past conversations. Use when you need to recall something discussed in a previous session."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -205,14 +204,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_search_tool_missing_query() {
+    async fn recall_tool_missing_query() {
         let tool = SessionSearchTool;
         let r = tool.execute("c1", json!({}), test_ctx()).await.unwrap();
         assert!(r.is_error);
     }
 
     #[tokio::test]
-    async fn session_search_tool_missing_db() {
+    async fn recall_tool_missing_db() {
         // With no index DB, should return a helpful message (not an error)
         let tool = SessionSearchTool;
         // We can't easily override the path in this test without refactoring,

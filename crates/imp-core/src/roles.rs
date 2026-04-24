@@ -40,7 +40,7 @@ impl Role {
                 "read".into(),
                 "scan".into(),
                 "web".into(),
-                "session_search".into(),
+                "recall".into(),
             ]),
             None => ToolSet::All,
         };
@@ -80,7 +80,7 @@ pub fn builtin_roles() -> Vec<(&'static str, RoleDef)> {
                     "read".into(),
                     "scan".into(),
                     "web".into(),
-                    "session_search".into(),
+                    "recall".into(),
                 ]),
                 readonly: true,
                 instructions: Some("Explore and summarize. Do not modify files.".into()),

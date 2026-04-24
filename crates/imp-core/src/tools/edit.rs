@@ -26,6 +26,18 @@ impl Tool for EditTool {
                 "path": { "type": "string" },
                 "oldText": { "type": "string" },
                 "newText": { "type": "string" },
+                "dryRun": {
+                    "type": "boolean",
+                    "description": "Return the diff and metadata without writing the file"
+                },
+                "expectedOccurrences": {
+                    "type": "integer",
+                    "description": "Require this many exact oldText matches before editing; useful with 1 to prevent ambiguous replacements"
+                },
+                "replaceAll": {
+                    "type": "boolean",
+                    "description": "Replace all exact oldText matches instead of only the first match"
+                },
                 "edits": { "type": "array", "items": { "type": "object", "properties": { "oldText": { "type": "string" }, "newText": { "type": "string" } }, "required": ["oldText", "newText"] } }
             },
             "required": ["path"]
@@ -51,6 +63,12 @@ impl Tool for EditTool {
         let raw_path = params["path"].as_str().unwrap_or("");
         let old_text = params["oldText"].as_str().unwrap_or("");
         let new_text = params["newText"].as_str().unwrap_or("");
+        let dry_run = params["dryRun"].as_bool().unwrap_or(false);
+        let replace_all = params["replaceAll"].as_bool().unwrap_or(false);
+        let expected_occurrences = params
+            .get("expectedOccurrences")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
 
         if raw_path.is_empty() {
             return Ok(ToolOutput::error("Missing required parameter: path"));
@@ -90,10 +108,6 @@ impl Tool for EditTool {
         };
 
         let raw_content = tokio::fs::read_to_string(&path).await?;
-        ctx.checkpoint_state.snapshot_paths(
-            std::slice::from_ref(&path),
-            Some(format!("edit {}", path.display())),
-        )?;
 
         // Normalize to LF for internal processing
         let content = raw_content.replace("\r\n", "\n");
@@ -101,10 +115,35 @@ impl Tool for EditTool {
         let old_normalized = old_text.replace("\r\n", "\n");
         let new_normalized = new_text.replace("\r\n", "\n");
 
-        let (new_content, was_fuzzy) = match apply_edit(&content, &old_normalized, &new_normalized)
-        {
-            Ok(v) => v,
-            Err(output) => return Ok(output),
+        let exact_occurrences = count_occurrences(&content, &old_normalized);
+        if let Some(expected) = expected_occurrences {
+            if exact_occurrences != expected {
+                return Ok(ToolOutput::error(format!(
+                    "Expected {expected} exact occurrence(s) of oldText in {raw_path}, found {exact_occurrences}. No changes made."
+                )));
+            }
+        }
+
+        let (new_content, was_fuzzy, replacements) = if replace_all {
+            if exact_occurrences == 0 {
+                return match apply_edit(&content, &old_normalized, &new_normalized) {
+                    Ok((_, true)) => Ok(ToolOutput::error(
+                        "replaceAll requires exact matches and does not use fuzzy matching. Found 0 exact matches, but a fuzzy match exists. No changes made.",
+                    )),
+                    Ok(_) => unreachable!("apply_edit cannot exact-match when exact_occurrences is 0"),
+                    Err(output) => Ok(output),
+                };
+            }
+            (
+                content.replace(&old_normalized, &new_normalized),
+                false,
+                exact_occurrences,
+            )
+        } else {
+            match apply_edit(&content, &old_normalized, &new_normalized) {
+                Ok((new_content, was_fuzzy)) => (new_content, was_fuzzy, 1),
+                Err(output) => return Ok(output),
+            }
         };
 
         let diff = generate_diff(raw_path, &content, &new_content);
@@ -116,8 +155,18 @@ impl Tool for EditTool {
             new_content
         };
 
-        tokio::fs::write(&path, &final_content).await?;
+        if !dry_run {
+            ctx.checkpoint_state.snapshot_paths(
+                std::slice::from_ref(&path),
+                Some(format!("edit {}", path.display())),
+            )?;
+            tokio::fs::write(&path, &final_content).await?;
+        }
+
         let mut msg = diff;
+        if dry_run {
+            msg.push_str("\n(dry run: no changes written)");
+        }
         if was_fuzzy {
             msg.push_str(
                 "\n(matched using fuzzy matching: trailing whitespace/unicode normalized)",
@@ -133,10 +182,21 @@ impl Tool for EditTool {
             details: json!({
                 "path": path.display().to_string(),
                 "fuzzy_match": was_fuzzy,
+                "dry_run": dry_run,
+                "replace_all": replace_all,
+                "exact_occurrences": exact_occurrences,
+                "replacements": replacements,
             }),
             is_error: false,
         })
     }
+}
+
+fn count_occurrences(content: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    content.match_indices(needle).count()
 }
 
 /// Apply a single edit, returning the new content and whether fuzzy matching was used.
@@ -224,6 +284,122 @@ mod tests {
         let written = std::fs::read_to_string(&file).unwrap();
         assert!(written.contains("world"));
         assert!(!written.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn edit_dry_run_returns_diff_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("dry.txt");
+        std::fs::write(&file, "alpha\n").unwrap();
+
+        let tool = EditTool;
+        let ctx = test_ctx(dir.path());
+        let checkpoint_state = ctx.checkpoint_state.clone();
+        let result = tool
+            .execute(
+                "c-dry",
+                json!({
+                    "path": "dry.txt",
+                    "oldText": "alpha",
+                    "newText": "beta",
+                    "dryRun": true
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "alpha\n");
+        assert!(checkpoint_state.checkpoints().is_empty());
+        assert_eq!(result.details["dry_run"], true);
+        let text = result.text_content().unwrap();
+        assert!(text.contains("beta"));
+        assert!(text.contains("dry run"));
+    }
+
+    #[tokio::test]
+    async fn edit_expected_occurrences_mismatch_does_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("expected-mismatch.txt");
+        std::fs::write(&file, "foo foo\n").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(
+                "c-expected-mismatch",
+                json!({
+                    "path": "expected-mismatch.txt",
+                    "oldText": "foo",
+                    "newText": "bar",
+                    "expectedOccurrences": 1
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "foo foo\n");
+        assert!(result.text_content().unwrap().contains("found 2"));
+    }
+
+    #[tokio::test]
+    async fn edit_expected_occurrences_success_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("expected-success.txt");
+        std::fs::write(&file, "foo\n").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(
+                "c-expected-success",
+                json!({
+                    "path": "expected-success.txt",
+                    "oldText": "foo",
+                    "newText": "bar",
+                    "expectedOccurrences": 1
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "bar\n");
+        assert_eq!(result.details["exact_occurrences"], 1);
+        assert_eq!(result.details["replacements"], 1);
+    }
+
+    #[tokio::test]
+    async fn edit_replace_all_replaces_exact_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("replace-all.txt");
+        std::fs::write(&file, "foo bar foo baz foo\n").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(
+                "c-replace-all",
+                json!({
+                    "path": "replace-all.txt",
+                    "oldText": "foo",
+                    "newText": "zap",
+                    "replaceAll": true,
+                    "expectedOccurrences": 3
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "zap bar zap baz zap\n"
+        );
+        assert_eq!(result.details["replace_all"], true);
+        assert_eq!(result.details["replacements"], 3);
     }
 
     #[tokio::test]

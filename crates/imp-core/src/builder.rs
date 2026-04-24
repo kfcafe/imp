@@ -293,25 +293,28 @@ impl AgentBuilder {
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
         ask::AskTool, bash::BashTool, edit::EditTool, extend::ExtendTool, git::GitTool,
-        imp::ImpTool, mana::ManaTool, memory::MemoryTool, multi_edit::MultiEditTool,
-        read::ReadTool, scan::ScanTool, session_search::SessionSearchTool, web::WebTool,
-        write::WriteTool,
+        imp::ImpTool, mana::ManaTool, read::ReadTool, scan::ScanTool,
+        session_search::SessionSearchTool, web::WebTool, write::WriteTool,
     };
 
     tools.register(Arc::new(AskTool));
-    tools.register(Arc::new(BashTool));
+    tools.register(Arc::new(BashTool::canonical()));
     tools.register(Arc::new(EditTool));
     tools.register(Arc::new(ExtendTool));
     tools.register(Arc::new(GitTool));
     tools.register(Arc::new(ImpTool));
     tools.register(Arc::new(ManaTool::default()));
-    tools.register(Arc::new(MemoryTool));
-    tools.register(Arc::new(MultiEditTool));
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ScanTool));
     tools.register(Arc::new(SessionSearchTool));
     tools.register(Arc::new(WebTool));
+
+    tools.register_alias("bash", "shell");
+    tools.register_alias("sh", "shell");
+    tools.register_alias("imp", "spawn");
+    tools.register_alias("multi_edit", "edit");
+    tools.register_alias("session_search", "recall");
 }
 
 #[cfg(test)]
@@ -516,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn builder_registers_memory_and_session_search_tools() {
+    fn builder_registers_canonical_tools_and_compat_aliases() {
         let (agent, _handle) = AgentBuilder::new(
             Config::default(),
             PathBuf::from("/tmp"),
@@ -526,9 +529,36 @@ mod tests {
         .build()
         .unwrap();
 
-        assert!(agent.tools.get("memory").is_some());
+        assert!(agent.tools.get("shell").is_some());
+        assert!(agent.tools.get("bash").is_some());
+        assert!(agent.tools.get("sh").is_some());
+        assert!(agent.tools.get("spawn").is_some());
+        assert!(agent.tools.get("imp").is_some());
+        assert!(agent.tools.get("edit").is_some());
+        assert!(agent.tools.get("multi_edit").is_some());
+        assert!(agent.tools.get("memory").is_none());
+        assert!(agent.tools.get("recall").is_some());
         assert!(agent.tools.get("session_search").is_some());
         assert!(agent.tools.get("git").is_some());
+
+        let mut definition_names: Vec<_> = agent
+            .tools
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        definition_names.sort();
+
+        assert!(definition_names.contains(&"shell".to_string()));
+        assert!(definition_names.contains(&"spawn".to_string()));
+        assert!(definition_names.contains(&"edit".to_string()));
+        assert!(!definition_names.contains(&"bash".to_string()));
+        assert!(!definition_names.contains(&"sh".to_string()));
+        assert!(!definition_names.contains(&"imp".to_string()));
+        assert!(!definition_names.contains(&"multi_edit".to_string()));
+        assert!(definition_names.contains(&"recall".to_string()));
+        assert!(!definition_names.contains(&"session_search".to_string()));
+        assert!(!definition_names.contains(&"memory".to_string()));
     }
 
     #[test]

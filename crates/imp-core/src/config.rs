@@ -37,40 +37,14 @@ impl AgentMode {
         match self {
             AgentMode::Full => &[],
             AgentMode::Worker => &[
-                "read",
-                "scan",
-                "web",
-                "session_search",
-                "write",
-                "edit",
-                "multi_edit",
-                "bash",
-                "git",
-                "mana",
-                "memory",
-                "ask",
+                "read", "scan", "web", "recall", "write", "edit", "shell", "git", "mana", "ask",
             ],
             AgentMode::Orchestrator => &[
-                "read",
-                "scan",
-                "web",
-                "session_search",
-                "mana",
-                "git",
-                "ask",
-                "imp",
+                "read", "scan", "web", "recall", "mana", "git", "ask", "spawn",
             ],
-            AgentMode::Planner => &[
-                "read",
-                "scan",
-                "web",
-                "session_search",
-                "git",
-                "mana",
-                "ask",
-            ],
-            AgentMode::Reviewer => &["read", "scan", "web", "session_search", "git", "ask"],
-            AgentMode::Auditor => &["read", "scan", "web", "session_search", "git", "mana"],
+            AgentMode::Planner => &["read", "scan", "web", "recall", "git", "mana", "ask"],
+            AgentMode::Reviewer => &["read", "scan", "web", "recall", "git", "ask"],
+            AgentMode::Auditor => &["read", "scan", "web", "recall", "git", "mana"],
         }
     }
 
@@ -1369,7 +1343,7 @@ model = "sonnet"
         let mode = AgentMode::Full;
         assert!(mode.allows_tool("anything"));
         assert!(mode.allows_tool("read"));
-        assert!(mode.allows_tool("bash"));
+        assert!(mode.allows_tool("shell"));
         assert!(mode.allows_tool("nonexistent_future_tool"));
         assert_eq!(mode.allowed_tool_names(), &[] as &[&str]);
     }
@@ -1381,10 +1355,10 @@ model = "sonnet"
         assert!(mode.allows_tool("scan"));
         assert!(mode.allows_tool("web"));
         assert!(mode.allows_tool("git"));
-        assert!(mode.allows_tool("session_search"));
+        assert!(mode.allows_tool("recall"));
         assert!(mode.allows_tool("mana"));
         assert!(mode.allows_tool("ask"));
-        assert!(mode.allows_tool("imp"));
+        assert!(mode.allows_tool("spawn"));
     }
 
     #[test]
@@ -1392,19 +1366,21 @@ model = "sonnet"
         let mode = AgentMode::Orchestrator;
         assert!(!mode.allows_tool("write"));
         assert!(!mode.allows_tool("edit"));
-        assert!(!mode.allows_tool("multi_edit"));
-        assert!(!mode.allows_tool("bash"));
+        assert!(!mode.allows_tool("shell"));
     }
 
     #[test]
-    fn non_orchestrator_modes_block_imp() {
+    fn non_orchestrator_modes_block_spawn() {
         for mode in [
             AgentMode::Worker,
             AgentMode::Planner,
             AgentMode::Reviewer,
             AgentMode::Auditor,
         ] {
-            assert!(!mode.allows_tool("imp"), "mode {mode:?} should block imp");
+            assert!(
+                !mode.allows_tool("spawn"),
+                "mode {mode:?} should block spawn"
+            );
         }
     }
 

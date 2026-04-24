@@ -26,13 +26,13 @@ pub fn should_nudge_learning(messages: &[Message], threshold: u32) -> bool {
 /// The nudge message injected after complex sessions.
 pub const LEARNING_NUDGE: &str = "\
 Before we finish — this was a complex session. Consider:
-1. Is there anything worth saving to memory (environment facts, lessons learned)?
+1. Is there anything worth capturing in mana facts, mana notes, or user profile context?
 2. Should the approach be saved as a skill for future reuse?
 3. If you used a skill that was wrong or incomplete, patch it.";
 
 /// Learning instructions injected into Layer 1 of the system prompt.
 pub const LEARNING_INSTRUCTIONS: &str = "\
-You have persistent memory and can author skills. \
+You can author skills and should use mana for durable project knowledge. \
 Use them to save durable knowledge and reduce repeat work.";
 
 #[cfg(test)]

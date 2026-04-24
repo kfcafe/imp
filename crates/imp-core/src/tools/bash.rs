@@ -181,13 +181,19 @@ fn truncate_command_output(command: &str, output: &str) -> TruncationResult {
 
 pub struct BashTool;
 
+impl BashTool {
+    pub fn canonical() -> Self {
+        Self
+    }
+}
+
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
-        "bash"
+        "shell"
     }
     fn label(&self) -> &str {
-        "Bash"
+        "Shell"
     }
     fn description(&self) -> &str {
         "Run a shell command in the workspace or an optional workdir."
