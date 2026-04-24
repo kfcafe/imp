@@ -506,6 +506,7 @@ impl Agent {
         if let Some(nudge) = mana_skill_follow_up_hint(
             &prompt,
             self.mode,
+            !self.tools.is_empty(),
             self.has_mana_skill,
             self.has_mana_basics_skill,
             self.has_mana_delegation_skill,
@@ -1822,10 +1823,15 @@ fn mana_bash_equivalent_hint(command: &str) -> Option<&'static str> {
 fn mana_skill_follow_up_hint(
     prompt: &str,
     mode: AgentMode,
+    tools_available: bool,
     has_mana_skill: bool,
     has_mana_basics_skill: bool,
     _has_mana_delegation_skill: bool,
 ) -> Option<&'static str> {
+    if !tools_available {
+        return None;
+    }
+
     let lower = prompt.to_ascii_lowercase();
 
     let orchestration_signal = [
@@ -3121,6 +3127,64 @@ mod tests {
             user_texts,
             vec!["Explain how this parser works".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn agent_does_not_queue_mana_basics_hint_when_no_tools_available() {
+        let provider = Arc::new(MockProvider::new(vec![text_response("Loaded basics skill", 100, 20)]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.has_mana_basics_skill = true;
+        agent.mode = AgentMode::Worker;
+        agent.tools.retain(|_| false);
+
+        agent
+            .run("Check mana status and logs for my unit".to_string())
+            .await
+            .unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts, vec!["Check mana status and logs for my unit".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn single_text_turn_with_max_turns_one_and_no_tools_exits_cleanly() {
+        let provider = Arc::new(MockProvider::new(vec![text_response("SMOKE_OK", 50, 10)]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.max_turns = 1;
+        agent.mode = AgentMode::Worker;
+        agent.has_mana_basics_skill = true;
+        agent.tools.retain(|_| false);
+
+        let events_task = tokio::spawn(collect_events(handle));
+        let result = agent
+            .run("Check mana status and finish".to_string())
+            .await;
+        drop(agent);
+
+        assert!(result.is_ok());
+
+        let events = events_task.await.unwrap();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Error { error } if error.contains("Max turns exceeded")
+        )));
     }
 
     #[tokio::test]

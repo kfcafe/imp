@@ -522,10 +522,34 @@ sudo mv imp-0.1.0-aarch64-unknown-linux-gnu/imp /usr/local/bin/
 ```bash
 git clone https://github.com/kfcafe/imp.git
 cd imp
-cargo install --path .
+uu install --default
+imp
 ```
 
-`uu install` now works from the repo root too because it resolves to the same root install target.
+`uu install --default` runs the repo's post-install hook, so local source installs repair the active shell `imp` path automatically (for example when `~/bin/imp` shadows `~/.cargo/bin/imp`).
+
+If you prefer raw Cargo, this also works:
+
+```bash
+cargo install --path .
+~/.cargo/bin/imp install-local
+imp
+```
+
+`uu install` now works from the repo root too because it resolves to the same root install target, and `uu install --default` additionally runs the repo post-install hook when present.
+
+For local source upgrades, prefer:
+
+```bash
+uu install --default
+```
+
+If you are bypassing `uu`, the manual equivalent is:
+
+```bash
+cargo install --path .
+~/.cargo/bin/imp install-local
+```
 
 ## macOS local install note
 

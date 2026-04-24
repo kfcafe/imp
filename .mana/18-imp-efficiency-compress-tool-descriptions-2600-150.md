@@ -2,10 +2,10 @@
 id: '18'
 title: 'imp efficiency: compress tool descriptions (~2600 → ~1500 tokens)'
 slug: imp-efficiency-compress-tool-descriptions-2600-150
-status: in_progress
+status: closed
 priority: 1
 created_at: '2026-03-22T23:59:18.310303Z'
-updated_at: '2026-04-17T07:56:55.639731Z'
+updated_at: '2026-04-23T13:02:07.521112Z'
 notes: |2-
 
   ## Attempt 1 — 2026-03-24T06:26:55Z
@@ -44,6 +44,10 @@ notes: |2-
   ---
   2026-04-17T07:56:55.639724+00:00
   Implemented step 3 by trimming the current shipped tool descriptions/parameter schemas in `{write, read, ask, bash, edit, web, scan, mana}`. Re-ran the sizing verify script against the unit's measured tool set and reduced total tool-definition size from 5333 to 3209 (< 4000). Also ran `cargo check -p imp-core` to confirm the schema-string edits still compile.
+
+  ---
+  2026-04-23T13:02:07.521107+00:00
+  2026-04-23 resumed and confirmed the unit had already been implemented. Re-ran the sizing verify script against the current shipped built-in tool set and got `Tool def size: 3209 chars (target: <4000)`, which satisfies the acceptance threshold. Also re-ran `cargo check -p imp-core`, which passes. No new code changes were required on resume; the job can be closed based on the existing trimmed schemas/descriptions in the current workspace state.
 verify: |-
   cd /Users/asher/tower && python3 -c "
   import re, os

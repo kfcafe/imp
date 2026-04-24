@@ -26,6 +26,7 @@ use imp_llm::{ContentBlock, ToolResultMessage};
 
 use crate::agent::AgentCommand;
 use crate::config::AgentMode;
+use crate::config::LuaCapabilityPolicy;
 use crate::error::Result;
 use crate::mana_review::TurnManaReviewAccumulator;
 use crate::ui::UserInterface;
@@ -124,7 +125,7 @@ impl FileTracker {
 }
 
 /// Cloneable runtime hook for loading Lua extension tools into a registry.
-pub type LuaToolLoader = Arc<dyn Fn(&mut ToolRegistry) + Send + Sync>;
+pub type LuaToolLoader = Arc<dyn Fn(&LuaCapabilityPolicy, &mut ToolRegistry) + Send + Sync>;
 
 /// Context provided to tools during execution.
 pub struct ToolContext {

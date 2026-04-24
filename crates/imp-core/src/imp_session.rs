@@ -330,7 +330,7 @@ impl ImpSession {
             builder = builder.system_prompt(prompt.clone());
         }
         if let Some(lua_loader) = options.lua_loader {
-            builder = builder.lua_tool_loader(move |tools| lua_loader(tools));
+            builder = builder.lua_tool_loader(move |policy, tools| lua_loader(policy, tools));
         }
 
         let (mut agent, handle) = builder.build()?;
@@ -533,6 +533,10 @@ impl ImpSession {
     pub async fn recv_event(&mut self) -> Option<AgentEvent> {
         if let Some(error) = self.take_persistence_error() {
             return Some(AgentEvent::Error { error });
+        }
+
+        if self.agent_task.is_none() && self.completed_run_result.is_some() {
+            return None;
         }
 
         let event = self.handle.event_rx.recv().await?;
@@ -1136,6 +1140,64 @@ mod tests {
         assert!(!prompt.trim().is_empty());
         assert!(prompt.contains("Test task"));
         assert!(prompt.contains("Verify headless prompt assembly"));
+    }
+
+    #[tokio::test]
+    async fn recv_event_returns_none_after_agent_end_even_if_sender_is_still_owned() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let (agent, handle) = Agent::new(
+            clone_model(&test_model_with_events(vec![Ok(StreamEvent::MessageEnd {
+                message: AssistantMessage {
+                    content: vec![ContentBlock::Text {
+                        text: "done".into(),
+                    }],
+                    usage: None,
+                    stop_reason: StopReason::EndTurn,
+                    timestamp: 1,
+                },
+            })])),
+            cwd.clone(),
+        );
+
+        let mut session = ImpSession {
+            agent: Some(agent),
+            handle,
+            session_mgr: SessionManager::in_memory(),
+            config: Config::default(),
+            model: test_model_with_events(vec![Ok(StreamEvent::MessageEnd {
+                message: AssistantMessage {
+                    content: vec![ContentBlock::Text {
+                        text: "done".into(),
+                    }],
+                    usage: None,
+                    stop_reason: StopReason::EndTurn,
+                    timestamp: 1,
+                },
+            })]),
+            auth_store: AuthStore::new(tmp.path().join("auth.json")),
+            model_registry: ModelRegistry::with_builtins(),
+            cwd,
+            agent_task: None,
+            completed_run_result: None,
+            pending_persistence_errors: VecDeque::new(),
+            context_prefill: Vec::new(),
+            context_prefill_injected: false,
+        };
+
+        session.prompt("latest").await.unwrap();
+        while let Some(event) = session.recv_event().await {
+            if matches!(event, AgentEvent::AgentEnd { .. }) {
+                break;
+            }
+        }
+
+        let next = tokio::time::timeout(std::time::Duration::from_secs(1), session.recv_event())
+            .await
+            .expect("recv_event should not hang after agent end");
+        assert!(next.is_none());
+
+        session.wait().await.unwrap();
     }
 
     #[tokio::test]

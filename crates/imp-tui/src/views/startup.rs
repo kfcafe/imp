@@ -49,8 +49,8 @@ impl Widget for StartupPanelView<'_> {
 
         let outer = Block::default()
             .title(Line::from(vec![
-                Span::styled(" launch ", self.theme.accent_style()),
-                Span::styled("start here", self.theme.muted_style()),
+                Span::styled(" imp ", self.theme.accent_style()),
+                Span::styled("ready", self.theme.muted_style()),
             ]))
             .borders(Borders::ALL)
             .border_style(self.theme.border_style());
@@ -148,7 +148,7 @@ fn render_actions(area: Rect, buf: &mut Buffer, theme: &Theme, actions: &[Startu
     }
 
     let block = Block::default()
-        .title(Line::from(Span::styled(" start here ", theme.header_style())))
+        .title(Line::from(Span::styled(" next actions ", theme.header_style())))
         .borders(Borders::ALL)
         .border_style(theme.accent_style());
     let inner = block.inner(area);
@@ -178,9 +178,9 @@ fn render_action_lines(area: Rect, buf: &mut Buffer, theme: &Theme, actions: &[S
         .map(|action| {
             Line::from(vec![
                 Span::styled(
-                    format!(" {:<9}", action.trigger),
-                    theme.accent_style().add_modifier(Modifier::BOLD),
-                ),
+                format!(" {:<10}", action.trigger),
+                theme.accent_style().add_modifier(Modifier::BOLD),
+            ),
                 Span::styled(action.label.clone(), Style::default()),
                 Span::styled(
                     format!(" — {}", action.description),
@@ -313,7 +313,7 @@ fn render_prompt_preview(area: Rect, buf: &mut Buffer, theme: &Theme, data: &Sta
 
     let block = Block::default()
         .title(Line::from(vec![
-            Span::styled(" generated prompt preview ", theme.header_style()),
+            Span::styled(" prompt preview ", theme.header_style()),
             Span::styled(
                 format!("~{} tok · excludes file-backed context", data.prompt_tokens),
                 theme.muted_style(),

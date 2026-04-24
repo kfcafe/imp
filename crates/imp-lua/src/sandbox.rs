@@ -5,7 +5,7 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use imp_core::config::AgentMode;
+use imp_core::config::{AgentMode, LuaCapabilityPolicy};
 use imp_core::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
 use imp_core::ui::UserInterface;
 use mlua::Lua;
@@ -98,8 +98,14 @@ pub struct LuaRuntime {
     call_context: Arc<Mutex<Option<LuaCallContext>>>,
     /// Env vars this extension is allowed to read via `imp.env()`.
     allowed_env: Arc<Mutex<HashSet<String>>>,
-    /// Whether Lua host-side native tool calls are permitted for the current execution.
+    /// Whether `imp.tool()` calls are currently permitted.
     allow_native_tool_calls: Arc<AtomicBool>,
+    /// Whether `imp.exec()` shell execution is permitted.
+    allow_shell_exec: Arc<AtomicBool>,
+    /// Whether `imp.http.*` calls are permitted.
+    allow_http: Arc<AtomicBool>,
+    /// Whether secret access is permitted.
+    allow_secrets: Arc<AtomicBool>,
 }
 
 impl LuaRuntime {
@@ -115,6 +121,9 @@ impl LuaRuntime {
             call_context: Arc::new(Mutex::new(None)),
             allowed_env: Arc::new(Mutex::new(HashSet::new())),
             allow_native_tool_calls: Arc::new(AtomicBool::new(true)),
+            allow_shell_exec: Arc::new(AtomicBool::new(false)),
+            allow_http: Arc::new(AtomicBool::new(false)),
+            allow_secrets: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -153,6 +162,21 @@ impl LuaRuntime {
         Arc::clone(&self.allowed_env)
     }
 
+    /// Get whether `imp.exec()` calls are currently permitted.
+    pub fn allow_shell_exec(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.allow_shell_exec)
+    }
+
+    /// Get whether `imp.http.*` calls are currently permitted.
+    pub fn allow_http(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.allow_http)
+    }
+
+    /// Get whether secret access is currently permitted.
+    pub fn allow_secrets(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.allow_secrets)
+    }
+
     /// Get whether `imp.tool()` calls are currently permitted.
     pub fn allow_native_tool_calls(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.allow_native_tool_calls)
@@ -178,10 +202,34 @@ impl LuaRuntime {
         *self.allowed_env.lock().unwrap() = vars;
     }
 
+    /// Set whether `imp.exec()` calls are permitted for the current runtime.
+    pub fn set_allow_shell_exec(&self, allowed: bool) {
+        self.allow_shell_exec.store(allowed, Ordering::Relaxed);
+    }
+
+    /// Set whether `imp.http.*` calls are permitted for the current runtime.
+    pub fn set_allow_http(&self, allowed: bool) {
+        self.allow_http.store(allowed, Ordering::Relaxed);
+    }
+
+    /// Set whether secret access is permitted for the current runtime.
+    pub fn set_allow_secrets(&self, allowed: bool) {
+        self.allow_secrets.store(allowed, Ordering::Relaxed);
+    }
+
     /// Set whether `imp.tool()` calls are permitted for the current runtime.
     pub fn set_allow_native_tool_calls(&self, allowed: bool) {
         self.allow_native_tool_calls
             .store(allowed, Ordering::Relaxed);
+    }
+
+    /// Apply a shipped-runtime capability policy.
+    pub fn apply_capability_policy(&self, policy: &LuaCapabilityPolicy) {
+        self.set_allow_native_tool_calls(policy.allow_native_tool_calls);
+        self.set_allow_shell_exec(policy.allow_shell_exec);
+        self.set_allow_http(policy.allow_http);
+        self.set_allow_secrets(policy.allow_secrets);
+        self.set_allowed_env(policy.allowed_env.clone());
     }
 
     /// Register a tool handle (called from bridge).

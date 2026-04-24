@@ -2,10 +2,10 @@
 id: '53'
 title: Audit model cutoff / mid-task truncation paths in imp runtime
 slug: audit-model-cutoff-mid-task-truncation-paths-in-im
-status: in_progress
+status: closed
 priority: 2
 created_at: '2026-04-16T04:15:31.814142Z'
-updated_at: '2026-04-16T05:17:01.957397Z'
+updated_at: '2026-04-23T05:33:06.493064Z'
 acceptance: Durable audit notes exist in mana with concrete file paths and failure modes. Follow-up implementation should either (a) transparently recover from max-token truncation, or (b) clearly surface truncation/incomplete-stream endings to the user instead of presenting them as clean completions.
 notes: |-
   ---
@@ -62,6 +62,10 @@ notes: |-
 
   Residual note:
   - Current targeted provider tests are mostly parser/unit tests, not full mocked network EOF tests. The runtime behavior is now guarded both in providers and in `imp-core`, which materially closes the silent-cutoff path even before dedicated transport-level EOF fixtures are added.
+
+  ---
+  2026-04-23T05:33:06.493060+00:00
+  2026-04-23 resumed and reverified against current workspace state. The hardening described in the audit notes is present in code and still passing targeted verification. Evidence: `crates/imp-core/src/agent.rs` now errors when a stream ends without a provider-supplied `MessageEnd` instead of silently synthesizing a clean completion (`Provider stream ended unexpectedly before completing the message ...`). Targeted tests still pass: `agent_treats_silent_eof_without_message_end_as_error`, `agent_surfaces_error_after_partial_stream_without_retrying`, plus provider suites `openai`, `openai_compat`, `google`, and `anthropic`. Acceptance for the audit/hardening job is satisfied in current state; no additional code change was needed on resume.
 labels:
 - bug
 - llm

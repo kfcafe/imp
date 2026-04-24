@@ -4,7 +4,7 @@ use std::sync::Arc;
 use imp_llm::Model;
 
 use crate::agent::{Agent, AgentHandle};
-use crate::config::Config;
+use crate::config::{Config, LuaCapabilityPolicy};
 use crate::error::Result;
 use crate::mana_prompt_context;
 use crate::resources;
@@ -136,7 +136,7 @@ impl AgentBuilder {
     /// `imp_lua::load_lua_extensions()`.
     pub fn lua_tool_loader<F>(mut self, f: F) -> Self
     where
-        F: Fn(&mut ToolRegistry) + Send + Sync + 'static,
+        F: Fn(&LuaCapabilityPolicy, &mut ToolRegistry) + Send + Sync + 'static,
     {
         self.lua_tool_loader = Some(Arc::new(f));
         self
@@ -209,7 +209,8 @@ impl AgentBuilder {
 
         // Load Lua extension tools (provided by the binary crate via lua_tool_loader)
         if let Some(lua_loader) = self.lua_tool_loader {
-            lua_loader(&mut agent.tools);
+            let lua_policy = self.config.lua.resolve_policy(agent.mode);
+            lua_loader(&lua_policy, &mut agent.tools);
         }
 
         // Filter registered tools to those allowed by the mode.

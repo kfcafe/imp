@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -580,6 +580,63 @@ fn stable_hash<T: std::hash::Hash>(value: &T) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
     hasher.finish()
+}
+
+fn model_picker_chatgpt_oauth_models(
+    registry: &ModelRegistry,
+    auth_store: &AuthStore,
+) -> Vec<ModelMeta> {
+    let has_chatgpt_oauth = auth_store.get_oauth("openai").is_some()
+        || auth_store.get_oauth("openai-codex").is_some();
+    if !has_chatgpt_oauth || auth_store.resolve_api_key_only("openai").is_ok() {
+        return Vec::new();
+    }
+
+    imp_llm::model::builtin_openai_codex_models()
+        .into_iter()
+        .filter(|model| registry.find(&model.id).is_none())
+        .map(|mut model| {
+            model.provider = "openai".into();
+            model
+        })
+        .collect()
+}
+
+fn filtered_model_options(
+    registry: &ModelRegistry,
+    config: &Config,
+    auth_store: &AuthStore,
+) -> Vec<ModelMeta> {
+    let oauth_only_models = model_picker_chatgpt_oauth_models(registry, auth_store);
+
+    match &config.enabled_models {
+        Some(enabled) if !enabled.is_empty() => {
+            let mut available_models = registry.list().to_vec();
+            available_models.extend(oauth_only_models);
+
+            let available_ids: HashSet<&str> = available_models.iter().map(|m| m.id.as_str()).collect();
+            let enabled_ids: HashSet<String> = enabled
+                .iter()
+                .filter_map(|name| registry.resolve_meta(name, None).map(|model| model.id))
+                .filter(|id| available_ids.contains(id.as_str()))
+                .collect();
+
+            available_models
+                .into_iter()
+                .filter(|model| enabled_ids.contains(&model.id))
+                .collect()
+        }
+        _ => {
+            let mut visible_models: Vec<ModelMeta> = registry
+                .list()
+                .iter()
+                .filter(|model| auth_store.has_credentials(&model.provider))
+                .cloned()
+                .collect();
+            visible_models.extend(oauth_only_models);
+            visible_models
+        }
+    }
 }
 
 impl App {
@@ -1341,11 +1398,24 @@ impl App {
             .unwrap_or_else(|| "new chat".to_string());
         let session_lines = vec![
             format!("• project: {repo_label}"),
+            format!("• cwd: {}", self.cwd.display()),
+            format!("• session: {session_name}"),
             format!("• model: {}", self.model_name),
             format!("• provider: {provider_id} ({provider_auth})"),
             format!("• thinking: {:?}", self.thinking_level),
-            format!("• session: {session_name}"),
             format!("• web: {web_summary}"),
+            format!("• lua extensions: {lua_extension_summary}"),
+            format!(
+                "• slash commands: {}",
+                summarize_inline(
+                    command_lines
+                        .iter()
+                        .filter_map(|line| line.trim().strip_prefix('•'))
+                        .map(|line| line.trim().to_string())
+                        .collect(),
+                    4,
+                )
+            ),
         ];
 
         let visible_prompt_tools = {
@@ -1402,32 +1472,32 @@ impl App {
         let actions = vec![
             StartupAction {
                 trigger: "type".to_string(),
-                label: "ask imp to work".to_string(),
+                label: "give imp a concrete task".to_string(),
                 description: format!("inspect {repo_label}, explain code, or make a change"),
             },
             StartupAction {
                 trigger: "/resume".to_string(),
-                label: "pick up earlier work".to_string(),
+                label: "return to earlier work".to_string(),
                 description: "browse and search saved sessions".to_string(),
             },
             StartupAction {
-                trigger: "Ctrl+L".to_string(),
-                label: "choose a model".to_string(),
-                description: format!("current: {}", self.model_name),
-            },
-            StartupAction {
                 trigger: "/setup".to_string(),
-                label: "configure auth and defaults".to_string(),
+                label: "connect providers".to_string(),
                 description: format!("provider {provider_id}; web {web_summary}"),
             },
             StartupAction {
+                trigger: "Ctrl+L".to_string(),
+                label: "switch model".to_string(),
+                description: format!("current: {}", self.model_name),
+            },
+            StartupAction {
                 trigger: "/settings".to_string(),
-                label: "adjust runtime settings".to_string(),
+                label: "adjust runtime".to_string(),
                 description: format!("mode {mode}; thinking {:?}", self.thinking_level),
             },
             StartupAction {
                 trigger: "/help".to_string(),
-                label: "see commands and shortcuts".to_string(),
+                label: "see commands + shortcuts".to_string(),
                 description: "discover memory, sessions, and other paths".to_string(),
             },
         ];
@@ -1447,7 +1517,11 @@ impl App {
                 ),
             },
             StartupSection {
-                title: "what imp can do here".to_string(),
+                title: "this session".to_string(),
+                lines: session_lines,
+            },
+            StartupSection {
+                title: "available here".to_string(),
                 lines: vec![
                     format!(
                         "• built-in tools: {}",
@@ -1476,41 +1550,16 @@ impl App {
                 ],
             },
             StartupSection {
-                title: "loaded here".to_string(),
-                lines: vec![
-                    format!("• project: {repo_label}"),
-                    format!("• cwd: {}", self.cwd.display()),
-                    format!("• provider: {provider_id} ({provider_auth})"),
-                    format!("• web search: {web_summary}"),
-                    format!("• lua extensions: {lua_extension_summary}"),
-                    format!(
-                        "• slash commands: {}",
-                        summarize_inline(
-                            command_lines
-                                .iter()
-                                .filter_map(|line| line.trim().strip_prefix('•'))
-                                .map(|line| line.trim().to_string())
-                                .collect(),
-                            4,
-                        )
-                    ),
-                ],
-            },
-            StartupSection {
                 title: "recent sessions".to_string(),
                 lines: recent_session_lines,
-            },
-            StartupSection {
-                title: "session + runtime".to_string(),
-                lines: session_lines,
             },
         ];
 
         StartupSurfaceData {
             panel: StartupPanelData {
-                headline: "imp is ready. start with an action, not a blank screen.".to_string(),
-                subtitle: "This launch view shows the fastest ways to begin, plus the runtime surface already available in this session.".to_string(),
-                hint: "Quarter-screen keeps only essentials; wider layouts reveal quickstart suggestions, recent sessions, and the generated prompt preview.".to_string(),
+                headline: "imp is ready. start with a request, not a blank screen.".to_string(),
+                subtitle: "You already have project context, runtime defaults, and the fastest next actions in view.".to_string(),
+                hint: "Smaller layouts keep the next action list first; wider layouts also show session state, recent work, and a prompt preview.".to_string(),
                 actions,
                 sections,
                 prompt_preview,
@@ -2918,8 +2967,8 @@ impl App {
         let lua_cwd = self.cwd.clone();
         let user_config_dir = imp_core::config::Config::user_config_dir();
         let (mut agent, handle) = AgentBuilder::new(config, self.cwd.clone(), model, api_key)
-            .lua_tool_loader(move |tools| {
-                imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
+            .lua_tool_loader(move |policy, tools| {
+                imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools, policy);
             })
             .build()
             .map_err(|e: imp_core::error::Error| e.to_string())?;
@@ -4720,35 +4769,9 @@ impl App {
     /// available credentials. Models whose provider has no auth configured
     /// are hidden unless explicitly listed in `enabled_models`.
     fn filtered_models(&self) -> Vec<ModelMeta> {
-        let all = self.model_registry.list();
-
-        // Load auth store to check which providers have credentials
         let auth_path = imp_core::storage::global_auth_path();
         let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
-
-        match &self.config.enabled_models {
-            Some(enabled) if !enabled.is_empty() => {
-                let enabled_ids: Vec<&str> = enabled
-                    .iter()
-                    .filter_map(|name| {
-                        self.model_registry
-                            .find_by_alias(name)
-                            .map(|m| m.id.as_str())
-                    })
-                    .collect();
-                all.iter()
-                    .filter(|m| enabled_ids.contains(&m.id.as_str()))
-                    .cloned()
-                    .collect()
-            }
-            _ => {
-                // Auto-filter: only show models whose provider has credentials
-                all.iter()
-                    .filter(|m| auth_store.has_credentials(&m.provider))
-                    .cloned()
-                    .collect()
-            }
-        }
+        filtered_model_options(&self.model_registry, &self.config, &auth_store)
     }
 
     fn open_model_selector(&mut self) {
@@ -4917,8 +4940,8 @@ impl App {
         let lua_cwd = self.cwd.clone();
         let user_config_dir = imp_core::config::Config::user_config_dir();
         let (agent, _handle) = match AgentBuilder::new(config, self.cwd.clone(), model, api_key)
-            .lua_tool_loader(move |tools| {
-                imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
+            .lua_tool_loader(move |policy, tools| {
+                imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools, policy);
             })
             .build()
         {
@@ -5364,6 +5387,7 @@ mod session_lifecycle {
     use super::*;
     use imp_core::config::Config;
     use imp_core::session::{SessionEntry, SessionManager};
+    use imp_llm::auth::{AuthStore, OAuthCredential, StoredCredential};
     use imp_llm::model::ModelRegistry;
     use imp_llm::ThinkingLevel;
     use imp_llm::{AssistantMessage, ContentBlock, StopReason};
@@ -5416,6 +5440,56 @@ mod session_lifecycle {
                     .unwrap_or(' ')
             })
             .collect()
+    }
+
+    #[test]
+    fn filtered_model_options_includes_chatgpt_oauth_only_models() {
+        let registry = ModelRegistry::with_builtins();
+        let mut auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
+        auth_store
+            .store(
+                "openai",
+                StoredCredential::OAuth(OAuthCredential {
+                    access_token: "oauth-token".into(),
+                    refresh_token: "refresh-token".into(),
+                    expires_at: imp_llm::now() + 3600,
+                }),
+            )
+            .unwrap();
+
+        let models = filtered_model_options(&registry, &Config::default(), &auth_store);
+        let model = models
+            .iter()
+            .find(|model| model.id == "gpt-5.5")
+            .expect("gpt-5.5 should be visible for ChatGPT OAuth users");
+        assert_eq!(model.provider, "openai");
+    }
+
+    #[test]
+    fn filtered_model_options_hides_chatgpt_oauth_only_models_when_openai_api_key_exists() {
+        let registry = ModelRegistry::with_builtins();
+        let mut auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
+        auth_store
+            .store(
+                "openai",
+                StoredCredential::ApiKey {
+                    key: "sk-openai".into(),
+                },
+            )
+            .unwrap();
+        auth_store
+            .store(
+                "openai-codex",
+                StoredCredential::OAuth(OAuthCredential {
+                    access_token: "oauth-token".into(),
+                    refresh_token: "refresh-token".into(),
+                    expires_at: imp_llm::now() + 3600,
+                }),
+            )
+            .unwrap();
+
+        let models = filtered_model_options(&registry, &Config::default(), &auth_store);
+        assert!(!models.iter().any(|model| model.id == "gpt-5.5"));
     }
 
     #[test]

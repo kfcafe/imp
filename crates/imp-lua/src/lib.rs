@@ -5,6 +5,7 @@ pub mod sandbox;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use imp_core::config::LuaCapabilityPolicy;
 use imp_core::tools::ToolRegistry;
 
 pub use bridge::{json_to_lua_value, load_lua_tools, lua_value_to_json, setup_host_api, LuaTool};
@@ -22,6 +23,7 @@ pub fn init_lua_extensions(
     user_config_dir: &Path,
     project_dir: Option<&Path>,
     tools: &mut ToolRegistry,
+    policy: &LuaCapabilityPolicy,
 ) -> Option<Arc<Mutex<LuaRuntime>>> {
     let extensions = discover_extensions(user_config_dir, project_dir);
     if extensions.is_empty() {
@@ -37,6 +39,7 @@ pub fn init_lua_extensions(
     if let Err(_e) = setup_host_api(&rt) {
         return None;
     }
+    rt.apply_capability_policy(policy);
 
     let results = load_extensions(&rt, &extensions);
     for (_name, result) in &results {
@@ -60,9 +63,14 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
+    use imp_core::config::LuaCapabilityPolicy;
     use imp_core::tools::{ToolContext, ToolRegistry};
     use imp_core::ui::NullInterface;
     use tempfile::TempDir;
+
+    fn make_policy() -> LuaCapabilityPolicy {
+        LuaCapabilityPolicy::default()
+    }
 
     /// Helper: create a runtime with host API set up.
     fn make_runtime() -> LuaRuntime {
@@ -97,10 +105,37 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 imp_core::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            lua_tool_loader: None,
         }
     }
 
     // ── Discovery ────────────────────────────────────────────────
+
+    #[test]
+    fn init_lua_extensions_applies_capability_policy() {
+        let user = TempDir::new().unwrap();
+        let lua_dir = user.path().join("lua");
+        std::fs::create_dir_all(&lua_dir).unwrap();
+        write_lua(&lua_dir, "ext.lua", "-- extension present");
+
+        let mut registry = ToolRegistry::new();
+        let mut policy = make_policy();
+        policy.allow_native_tool_calls = false;
+        policy.allow_shell_exec = true;
+        policy.allow_http = true;
+        policy.allow_secrets = true;
+        policy.allowed_env.insert("ALLOWED_ONE".to_string());
+
+        let runtime = init_lua_extensions(user.path(), None, &mut registry, &policy)
+            .expect("runtime should initialize");
+        let guard = runtime.lock().unwrap();
+
+        assert!(!guard.allow_native_tool_calls().load(std::sync::atomic::Ordering::Relaxed));
+        assert!(guard.allow_shell_exec().load(std::sync::atomic::Ordering::Relaxed));
+        assert!(guard.allow_http().load(std::sync::atomic::Ordering::Relaxed));
+        assert!(guard.allow_secrets().load(std::sync::atomic::Ordering::Relaxed));
+        assert!(guard.allowed_env().lock().unwrap().contains("ALLOWED_ONE"));
+    }
 
     #[test]
     fn discover_user_lua_files() {
@@ -372,6 +407,7 @@ mod tests {
     #[test]
     fn exec_runs_command_returns_stdout() {
         let rt = make_runtime();
+        rt.set_allow_shell_exec(true);
         rt.exec(
             r#"
             local result = imp.exec("echo hello")
@@ -390,6 +426,7 @@ mod tests {
     #[test]
     fn exec_captures_stderr() {
         let rt = make_runtime();
+        rt.set_allow_shell_exec(true);
         rt.exec(
             r#"
             local result = imp.exec("echo error >&2")
@@ -405,6 +442,7 @@ mod tests {
     #[test]
     fn exec_returns_nonzero_exit_code() {
         let rt = make_runtime();
+        rt.set_allow_shell_exec(true);
         rt.exec(
             r#"
             local result = imp.exec("exit 42")
@@ -420,6 +458,7 @@ mod tests {
     #[test]
     fn exec_with_cwd() {
         let rt = make_runtime();
+        rt.set_allow_shell_exec(true);
         rt.exec(
             r#"
             local result = imp.exec("pwd", nil, { cwd = "/tmp" })
@@ -897,6 +936,7 @@ mod tests {
             )),
             mode: imp_core::config::AgentMode::Full,
             read_max_lines: 500,
+            lua_tool_loader: None,
         }
     }
 
@@ -1033,6 +1073,87 @@ mod tests {
     }
 
     // ── imp.env() — scoped env var access ───────────────────────
+
+    #[test]
+    fn imp_exec_errors_when_disabled() {
+        let rt = make_runtime();
+        let result = rt.exec(
+            r#"
+            local _ = imp.exec("echo hi")
+        "#,
+        );
+        assert!(result.is_err(), "disabled imp.exec() should error");
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("imp.exec() is disabled"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn imp_exec_runs_when_enabled() {
+        let rt = make_runtime();
+        rt.set_allow_shell_exec(true);
+
+        rt.exec(
+            r#"
+            local result = imp.exec("printf lua_exec_ok")
+            _test_stdout = result.stdout
+            _test_exit = result.exit_code
+        "#,
+        )
+        .unwrap();
+
+        let stdout: String = rt.lua().globals().get("_test_stdout").unwrap();
+        let exit_code: i32 = rt.lua().globals().get("_test_exit").unwrap();
+        assert_eq!(stdout, "lua_exec_ok");
+        assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn imp_secret_errors_when_disabled() {
+        let rt = make_runtime();
+        let result = rt.exec(
+            r#"
+            local _ = imp.secret("openai", "api_key")
+        "#,
+        );
+        assert!(result.is_err(), "disabled imp.secret() should error");
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("imp.secret() is disabled"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn imp_secret_fields_errors_when_disabled() {
+        let rt = make_runtime();
+        let result = rt.exec(
+            r#"
+            local _ = imp.secret_fields("openai")
+        "#,
+        );
+        assert!(result.is_err(), "disabled imp.secret_fields() should error");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("imp.secret_fields() is disabled"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn imp_http_get_errors_when_disabled() {
+        let rt = Arc::new(Mutex::new(make_runtime()));
+        let rt2 = Arc::clone(&rt);
+        tokio::task::spawn_blocking(move || {
+            let guard = rt2.lock().unwrap();
+            let result = guard.exec(
+                r#"
+                local _ = imp.http.get("https://example.com")
+            "#,
+            );
+            assert!(result.is_err(), "disabled imp.http.get() should error");
+            let err = format!("{}", result.unwrap_err());
+            assert!(err.contains("imp.http.get() is disabled"), "unexpected error: {err}");
+        })
+        .await
+        .unwrap();
+    }
 
     #[test]
     fn imp_env_reads_var_when_allowed() {

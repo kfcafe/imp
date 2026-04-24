@@ -88,6 +88,7 @@ impl StartupTimer {
 
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use imp_core::config::{AnimationLevel, Config, ToolOutputDisplay};
 use imp_core::format_error_for_display;
@@ -381,6 +382,15 @@ enum Commands {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+    /// Install this build to the user-visible `imp` command path
+    InstallLocal {
+        /// Print the chosen install destination without writing it
+        #[arg(long)]
+        dry_run: bool,
+        /// Explicit install destination path
+        #[arg(long)]
+        dest: Option<PathBuf>,
+    },
     /// Save a web search provider API key into imp auth storage
     WebLogin {
         /// Search provider to configure (tavily, exa, linkup, perplexity)
@@ -590,6 +600,130 @@ struct UsageExportRecord {
     parent_id: Option<String>,
 }
 
+fn split_path_entries(path: Option<OsString>) -> Vec<PathBuf> {
+    path.as_deref()
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+fn find_imp_on_path_from(path: Option<OsString>) -> Option<PathBuf> {
+    split_path_entries(path)
+        .into_iter()
+        .map(|dir| dir.join("imp"))
+        .find(|candidate| candidate.is_file())
+}
+
+fn path_contains_dir(path: Option<OsString>, dir: &std::path::Path) -> bool {
+    split_path_entries(path).into_iter().any(|entry| entry == dir)
+}
+
+fn preferred_user_install_path(home: &std::path::Path, path: Option<OsString>) -> PathBuf {
+    let home_bin = home.join("bin");
+    if path_contains_dir(path.clone(), &home_bin) {
+        return home_bin.join("imp");
+    }
+
+    let local_bin = home.join(".local/bin");
+    if path_contains_dir(path.clone(), &local_bin) {
+        return local_bin.join("imp");
+    }
+
+    home.join(".cargo/bin/imp")
+}
+
+fn resolve_install_destination(
+    home: &std::path::Path,
+    path: Option<OsString>,
+    active_imp: Option<PathBuf>,
+    dest_override: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(dest) = dest_override {
+        return dest;
+    }
+
+    if let Some(active) = active_imp {
+        if active.starts_with(home) {
+            return active;
+        }
+    }
+
+    preferred_user_install_path(home, path)
+}
+
+fn install_binary_to(source: &std::path::Path, dest: &std::path::Path) -> io::Result<()> {
+    let parent = dest.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Install destination has no parent: {}", dest.display()),
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+
+    let temp = dest.with_extension("tmp");
+    std::fs::copy(source, &temp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&temp, perms)?;
+    }
+    std::fs::rename(&temp, dest)?;
+    Ok(())
+}
+
+fn run_install_local(dest_override: Option<PathBuf>, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let current_exe = std::env::current_exe()?;
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
+    let path_env = std::env::var_os("PATH");
+    let active_imp = find_imp_on_path_from(path_env.clone());
+    let dest = resolve_install_destination(&home, path_env, active_imp.clone(), dest_override);
+
+    if dry_run {
+        println!("{}", dest.display());
+        return Ok(());
+    }
+
+    install_binary_to(&current_exe, &dest)?;
+
+    println!("Installed imp to {}", dest.display());
+    if let Some(previous) = active_imp {
+        if previous != dest {
+            println!(
+                "Updated active-user install target instead of Cargo bin shadow path. Previous `imp` path was {}.",
+                previous.display()
+            );
+        }
+    }
+
+    let resolved_after = find_imp_on_path_from(std::env::var_os("PATH"));
+    match resolved_after {
+        Some(path) if path == dest => {
+            println!("`imp` now resolves to {}", path.display());
+        }
+        Some(path) => {
+            println!(
+                "Installed to {}, but `imp` still resolves to {}. Adjust PATH or rerun with --dest {}.",
+                dest.display(),
+                path.display(),
+                path.display()
+            );
+        }
+        None => {
+            println!(
+                "Installed to {}, but `imp` is not currently on PATH. Add {} to PATH.",
+                dest.display(),
+                dest.parent().map(|p| p.display().to_string()).unwrap_or_default()
+            );
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn run() {
     let cli = Cli::parse();
 
@@ -714,6 +848,13 @@ pub async fn run() {
             }
             Commands::Import { dry_run, from, yes } => {
                 run_import(*dry_run, from.as_deref(), *yes);
+                return;
+            }
+            Commands::InstallLocal { dry_run, dest } => {
+                if let Err(e) = run_install_local(dest.clone(), *dry_run) {
+                    eprintln!("Install failed: {e}");
+                    std::process::exit(1);
+                }
                 return;
             }
             Commands::WebLogin { provider } => {
@@ -1620,12 +1761,18 @@ fn build_lua_loader(no_tools: bool, cwd: PathBuf) -> Option<imp_core::tools::Lua
         return None;
     }
 
-    fn init_lua_tools(cwd: PathBuf, tools: &mut imp_core::tools::ToolRegistry) {
+    fn init_lua_tools(
+        cwd: PathBuf,
+        policy: &imp_core::config::LuaCapabilityPolicy,
+        tools: &mut imp_core::tools::ToolRegistry,
+    ) {
         let user_config_dir = Config::user_config_dir();
-        imp_lua::init_lua_extensions(&user_config_dir, Some(&cwd), tools);
+        imp_lua::init_lua_extensions(&user_config_dir, Some(&cwd), tools, policy);
     }
 
-    Some(Arc::new(move |tools| init_lua_tools(cwd.clone(), tools)))
+    Some(Arc::new(move |policy, tools| {
+        init_lua_tools(cwd.clone(), policy, tools)
+    }))
 }
 
 fn emit_startup_timing(timer: &mut StartupTimer, stage: StartupStage) {
@@ -2261,9 +2408,9 @@ fn create_rpc_agent(
     let lua_cwd = cwd.to_path_buf();
     let mut builder =
         imp_core::builder::AgentBuilder::new(agent_config, cwd.to_path_buf(), model, api_key)
-            .lua_tool_loader(move |tools| {
+            .lua_tool_loader(move |policy, tools| {
                 let user_config_dir = Config::user_config_dir();
-                imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools);
+                imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools, policy);
             });
     if let Some(ref prompt) = cli.system_prompt {
         builder = builder.system_prompt(prompt.clone());
@@ -4363,6 +4510,81 @@ mod tests {
         assert_eq!(archived.unit.status.to_string(), "closed");
     }
 
+    #[tokio::test]
+    async fn run_headless_no_tools_worker_single_turn_exits_cleanly() {
+        let temp = tempfile::tempdir().unwrap();
+        write_test_mana_unit(
+            temp.path(),
+            "1",
+            "headless-no-tools",
+            "Headless no-tools unit",
+            "Check mana status and finish.",
+            "test -n ok",
+        );
+
+        let assignment = imp_core::mana_worker::load_assignment_with_mana_dir(
+            temp.path(),
+            "1",
+            Some(temp.path().join(".mana").as_path()),
+        )
+        .expect("load assignment");
+
+        let options = imp_core::mana_worker::WorkerRunOptions {
+            cwd: temp.path().to_path_buf(),
+            model_override: Some(static_test_model("SMOKE_OK")),
+            model: None,
+            provider: None,
+            api_key: None,
+            system_prompt: None,
+            thinking: Some(ThinkingLevel::Off),
+            max_turns: Some(1),
+            max_tokens: None,
+            no_tools: true,
+            mana_dir_override: Some(temp.path().join(".mana")),
+            defer_verify: true,
+            lua_loader: None,
+        };
+
+        let mut prepared = imp_core::mana_worker::prepare_worker_run(assignment, options)
+            .await
+            .expect("prepare worker run");
+        prepared
+            .session
+            .prompt(&prepared.prompt)
+            .await
+            .expect("prompt session");
+
+        let events = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut events = Vec::new();
+            while let Some(event) = prepared.session.recv_event().await {
+                events.push(event);
+            }
+            events
+        })
+        .await
+        .expect("headless event stream should complete promptly");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), prepared.session.wait())
+            .await
+            .expect("headless session wait should complete promptly")
+            .expect("wait for session");
+
+        let saw_expected_text = events.iter().any(|event| {
+            matches!(
+                event,
+                AgentEvent::MessageDelta {
+                    delta: StreamEvent::TextDelta { text },
+                } if text.contains("SMOKE_OK")
+            )
+        });
+        let saw_max_turn_error = events.iter().any(|event| {
+            matches!(event, AgentEvent::Error { error } if error.contains("Max turns exceeded"))
+        });
+
+        assert!(saw_expected_text);
+        assert!(!saw_max_turn_error);
+    }
+
     #[test]
     fn determine_headless_output_mode_prefers_human_for_terminal_run() {
         assert_eq!(
@@ -4515,6 +4737,31 @@ mod tests {
         assert_eq!(web_search_provider_label(Some(SearchProvider::Exa)), "exa");
     }
 
+    #[test]
+    fn resolve_install_destination_prefers_active_user_imp_path() {
+        let home = PathBuf::from("/Users/test");
+        let path = Some(OsString::from("/Users/test/bin:/Users/test/.cargo/bin:/usr/bin"));
+        let active_imp = Some(PathBuf::from("/Users/test/bin/imp"));
+
+        let dest = resolve_install_destination(&home, path, active_imp, None);
+        assert_eq!(dest, PathBuf::from("/Users/test/bin/imp"));
+    }
+    #[test]
+    fn resolve_install_destination_falls_back_to_path_preference_when_imp_missing() {
+        let home = PathBuf::from("/Users/test");
+        let path = Some(OsString::from("/Users/test/bin:/Users/test/.cargo/bin:/usr/bin"));
+
+        let dest = resolve_install_destination(&home, path, None, None);
+        assert_eq!(dest, PathBuf::from("/Users/test/bin/imp"));
+    }
+    #[test]
+    fn resolve_install_destination_uses_cargo_bin_when_no_user_bin_is_on_path() {
+        let home = PathBuf::from("/Users/test");
+        let path = Some(OsString::from("/usr/local/bin:/usr/bin"));
+
+        let dest = resolve_install_destination(&home, path, None, None);
+        assert_eq!(dest, PathBuf::from("/Users/test/.cargo/bin/imp"));
+    }
     #[test]
     fn parse_thinking_level_strict_rejects_unknown_values() {
         assert_eq!(

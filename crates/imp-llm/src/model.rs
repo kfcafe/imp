@@ -617,13 +617,29 @@ pub fn builtin_openai_models() -> Vec<ModelMeta> {
 }
 
 pub fn builtin_openai_codex_models() -> Vec<ModelMeta> {
-    builtin_openai_models()
+    let mut models: Vec<ModelMeta> = builtin_openai_models()
         .into_iter()
         .map(|mut model| {
             model.provider = "openai-codex".into();
             model
         })
-        .collect()
+        .collect();
+
+    models.push(ModelMeta {
+        id: "gpt-5.5".into(),
+        provider: "openai-codex".into(),
+        name: "GPT-5.5".into(),
+        context_window: 400_000,
+        max_output_tokens: 128_000,
+        pricing: ModelPricing::default(),
+        capabilities: Capabilities {
+            reasoning: true,
+            images: true,
+            tool_use: true,
+        },
+    });
+
+    models
 }
 
 fn guess_provider_for_custom_model(model_name: &str) -> Option<&'static str> {
@@ -869,6 +885,10 @@ fn builtin_aliases() -> Vec<(String, String)> {
         ("claude-opus".into(), "claude-opus-4-6".into()),
         ("opus-4.6".into(), "claude-opus-4-6".into()),
         // OpenAI
+        ("gpt5.5".into(), "gpt-5.5".into()),
+        ("gpt-5.5".into(), "gpt-5.5".into()),
+        ("chatgpt5.5".into(), "gpt-5.5".into()),
+        ("chatgpt-5.5".into(), "gpt-5.5".into()),
         ("gpt5".into(), "gpt-5.4".into()),
         ("gpt5.4".into(), "gpt-5.4".into()),
         ("gpt-5".into(), "gpt-5.4".into()),
@@ -941,6 +961,16 @@ mod tests {
             .find_by_alias("gpt5")
             .expect("gpt5 alias should resolve");
         assert_eq!(model.id, "gpt-5.4");
+    }
+
+    #[test]
+    fn resolve_meta_synthesizes_gpt_5_5_alias() {
+        let reg = ModelRegistry::with_builtins();
+        let model = reg
+            .resolve_meta("gpt5.5", None)
+            .expect("gpt5.5 alias should synthesize");
+        assert_eq!(model.id, "gpt-5.5");
+        assert_eq!(model.provider, "openai");
     }
 
     #[test]
@@ -1056,8 +1086,9 @@ mod tests {
     #[test]
     fn builtin_openai_codex_models_retag_openai_models() {
         let models = builtin_openai_codex_models();
-        assert_eq!(models.len(), 6);
+        assert_eq!(models.len(), 7);
         assert!(models.iter().all(|model| model.provider == "openai-codex"));
+        assert!(models.iter().any(|model| model.id == "gpt-5.5"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use imp_llm::ThinkingLevel;
@@ -260,6 +260,66 @@ impl Default for ShellConfig {
     }
 }
 
+/// Concrete capability policy for the shipped Lua extension runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LuaCapabilityPolicy {
+    pub allow_native_tool_calls: bool,
+    pub allow_shell_exec: bool,
+    pub allow_http: bool,
+    pub allow_secrets: bool,
+    pub allowed_env: HashSet<String>,
+}
+
+impl Default for LuaCapabilityPolicy {
+    fn default() -> Self {
+        Self {
+            allow_native_tool_calls: true,
+            allow_shell_exec: false,
+            allow_http: false,
+            allow_secrets: false,
+            allowed_env: HashSet::new(),
+        }
+    }
+}
+
+/// Configuration for the shipped Lua extension runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct LuaConfig {
+    /// Whether `imp.tool()` calls from Lua are allowed.
+    pub allow_native_tool_calls: Option<bool>,
+    /// Whether `imp.exec()` is allowed.
+    pub allow_shell_exec: Option<bool>,
+    /// Whether `imp.http.*` is allowed.
+    pub allow_http: Option<bool>,
+    /// Whether `imp.secret()` / `imp.secret_fields()` are allowed.
+    pub allow_secrets: Option<bool>,
+    /// Env vars Lua extensions may read through `imp.env()`.
+    pub allowed_env: Option<Vec<String>>,
+}
+
+impl LuaConfig {
+    #[must_use]
+    pub fn resolve_policy(&self, _mode: AgentMode) -> LuaCapabilityPolicy {
+        let mut policy = LuaCapabilityPolicy::default();
+        if let Some(value) = self.allow_native_tool_calls {
+            policy.allow_native_tool_calls = value;
+        }
+        if let Some(value) = self.allow_shell_exec {
+            policy.allow_shell_exec = value;
+        }
+        if let Some(value) = self.allow_http {
+            policy.allow_http = value;
+        }
+        if let Some(value) = self.allow_secrets {
+            policy.allow_secrets = value;
+        }
+        if let Some(values) = &self.allowed_env {
+            policy.allowed_env = values.iter().cloned().collect();
+        }
+        policy
+    }
+}
+
 /// Top-level configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -321,6 +381,10 @@ pub struct Config {
     /// Web tool settings.
     #[serde(default)]
     pub web: WebConfig,
+
+    /// Shipped Lua extension runtime policy.
+    #[serde(default)]
+    pub lua: LuaConfig,
 
     /// Personality settings, including identity sentence and saved profiles.
     #[serde(default)]
@@ -1279,6 +1343,25 @@ model = "sonnet"
         let config = Config::default();
         assert_eq!(config.mode, AgentMode::Full);
         assert_eq!(AgentMode::default(), AgentMode::Full);
+    }
+
+    #[test]
+    fn lua_config_resolves_capability_policy() {
+        let config = LuaConfig {
+            allow_native_tool_calls: Some(false),
+            allow_shell_exec: Some(true),
+            allow_http: Some(true),
+            allow_secrets: Some(true),
+            allowed_env: Some(vec!["OPENAI_API_KEY".to_string(), "HOME".to_string()]),
+        };
+
+        let policy = config.resolve_policy(AgentMode::Worker);
+        assert!(!policy.allow_native_tool_calls);
+        assert!(policy.allow_shell_exec);
+        assert!(policy.allow_http);
+        assert!(policy.allow_secrets);
+        assert!(policy.allowed_env.contains("OPENAI_API_KEY"));
+        assert!(policy.allowed_env.contains("HOME"));
     }
 
     #[test]

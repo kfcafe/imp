@@ -227,8 +227,12 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
     imp.set("register_tool", register_tool_fn)?;
 
     // ── imp.exec(command, args, opts) ────────────────────────────
+    let allow_shell_exec = runtime.allow_shell_exec();
     let exec_fn = lua.create_function(
-        |lua_inner, (cmd, args, opts): (String, Option<Table>, Option<Table>)| {
+        move |lua_inner, (cmd, args, opts): (String, Option<Table>, Option<Table>)| {
+            if !allow_shell_exec.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(mlua::Error::external("imp.exec() is disabled for this runtime"));
+            }
             let mut command = Command::new("sh");
             command.arg("-c");
 
@@ -410,8 +414,14 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
     imp.set("update", imp_update_fn)?;
 
     // ── imp.secret(provider, field?) — read a saved secret field ──────────
+    let allow_secrets = runtime.allow_secrets();
     let secret_fn = lua.create_function(
-        |lua_inner, (provider, field): (String, Option<String>)| -> mlua::Result<Value> {
+        move |lua_inner, (provider, field): (String, Option<String>)| -> mlua::Result<Value> {
+            if !allow_secrets.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(mlua::Error::external(
+                    "imp.secret() is disabled for this runtime",
+                ));
+            }
             let auth_path: PathBuf = Config::user_config_dir().join("auth.json");
             let auth_store =
                 AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
@@ -425,8 +435,14 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
     imp.set("secret", secret_fn)?;
 
     // ── imp.secret_fields(provider) — read all saved secret fields ─────────
+    let allow_secrets = runtime.allow_secrets();
     let secret_fields_fn =
-        lua.create_function(|lua_inner, provider: String| -> mlua::Result<Value> {
+        lua.create_function(move |lua_inner, provider: String| -> mlua::Result<Value> {
+            if !allow_secrets.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(mlua::Error::external(
+                    "imp.secret_fields() is disabled for this runtime",
+                ));
+            }
             let auth_path: PathBuf = Config::user_config_dir().join("auth.json");
             let auth_store =
                 AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
@@ -462,9 +478,15 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
 
     // ── imp.http — HTTP GET / POST via reqwest ───────────────────
     let http = lua.create_table()?;
+    let allow_http = runtime.allow_http();
 
     let http_get_fn =
-        lua.create_function(|lua_inner, (url, headers): (String, Option<Table>)| {
+        lua.create_function(move |lua_inner, (url, headers): (String, Option<Table>)| {
+            if !allow_http.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(mlua::Error::external(
+                    "imp.http.get() is disabled for this runtime",
+                ));
+            }
             let header_pairs = extract_header_pairs(headers)?;
 
             let handle = tokio::runtime::Handle::try_current()
@@ -491,8 +513,14 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
         })?;
     http.set("get", http_get_fn)?;
 
+    let allow_http = runtime.allow_http();
     let http_post_fn = lua.create_function(
-        |lua_inner, (url, body, headers): (String, String, Option<Table>)| {
+        move |lua_inner, (url, body, headers): (String, String, Option<Table>)| {
+            if !allow_http.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(mlua::Error::external(
+                    "imp.http.post() is disabled for this runtime",
+                ));
+            }
             let header_pairs = extract_header_pairs(headers)?;
 
             let handle = tokio::runtime::Handle::try_current()
