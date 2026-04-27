@@ -97,6 +97,43 @@ See:
 - `imp_ontology.md`
 - `../docs/architecture/mana-platform-target-architecture.md`
 
+## TypeScript extensions
+
+imp can import Pi TypeScript extensions into the project-local extension root:
+
+```bash
+imp import --from pi
+# imports Pi extensions into .imp/extensions/pi/<name>/
+```
+
+TypeScript extension execution is currently a sprint-1 compatibility layer, not full Pi API parity. It requires `bun` on `PATH` and loads extensions from `.imp/extensions/`.
+
+Supported now:
+- Bun-backed `.ts` entrypoints
+- Pi-style `registerTool(...)`
+- TypeBox-style schemas for common object/string/number/boolean/array/union/literal shapes
+- text/details tool results
+- `session_start` lifecycle hooks enough for dynamic tool registration
+
+Stubbed or recorded:
+- `registerCommand(...)`
+- `ctx.ui.notify(...)`
+- `ctx.ui.setStatus(...)`
+- `sessionManager.getBranch()` / `getEntries()`
+
+Needs dependencies:
+- missing installable npm/Bun dependencies; imp notifies before any install
+
+Unsupported or fallback-only:
+- `ctx.ui.custom(...)`
+- rich viewer renderers (`renderCall` / `renderResult`) beyond metadata detection
+- built-in tool overrides
+- unrestricted filesystem/network/process/env/secrets/native tool access
+
+Missing dependencies are treated as installable setup work, not unsupported extensions. imp should notify and ask before running Bun install commands; it must not install dependencies silently during import.
+
+Lua remains the current stable shipped extension path; TypeScript support is the forward compatibility path and should be treated as limited until this boundary is expanded.
+
 ## TUI
 
 `imp` opens the fullscreen cockpit by default.

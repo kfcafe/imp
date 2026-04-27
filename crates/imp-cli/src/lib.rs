@@ -92,6 +92,9 @@ use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use imp_core::config::{AnimationLevel, Config, ToolOutputDisplay};
 use imp_core::format_error_for_display;
 use imp_core::tools::web::types::SearchProvider;
+use imp_core::typescript_extensions::{
+    inspect_typescript_extension_statuses, TypeScriptExtensionLoadState,
+};
 use std::ffi::OsString;
 
 use imp_core::imp_session::{
@@ -5542,6 +5545,7 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
             "\nTypeScript extensions are staged in {}. Runtime support is limited to the current compatibility subset.",
             imp_extensions.display()
         );
+        print_typescript_extension_statuses(&imp_extensions);
     }
 
     // Import AGENTS.md (only the first one found, if imp doesn't have one yet)
@@ -5582,4 +5586,40 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
     }
 
     println!("\nDone. Skills are in {}", imp_skills.display());
+}
+
+fn print_typescript_extension_statuses(imp_extensions: &Path) {
+    let Some(project_dir) = imp_extensions.parent().and_then(Path::parent) else {
+        return;
+    };
+    let statuses = inspect_typescript_extension_statuses(project_dir);
+    if statuses.is_empty() {
+        return;
+    }
+
+    println!("\nTypeScript extension runtime status:");
+    for status in statuses {
+        println!("  - {} — {}", status.extension_name, status.state.label());
+        if !status.tools.is_empty() {
+            let tool_names: Vec<_> = status.tools.iter().map(|tool| tool.name.as_str()).collect();
+            println!("      tools: {}", tool_names.join(", "));
+        }
+        if status.state == TypeScriptExtensionLoadState::LoadedWithStubs {
+            let notes: Vec<_> = status
+                .tools
+                .iter()
+                .flat_map(|tool| tool.compatibility.stubbed_apis.iter())
+                .map(String::as_str)
+                .collect();
+            if !notes.is_empty() {
+                println!("      stubbed APIs: {}", notes.join(", "));
+            }
+        }
+        if status.state == TypeScriptExtensionLoadState::NeedsDependencies {
+            println!("      dependencies are missing; ask before installing with Bun");
+        }
+        if let Some(message) = status.message {
+            println!("      {message}");
+        }
+    }
 }
