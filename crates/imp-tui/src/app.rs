@@ -33,7 +33,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Clear;
 use ratatui::Frame;
 
-use crate::animation::AnimationState;
+use crate::animation::{spinner_frame, AnimationState};
 use crate::highlight::Highlighter;
 use crate::keybindings::{self, Action};
 use crate::selection::{
@@ -712,7 +712,12 @@ impl App {
             .or_else(|| self.session.title(48))
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| "chat".to_string());
-        format!("imp — {title}")
+        let identity = if self.is_streaming {
+            spinner_frame(self.tick)
+        } else {
+            "imp"
+        };
+        format!("{identity} — {title}")
     }
 
     fn prepare_for_interactive(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -772,6 +777,7 @@ impl App {
             self.tick = self.tick.wrapping_add(1);
             self.maybe_autoscroll_selection();
             if self.is_streaming {
+                self.sync_window_title();
                 self.needs_redraw = true;
             }
 
@@ -5533,6 +5539,15 @@ mod session_lifecycle {
             })
             .unwrap();
         assert_eq!(app.terminal_title(), "imp — adjust top bar");
+    }
+
+    #[test]
+    fn terminal_title_replaces_imp_with_spinner_while_streaming() {
+        let mut app = make_app();
+        app.session.set_name("my chat");
+        app.is_streaming = true;
+        app.tick = 0;
+        assert_eq!(app.terminal_title(), "⠋ — my chat");
     }
 
     #[test]

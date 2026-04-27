@@ -5,9 +5,9 @@ slug: review-project-gaps-that-would-make-imp-stronger-t
 status: open
 priority: 1
 created_at: '2026-04-27T19:23:43.040906Z'
-updated_at: '2026-04-27T20:02:52.220399Z'
+updated_at: '2026-04-27T21:46:09.982029Z'
 acceptance: User receives a concise prioritized review; no code modifications are made.
-notes: |-
+notes: |
   ---
   2026-04-27T19:23:49.503774+00:00
   Read-only review evidence gathered:
@@ -43,12 +43,27 @@ notes: |-
   - Dirac prompt snapshots explicitly instruct surgical tools before full file reads, line-hash protocol, and batching all non-overlapping edits into one tool call.
   - Dirac has broader IDE/product packaging than imp today: VS Code extension marketplace, webview UI, walkthroughs, editor diagnostics/diff integration, command palette/context menu entries, CLI, ACP stubs.
   - Dirac also has weaknesses relative to imp: no mana-style durable work graph/verify gates/handoff substrate, no explicit Rust-native worker runtime boundary, no project-durable task orchestration comparable to mana, apparent large TS surface inherited from Cline with 136k TS LOC, and benchmark/readme heavily optimized around coding/refactor efficiency rather than broader agent runtime/policy graph.
+  ## Attempt 1 — 2026-04-27T21:46:09Z
+  Exit code: 2
+
+  ```
+  sh: line 0: test: analysis-only}: binary operator expected
+  ```
 labels:
 - analysis
 - imp
 - roadmap
 - competitive-review
 verify: test -n "analysis-only"} aisuiu
+attempts: 1
+history:
+- attempt: 1
+  started_at: '2026-04-27T21:46:09.926751Z'
+  finished_at: '2026-04-27T21:46:09.982026Z'
+  duration_secs: 0.055
+  result: fail
+  exit_code: 2
+  output_snippet: 'sh: line 0: test: analysis-only}: binary operator expected'
 kind: job
 ---
 
