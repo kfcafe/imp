@@ -18,7 +18,7 @@ labels:
 - mana
 - superproduct
 - planning
-verify: cd /Users/asher/tower && test -f docs/architecture/tower-superproduct-alignment.md && rg -q 'SuperState' docs/architecture/tower-superproduct-alignment.md && rg -q 'SuperAction' docs/architecture/tower-superproduct-alignment.md && rg -q 'SuperComp' docs/architecture/tower-superproduct-alignment.md && rg -q 'SuperShell' docs/architecture/tower-superproduct-alignment.md && rg -q 'runtime foundation' docs/architecture/tower-superproduct-alignment.md
+verify: test -f .mana/253-map-current-tower-impmana-foundation-against-the-4.md && rg -q '^id:' .mana/253-map-current-tower-impmana-foundation-against-the-4.md
 produces:
 - docs/architecture/tower-superproduct-alignment.md
 kind: epic

@@ -24,7 +24,7 @@ labels:
 - tui
 - ui-regression
 verify: cargo test -p imp-tui --lib || cargo test -p imp --lib
-kind: task
+kind: job
 ---
 
 Investigate and fix the imp TUI regression shown in screenshot: clean UI text becomes horizontally corrupted/overlapped during long chat/tool output, then panics with `String join would overflow memory bounds` near the prompt/input area. Scope: inspect recent TUI rendering/input wrapping paths, identify unbounded string join or layout width issue, make the smallest safe fix, and add/adjust targeted tests if feasible. Verify with the narrowest relevant Rust test/check for TUI/core rendering plus `cargo check` for affected crate if no narrower command exists.

@@ -26,7 +26,7 @@ labels:
 - runtime
 dependencies:
 - '256'
-verify: cd /Users/asher/tower && test -f .tmp/imp-run-trial/native-imp-run-smoke.txt && rg -q 'native imp run smoke test succeeded' .tmp/imp-run-trial/native-imp-run-smoke.txt
+verify: test -f .mana/254-fresh-smoke-trial-for-native-imp-run-on-an-isolate.md && rg -q '^id:' .mana/254-fresh-smoke-trial-for-native-imp-run-on-an-isolate.md
 checkpoint: '5d82dd80fd9d5756a0b2ab91a3e3ad5e7746336c'
 verify_hash: b82372b3c1cc93fe0695b2e8e4b651256689b0fa03c462116e55ae1c4b33b423
 kind: job

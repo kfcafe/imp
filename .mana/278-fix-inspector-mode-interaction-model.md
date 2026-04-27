@@ -31,7 +31,7 @@ labels:
 - tui
 - inspector
 - ux
-kind: task
+kind: job
 decisions:
 - 'Consider simplifying TUI tool-call UI around a single next-generation inspector mode as the default and potentially removing split/stream modes. Rationale: reduces settings confusion, keeps compact summaries in chat as navigation, frees sidebar as a general detail/action surface. Future sidebar direction may include editable/manipulable text that can apply changes back to codebase, but that is explicitly nontrivial and out of immediate scope.'
 ---

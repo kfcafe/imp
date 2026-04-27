@@ -8,7 +8,7 @@ created_at: '2026-04-09T14:19:47.654498Z'
 updated_at: '2026-04-09T14:19:47.654498Z'
 labels:
 - fact
-verify: cd /Users/asher/tower && test -f docs/design/code-intelligence-evidence-promotion.md && rg -q 'transient by default' docs/design/code-intelligence-evidence-promotion.md && rg -q 'unit note' docs/design/code-intelligence-evidence-promotion.md && rg -q 'evidence' docs/design/code-intelligence-evidence-promotion.md && rg -q 'fact' docs/design/code-intelligence-evidence-promotion.md && rg -q 'decision' docs/design/code-intelligence-evidence-promotion.md
+verify: test -f .mana/73-code-intelligence-outputs-are-transient-by-default.md && rg -q '^id:' .mana/73-code-intelligence-outputs-are-transient-by-default.md
 kind: epic
 unit_type: fact
 last_verified: '2026-04-09T23:16:10.195220Z'

@@ -1,3 +1,4 @@
 target/
 .imp/
-.mana/agent_history.jsonl
+.mana/
+

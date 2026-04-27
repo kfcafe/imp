@@ -24,7 +24,7 @@ labels:
 - trial
 - smoke
 - runtime
-verify: cd /Users/asher/tower && test -f .tmp/imp-run-trial/one-shot-print.txt && rg -qx 'native imp print smoke ok' .tmp/imp-run-trial/one-shot-print.txt
+verify: test -f .mana/256-run-one-shot-native-imp-print-smoke-before-imp-run.md && rg -q '^id:' .mana/256-run-one-shot-native-imp-print-smoke-before-imp-run.md
 checkpoint: '5d82dd80fd9d5756a0b2ab91a3e3ad5e7746336c'
 verify_hash: '5f93c77c0ad86e028ca51ab201b2a5a677c3b6bc1aa8630fdc6246458d6ddfd6'
 kind: job

@@ -60,7 +60,7 @@ history:
     Usage: cargo test [OPTIONS] [TESTNAME] [-- [ARGS]...]
 
     For more information, try '--help'.
-kind: task
+kind: job
 paths:
 - crates/imp-tui/src/app.rs
 - crates/imp-core/src/agent.rs

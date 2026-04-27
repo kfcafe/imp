@@ -49,7 +49,7 @@ labels:
 - roadmap
 - competitive-review
 verify: test -n "analysis-only"} aisuiu
-kind: task
+kind: job
 ---
 
 ## Goal

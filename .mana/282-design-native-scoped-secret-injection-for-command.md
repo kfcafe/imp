@@ -12,7 +12,7 @@ labels:
 - secrets
 - runtime
 - design
-kind: task
+kind: job
 ---
 
 Goal: Design and implement a native, auditable way for imp tools/agents to inject stored secrets into command environments without exposing raw secret values to the agent or broad Lua runtime.
