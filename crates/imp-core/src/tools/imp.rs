@@ -503,7 +503,10 @@ mod tests {
 
     #[test]
     fn ad_hoc_spawn_timeout_defaults_when_missing_or_invalid() {
-        assert_eq!(ad_hoc_spawn_timeout_secs(&json!({})), DEFAULT_AD_HOC_SPAWN_TIMEOUT_SECS);
+        assert_eq!(
+            ad_hoc_spawn_timeout_secs(&json!({})),
+            DEFAULT_AD_HOC_SPAWN_TIMEOUT_SECS
+        );
         assert_eq!(
             ad_hoc_spawn_timeout_secs(&json!({"timeout_secs": 0})),
             DEFAULT_AD_HOC_SPAWN_TIMEOUT_SECS

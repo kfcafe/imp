@@ -23,10 +23,14 @@ pub enum ModelSelection<'a> {
 
 impl ModelSelectorState {
     pub fn new(models: Vec<ModelMeta>, current_model: String) -> Self {
+        let selected = models
+            .iter()
+            .position(|model| model.id == current_model)
+            .unwrap_or(0);
         Self {
             models,
             filter: String::new(),
-            selected: 0,
+            selected,
             current_model,
         }
     }
@@ -250,6 +254,20 @@ mod tests {
                 images: true,
                 tool_use: true,
             },
+        }
+    }
+
+    #[test]
+    fn model_selector_initially_selects_current_model() {
+        let state = ModelSelectorState::new(
+            vec![test_model("gpt-5.4"), test_model("gpt-4o")],
+            "gpt-4o".into(),
+        );
+
+        assert_eq!(state.selected, 1);
+        match state.selected_choice() {
+            Some(ModelSelection::Builtin(model)) => assert_eq!(model.id, "gpt-4o"),
+            _ => panic!("expected current model to be selected"),
         }
     }
 

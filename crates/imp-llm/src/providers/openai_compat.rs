@@ -29,6 +29,16 @@ struct ApiRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<KimiThinking>,
+}
+
+#[derive(Debug, Serialize)]
+struct KimiThinking {
+    #[serde(rename = "type")]
+    thinking_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -41,6 +51,8 @@ struct ApiMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -196,6 +208,7 @@ fn build_request(model: &Model, context: Context, options: RequestOptions) -> Ap
         messages.push(ApiMessage {
             role: "system".into(),
             content: Some(serde_json::Value::String(options.system_prompt.clone())),
+            reasoning_content: None,
             tool_call_id: None,
             tool_calls: None,
         });
@@ -216,8 +229,61 @@ fn build_request(model: &Model, context: Context, options: RequestOptions) -> Ap
             include_usage: true,
         },
         tools,
-        temperature: options.temperature,
+        temperature: kimi_compatible_temperature(&model.meta, options.temperature),
         max_tokens,
+        thinking: kimi_thinking_config(&model.meta, options.thinking_level),
+    }
+}
+
+fn is_kimi_configurable_thinking_model(model_id: &str) -> bool {
+    matches!(model_id, "kimi-k2.6" | "kimi-k2.5")
+}
+
+fn is_kimi_forced_thinking_model(model_id: &str) -> bool {
+    matches!(model_id, "kimi-k2-thinking" | "kimi-k2-thinking-turbo")
+}
+
+fn is_kimi_fixed_temperature_model(model_id: &str) -> bool {
+    is_kimi_configurable_thinking_model(model_id) || is_kimi_forced_thinking_model(model_id)
+}
+
+fn kimi_compatible_temperature(meta: &ModelMeta, temperature: Option<f32>) -> Option<f32> {
+    if is_kimi_fixed_temperature_model(&meta.id) {
+        None
+    } else {
+        temperature
+    }
+}
+
+fn kimi_thinking_config(
+    meta: &ModelMeta,
+    level: crate::provider::ThinkingLevel,
+) -> Option<KimiThinking> {
+    if is_kimi_forced_thinking_model(&meta.id) {
+        return Some(KimiThinking {
+            thinking_type: "enabled",
+            keep: Some("all"),
+        });
+    }
+
+    if !is_kimi_configurable_thinking_model(&meta.id) {
+        return None;
+    }
+
+    match level {
+        crate::provider::ThinkingLevel::Off | crate::provider::ThinkingLevel::Minimal => {
+            Some(KimiThinking {
+                thinking_type: "disabled",
+                keep: None,
+            })
+        }
+        crate::provider::ThinkingLevel::Low
+        | crate::provider::ThinkingLevel::Medium
+        | crate::provider::ThinkingLevel::High
+        | crate::provider::ThinkingLevel::XHigh => Some(KimiThinking {
+            thinking_type: "enabled",
+            keep: Some("all"),
+        }),
     }
 }
 
@@ -278,6 +344,7 @@ fn convert_message(msg: &Message) -> Vec<ApiMessage> {
             vec![ApiMessage {
                 role: "user".into(),
                 content: Some(content),
+                reasoning_content: None,
                 tool_call_id: None,
                 tool_calls: None,
             }]
@@ -288,6 +355,16 @@ fn convert_message(msg: &Message) -> Vec<ApiMessage> {
                 .iter()
                 .filter_map(|b| match b {
                     ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+
+            let reasoning_content = a
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Thinking { text } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -327,6 +404,7 @@ fn convert_message(msg: &Message) -> Vec<ApiMessage> {
             vec![ApiMessage {
                 role: "assistant".into(),
                 content,
+                reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
                 tool_call_id: None,
                 tool_calls: tool_calls_opt,
             }]
@@ -345,6 +423,7 @@ fn convert_message(msg: &Message) -> Vec<ApiMessage> {
             vec![ApiMessage {
                 role: "tool".into(),
                 content: Some(serde_json::Value::String(output)),
+                reasoning_content: None,
                 tool_call_id: Some(tr.tool_call_id.clone()),
                 tool_calls: None,
             }]
@@ -448,18 +527,22 @@ fn stream_response(
                                     for choice in chunk.choices {
                                         let delta = choice.delta;
 
-                                        // Thinking/reasoning content (DeepSeek, etc.)
+                                        // Thinking/reasoning content (DeepSeek, Kimi, etc.)
                                         if let Some(reasoning) = delta.reasoning_content {
-                                            if !reasoning.is_empty()
-                                                && tx
+                                            if !reasoning.is_empty() {
+                                                content_buf.push(ContentBlock::Thinking {
+                                                    text: reasoning.clone(),
+                                                });
+                                                if tx
                                                     .unbounded_send(Ok(
                                                         StreamEvent::ThinkingDelta {
                                                             text: reasoning,
                                                         },
                                                     ))
                                                     .is_err()
-                                            {
-                                                return;
+                                                {
+                                                    return;
+                                                }
                                             }
                                         }
 
@@ -545,14 +628,18 @@ fn stream_response(
                         let delta = choice.delta;
 
                         if let Some(reasoning) = delta.reasoning_content {
-                            if !reasoning.is_empty()
-                                && tx
+                            if !reasoning.is_empty() {
+                                content_buf.push(ContentBlock::Thinking {
+                                    text: reasoning.clone(),
+                                });
+                                if tx
                                     .unbounded_send(Ok(StreamEvent::ThinkingDelta {
                                         text: reasoning,
                                     }))
                                     .is_err()
-                            {
-                                return;
+                                {
+                                    return;
+                                }
                             }
                         }
 
@@ -700,10 +787,14 @@ mod tests {
     use crate::provider::{Context, RequestOptions};
 
     fn test_model() -> Model {
+        test_model_for_provider("deepseek-chat", "deepseek")
+    }
+
+    fn test_model_for_provider(id: &str, provider_id: &str) -> Model {
         let meta = ModelMeta {
-            id: "deepseek-chat".into(),
-            provider: "deepseek".into(),
-            name: "DeepSeek Chat".into(),
+            id: id.into(),
+            provider: provider_id.into(),
+            name: id.into(),
             context_window: 64_000,
             max_output_tokens: 4_096,
             pricing: ModelPricing::default(),
@@ -714,7 +805,7 @@ mod tests {
             },
         };
         let provider =
-            OpenAiCompatProvider::new("deepseek", "https://api.deepseek.com", vec![meta.clone()]);
+            OpenAiCompatProvider::new(provider_id, "https://api.example.com", vec![meta.clone()]);
         Model {
             meta,
             provider: Arc::new(provider),
@@ -892,6 +983,107 @@ mod tests {
 
         let req = build_request(&model, Context::default(), options);
         assert_eq!(req.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn kimi_fixed_temperature_models_omit_temperature() {
+        let model = test_model_for_provider("kimi-k2.6", "moonshot");
+        let req = build_request(
+            &model,
+            Context::default(),
+            RequestOptions {
+                temperature: Some(0.7),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(req.temperature, None);
+    }
+
+    #[test]
+    fn kimi_request_sends_thinking_control() {
+        let model = test_model_for_provider("kimi-k2.6", "moonshot");
+        let enabled = build_request(
+            &model,
+            Context::default(),
+            RequestOptions {
+                thinking_level: crate::provider::ThinkingLevel::Medium,
+                ..Default::default()
+            },
+        );
+        let disabled = build_request(
+            &model,
+            Context::default(),
+            RequestOptions {
+                thinking_level: crate::provider::ThinkingLevel::Off,
+                ..Default::default()
+            },
+        );
+
+        let enabled_json = serde_json::to_value(&enabled).unwrap();
+        assert_eq!(enabled_json["thinking"]["type"], "enabled");
+        assert_eq!(enabled_json["thinking"]["keep"], "all");
+
+        let disabled_json = serde_json::to_value(&disabled).unwrap();
+        assert_eq!(disabled_json["thinking"]["type"], "disabled");
+        assert!(disabled_json["thinking"].get("keep").is_none());
+    }
+
+    #[test]
+    fn kimi_legacy_preview_omits_thinking_control() {
+        let model = test_model_for_provider("kimi-k2-turbo-preview", "moonshot");
+        let req = build_request(
+            &model,
+            Context::default(),
+            RequestOptions {
+                thinking_level: crate::provider::ThinkingLevel::Medium,
+                ..Default::default()
+            },
+        );
+        let json = serde_json::to_value(&req).unwrap();
+
+        assert!(json.get("thinking").is_none());
+    }
+
+    #[test]
+    fn kimi_forced_thinking_models_keep_thinking_enabled() {
+        let model = test_model_for_provider("kimi-k2-thinking", "moonshot");
+        let req = build_request(
+            &model,
+            Context::default(),
+            RequestOptions {
+                thinking_level: crate::provider::ThinkingLevel::Off,
+                ..Default::default()
+            },
+        );
+        let json = serde_json::to_value(&req).unwrap();
+
+        assert_eq!(json["thinking"]["type"], "enabled");
+        assert_eq!(json["thinking"]["keep"], "all");
+    }
+
+    #[test]
+    fn openai_compat_preserves_assistant_reasoning_content() {
+        let msg = Message::Assistant(AssistantMessage {
+            content: vec![
+                ContentBlock::Thinking {
+                    text: "reasoning".into(),
+                },
+                ContentBlock::Text {
+                    text: "answer".into(),
+                },
+            ],
+            usage: None,
+            stop_reason: StopReason::EndTurn,
+            timestamp: 0,
+        });
+
+        let converted = convert_message(&msg);
+        assert_eq!(converted.len(), 1);
+        let json = serde_json::to_value(&converted[0]).unwrap();
+        assert_eq!(json["role"], "assistant");
+        assert_eq!(json["reasoning_content"], "reasoning");
+        assert_eq!(json["content"], "answer");
     }
 
     #[test]

@@ -10,6 +10,7 @@
 pub mod read;
 pub mod search;
 pub mod types;
+pub mod youtube;
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -50,7 +51,7 @@ impl Tool for WebTool {
         "Web"
     }
     fn description(&self) -> &str {
-        "Search the web or read a page."
+        "Search the web or read a page. YouTube URLs are read through native HTTP metadata/transcript extraction."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({

@@ -138,7 +138,12 @@ fn render_sections(area: Rect, buf: &mut Buffer, theme: &Theme, sections: &[Star
     if area.width >= 96 {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25)])
+            .constraints([
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+            ])
             .split(area);
         for (section, rect) in visible_sections.iter().zip(columns.iter().copied()) {
             render_section(rect, buf, theme, section);

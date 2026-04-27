@@ -453,7 +453,7 @@ fn builtin_models() -> Vec<ModelMeta> {
             provider: "moonshot".into(),
             name: "Kimi K2.6".into(),
             context_window: 256_000,
-            max_output_tokens: 16_384,
+            max_output_tokens: 32_768,
             pricing: ModelPricing::default(),
             capabilities: Capabilities {
                 reasoning: true,
@@ -466,7 +466,7 @@ fn builtin_models() -> Vec<ModelMeta> {
             provider: "moonshot".into(),
             name: "Kimi K2.5".into(),
             context_window: 256_000,
-            max_output_tokens: 16_384,
+            max_output_tokens: 32_768,
             pricing: ModelPricing::default(),
             capabilities: Capabilities {
                 reasoning: true,
@@ -475,11 +475,50 @@ fn builtin_models() -> Vec<ModelMeta> {
             },
         },
         ModelMeta {
+            id: "kimi-k2-0905-preview".into(),
+            provider: "moonshot".into(),
+            name: "Kimi K2 0905 Preview".into(),
+            context_window: 256_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: false,
+                images: false,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "kimi-k2-turbo-preview".into(),
+            provider: "moonshot".into(),
+            name: "Kimi K2 Turbo Preview".into(),
+            context_window: 256_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: false,
+                images: false,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
             id: "kimi-k2-thinking".into(),
             provider: "moonshot".into(),
             name: "Kimi K2 Thinking".into(),
             context_window: 256_000,
-            max_output_tokens: 16_384,
+            max_output_tokens: 32_768,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "kimi-k2-thinking-turbo".into(),
+            provider: "moonshot".into(),
+            name: "Kimi K2 Thinking Turbo".into(),
+            context_window: 256_000,
+            max_output_tokens: 32_768,
             pricing: ModelPricing::default(),
             capabilities: Capabilities {
                 reasoning: true,
@@ -731,7 +770,13 @@ fn synthesize_custom_model_meta(model_id: &str, provider: &str) -> ModelMeta {
             provider: provider.into(),
             name: model_id.into(),
             context_window: 256_000,
-            max_output_tokens: 16_384,
+            max_output_tokens: if model_id.contains("thinking")
+                || matches!(model_id, "kimi-k2.6" | "kimi-k2.5")
+            {
+                32_768
+            } else {
+                16_384
+            },
             pricing: ModelPricing::default(),
             capabilities: Capabilities {
                 reasoning: true,
@@ -937,8 +982,19 @@ fn builtin_aliases() -> Vec<(String, String)> {
         ("kimi".into(), "kimi-k2.6".into()),
         ("kimi-k2.6".into(), "kimi-k2.6".into()),
         ("kimi-k2.5".into(), "kimi-k2.5".into()),
+        ("kimi-k2".into(), "kimi-k2-0905-preview".into()),
+        ("kimi-k2-0905".into(), "kimi-k2-0905-preview".into()),
+        ("kimi-k2-turbo".into(), "kimi-k2-turbo-preview".into()),
         ("kimi-thinking".into(), "kimi-k2-thinking".into()),
         ("kimi-k2-thinking".into(), "kimi-k2-thinking".into()),
+        (
+            "kimi-thinking-turbo".into(),
+            "kimi-k2-thinking-turbo".into(),
+        ),
+        (
+            "kimi-k2-thinking-turbo".into(),
+            "kimi-k2-thinking-turbo".into(),
+        ),
         // Kimi Code
         ("kimi-code".into(), "kimi-for-coding".into()),
         ("kimi-for-coding".into(), "kimi-for-coding".into()),
@@ -1056,6 +1112,16 @@ mod tests {
     }
 
     #[test]
+    fn find_by_alias_resolves_kimi_turbo() {
+        let reg = ModelRegistry::with_builtins();
+        let model = reg
+            .find_by_alias("kimi-k2-turbo")
+            .expect("kimi-k2-turbo alias should resolve");
+        assert_eq!(model.id, "kimi-k2-turbo-preview");
+        assert_eq!(model.provider, "moonshot");
+    }
+
+    #[test]
     fn resolve_meta_guesses_moonshot_for_kimi_models() {
         let reg = ModelRegistry::with_builtins();
         let model = reg
@@ -1105,7 +1171,7 @@ mod tests {
         assert_eq!(google.len(), 2);
 
         let moonshot = reg.list_by_provider("moonshot");
-        assert_eq!(moonshot.len(), 3);
+        assert_eq!(moonshot.len(), 6);
     }
 
     #[test]

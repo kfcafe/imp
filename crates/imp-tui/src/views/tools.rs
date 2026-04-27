@@ -448,7 +448,11 @@ fn push_field(fields: &mut Vec<String>, key: &str, value: Option<String>) {
 fn value_to_short_string(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
-        Value::String(s) => Some(truncate_chars_with_suffix(&abbreviate_home_path(s), 32, "…")),
+        Value::String(s) => Some(truncate_chars_with_suffix(
+            &abbreviate_home_path(s),
+            32,
+            "…",
+        )),
         Value::Bool(b) => Some(b.to_string()),
         Value::Number(n) => Some(n.to_string()),
         Value::Array(items) => {
@@ -705,8 +709,14 @@ mod tests {
 
     #[test]
     fn abbreviates_user_home_paths() {
-        assert_eq!(abbreviate_home_path("/Users/test/src/main.rs"), "~/src/main.rs");
-        assert_eq!(abbreviate_home_path("/home/test/src/main.rs"), "~/src/main.rs");
+        assert_eq!(
+            abbreviate_home_path("/Users/test/src/main.rs"),
+            "~/src/main.rs"
+        );
+        assert_eq!(
+            abbreviate_home_path("/home/test/src/main.rs"),
+            "~/src/main.rs"
+        );
     }
 
     #[test]

@@ -60,7 +60,9 @@ use crate::views::sidebar::{
     build_detail_render_data, build_detail_text_surface_from_plain_lines, build_stream_lines,
     sidebar_sub_areas, Sidebar, SidebarDetailRenderData, SidebarView,
 };
-use crate::views::startup::{summarize_inline, StartupAction, StartupPanelData, StartupPanelView, StartupSection};
+use crate::views::startup::{
+    summarize_inline, StartupAction, StartupPanelData, StartupPanelView, StartupSection,
+};
 use crate::views::status::StatusInfo;
 use crate::views::tools::DisplayToolCall;
 use crate::views::tree::{flatten_tree, TreeView, TreeViewState};
@@ -389,7 +391,10 @@ fn provider_logged_in(auth_store: &AuthStore, provider: &str) -> bool {
 }
 
 fn oauth_provider(provider: &str) -> bool {
-    matches!(provider, "anthropic" | "openai" | "openai-codex" | "kimi-code")
+    matches!(
+        provider,
+        "anthropic" | "openai" | "openai-codex" | "kimi-code"
+    )
 }
 
 fn parse_secret_field_names(input: &str) -> Vec<String> {
@@ -420,8 +425,8 @@ fn model_picker_chatgpt_oauth_models(
     registry: &ModelRegistry,
     auth_store: &AuthStore,
 ) -> Vec<ModelMeta> {
-    let has_chatgpt_oauth = auth_store.get_oauth("openai").is_some()
-        || auth_store.get_oauth("openai-codex").is_some();
+    let has_chatgpt_oauth =
+        auth_store.get_oauth("openai").is_some() || auth_store.get_oauth("openai-codex").is_some();
     if !has_chatgpt_oauth || auth_store.resolve_api_key_only("openai").is_ok() {
         return Vec::new();
     }
@@ -466,7 +471,8 @@ fn filtered_model_options(
                 oauth_only_models,
             );
 
-            let available_ids: HashSet<&str> = available_models.iter().map(|m| m.id.as_str()).collect();
+            let available_ids: HashSet<&str> =
+                available_models.iter().map(|m| m.id.as_str()).collect();
             let enabled_ids: HashSet<String> = enabled
                 .iter()
                 .filter_map(|name| registry.resolve_meta(name, None).map(|model| model.id))
@@ -488,6 +494,23 @@ fn filtered_model_options(
             merge_model_options_with_oauth_only_models(visible_models, oauth_only_models)
         }
     }
+}
+
+fn include_current_model_option(
+    mut models: Vec<ModelMeta>,
+    registry: &ModelRegistry,
+    current_model: &str,
+) -> (Vec<ModelMeta>, String) {
+    let Some(meta) = registry.resolve_meta(current_model, None) else {
+        return (models, current_model.to_string());
+    };
+
+    let canonical_id = meta.id.clone();
+    if !models.iter().any(|model| model.id == canonical_id) {
+        models.insert(0, meta);
+    }
+
+    (models, canonical_id)
 }
 
 impl App {
@@ -1338,10 +1361,7 @@ impl App {
         ];
 
         StartupSurfaceData {
-            panel: StartupPanelData {
-                actions,
-                sections,
-            },
+            panel: StartupPanelData { actions, sections },
         }
     }
 
@@ -2145,8 +2165,8 @@ impl App {
                     None
                 };
                 if let Some(id) = selected_id {
-                    let path =
-                        imp_core::storage::global_sessions_dir().join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+                    let path = imp_core::storage::global_sessions_dir()
+                        .join(format!("{}.jsonl", uuid::Uuid::new_v4()));
                     match self.session.fork(&id, &path) {
                         Ok(forked) => {
                             self.session = forked;
@@ -3031,7 +3051,8 @@ impl App {
             }
             "fork" => {
                 let leaf = self.session.leaf_id().unwrap_or_default().to_string();
-                let path = imp_core::storage::global_sessions_dir().join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+                let path = imp_core::storage::global_sessions_dir()
+                    .join(format!("{}.jsonl", uuid::Uuid::new_v4()));
                 match self.session.fork(&leaf, &path) {
                     Ok(forked) => {
                         self.session = forked;
@@ -3121,17 +3142,12 @@ impl App {
                     return;
                 }
                 // Copy last assistant message to clipboard
-                if let Some(last) = self
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|m| {
-                        matches!(
-                            m.role,
-                            MessageRole::Assistant | MessageRole::Warning | MessageRole::Error
-                        )
-                    })
-                {
+                if let Some(last) = self.messages.iter().rev().find(|m| {
+                    matches!(
+                        m.role,
+                        MessageRole::Assistant | MessageRole::Warning | MessageRole::Error
+                    )
+                }) {
                     let text = last.content.clone();
                     self.copy_to_clipboard(&text);
                     self.messages.push(DisplayMessage {
@@ -4573,7 +4589,9 @@ impl App {
 
     fn open_model_selector(&mut self) {
         let models = self.filtered_models();
-        self.mode = UiMode::ModelSelector(ModelSelectorState::new(models, self.model_name.clone()));
+        let (models, current_model) =
+            include_current_model_option(models, &self.model_registry, &self.model_name);
+        self.mode = UiMode::ModelSelector(ModelSelectorState::new(models, current_model));
     }
 
     fn open_file_finder(&mut self) {
@@ -5304,6 +5322,20 @@ mod session_lifecycle {
     }
 
     #[test]
+    fn model_picker_includes_current_alias_even_without_auth() {
+        let registry = ModelRegistry::with_builtins();
+        let tmp = tempfile::tempdir().unwrap();
+        let auth_store = AuthStore::new(tmp.path().join("auth.json"));
+        let models = filtered_model_options(&registry, &Config::default(), &auth_store);
+        assert!(models.is_empty());
+
+        let (models, current_model) = include_current_model_option(models, &registry, "kimi");
+
+        assert_eq!(current_model, "kimi-k2.6");
+        assert!(models.iter().any(|model| model.id == "kimi-k2.6"));
+    }
+
+    #[test]
     fn terminal_title_uses_manual_session_name_when_present() {
         let mut app = make_app();
         app.session.set_name("my chat");
@@ -5830,7 +5862,10 @@ mod session_lifecycle {
             .find(|msg| msg.role == MessageRole::Assistant)
             .expect("assistant message");
         assert_eq!(assistant.tool_calls.len(), 1);
-        assert_eq!(assistant.tool_calls[0].output.as_deref(), Some("selected option"));
+        assert_eq!(
+            assistant.tool_calls[0].output.as_deref(),
+            Some("selected option")
+        );
         assert!(!assistant.tool_calls[0].is_error);
 
         let system = app.messages.last().expect("system message remains");

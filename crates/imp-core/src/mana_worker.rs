@@ -408,12 +408,8 @@ pub async fn finalize_worker_run(
             .map(str::trim)
             .filter(|verify| !verify.is_empty())
         {
-            let (passed, output) = run_verify_command(
-                &assignment.id,
-                verify,
-                &assignment.workspace_root,
-            )
-            .await?;
+            let (passed, output) =
+                run_verify_command(&assignment.id, verify, &assignment.workspace_root).await?;
             verify_passed = Some(passed);
             verify_output = output;
             if passed {
@@ -1007,13 +1003,10 @@ mod tests {
             ..mana_core::unit::Unit::new("11", "Slow verify")
         };
         unit.to_file(mana_dir.join("11-slow-verify.md")).unwrap();
-        let (passed, output) = run_verify_command(
-            "11",
-            "python3 -c 'import time; time.sleep(2)'",
-            dir.path(),
-        )
-        .await
-        .unwrap();
+        let (passed, output) =
+            run_verify_command("11", "python3 -c 'import time; time.sleep(2)'", dir.path())
+                .await
+                .unwrap();
         assert!(!passed);
         assert_eq!(output.as_deref(), Some("Verify timed out after 1s"));
     }

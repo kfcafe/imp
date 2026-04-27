@@ -1220,7 +1220,9 @@ mod tests {
         let (agent, handle) = Agent::new(
             test_model_with_events(vec![Ok(StreamEvent::MessageEnd {
                 message: AssistantMessage {
-                    content: vec![ContentBlock::Text { text: "done".into() }],
+                    content: vec![ContentBlock::Text {
+                        text: "done".into(),
+                    }],
                     usage: None,
                     stop_reason: StopReason::EndTurn,
                     timestamp: 1,
@@ -1235,7 +1237,9 @@ mod tests {
             config: Config::default(),
             model: test_model_with_events(vec![Ok(StreamEvent::MessageEnd {
                 message: AssistantMessage {
-                    content: vec![ContentBlock::Text { text: "done".into() }],
+                    content: vec![ContentBlock::Text {
+                        text: "done".into(),
+                    }],
                     usage: None,
                     stop_reason: StopReason::EndTurn,
                     timestamp: 1,
@@ -1246,18 +1250,23 @@ mod tests {
             cwd,
             agent_task: Some(tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                (Agent::new(
-                    test_model_with_events(vec![Ok(StreamEvent::MessageEnd {
-                        message: AssistantMessage {
-                            content: vec![ContentBlock::Text { text: "done".into() }],
-                            usage: None,
-                            stop_reason: StopReason::EndTurn,
-                            timestamp: 1,
-                        },
-                    })]),
-                    PathBuf::from("/tmp"),
+                (
+                    Agent::new(
+                        test_model_with_events(vec![Ok(StreamEvent::MessageEnd {
+                            message: AssistantMessage {
+                                content: vec![ContentBlock::Text {
+                                    text: "done".into(),
+                                }],
+                                usage: None,
+                                stop_reason: StopReason::EndTurn,
+                                timestamp: 1,
+                            },
+                        })]),
+                        PathBuf::from("/tmp"),
+                    )
+                    .0,
+                    Ok(()),
                 )
-                .0, Ok(()))
             })),
             completed_run_result: None,
             pending_persistence_errors: VecDeque::new(),

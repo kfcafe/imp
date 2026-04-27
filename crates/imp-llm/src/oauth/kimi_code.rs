@@ -63,18 +63,9 @@ impl KimiCodeOAuth {
         }
 
         Ok(DeviceAuthorization {
-            user_code: data["user_code"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
-            device_code: data["device_code"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
-            verification_uri: data["verification_uri"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
+            user_code: data["user_code"].as_str().unwrap_or("").to_string(),
+            device_code: data["device_code"].as_str().unwrap_or("").to_string(),
+            verification_uri: data["verification_uri"].as_str().unwrap_or("").to_string(),
             verification_uri_complete: data["verification_uri_complete"]
                 .as_str()
                 .unwrap_or("")
@@ -95,10 +86,7 @@ impl KimiCodeOAuth {
             .form(&[
                 ("client_id", self.client_id.as_str()),
                 ("device_code", device_code),
-                (
-                    "grant_type",
-                    "urn:ietf:params:oauth:grant-type:device_code",
-                ),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ])
             .headers(common_headers())
             .send()
@@ -165,11 +153,7 @@ impl KimiCodeOAuth {
     ///
     /// `open_url` is called with the verification URL to open in the browser.
     /// `print_message` is called with status messages for the user.
-    pub async fn login<F, G>(
-        &self,
-        open_url: F,
-        mut print_message: G,
-    ) -> Result<OAuthCredential>
+    pub async fn login<F, G>(&self, open_url: F, mut print_message: G) -> Result<OAuthCredential>
     where
         F: FnOnce(&str),
         G: FnMut(&str),
@@ -177,7 +161,10 @@ impl KimiCodeOAuth {
         let auth = self.request_device_authorization().await?;
 
         print_message("Please visit the following URL to finish authorization:");
-        print_message(&format!("Verification URL: {}", auth.verification_uri_complete));
+        print_message(&format!(
+            "Verification URL: {}",
+            auth.verification_uri_complete
+        ));
         open_url(&auth.verification_uri_complete);
 
         let interval = Duration::from_secs(auth.interval);
@@ -282,27 +269,23 @@ pub fn common_headers() -> reqwest::header::HeaderMap {
     );
     headers.insert(
         "X-Msh-Device-Name",
-        reqwest::header::HeaderValue::from_str(&hostname()).unwrap_or_else(|_| {
-            reqwest::header::HeaderValue::from_static("unknown")
-        }),
+        reqwest::header::HeaderValue::from_str(&hostname())
+            .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("unknown")),
     );
     headers.insert(
         "X-Msh-Device-Model",
-        reqwest::header::HeaderValue::from_str(&device_model()).unwrap_or_else(|_| {
-            reqwest::header::HeaderValue::from_static("unknown")
-        }),
+        reqwest::header::HeaderValue::from_str(&device_model())
+            .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("unknown")),
     );
     headers.insert(
         "X-Msh-Os-Version",
-        reqwest::header::HeaderValue::from_str(&os_version()).unwrap_or_else(|_| {
-            reqwest::header::HeaderValue::from_static("unknown")
-        }),
+        reqwest::header::HeaderValue::from_str(&os_version())
+            .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("unknown")),
     );
     headers.insert(
         "X-Msh-Device-Id",
-        reqwest::header::HeaderValue::from_str(&device_id()).unwrap_or_else(|_| {
-            reqwest::header::HeaderValue::from_static("unknown")
-        }),
+        reqwest::header::HeaderValue::from_str(&device_id())
+            .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("unknown")),
     );
     headers
 }
@@ -350,9 +333,9 @@ fn device_id() -> String {
     // If the user already has kimi-cli installed, reuse its device id so
     // that imported tokens (whose JWT contains that device_id) match the
     // headers we send to the API.
-    if let Some(ref p) = std::env::var_os("HOME").map(|h| {
-        std::path::PathBuf::from(h).join(".kimi").join("device_id")
-    }) {
+    if let Some(ref p) = std::env::var_os("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".kimi").join("device_id"))
+    {
         if let Ok(id) = std::fs::read_to_string(p) {
             let trimmed = id.trim();
             if !trimmed.is_empty() {
@@ -362,9 +345,9 @@ fn device_id() -> String {
     }
 
     // Fall back to imp's own device id.
-    if let Some(ref p) = std::env::var_os("HOME").map(|h| {
-        std::path::PathBuf::from(h).join(".imp").join("device_id")
-    }) {
+    if let Some(ref p) =
+        std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".imp").join("device_id"))
+    {
         if let Ok(id) = std::fs::read_to_string(p) {
             let trimmed = id.trim();
             if !trimmed.is_empty() {
@@ -375,15 +358,12 @@ fn device_id() -> String {
 
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
-    let id = bytes
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+    let id = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
 
     // Persist the newly generated id in imp's own directory.
-    if let Some(ref p) = std::env::var_os("HOME").map(|h| {
-        std::path::PathBuf::from(h).join(".imp").join("device_id")
-    }) {
+    if let Some(ref p) =
+        std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".imp").join("device_id"))
+    {
         if let Some(parent) = p.parent() {
             let _ = std::fs::create_dir_all(parent);
         }

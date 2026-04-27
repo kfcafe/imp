@@ -9,18 +9,19 @@ use url::Url;
 use super::types::{ContentFormat, PageContent};
 
 /// User-Agent string that identifies as a legitimate browser to avoid blocks.
-const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+pub(crate) const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-const ACCEPT_HEADER: &str =
+pub(crate) const ACCEPT_HEADER: &str =
     "text/markdown,text/plain;q=0.9,text/html;q=0.8,application/xhtml+xml;q=0.7,*/*;q=0.5";
 
 /// Fetch a URL and extract its readable content.
 pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent, ReadError> {
     let parsed_url = Url::parse(url).map_err(|e| ReadError::InvalidUrl(e.to_string()))?;
 
-    // YouTube: hint the user to use a different approach
-    if is_youtube_url(&parsed_url) {
-        return Err(ReadError::YoutubeNotSupported);
+    if super::youtube::is_youtube_url(&parsed_url) {
+        return super::youtube::fetch_and_extract(client, url)
+            .await
+            .map_err(|err| ReadError::Youtube(err.to_string()));
     }
 
     let requested_url = url.to_string();
@@ -267,11 +268,6 @@ fn detect_content_format(content_type: &str) -> ContentFormat {
     }
 }
 
-fn is_youtube_url(url: &Url) -> bool {
-    url.host_str()
-        .is_some_and(|h| h.contains("youtube.com") || h.contains("youtu.be"))
-}
-
 #[derive(Debug)]
 pub enum ReadError {
     InvalidUrl(String),
@@ -281,7 +277,7 @@ pub enum ReadError {
     Parse(String),
     NoContent,
     InsufficientContent,
-    YoutubeNotSupported,
+    Youtube(String),
 }
 
 impl std::fmt::Display for ReadError {
@@ -294,7 +290,7 @@ impl std::fmt::Display for ReadError {
             Self::Parse(msg) => write!(f, "Parse error: {msg}"),
             Self::NoContent => write!(f, "Could not extract readable content from page"),
             Self::InsufficientContent => write!(f, "Page returned insufficient content"),
-            Self::YoutubeNotSupported => write!(f, "YouTube URLs not supported yet. Use the page URL directly or try a transcript tool."),
+            Self::Youtube(msg) => write!(f, "YouTube extraction failed: {msg}"),
         }
     }
 }
