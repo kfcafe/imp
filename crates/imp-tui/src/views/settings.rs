@@ -25,14 +25,10 @@ pub enum SettingsField {
     MaxTurns,
     ObservationMask,
     ShellBackend,
-    SidebarStyle,
-    ToolOutput,
-    ToolOutputLines,
     ReadMaxLines,
     SidebarWidth,
     WordWrap,
     Animations,
-    ChatToolDisplay,
     AutoOpenSidebar,
     SidebarAutoOpenWidth,
     ThinkingLines,
@@ -59,14 +55,10 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::MaxTurns,
     SettingsField::ObservationMask,
     SettingsField::ShellBackend,
-    SettingsField::SidebarStyle,
-    SettingsField::ToolOutput,
-    SettingsField::ToolOutputLines,
     SettingsField::ReadMaxLines,
     SettingsField::SidebarWidth,
     SettingsField::WordWrap,
     SettingsField::Animations,
-    SettingsField::ChatToolDisplay,
     SettingsField::AutoOpenSidebar,
     SettingsField::SidebarAutoOpenWidth,
     SettingsField::ThinkingLines,
@@ -242,23 +234,6 @@ impl SettingsState {
             SettingsField::ObservationMask => {
                 self.observation_mask = (self.observation_mask + 0.05).min(1.0);
             }
-            SettingsField::SidebarStyle => {
-                self.sidebar_style = match self.sidebar_style {
-                    SidebarStyle::Inspector => SidebarStyle::Stream,
-                    SidebarStyle::Stream => SidebarStyle::Split,
-                    SidebarStyle::Split => SidebarStyle::Inspector,
-                };
-            }
-            SettingsField::ToolOutput => {
-                self.tool_output = match self.tool_output {
-                    ToolOutputDisplay::Full => ToolOutputDisplay::Compact,
-                    ToolOutputDisplay::Compact => ToolOutputDisplay::Collapsed,
-                    ToolOutputDisplay::Collapsed => ToolOutputDisplay::Full,
-                };
-            }
-            SettingsField::ToolOutputLines => {
-                self.tool_output_lines = self.tool_output_lines.saturating_add(5).min(100);
-            }
             SettingsField::ReadMaxLines => {
                 self.read_max_lines = self.read_max_lines.saturating_add(100);
             }
@@ -273,13 +248,6 @@ impl SettingsState {
                     AnimationLevel::None => AnimationLevel::Spinner,
                     AnimationLevel::Spinner => AnimationLevel::Minimal,
                     AnimationLevel::Minimal => AnimationLevel::None,
-                };
-            }
-            SettingsField::ChatToolDisplay => {
-                self.chat_tool_display = match self.chat_tool_display {
-                    ChatToolDisplay::Interleaved => ChatToolDisplay::Summary,
-                    ChatToolDisplay::Summary => ChatToolDisplay::Hidden,
-                    ChatToolDisplay::Hidden => ChatToolDisplay::Interleaved,
                 };
             }
             SettingsField::AutoOpenSidebar => {
@@ -385,23 +353,6 @@ impl SettingsState {
             SettingsField::ObservationMask => {
                 self.observation_mask = (self.observation_mask - 0.05).max(0.0);
             }
-            SettingsField::SidebarStyle => {
-                self.sidebar_style = match self.sidebar_style {
-                    SidebarStyle::Inspector => SidebarStyle::Split,
-                    SidebarStyle::Split => SidebarStyle::Stream,
-                    SidebarStyle::Stream => SidebarStyle::Inspector,
-                };
-            }
-            SettingsField::ToolOutput => {
-                self.tool_output = match self.tool_output {
-                    ToolOutputDisplay::Full => ToolOutputDisplay::Collapsed,
-                    ToolOutputDisplay::Compact => ToolOutputDisplay::Full,
-                    ToolOutputDisplay::Collapsed => ToolOutputDisplay::Compact,
-                };
-            }
-            SettingsField::ToolOutputLines => {
-                self.tool_output_lines = self.tool_output_lines.saturating_sub(5).max(5);
-            }
             SettingsField::ReadMaxLines => {
                 self.read_max_lines = self.read_max_lines.saturating_sub(100);
             }
@@ -416,13 +367,6 @@ impl SettingsState {
                     AnimationLevel::None => AnimationLevel::Minimal,
                     AnimationLevel::Spinner => AnimationLevel::None,
                     AnimationLevel::Minimal => AnimationLevel::Spinner,
-                };
-            }
-            SettingsField::ChatToolDisplay => {
-                self.chat_tool_display = match self.chat_tool_display {
-                    ChatToolDisplay::Interleaved => ChatToolDisplay::Hidden,
-                    ChatToolDisplay::Summary => ChatToolDisplay::Interleaved,
-                    ChatToolDisplay::Hidden => ChatToolDisplay::Summary,
                 };
             }
             SettingsField::AutoOpenSidebar => {
@@ -493,10 +437,6 @@ impl SettingsState {
             SettingsField::ObservationMask => {
                 self.editing_number = true;
                 self.edit_buffer = format!("{:.2}", self.observation_mask);
-            }
-            SettingsField::ToolOutputLines => {
-                self.editing_number = true;
-                self.edit_buffer = self.tool_output_lines.to_string();
             }
             SettingsField::ReadMaxLines => {
                 self.editing_number = true;
@@ -596,11 +536,6 @@ impl SettingsState {
                     self.observation_mask = v.clamp(0.0, 1.0);
                 }
             }
-            SettingsField::ToolOutputLines => {
-                if let Ok(v) = self.edit_buffer.parse::<usize>() {
-                    self.tool_output_lines = v.clamp(1, 100);
-                }
-            }
             SettingsField::ReadMaxLines => {
                 if let Ok(v) = self.edit_buffer.parse::<usize>() {
                     self.read_max_lines = v;
@@ -636,15 +571,15 @@ impl SettingsState {
             backend: self.shell_backend.clone(),
         };
         config.ui = imp_core::config::UiConfig {
-            sidebar_style: self.sidebar_style,
-            tool_output: self.tool_output,
+            sidebar_style: SidebarStyle::Inspector,
+            tool_output: ToolOutputDisplay::Full,
             tool_output_lines: self.tool_output_lines,
             read_max_lines: self.read_max_lines,
             sidebar_width: self.sidebar_width,
             word_wrap: self.word_wrap,
             animations: self.animations,
-            hide_tools_in_chat: self.chat_tool_display == ChatToolDisplay::Hidden,
-            chat_tool_display: self.chat_tool_display,
+            hide_tools_in_chat: false,
+            chat_tool_display: ChatToolDisplay::Summary,
             auto_open_sidebar: self.auto_open_sidebar,
             sidebar_auto_open_width: self.sidebar_auto_open_width,
             thinking_lines: self.thinking_lines,
@@ -1010,62 +945,6 @@ impl Widget for SettingsView<'_> {
 
         row += 1;
 
-        let sidebar_label = match self.state.sidebar_style {
-            SidebarStyle::Inspector => "inspector",
-            SidebarStyle::Stream => "stream",
-            SidebarStyle::Split => "split",
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            8,
-            "Sidebar style",
-            sidebar_label,
-            "← →",
-        );
-
-        let tool_output_label = match self.state.tool_output {
-            ToolOutputDisplay::Full => "full",
-            ToolOutputDisplay::Compact => "compact",
-            ToolOutputDisplay::Collapsed => "collapsed",
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            9,
-            "Tool output",
-            tool_output_label,
-            "← →",
-        );
-
-        let tol_val = if self.state.editing_number
-            && self.state.current_field() == SettingsField::ToolOutputLines
-        {
-            format!("{}▎", self.state.edit_buffer)
-        } else {
-            self.state.tool_output_lines.to_string()
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            10,
-            "Tool output lines",
-            &tol_val,
-            "← → / type",
-        );
-
         let rml_val = if self.state.editing_number
             && self.state.current_field() == SettingsField::ReadMaxLines
         {
@@ -1080,7 +959,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            11,
+            8,
             "Read max lines",
             &rml_val,
             "← → / type (0 = no limit)",
@@ -1100,8 +979,8 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            12,
-            "Sidebar width",
+            9,
+            "Inspector width",
             &sw_val,
             "← → / type",
         );
@@ -1113,7 +992,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            13,
+            10,
             "Word wrap",
             if self.state.word_wrap { "on" } else { "off" },
             "← →",
@@ -1126,28 +1005,12 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            14,
+            11,
             "Animations",
             animation_label(self.state.animations),
             "← →",
         );
 
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            15,
-            "Chat tool display",
-            match self.state.chat_tool_display {
-                ChatToolDisplay::Interleaved => "interleaved",
-                ChatToolDisplay::Summary => "summary",
-                ChatToolDisplay::Hidden => "hidden",
-            },
-            "← →",
-        );
         render_field(
             self.state,
             self.theme,
@@ -1506,23 +1369,19 @@ mod tests {
     use imp_llm::model::ModelRegistry;
 
     #[test]
-    fn sidebar_style_cycles_include_inspector() {
+    fn applying_settings_forces_primary_inspector_display_model() {
         let registry = ModelRegistry::with_builtins();
         let models = registry.list().to_vec();
         let auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
-        let mut state = SettingsState::new(&Config::default(), &models[0].id, &models, &auth_store);
-        state.selected = FIELDS
-            .iter()
-            .position(|field| matches!(field, SettingsField::SidebarStyle))
-            .unwrap();
+        let mut config = Config::default();
+        let state = SettingsState::new(&config, &models[0].id, &models, &auth_store);
 
-        assert_eq!(state.sidebar_style, SidebarStyle::Inspector);
-        state.cycle_forward();
-        assert_eq!(state.sidebar_style, SidebarStyle::Stream);
-        state.cycle_forward();
-        assert_eq!(state.sidebar_style, SidebarStyle::Split);
-        state.cycle_backward();
-        assert_eq!(state.sidebar_style, SidebarStyle::Stream);
+        state.apply_to_config(&mut config);
+
+        assert_eq!(config.ui.sidebar_style, SidebarStyle::Inspector);
+        assert_eq!(config.ui.tool_output, ToolOutputDisplay::Full);
+        assert_eq!(config.ui.chat_tool_display, ChatToolDisplay::Summary);
+        assert!(!config.ui.hide_tools_in_chat);
     }
 
     #[test]

@@ -4,7 +4,6 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use serde_json::Value;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::highlight::Highlighter;
 use crate::selection::TextSurface;
@@ -643,18 +642,14 @@ fn tool_input_detail_lines(
     theme: &Theme,
     width: usize,
 ) -> Vec<Line<'static>> {
-    if tc.details.is_null() {
-        return Vec::new();
-    }
-
-    let pretty = tool_input_preview(&tc.details, width);
-    if pretty.is_empty() {
+    let rows = tool_input_summary_rows(tc);
+    if rows.is_empty() {
         return Vec::new();
     }
 
     let mut lines = vec![Line::from(Span::styled("input", theme.muted_style()))];
     lines.extend(wrap_plain_lines(
-        pretty.lines().map(String::from).collect(),
+        rows,
         width,
         &UiConfig {
             tool_output: ToolOutputDisplay::Full,
@@ -667,34 +662,142 @@ fn tool_input_detail_lines(
     lines
 }
 
-fn tool_input_preview(value: &Value, width: usize) -> String {
-    const MAX_TOOL_INPUT_LINES: usize = 80;
-    const MAX_TOOL_INPUT_CHARS: usize = 12_000;
-
-    let Ok(pretty) = serde_json::to_string_pretty(value) else {
-        return truncated_scalar_preview(&value.to_string(), MAX_TOOL_INPUT_CHARS);
+fn tool_input_summary_rows(tc: &DisplayToolCall) -> Vec<String> {
+    let Some(args) = tc.details.as_object() else {
+        return value_to_summary_rows(&tc.details);
     };
 
-    if pretty.trim().is_empty() || pretty == "null" {
-        return String::new();
-    }
-
-    let mut out = Vec::new();
-    let max_line_width = width.max(20).min(240);
-    for line in pretty.lines().take(MAX_TOOL_INPUT_LINES) {
-        out.push(truncated_display_line(line, max_line_width));
-    }
-
-    let omitted_lines = pretty.lines().count().saturating_sub(out.len());
-    let mut preview = out.join("\n");
-    preview = truncated_scalar_preview(&preview, MAX_TOOL_INPUT_CHARS);
-    if omitted_lines > 0 {
-        if !preview.is_empty() {
-            preview.push('\n');
+    match tc.name.as_str() {
+        "shell" | "bash" => summarize_named_fields(args, &["command", "workdir", "timeout"]),
+        "read" => summarize_named_fields(args, &["path", "offset", "limit"]),
+        "edit" => summarize_edit_fields(args),
+        "write" => summarize_write_fields(args),
+        "scan" => summarize_named_fields(args, &["action", "directory", "files", "task"]),
+        "mana" => summarize_named_fields(
+            args,
+            &[
+                "action", "id", "title", "status", "priority", "parent", "deps", "verify", "notes",
+                "reason", "run_id",
+            ],
+        ),
+        "ask" => {
+            summarize_named_fields(args, &["question", "options", "allowOther", "multiSelect"])
         }
-        preview.push_str(&format!("… {omitted_lines} more input lines"));
+        "web" => {
+            summarize_named_fields(args, &["action", "query", "url", "provider", "maxResults"])
+        }
+        "spawn" => summarize_named_fields(args, &["mode", "unit_id", "prompt", "timeout_secs"]),
+        _ => summarize_object_fields(args),
     }
-    preview
+}
+
+fn summarize_named_fields(args: &serde_json::Map<String, Value>, keys: &[&str]) -> Vec<String> {
+    let mut rows = Vec::new();
+    for key in keys {
+        if let Some(value) = args.get(*key) {
+            push_summary_row(&mut rows, key, value);
+        }
+    }
+    rows
+}
+
+fn summarize_edit_fields(args: &serde_json::Map<String, Value>) -> Vec<String> {
+    let mut rows = summarize_named_fields(args, &["path"]);
+    if let Some(edits) = args.get("edits").and_then(Value::as_array) {
+        rows.push(format!("edits: {}", edits.len()));
+    } else {
+        rows.extend(summarize_named_fields(
+            args,
+            &["oldText", "newText", "replaceAll"],
+        ));
+    }
+    rows
+}
+
+fn summarize_write_fields(args: &serde_json::Map<String, Value>) -> Vec<String> {
+    let mut rows = summarize_named_fields(args, &["path"]);
+    if let Some(content) = args.get("content").and_then(Value::as_str) {
+        rows.push(format!(
+            "content: {} chars, {} lines",
+            content.chars().count(),
+            content.lines().count()
+        ));
+    }
+    rows
+}
+
+fn summarize_object_fields(args: &serde_json::Map<String, Value>) -> Vec<String> {
+    let mut rows = Vec::new();
+    for (key, value) in args {
+        push_summary_row(&mut rows, key, value);
+    }
+    rows
+}
+
+fn value_to_summary_rows(value: &Value) -> Vec<String> {
+    if value.is_null() {
+        Vec::new()
+    } else {
+        vec![format!("value: {}", summarize_value(value))]
+    }
+}
+
+fn push_summary_row(rows: &mut Vec<String>, key: &str, value: &Value) {
+    if let Some(summary) = summarize_field_value(value) {
+        rows.push(format!("{key}: {summary}"));
+    }
+}
+
+fn summarize_field_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) => Some(summarize_text(text)),
+        Value::Array(items) => Some(summarize_array(items)),
+        Value::Object(obj) => Some(format!("{{{} fields}}", obj.len())),
+        Value::Bool(_) | Value::Number(_) => Some(summarize_value(value)),
+    }
+}
+
+fn summarize_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => summarize_text(text),
+        Value::Array(items) => summarize_array(items),
+        Value::Object(obj) => format!("{{{} fields}}", obj.len()),
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+    }
+}
+
+fn summarize_array(items: &[Value]) -> String {
+    const MAX_ITEMS: usize = 6;
+    let mut parts = items
+        .iter()
+        .take(MAX_ITEMS)
+        .map(summarize_value)
+        .collect::<Vec<_>>();
+    if items.len() > MAX_ITEMS {
+        parts.push(format!("… {} more", items.len() - MAX_ITEMS));
+    }
+    format!("[{}]", parts.join(", "))
+}
+
+fn summarize_text(text: &str) -> String {
+    const MAX_TEXT_CHARS: usize = 240;
+    const MAX_TEXT_LINES: usize = 4;
+
+    let mut lines = text.lines().take(MAX_TEXT_LINES).collect::<Vec<_>>();
+    let omitted_lines = text.lines().count().saturating_sub(lines.len());
+    if lines.is_empty() && !text.is_empty() {
+        lines.push(text);
+    }
+
+    let mut summary = lines.join("\\n");
+    summary = truncated_scalar_preview(&summary, MAX_TEXT_CHARS);
+    if omitted_lines > 0 {
+        summary.push_str(&format!(" … {omitted_lines} more lines"));
+    }
+    summary
 }
 
 fn truncated_scalar_preview(value: &str, max_chars: usize) -> String {
@@ -704,29 +807,6 @@ fn truncated_scalar_preview(value: &str, max_chars: usize) -> String {
 
     let mut out = value.chars().take(max_chars).collect::<String>();
     out.push('…');
-    out
-}
-
-fn truncated_display_line(line: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(line) <= max_width {
-        return line.to_string();
-    }
-
-    let suffix = "…";
-    let target = max_width
-        .saturating_sub(UnicodeWidthStr::width(suffix))
-        .max(1);
-    let mut out = String::new();
-    let mut width = 0;
-    for ch in line.chars() {
-        let next = ch.width().unwrap_or(0);
-        if width + next > target {
-            break;
-        }
-        out.push(ch);
-        width += next;
-    }
-    out.push_str(suffix);
     out
 }
 
@@ -1473,11 +1553,13 @@ mod tests {
     }
 
     #[test]
-    fn inspector_detail_caps_large_tool_input_arguments() {
-        let mut tc = make_tc("shell", "run", Some("done"), false);
+    fn inspector_detail_summarizes_large_tool_input_arguments() {
+        let mut tc = make_tc("edit", "run", Some("done"), false);
         tc.details = serde_json::json!({
-            "command": "x".repeat(100_000),
-            "lines": (0..120).map(|idx| format!("line-{idx}")).collect::<Vec<_>>(),
+            "edits": (0..120).map(|idx| serde_json::json!({
+                "oldText": format!("old-{idx}"),
+                "newText": "x".repeat(10_000),
+            })).collect::<Vec<_>>(),
         });
 
         let render = build_detail_render_data(
@@ -1496,7 +1578,11 @@ mod tests {
         assert!(render
             .plain_lines
             .iter()
-            .any(|line| line.contains("more input lines") || line.ends_with('…')));
+            .any(|line| line.contains("edits: 120")));
+        assert!(!render
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("old-119")));
         assert!(render.plain_lines.iter().all(|line| line.len() < 1_000));
     }
 

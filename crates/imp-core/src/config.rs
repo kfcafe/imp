@@ -593,11 +593,9 @@ impl Default for UiConfig {
 
 impl UiConfig {
     pub fn effective_chat_tool_display(&self) -> ChatToolDisplay {
-        if self.hide_tools_in_chat {
+        if self.hide_tools_in_chat && self.sidebar_style != SidebarStyle::Inspector {
             ChatToolDisplay::Hidden
-        } else if self.sidebar_style == SidebarStyle::Inspector
-            && self.chat_tool_display == ChatToolDisplay::Interleaved
-        {
+        } else if self.sidebar_style == SidebarStyle::Inspector {
             ChatToolDisplay::Summary
         } else {
             self.chat_tool_display
@@ -871,6 +869,7 @@ mod tests {
         assert_eq!(config.ui.read_max_lines, 500);
         assert_eq!(config.ui.sidebar_style, SidebarStyle::Inspector);
         assert_eq!(config.ui.chat_tool_display, ChatToolDisplay::Summary);
+        assert_eq!(config.ui.tool_output, ToolOutputDisplay::Compact);
         assert_eq!(config.web, WebConfig::default());
         assert_eq!(config.personality, PersonalityConfig::default());
         assert!(config.roles.is_empty());
@@ -894,6 +893,10 @@ mod tests {
         assert_eq!(ui.effective_chat_tool_display(), ChatToolDisplay::Summary);
 
         ui.chat_tool_display = ChatToolDisplay::Hidden;
+        ui.hide_tools_in_chat = true;
+        assert_eq!(ui.effective_chat_tool_display(), ChatToolDisplay::Summary);
+
+        ui.sidebar_style = SidebarStyle::Stream;
         assert_eq!(ui.effective_chat_tool_display(), ChatToolDisplay::Hidden);
     }
 

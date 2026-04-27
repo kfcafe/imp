@@ -5,7 +5,7 @@ slug: fix-imp-tui-clean-ui-corruption-and-string-join-ov
 status: in_progress
 priority: 1
 created_at: '2026-04-27T16:59:23.538366Z'
-updated_at: '2026-04-27T17:11:12.941392Z'
+updated_at: '2026-04-27T17:14:59.289711Z'
 acceptance: Imp TUI no longer panics with `String join would overflow memory bounds` from normal rendering/input state and the clean UI text layout avoids corrupted overlapping output for wrapped content.
 notes: |-
   ---
@@ -15,6 +15,10 @@ notes: |-
   ---
   2026-04-27T17:11:12.941378+00:00
   Verification update: `cargo fmt -p imp-tui --check` initially failed only because sidebar.rs needed rustfmt wrapping; ran `cargo fmt -p imp-tui`. Focused verification now passes: `cargo test -p imp-tui inspector -- --nocapture` and `cargo check -p imp-tui`. Broader `cargo test -p imp-tui --lib` still has one unrelated existing failure in `tui_integration_slash_memory_add_and_show` asserting memory output contains `Added`; this is outside the inspector/input-rendering regression scope.
+
+  ---
+  2026-04-27T17:14:59.289709+00:00
+  Adjusted fix per user direction: replaced the raw-JSON-with-cap approach with structured per-tool input summaries. Inspector now shows useful fields by tool (shell command/workdir/timeout, read path/offset/limit, edit path/edit count, write path/content size, scan/mana/ask/web/spawn key fields, generic field summaries) and only uses small scalar truncation as a backstop. This avoids feeding giant raw JSON into the clean UI while preserving useful context. Targeted inspector tests pass.
 labels:
 - bug
 - tui

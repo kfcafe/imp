@@ -280,8 +280,12 @@ pub struct App {
     pub scroll_offset: usize,
     pub auto_scroll: bool,
     pub tools_expanded: bool,
-    /// Index into the flattened tool call list — `None` means no tool focused.
+    /// Index into the flattened tool call list. `None` means inspector follows latest.
     pub tool_focus: Option<usize>,
+    /// True once the user explicitly selects a tool; prevents new tools stealing focus.
+    pub tool_focus_pinned: bool,
+    /// True while inspector should keep live output pinned to the bottom.
+    pub sidebar_auto_follow: bool,
 
     pub ctrl_c_count: u8,
     pub needs_redraw: bool,
@@ -548,6 +552,8 @@ impl App {
             auto_scroll: true,
             tools_expanded: false,
             tool_focus: None,
+            tool_focus_pinned: false,
+            sidebar_auto_follow: true,
 
             ctrl_c_count: 0,
             needs_redraw: true,
@@ -1931,7 +1937,7 @@ impl App {
                 if total > 0 {
                     if !self.sidebar.open {
                         self.sidebar.open = true;
-                        self.focus_latest_tool();
+                        self.focus_latest_tool_with_pin(false);
                     } else {
                         let idx = match self.tool_focus {
                             None => 0,
@@ -1946,7 +1952,7 @@ impl App {
                 if total > 0 {
                     if !self.sidebar.open {
                         self.sidebar.open = true;
-                        self.focus_latest_tool();
+                        self.focus_latest_tool_with_pin(false);
                     } else {
                         let idx = match self.tool_focus {
                             None => total.saturating_sub(1),
@@ -2230,7 +2236,22 @@ impl App {
 
     /// Focus a tool call by flat index: update tool_focus and sync sidebar.
     fn focus_tool(&mut self, index: usize) {
+        self.focus_tool_with_pin(index, true);
+    }
+
+    fn focus_latest_tool_with_pin(&mut self, pinned: bool) -> bool {
+        let total = self.total_tool_calls();
+        if total == 0 {
+            return false;
+        }
+        self.focus_tool_with_pin(total - 1, pinned);
+        true
+    }
+
+    fn focus_tool_with_pin(&mut self, index: usize, pinned: bool) {
         self.tool_focus = Some(index);
+        self.tool_focus_pinned = pinned;
+        self.sidebar_auto_follow = !pinned;
         self.sidebar.open = true;
         self.sidebar.reset_detail_scroll();
         self.active_pane = match self.config.ui.sidebar_style {
@@ -2244,23 +2265,16 @@ impl App {
         }
     }
 
-    fn focus_latest_tool(&mut self) -> bool {
-        let total = self.total_tool_calls();
-        if total == 0 {
-            return false;
-        }
-        self.focus_tool(total - 1);
-        true
-    }
-
     fn toggle_sidebar(&mut self) {
         if self.sidebar.open {
             self.sidebar.open = false;
             self.active_pane = Pane::Chat;
         } else {
             self.sidebar.open = true;
-            if !self.focus_latest_tool() {
+            if self.tool_focus.is_none() && !self.focus_latest_tool_with_pin(false) {
                 self.active_pane = Pane::Chat;
+            } else {
+                self.active_pane = Pane::SidebarDetail;
             }
         }
     }
@@ -2316,7 +2330,10 @@ impl App {
     fn scroll_active_pane_up(&mut self, lines: usize) {
         match self.active_pane {
             Pane::SidebarList if self.sidebar.open => self.sidebar.scroll_list_up(lines),
-            Pane::SidebarDetail if self.sidebar.open => self.sidebar.scroll_detail_up(lines),
+            Pane::SidebarDetail if self.sidebar.open => {
+                self.sidebar_auto_follow = false;
+                self.sidebar.scroll_detail_up(lines);
+            }
             _ => self.scroll_chat_up(lines),
         }
     }
@@ -2324,7 +2341,10 @@ impl App {
     fn scroll_active_pane_down(&mut self, lines: usize) {
         match self.active_pane {
             Pane::SidebarList if self.sidebar.open => self.sidebar.scroll_list_down(lines),
-            Pane::SidebarDetail if self.sidebar.open => self.sidebar.scroll_detail_down(lines),
+            Pane::SidebarDetail if self.sidebar.open => {
+                self.sidebar_auto_follow = false;
+                self.sidebar.scroll_detail_down(lines);
+            }
             _ => self.scroll_chat_down(lines),
         }
     }
@@ -2632,6 +2652,7 @@ impl App {
                         .scroll_list_up(self.config.ui.mouse_scroll_lines);
                 } else if in_detail || (in_sidebar && (is_stream || is_inspector)) {
                     self.active_pane = Pane::SidebarDetail;
+                    self.sidebar_auto_follow = false;
                     self.sidebar
                         .scroll_detail_up(self.config.ui.mouse_scroll_lines);
                 } else {
@@ -2646,6 +2667,7 @@ impl App {
                         .scroll_list_down(self.config.ui.mouse_scroll_lines);
                 } else if in_detail || (in_sidebar && (is_stream || is_inspector)) {
                     self.active_pane = Pane::SidebarDetail;
+                    self.sidebar_auto_follow = false;
                     self.sidebar
                         .scroll_detail_down(self.config.ui.mouse_scroll_lines);
                 } else {
@@ -2932,6 +2954,8 @@ impl App {
         self.auto_scroll = true;
         self.scroll_offset = 0;
         self.tool_focus = None;
+        self.tool_focus_pinned = false;
+        self.sidebar_auto_follow = true;
         self.editor.push_history();
         self.editor.clear();
 
@@ -2989,6 +3013,9 @@ impl App {
                 self.invalidate_chat_render_cache();
                 self.session = SessionManager::in_memory();
                 self.tool_focus = None;
+                self.tool_focus_pinned = false;
+                self.sidebar_auto_follow = true;
+                self.invalidate_chat_render_cache();
                 self.accumulated_usage = Usage::default();
                 self.accumulated_cost = Cost::default();
                 self.current_context_tokens = 0;
@@ -4985,6 +5012,8 @@ impl App {
                 self.model_name = model;
                 self.is_streaming = true;
                 self.tool_focus = None;
+                self.tool_focus_pinned = false;
+                self.sidebar_auto_follow = true;
                 self.invalidate_chat_render_cache();
                 self.turn_tracker.reset();
             }
@@ -5069,14 +5098,18 @@ impl App {
                     tc.details = args;
                 }
                 self.invalidate_chat_render_cache();
-                // Sidebar: auto-follow the new tool call
+                // Sidebar: follow the new tool only until the user pins an older selection.
                 if let Some(idx) = self.find_tool_call_index(&tool_call_id) {
-                    self.focus_tool(idx);
-                    if matches!(
-                        self.config.ui.sidebar_style,
-                        imp_core::config::SidebarStyle::Stream
-                            | imp_core::config::SidebarStyle::Inspector
-                    ) {
+                    if !self.tool_focus_pinned {
+                        self.focus_tool_with_pin(idx, false);
+                    }
+                    if self.sidebar_auto_follow
+                        && matches!(
+                            self.config.ui.sidebar_style,
+                            imp_core::config::SidebarStyle::Stream
+                                | imp_core::config::SidebarStyle::Inspector
+                        )
+                    {
                         self.sidebar.detail_scroll = usize::MAX;
                     }
                 }
