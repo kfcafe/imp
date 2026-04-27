@@ -5,7 +5,7 @@ slug: fix-inspector-mode-interaction-model
 status: open
 priority: 2
 created_at: '2026-04-27T17:21:39.007903Z'
-updated_at: '2026-04-27T17:48:34.792735Z'
+updated_at: '2026-04-27T17:50:41.879696Z'
 acceptance: Tool summaries are visible in chat by default for inspector mode; clicking a summary opens/focuses that tool in inspector; new tool calls do not steal focus from a manually selected older tool; streaming output auto-follows latest only when not manually pinned/scrolled; /settings clearly separates chat tool summaries, sidebar inspector mode, and output verbosity; targeted imp-tui/imp-core tests pass.
 notes: |-
   ---
@@ -23,6 +23,10 @@ notes: |-
   ---
   2026-04-27T17:48:34.792722+00:00
   Verification update: fixed config test expectation to match the new inspector invariant (inspector always keeps summary cards visible even if legacy hide/hidden settings are set). `cargo test -p imp-core inspector_sidebar_keeps_tool_calls_in_chat_summary -- --nocapture` passes. The combined imp-tui command `cargo test -p imp-tui inspector settings -- --nocapture` was invalid cargo syntax (`unexpected argument 'settings'`), so rerunning inspector and settings filters separately.
+
+  ---
+  2026-04-27T17:50:41.879687+00:00
+  Implemented/verified pass-1 inspector behavior in current tree: inspector effective chat display keeps summaries visible even if legacy hide flag is set; settings apply primary inspector model (inspector layout, full output, summary chat display, hide false); settings no longer expose sidebar style/tool output/tool output lines/chat tool display fields; inspector focus now distinguishes pinned manual selection from auto-follow and new tool starts do not steal pinned focus. Verified with `cargo test -p imp-core config::tests::inspector_sidebar_keeps_tool_calls_in_chat_summary`, `cargo test -p imp-tui settings -- --nocapture`, and `cargo test -p imp-tui inspector -- --nocapture`. Note: repo has unrelated dirty files outside this scope.
 labels:
 - tui
 - inspector
