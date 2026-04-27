@@ -5,8 +5,8 @@ slug: define-cli-first-operator-surface-for-imp-with-tui
 status: open
 priority: 1
 created_at: '2026-04-09T05:55:28.758827Z'
-updated_at: '2026-04-09T18:04:29.592665Z'
-notes: |-
+updated_at: '2026-04-27T21:45:46.113450Z'
+notes: |
   ---
   2026-04-09T05:56:48.993884+00:00
   Initial grounded decomposition after repo inspection:
@@ -445,6 +445,12 @@ notes: |-
   ---
   2026-04-09T18:04:29.592659+00:00
   Conversation-time externalization per user request. Verified `docs/rebuild/imp-view-submodes-and-entrypoints.md` and recorded the durable viewer decomposition on the root CLI-first parent so downstream work can inherit it even if child lookup is inconsistent. Grounded mapping to preserve: `session_picker.rs` -> `imp view sessions`; `tree.rs` -> `imp view tree`; `sidebar.rs` stream/split inspector -> `imp view logs`; checkpoints stay in the same focused list/detail viewer family. Product-surface rule: keep `imp view` entrypoints explicit and task-shaped; share runtime/layout internals if helpful, but keep the shell/view boundary visible and avoid drifting back into a single fullscreen browser/app.
+  ## Attempt 1 — 2026-04-27T21:45:46Z
+  Exit code: 1
+
+  ```
+
+  ```
 labels:
 - architecture
 - imp
@@ -452,6 +458,14 @@ labels:
 - tui
 - ux
 verify: cd /Users/asher/imp && test -f docs/rebuild/imp-cli-first-surface.md && rg -q 'CLI-first' docs/rebuild/imp-cli-first-surface.md && rg -q 'TUI as adapter' docs/rebuild/imp-cli-first-surface.md && rg -q 'run_print_mode' docs/rebuild/imp-cli-first-surface.md && rg -q 'run_interactive' docs/rebuild/imp-cli-first-surface.md
+attempts: 1
+history:
+- attempt: 1
+  started_at: '2026-04-27T21:45:46.058782Z'
+  finished_at: '2026-04-27T21:45:46.113448Z'
+  duration_secs: 0.054
+  result: fail
+  exit_code: 1
 kind: job
 decisions:
 - 'Decision: adopt a CLI-first imp command grammar centered on explicit surfaces. Canonical families are `imp chat` for human authoring, `imp prompt` for one-shot prompt/print, `imp run <unit-id>` for the machine-facing mana-worker runtime, `imp view` for browsing/inspection, and `imp tui` for explicit fullscreen presentation. Plain `imp` should eventually equal `imp chat` after a staged compatibility migration rather than remaining fullscreen by default or becoming a heuristic launcher.'
