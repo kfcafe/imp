@@ -27,6 +27,7 @@ pub mod session_index;
 pub mod storage;
 pub mod system_prompt;
 pub mod tools;
+pub mod typescript_extensions;
 pub mod ui;
 pub mod usage;
 

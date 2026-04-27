@@ -213,6 +213,13 @@ impl AgentBuilder {
             lua_loader(&lua_policy, &mut agent.tools);
         }
 
+        // Load project-local TypeScript extension tools from .imp/extensions.
+        if let Err(err) =
+            crate::typescript_extensions::load_typescript_extensions(&self.cwd, &mut agent.tools)
+        {
+            eprintln!("Failed to load TypeScript extensions: {err}");
+        }
+
         // Filter registered tools to those allowed by the mode.
         // Full mode allows everything — no filtering needed.
         if agent.mode != crate::config::AgentMode::Full {

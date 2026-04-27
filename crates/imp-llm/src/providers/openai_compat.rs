@@ -200,6 +200,13 @@ impl OpenAiCompatProvider {
 // Request building
 // ---------------------------------------------------------------------------
 
+fn api_model_id(model: &Model) -> &str {
+    match (model.meta.provider.as_str(), model.meta.id.as_str()) {
+        ("kimi-code", "kimi2.6") => "kimi-k2.6",
+        _ => &model.meta.id,
+    }
+}
+
 fn build_request(model: &Model, context: Context, options: RequestOptions) -> ApiRequest {
     let mut messages = Vec::new();
 
@@ -222,7 +229,7 @@ fn build_request(model: &Model, context: Context, options: RequestOptions) -> Ap
     let max_tokens = options.max_tokens.or(Some(default_max_tokens(model)));
 
     ApiRequest {
-        model: model.meta.id.clone(),
+        model: api_model_id(model).to_string(),
         messages,
         stream: true,
         stream_options: ApiStreamOptions {
@@ -232,6 +239,13 @@ fn build_request(model: &Model, context: Context, options: RequestOptions) -> Ap
         temperature: kimi_compatible_temperature(&model.meta, options.temperature),
         max_tokens,
         thinking: kimi_thinking_config(&model.meta, options.thinking_level),
+    }
+}
+
+fn kimi_behavior_model_id(meta: &ModelMeta) -> &str {
+    match (meta.provider.as_str(), meta.id.as_str()) {
+        ("kimi-code", "kimi2.6") => "kimi-k2.6",
+        _ => &meta.id,
     }
 }
 
@@ -248,7 +262,7 @@ fn is_kimi_fixed_temperature_model(model_id: &str) -> bool {
 }
 
 fn kimi_compatible_temperature(meta: &ModelMeta, temperature: Option<f32>) -> Option<f32> {
-    if is_kimi_fixed_temperature_model(&meta.id) {
+    if is_kimi_fixed_temperature_model(kimi_behavior_model_id(meta)) {
         None
     } else {
         temperature
@@ -259,14 +273,15 @@ fn kimi_thinking_config(
     meta: &ModelMeta,
     level: crate::provider::ThinkingLevel,
 ) -> Option<KimiThinking> {
-    if is_kimi_forced_thinking_model(&meta.id) {
+    let model_id = kimi_behavior_model_id(meta);
+    if is_kimi_forced_thinking_model(model_id) {
         return Some(KimiThinking {
             thinking_type: "enabled",
             keep: Some("all"),
         });
     }
 
-    if !is_kimi_configurable_thinking_model(&meta.id) {
+    if !is_kimi_configurable_thinking_model(model_id) {
         return None;
     }
 
@@ -435,6 +450,10 @@ fn convert_message(msg: &Message) -> Vec<ApiMessage> {
 // SSE parsing
 // ---------------------------------------------------------------------------
 
+fn sse_data_payload(line: &str) -> Option<&str> {
+    line.strip_prefix("data:").map(str::trim_start)
+}
+
 fn parse_sse_chunk(data: &str) -> Result<Option<SseChunk>> {
     let trimmed = data.trim();
     if trimmed.is_empty() || trimmed == "[DONE]" {
@@ -516,7 +535,7 @@ fn stream_response(
                         buf = buf[pos + 1..].to_string();
 
                         let trimmed = line.trim();
-                        if let Some(data) = trimmed.strip_prefix("data: ") {
+                        if let Some(data) = sse_data_payload(trimmed) {
                             match parse_sse_chunk(data) {
                                 Ok(Some(chunk)) => {
                                     if let Some(u) = chunk.usage {
@@ -616,7 +635,7 @@ fn stream_response(
         }
 
         let trimmed = buf.trim();
-        if let Some(data) = trimmed.strip_prefix("data: ") {
+        if let Some(data) = sse_data_payload(trimmed) {
             match parse_sse_chunk(data) {
                 Ok(Some(chunk)) => {
                     if let Some(u) = chunk.usage {

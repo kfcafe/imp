@@ -5,8 +5,36 @@ slug: diagnose-and-harden-kimi-code-oauth-model-routing
 status: open
 priority: 2
 created_at: '2026-04-27T04:38:38.847861Z'
-updated_at: '2026-04-27T04:47:35.130122Z'
+updated_at: '2026-04-27T05:27:46.973563Z'
 acceptance: A user who completes `imp login kimi` can select and use an OAuth-backed Kimi Code model without accidentally routing to Moonshot API-key auth. If `kimi` remains Moonshot-only, the UI/CLI must make that distinction actionable. Verification should include targeted auth/model routing tests and `cargo check -p imp-cli -p imp-llm -p imp-tui`.
+notes: |-
+  ---
+  2026-04-27T04:53:38.370164+00:00
+  Implemented first pass of option 1 auth-aware routing. In `crates/imp-core/src/imp_session.rs`, runtime model resolution now uses an `auth_preferred_oauth_route` helper: existing OpenAI→openai-codex fallback remains, and Kimi/Moonshot aliases now route to `kimi-code`/`kimi-for-coding` when Kimi Code OAuth exists and no Moonshot API key/API-key override is present. If Moonshot API key exists, `kimi` remains Moonshot (`kimi-k2.6`). In `crates/imp-tui/src/app.rs`, model picker now includes `kimi-for-coding` when Kimi Code OAuth exists and no Moonshot API key exists. Added targeted tests for both routing and picker cases. Verification passed: `cargo fmt --package imp-core --package imp-tui`; `cargo test -p imp-core resolve_runtime_connection -- --nocapture`; `cargo test -p imp-tui filtered_model_options -- --nocapture`; `cargo check -p imp-cli -p imp-llm -p imp-tui`. Still not proven: live Kimi Code HTTP endpoint compatibility (`https://api.kimi.com/coding/v1/chat/completions`) against real OAuth token.
+
+  ---
+  2026-04-27T04:56:38.817037+00:00
+  User asked to live-test whether Kimi OAuth works. Next step: inspect available stored auth without exposing token values, then run a minimal Kimi Code/OAuth request through imp if credentials exist. If no usable Kimi OAuth credential exists locally, report exact command/user action needed to complete login.
+
+  ---
+  2026-04-27T04:59:48.569794+00:00
+  Live Kimi OAuth test results: local `~/.imp/auth.json` contains `kimi-code` OAuth credentials and `~/.kimi/credentials/kimi-code.json` exists. Direct HTTP POST to `https://api.kimi.com/coding/v1/chat/completions` with Kimi Code bearer token + Kimi CLI headers returned HTTP 200 for both non-streaming and streaming requests using model `kimi-for-coding`. Non-streaming body for prompt `What is 2+2? Answer with the number only.` returned assistant `content:"4"` plus `reasoning_content`, usage 20/33/53. Streaming returned SSE chunks with `reasoning_content` first and HTTP 200. However, running through current `imp-cli` print mode with `--provider kimi-code --model kimi-for-coding` completes with zero token usage and no visible text; this likely means imp's streaming parser/agent path is not surfacing final non-empty content for Kimi Code, or max-token/forced reasoning behavior causes reasoning-only stream with no visible text in the print-mode output. Next implementation should add a Kimi Code provider/streaming regression using mocked SSE where reasoning-only chunks are followed by content, and inspect whether the live stream eventually emits content with sufficient max tokens and whether `MessageEnd` content is dropped from print mode when no TextDelta is emitted.
+
+  ---
+  2026-04-27T05:15:30.306208+00:00
+  User clarified expected model naming should feel like `kimi2.6`/K2.6 rather than exposing `kimi-for-coding` as the primary name. Continue fixing the live bug: likely stream parser issue because Kimi Code SSE lines are `data:{...}` without a space, while imp's OpenAI-compatible parser only accepts `data: `. Also verify whether Kimi Code coding endpoint accepts Moonshot model IDs such as `kimi-k2.6`; if not, keep API wire model as `kimi-for-coding` but hide it behind user-facing aliases/labels.
+
+  ---
+  2026-04-27T05:18:21.261864+00:00
+  Fixed live Kimi OAuth streaming bug. Root cause confirmed: Kimi Code SSE uses `data:{...}` without a space, while imp parsed only `data: `; therefore the stream had HTTP 200 but no parsed chunks, zero usage, and no text. Updated OpenAI-compatible SSE parsing to accept both `data: {...}` and `data:{...}`. Also renamed/aliased the OAuth-facing model to `kimi-k2.6-code`: Kimi Code endpoint accepts request model ids like `kimi-k2.6`/`kimi2.6` and returns model `kimi-for-coding`, so imp should not expose `kimi-for-coding` as the primary user-facing name. Added `kimi-k2.6-code` model metadata, aliases `kimi-code`, `kimi2.6`, and `kimi-k2.6-code`, and route fallback now chooses `kimi-k2.6-code`; wire request maps `kimi-k2.6-code` to API model id `kimi-k2.6`. Live verify now prints response through imp-cli with `--provider kimi-code --model kimi-k2.6-code`; output included answer `4` and token usage. Note: Kimi also streamed reasoning text, which imp currently prints to stderr in print mode, so visible output contains answer plus reasoning when stderr is merged; stdout answer is present. Verification passed: cargo test -p imp-llm openai_compat; cargo test -p imp-core resolve_runtime_connection; cargo test -p imp-tui filtered_model_options; cargo check -p imp-cli -p imp-llm -p imp-tui.
+
+  ---
+  2026-04-27T05:26:45.764730+00:00
+  User asked to make the OAuth-facing Kimi model id simply `kimi2.6` instead of `kimi-k2.6-code`. Implement by renaming the user-facing `kimi-code` model metadata id to `kimi2.6`, mapping it to wire API model id `kimi-k2.6`, and updating auth fallback/picker/tests accordingly. Keep `kimi-for-coding` only as a legacy/backend alias/model if needed for compatibility, not the primary route.
+
+  ---
+  2026-04-27T05:27:46.973556+00:00
+  Renamed OAuth-facing model from `kimi-k2.6-code` to `kimi2.6` per user request. Updated metadata, aliases, auth-aware fallback, picker, and wire mapping (`kimi2.6` sends API model id `kimi-k2.6`). Targeted `imp-llm` model/openai_compat tests passed after rename. Broader check/run is currently blocked by unrelated pre-existing dirty TUI/TypeScript extension compile errors in `crates/imp-tui/src/app.rs`, `crates/imp-tui/src/views/settings.rs`, and `crates/imp-core/src/typescript_extensions.rs`; these are outside Kimi files and were present/introduced by unrelated work. Earlier live run before rename proved Kimi OAuth streaming bug fixed; after rename, compile of imp-cli is blocked by unrelated TUI errors because imp-cli depends on imp-tui.
 design: |-
   Durable decomposition for Kimi OAuth support:
 

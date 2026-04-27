@@ -27,7 +27,7 @@ pub fn should_nudge_learning(messages: &[Message], threshold: u32) -> bool {
 pub const LEARNING_NUDGE: &str = "\
 Before we finish — this was a complex session. Consider:
 1. Is there anything worth capturing in mana facts, mana notes, or user profile context?
-2. Should the approach be saved as a skill for future reuse?
+2. Should the approach be saved as a skill or extension for future reuse?
 3. If you used a skill that was wrong or incomplete, patch it.";
 
 /// Learning instructions injected into Layer 1 of the system prompt.

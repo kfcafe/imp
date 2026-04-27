@@ -528,6 +528,19 @@ fn builtin_models() -> Vec<ModelMeta> {
         },
         // -- Kimi Code --
         ModelMeta {
+            id: "kimi2.6".into(),
+            provider: "kimi-code".into(),
+            name: "Kimi K2.6 Code".into(),
+            context_window: 262_144,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
             id: "kimi-for-coding".into(),
             provider: "kimi-code".into(),
             name: "Kimi for Coding".into(),
@@ -996,7 +1009,8 @@ fn builtin_aliases() -> Vec<(String, String)> {
             "kimi-k2-thinking-turbo".into(),
         ),
         // Kimi Code
-        ("kimi-code".into(), "kimi-for-coding".into()),
+        ("kimi-code".into(), "kimi2.6".into()),
+        ("kimi2.6".into(), "kimi2.6".into()),
         ("kimi-for-coding".into(), "kimi-for-coding".into()),
         // Groq
         ("llama-groq".into(), "llama-3.3-70b-versatile".into()),

@@ -381,8 +381,10 @@ pub struct Config {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SidebarStyle {
-    /// Chronological stream of tool calls with inline results.
+    /// Contextual inspector for the selected tool call.
     #[default]
+    Inspector,
+    /// Chronological stream of tool calls with inline results.
     Stream,
     /// Master-detail split: tool list (top) + selected output (bottom).
     Split,
@@ -406,9 +408,9 @@ pub enum ToolOutputDisplay {
 #[serde(rename_all = "kebab-case")]
 pub enum ChatToolDisplay {
     /// Show tool calls inline where they occurred, preserving chronological order.
-    #[default]
     Interleaved,
     /// Show a compact header in chat and leave details to the sidebar.
+    #[default]
     Summary,
     /// Hide tool calls in chat entirely.
     Hidden,
@@ -863,6 +865,8 @@ mod tests {
         assert!(config.max_turns.is_none());
         assert!(config.tools.is_none());
         assert_eq!(config.ui.read_max_lines, 500);
+        assert_eq!(config.ui.sidebar_style, SidebarStyle::Inspector);
+        assert_eq!(config.ui.chat_tool_display, ChatToolDisplay::Summary);
         assert_eq!(config.web, WebConfig::default());
         assert_eq!(config.personality, PersonalityConfig::default());
         assert!(config.roles.is_empty());

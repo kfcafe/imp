@@ -35,7 +35,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use imp_llm::auth::{ApiKey, AuthStore};
-use imp_llm::model::ModelRegistry;
+use imp_llm::model::{ModelMeta, ModelRegistry};
 use imp_llm::providers::create_provider;
 use imp_llm::{Model, ThinkingLevel};
 
@@ -186,20 +186,20 @@ pub fn resolve_runtime_connection(
         .resolve_meta(model_hint, intent.provider_override)
         .ok_or_else(|| format!("Unknown model: {model_hint}"))?;
 
-    let mut provider_name = intent
+    let provider_name = intent
         .provider_override
         .unwrap_or(&meta.provider)
         .to_string();
 
-    if should_use_openai_chatgpt_route(
+    if let Some(oauth_route) = auth_preferred_oauth_route(
         intent.provider_override,
         intent.api_key_override_present,
         auth_store,
         registry,
-        &meta.id,
+        &meta,
         &provider_name,
     ) {
-        provider_name = "openai-codex".to_string();
+        return Ok(oauth_route);
     }
 
     Ok(ResolvedRuntimeConnection {
@@ -733,6 +733,44 @@ async fn resolve_api_key(auth_store: &mut AuthStore, provider: &str) -> Result<A
     result.map_err(|e| Error::Config(format!("Auth failed for {provider}: {e}")))
 }
 
+fn auth_preferred_oauth_route(
+    provider_override: Option<&str>,
+    api_key_override_present: bool,
+    auth_store: &AuthStore,
+    registry: &ModelRegistry,
+    meta: &ModelMeta,
+    provider_name: &str,
+) -> Option<ResolvedRuntimeConnection> {
+    if should_use_openai_chatgpt_route(
+        provider_override,
+        api_key_override_present,
+        auth_store,
+        registry,
+        &meta.id,
+        provider_name,
+    ) {
+        return Some(ResolvedRuntimeConnection {
+            model_id: meta.id.clone(),
+            provider_name: "openai-codex".to_string(),
+        });
+    }
+
+    if should_use_kimi_code_route(
+        provider_override,
+        api_key_override_present,
+        auth_store,
+        registry,
+        meta,
+        provider_name,
+    ) {
+        return Some(ResolvedRuntimeConnection {
+            model_id: "kimi2.6".to_string(),
+            provider_name: "kimi-code".to_string(),
+        });
+    }
+
+    None
+}
 fn should_use_openai_chatgpt_route(
     provider_override: Option<&str>,
     api_key_override_present: bool,
@@ -756,6 +794,41 @@ fn should_use_openai_chatgpt_route(
         && codex_supports_model(registry, model_id)
 }
 
+fn should_use_kimi_code_route(
+    provider_override: Option<&str>,
+    api_key_override_present: bool,
+    auth_store: &AuthStore,
+    registry: &ModelRegistry,
+    meta: &ModelMeta,
+    provider_name: &str,
+) -> bool {
+    let provider_allows_fallback = match provider_override {
+        None => true,
+        Some("moonshot") => true,
+        Some("kimi-code") => true,
+        Some(_) => false,
+    };
+
+    provider_allows_fallback
+        && !api_key_override_present
+        && provider_name == "moonshot"
+        && auth_store.resolve_api_key_only("moonshot").is_err()
+        && auth_store.get_oauth("kimi-code").is_some()
+        && registry.find("kimi2.6").is_some()
+        && is_kimi_moonshot_model(&meta.id)
+}
+
+fn is_kimi_moonshot_model(model_id: &str) -> bool {
+    matches!(
+        model_id,
+        "kimi-k2.6"
+            | "kimi-k2.5"
+            | "kimi-k2-0905-preview"
+            | "kimi-k2-turbo-preview"
+            | "kimi-k2-thinking"
+            | "kimi-k2-thinking-turbo"
+    )
+}
 fn clone_model(model: &Model) -> Model {
     Model {
         meta: model.meta.clone(),
@@ -1071,6 +1144,80 @@ mod tests {
 
         assert_eq!(resolved.model_id, "gpt-5.4");
         assert_eq!(resolved.provider_name, "openai");
+    }
+
+    #[test]
+    fn resolve_runtime_connection_prefers_kimi_code_route_when_oauth_exists_without_api_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let mut auth_store = AuthStore::new(auth_path);
+        auth_store
+            .store(
+                "kimi-code",
+                imp_llm::auth::StoredCredential::OAuth(imp_llm::auth::OAuthCredential {
+                    access_token: "oauth-token".into(),
+                    refresh_token: "refresh-token".into(),
+                    expires_at: imp_llm::now() + 3600,
+                }),
+            )
+            .unwrap();
+        let registry = ModelRegistry::with_builtins();
+
+        let resolved = resolve_runtime_connection(
+            RuntimeConnectionIntent {
+                model_hint: Some("kimi"),
+                config_model: None,
+                provider_override: None,
+                api_key_override_present: false,
+            },
+            &auth_store,
+            &registry,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.model_id, "kimi2.6");
+        assert_eq!(resolved.provider_name, "kimi-code");
+    }
+
+    #[test]
+    fn resolve_runtime_connection_keeps_moonshot_kimi_when_api_key_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let mut auth_store = AuthStore::new(auth_path);
+        auth_store
+            .store(
+                "moonshot",
+                imp_llm::auth::StoredCredential::ApiKey {
+                    key: "sk-moonshot".into(),
+                },
+            )
+            .unwrap();
+        auth_store
+            .store(
+                "kimi-code",
+                imp_llm::auth::StoredCredential::OAuth(imp_llm::auth::OAuthCredential {
+                    access_token: "oauth-token".into(),
+                    refresh_token: "refresh-token".into(),
+                    expires_at: imp_llm::now() + 3600,
+                }),
+            )
+            .unwrap();
+        let registry = ModelRegistry::with_builtins();
+
+        let resolved = resolve_runtime_connection(
+            RuntimeConnectionIntent {
+                model_hint: Some("kimi"),
+                config_model: None,
+                provider_override: None,
+                api_key_override_present: false,
+            },
+            &auth_store,
+            &registry,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.model_id, "kimi-k2.6");
+        assert_eq!(resolved.provider_name, "moonshot");
     }
 
     #[tokio::test]
