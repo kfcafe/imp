@@ -5040,7 +5040,7 @@ impl App {
                                 args_summary: DisplayToolCall::make_args_summary(&name, &arguments),
                                 name,
                                 output: None,
-                                details: serde_json::Value::Null,
+                                details: arguments,
                                 is_error: false,
                                 expanded: tools_expanded,
                                 streaming_lines: Vec::new(),
@@ -5066,6 +5066,7 @@ impl App {
                 // Find the matching tool call and update it
                 if let Some(tc) = self.find_tool_call_mut(&tool_call_id) {
                     tc.args_summary = DisplayToolCall::make_args_summary(&tool_name, &args);
+                    tc.details = args;
                 }
                 self.invalidate_chat_render_cache();
                 // Sidebar: auto-follow the new tool call

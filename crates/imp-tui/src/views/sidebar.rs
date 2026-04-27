@@ -4,6 +4,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use serde_json::Value;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::highlight::Highlighter;
 use crate::selection::TextSurface;
@@ -625,6 +626,8 @@ fn styled_detail_lines(
         ..*ui_config
     };
     let mut lines = vec![header];
+    let input_lines = tool_input_detail_lines(tc, theme, content_w.saturating_sub(2));
+    lines.extend(input_lines);
     lines.extend(styled_output_lines(
         tc,
         &full_config,
@@ -633,6 +636,98 @@ fn styled_detail_lines(
         content_w.saturating_sub(2),
     ));
     lines
+}
+
+fn tool_input_detail_lines(
+    tc: &DisplayToolCall,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    if tc.details.is_null() {
+        return Vec::new();
+    }
+
+    let pretty = tool_input_preview(&tc.details, width);
+    if pretty.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = vec![Line::from(Span::styled("input", theme.muted_style()))];
+    lines.extend(wrap_plain_lines(
+        pretty.lines().map(String::from).collect(),
+        width,
+        &UiConfig {
+            tool_output: ToolOutputDisplay::Full,
+            word_wrap: true,
+            ..Default::default()
+        },
+        theme,
+        false,
+    ));
+    lines
+}
+
+fn tool_input_preview(value: &Value, width: usize) -> String {
+    const MAX_TOOL_INPUT_LINES: usize = 80;
+    const MAX_TOOL_INPUT_CHARS: usize = 12_000;
+
+    let Ok(pretty) = serde_json::to_string_pretty(value) else {
+        return truncated_scalar_preview(&value.to_string(), MAX_TOOL_INPUT_CHARS);
+    };
+
+    if pretty.trim().is_empty() || pretty == "null" {
+        return String::new();
+    }
+
+    let mut out = Vec::new();
+    let max_line_width = width.max(20).min(240);
+    for line in pretty.lines().take(MAX_TOOL_INPUT_LINES) {
+        out.push(truncated_display_line(line, max_line_width));
+    }
+
+    let omitted_lines = pretty.lines().count().saturating_sub(out.len());
+    let mut preview = out.join("\n");
+    preview = truncated_scalar_preview(&preview, MAX_TOOL_INPUT_CHARS);
+    if omitted_lines > 0 {
+        if !preview.is_empty() {
+            preview.push('\n');
+        }
+        preview.push_str(&format!("… {omitted_lines} more input lines"));
+    }
+    preview
+}
+
+fn truncated_scalar_preview(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let mut out = value.chars().take(max_chars).collect::<String>();
+    out.push('…');
+    out
+}
+
+fn truncated_display_line(line: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(line) <= max_width {
+        return line.to_string();
+    }
+
+    let suffix = "…";
+    let target = max_width
+        .saturating_sub(UnicodeWidthStr::width(suffix))
+        .max(1);
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in line.chars() {
+        let next = ch.width().unwrap_or(0);
+        if width + next > target {
+            break;
+        }
+        out.push(ch);
+        width += next;
+    }
+    out.push_str(suffix);
+    out
 }
 
 fn styled_output_lines(
@@ -1340,6 +1435,69 @@ mod tests {
         assert!(render.plain_lines.iter().any(|line| line == "line1"));
         assert!(render.plain_lines.iter().any(|line| line == "line2"));
         assert!(!render.plain_lines.iter().any(|line| line == "…"));
+    }
+
+    #[test]
+    fn inspector_detail_includes_tool_input_arguments() {
+        let mut tc = make_tc("shell", "run", Some("done"), false);
+        tc.details = serde_json::json!({
+            "command": "cargo test -p imp-tui inspector -- --nocapture",
+            "timeout": 120000,
+        });
+        let config = UiConfig {
+            sidebar_style: SidebarStyle::Inspector,
+            tool_output: ToolOutputDisplay::Compact,
+            tool_output_lines: 1,
+            word_wrap: false,
+            ..Default::default()
+        };
+
+        let render = build_detail_render_data(
+            Some(&tc),
+            &config,
+            &crate::highlight::Highlighter::new(),
+            &Theme::default(),
+            120,
+        );
+
+        assert!(render.plain_lines.iter().any(|line| line == "input"));
+        assert!(render
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("cargo test -p imp-tui inspector")));
+        assert!(render
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("timeout")));
+        assert!(render.plain_lines.iter().any(|line| line == "done"));
+    }
+
+    #[test]
+    fn inspector_detail_caps_large_tool_input_arguments() {
+        let mut tc = make_tc("shell", "run", Some("done"), false);
+        tc.details = serde_json::json!({
+            "command": "x".repeat(100_000),
+            "lines": (0..120).map(|idx| format!("line-{idx}")).collect::<Vec<_>>(),
+        });
+
+        let render = build_detail_render_data(
+            Some(&tc),
+            &UiConfig {
+                sidebar_style: SidebarStyle::Inspector,
+                word_wrap: true,
+                ..Default::default()
+            },
+            &crate::highlight::Highlighter::new(),
+            &Theme::default(),
+            40,
+        );
+
+        assert!(render.plain_lines.iter().any(|line| line == "input"));
+        assert!(render
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("more input lines") || line.ends_with('…')));
+        assert!(render.plain_lines.iter().all(|line| line.len() < 1_000));
     }
 
     #[test]

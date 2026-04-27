@@ -5,7 +5,7 @@ slug: rethink-imp-tui-tool-call-presentation-and-sidebar
 status: in_progress
 priority: 2
 created_at: '2026-04-27T05:19:53.262110Z'
-updated_at: '2026-04-27T16:37:39.692596Z'
+updated_at: '2026-04-27T16:43:50.743600Z'
 notes: |-
   ---
   2026-04-27T05:24:43.313002+00:00
@@ -34,6 +34,10 @@ notes: |-
   ---
   2026-04-27T16:37:39.692590+00:00
   Continuing inspector bugfix from user report: inspector still is not printing tool calls in real use. Re-inspecting render/selection/cache path; likely issue remains in sidebar detail data source or selected-tool mapping rather than high-level design.
+
+  ---
+  2026-04-27T16:43:50.743596+00:00
+  Inspector follow-up fix: the detail pane was showing header/output but not tool input because live `DisplayToolCall.details` was initialized to Null and only replaced with result details at tool end. Updated event handling to preserve ToolCall arguments and ToolExecutionStart args in `details`; sidebar detail now prints a pretty JSON `input` section before output. Added regression coverage for inspector input rendering. Verification passed: `cargo fmt -p imp-tui --check`; `cargo test -p imp-tui inspector -- --nocapture`; `cargo check -p imp-tui`.
 labels:
 - imp
 - tui
