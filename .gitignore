@@ -1,4 +1,16 @@
 target/
-.imp/
-.mana/
 
+# Local imp runtime/dev state.
+.imp/
+
+# Track active migrated mana unit files, but keep generated/local mana state and archives out of Git.
+.mana/config.yaml
+.mana/agent_history.jsonl
+.mana/index.yaml
+.mana/archive.yaml
+.mana/index.lock
+.mana/archive/
+.mana/runs/
+.mana/index/
+.mana/tmp/
+.mana/cache/
