@@ -52,6 +52,8 @@ pub enum Action {
     // Tool call navigation
     ToolFocusNext,
     ToolFocusPrev,
+    /// Open the file referenced by the selected read tool call.
+    OpenSelectedReadFile,
     /// Toggle the focused tool call's expansion (or all if no focus).
     ToolToggle,
 }
@@ -77,7 +79,7 @@ pub fn resolve_normal(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('l') if ctrl => Some(Action::SelectModel),
         KeyCode::Char('p') if ctrl && shift => Some(Action::CycleModelBackward),
         KeyCode::Char('p') if ctrl => Some(Action::CycleModelForward),
-        KeyCode::Char('o') if ctrl => Some(Action::ToolToggle),
+        KeyCode::Char('o') if ctrl => Some(Action::OpenSelectedReadFile),
         KeyCode::BackTab => Some(Action::CycleThinking),
 
         // Sidebar / tool navigation

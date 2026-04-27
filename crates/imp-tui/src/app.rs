@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -346,6 +346,51 @@ pub struct App {
     pub theme: Theme,
     pub highlighter: Highlighter,
     pub model_registry: ModelRegistry,
+}
+
+fn selected_read_file_path_from_tool(tc: Option<&DisplayToolCall>, cwd: &Path) -> Option<PathBuf> {
+    let tc = tc?;
+    if tc.name != "read" {
+        return None;
+    }
+
+    let path = tc.details.get("path")?.as_str()?.trim();
+    if path.is_empty() {
+        return None;
+    }
+
+    let path = PathBuf::from(path);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    })
+}
+
+fn open_path_in_editor(path: &Path) -> std::io::Result<()> {
+    let editor = std::env::var_os("VISUAL").or_else(|| std::env::var_os("EDITOR"));
+    if let Some(editor) = editor.filter(|value| !value.is_empty()) {
+        return std::process::Command::new(editor)
+            .arg(path)
+            .spawn()
+            .map(|_| ());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map(|_| ());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+    }
 }
 
 fn model_supports_provider(registry: &ModelRegistry, provider: &str, model_id: &str) -> bool {
@@ -1914,6 +1959,9 @@ impl App {
                 }
                 self.invalidate_chat_render_cache();
             }
+            Some(Action::OpenSelectedReadFile) => {
+                self.open_selected_read_file();
+            }
             Some(Action::ToolToggle) => {
                 if let Some(idx) = self.tool_focus {
                     // Toggle just the focused tool call
@@ -2262,6 +2310,32 @@ impl App {
         };
         if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Split {
             self.sidebar.ensure_selected_visible(index);
+        }
+    }
+
+    fn selected_read_file_path(&self) -> Option<PathBuf> {
+        selected_read_file_path_from_tool(self.selected_tool_call().as_ref(), &self.cwd)
+    }
+
+    fn open_selected_read_file(&mut self) {
+        let Some(path) = self.selected_read_file_path() else {
+            self.push_system_msg("No read file selected to open.");
+            return;
+        };
+
+        if !path.is_file() {
+            self.push_error_msg(&format!(
+                "Selected read file does not exist: {}",
+                path.display()
+            ));
+            return;
+        }
+
+        match open_path_in_editor(&path) {
+            Ok(()) => self.push_system_msg(&format!("Opened {}", path.display())),
+            Err(error) => {
+                self.push_error_msg(&format!("Failed to open {}: {error}", path.display()))
+            }
         }
     }
 
@@ -3036,7 +3110,7 @@ impl App {
   Ctrl+P        Next chosen model\n\
   Ctrl+Shift+P  Previous chosen model\n\
   Tab           Show/hide sidebar\n\
-  Ctrl+O        Toggle tool output\n\
+  Ctrl+O        Open selected read file in editor\n\
   Ctrl+Up/Down  Focus previous/next tool\n\
   Shift+Tab     Cycle thinking level\n\
   @             File finder\n\
@@ -6510,6 +6584,58 @@ mod session_lifecycle {
         let text = app.selection_text().unwrap();
         assert_eq!(text, "ello");
         assert_eq!(app.active_pane, Pane::Chat);
+    }
+
+    #[test]
+    fn selected_read_file_path_resolves_relative_path() {
+        let cwd = PathBuf::from("/tmp/project");
+        let tc = crate::views::tools::DisplayToolCall {
+            id: "tc-read".into(),
+            name: "read".into(),
+            args_summary: "src/lib.rs".into(),
+            output: Some("content".into()),
+            details: serde_json::json!({ "path": "src/lib.rs" }),
+            is_error: false,
+            expanded: false,
+            streaming_lines: Vec::new(),
+            streaming_output: String::new(),
+        };
+
+        let path = selected_read_file_path_from_tool(Some(&tc), &cwd).unwrap();
+
+        assert_eq!(path, cwd.join("src/lib.rs"));
+    }
+
+    #[test]
+    fn selected_read_file_path_ignores_non_read_tools() {
+        let tc = crate::views::tools::DisplayToolCall {
+            id: "tc-shell".into(),
+            name: "shell".into(),
+            args_summary: "cat src/lib.rs".into(),
+            output: None,
+            details: serde_json::json!({ "path": "src/lib.rs" }),
+            is_error: false,
+            expanded: false,
+            streaming_lines: Vec::new(),
+            streaming_output: String::new(),
+        };
+
+        assert!(selected_read_file_path_from_tool(Some(&tc), Path::new("/tmp/project")).is_none());
+    }
+
+    #[test]
+    fn ctrl_o_without_read_selection_reports_no_file() {
+        let mut app = make_app();
+
+        app.handle_normal_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert!(app
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("No read file selected"));
     }
 
     #[test]
