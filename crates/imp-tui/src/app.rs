@@ -44,8 +44,8 @@ use crate::theme::Theme;
 use crate::turn_tracker::TurnTracker;
 use crate::views::ask_bar::AskState;
 use crate::views::chat::{
-    build_chat_render_data, build_text_surface_from_lines, clamped_scroll_offset_for_total_lines,
-    DisplayMessage, MessageRole, RenderedChatView,
+    build_chat_render_data, build_click_map, build_text_surface_from_lines,
+    clamped_scroll_offset_for_total_lines, DisplayMessage, MessageRole, RenderedChatView,
 };
 use crate::views::command_palette::{builtin_commands, CommandPaletteState, CommandPaletteView};
 use crate::views::editor::{EditorState, EditorView};
@@ -1482,22 +1482,24 @@ impl App {
                 } else {
                     None
                 };
-            let detail_render =
-                if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Split {
-                    let selected_tc_owned = selected_tc_index.and_then(|i| {
-                        self.messages
-                            .iter()
-                            .flat_map(|m| m.tool_calls.iter())
-                            .nth(i)
-                            .cloned()
-                    });
-                    Some(
-                        self.cached_sidebar_detail_render(sub.1.width, selected_tc_owned.as_ref())
-                            .clone(),
-                    )
-                } else {
-                    None
-                };
+            let detail_render = if matches!(
+                self.config.ui.sidebar_style,
+                imp_core::config::SidebarStyle::Split | imp_core::config::SidebarStyle::Inspector
+            ) {
+                let selected_tc_owned = selected_tc_index.and_then(|i| {
+                    self.messages
+                        .iter()
+                        .flat_map(|m| m.tool_calls.iter())
+                        .nth(i)
+                        .cloned()
+                });
+                Some(
+                    self.cached_sidebar_detail_render(sub.1.width, selected_tc_owned.as_ref())
+                        .clone(),
+                )
+            } else {
+                None
+            };
 
             let all_tool_calls: Vec<&DisplayToolCall> = self
                 .messages
@@ -1516,6 +1518,11 @@ impl App {
             );
 
             match self.config.ui.sidebar_style {
+                imp_core::config::SidebarStyle::Inspector => {
+                    let detail_lines = detail_render.as_ref().expect("detail cache lines");
+                    view = view.precomputed_detail_lines(&detail_lines.lines);
+                    frame.render_widget(view, sidebar_area);
+                }
                 imp_core::config::SidebarStyle::Stream => {
                     let stream_lines = stream_lines.expect("stream cache lines");
                     view = view.precomputed_stream_lines(&stream_lines);
@@ -2211,11 +2218,12 @@ impl App {
     /// Focus a tool call by flat index: update tool_focus and sync sidebar.
     fn focus_tool(&mut self, index: usize) {
         self.tool_focus = Some(index);
-        self.active_pane = if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Split
-        {
-            Pane::SidebarList
-        } else {
-            Pane::SidebarDetail
+        self.sidebar.open = true;
+        self.active_pane = match self.config.ui.sidebar_style {
+            imp_core::config::SidebarStyle::Split => Pane::SidebarList,
+            imp_core::config::SidebarStyle::Inspector | imp_core::config::SidebarStyle::Stream => {
+                Pane::SidebarDetail
+            }
         };
         if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Split {
             self.sidebar.reset_detail_scroll();
@@ -2242,6 +2250,22 @@ impl App {
                 self.active_pane = Pane::Chat;
             }
         }
+    }
+
+    fn tool_id_at_chat_row(&self, row: u16, chat_area: Rect) -> Option<String> {
+        build_click_map(
+            &self.messages,
+            &self.theme,
+            &self.highlighter,
+            chat_area,
+            self.scroll_offset,
+            self.config.ui.word_wrap,
+            self.config.ui.effective_chat_tool_display(),
+            self.config.ui.thinking_lines,
+            self.config.ui.show_timestamps,
+        )
+        .into_iter()
+        .find_map(|(tool_row, tool_id)| (tool_row == row).then_some(tool_id))
     }
 
     /// Total number of tool calls across all display messages.
@@ -2581,21 +2605,19 @@ impl App {
         let row = mouse.row;
 
         let is_stream = self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Stream;
+        let is_inspector =
+            self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Inspector;
         let in_list = point_in_rect(col, row, self.sidebar_list_rect);
         let in_detail = point_in_rect(col, row, self.sidebar_detail_rect);
         let in_sidebar = in_list || in_detail;
 
         match mouse.kind {
             MouseEventKind::ScrollUp => {
-                if in_list {
+                if in_list && !is_inspector {
                     self.active_pane = Pane::SidebarList;
                     self.sidebar
                         .scroll_list_up(self.config.ui.mouse_scroll_lines);
-                } else if in_detail {
-                    self.active_pane = Pane::SidebarDetail;
-                    self.sidebar
-                        .scroll_detail_up(self.config.ui.mouse_scroll_lines);
-                } else if in_sidebar && is_stream {
+                } else if in_detail || (in_sidebar && (is_stream || is_inspector)) {
                     self.active_pane = Pane::SidebarDetail;
                     self.sidebar
                         .scroll_detail_up(self.config.ui.mouse_scroll_lines);
@@ -2605,15 +2627,11 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown => {
-                if in_list {
+                if in_list && !is_inspector {
                     self.active_pane = Pane::SidebarList;
                     self.sidebar
                         .scroll_list_down(self.config.ui.mouse_scroll_lines);
-                } else if in_detail {
-                    self.active_pane = Pane::SidebarDetail;
-                    self.sidebar
-                        .scroll_detail_down(self.config.ui.mouse_scroll_lines);
-                } else if in_sidebar && is_stream {
+                } else if in_detail || (in_sidebar && (is_stream || is_inspector)) {
                     self.active_pane = Pane::SidebarDetail;
                     self.sidebar
                         .scroll_detail_down(self.config.ui.mouse_scroll_lines);
@@ -2623,7 +2641,7 @@ impl App {
                 }
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                if in_list {
+                if in_list && !is_inspector {
                     self.clear_selection();
                     self.active_pane = Pane::SidebarList;
                     if let Some(lr) = self.sidebar_list_rect {
@@ -2637,7 +2655,7 @@ impl App {
                     return;
                 }
 
-                if in_detail || (in_sidebar && is_stream) {
+                if in_detail || (in_sidebar && (is_stream || is_inspector)) {
                     self.active_pane = Pane::SidebarDetail;
                     if let Some(surface) = self.sidebar_detail_surface.as_ref().cloned() {
                         if !surface.is_empty() {
@@ -2657,6 +2675,16 @@ impl App {
                 }
 
                 self.active_pane = Pane::Chat;
+                if let Some(chat_area) = self.chat_surface.as_ref().map(|surface| surface.rect) {
+                    if let Some(tool_id) = self.tool_id_at_chat_row(row, chat_area) {
+                        self.clear_selection();
+                        if let Some(index) = self.find_tool_call_index(&tool_id) {
+                            self.focus_tool(index);
+                        }
+                        return;
+                    }
+                }
+
                 if let Some(surface) = self.chat_surface.as_ref().cloned() {
                     if !surface.is_empty() {
                         let pos = surface.pos_from_screen_clamped(col, row);
@@ -4975,7 +5003,11 @@ impl App {
                 }
             }
             AgentEvent::MessageDelta { delta } => {
-                let tools_expanded = self.tools_expanded;
+                // Keep the current default compact: the main transcript shows
+                // where the tool ran, and the sidebar inspector owns details.
+                let tools_expanded = self.tools_expanded
+                    && self.config.ui.effective_chat_tool_display()
+                        == imp_core::config::ChatToolDisplay::Interleaved;
                 if let Some(last) = self.latest_streaming_message_mut() {
                     match delta {
                         StreamEvent::TextDelta { text } => {
@@ -5026,7 +5058,11 @@ impl App {
                 // Sidebar: auto-follow the new tool call
                 if let Some(idx) = self.find_tool_call_index(&tool_call_id) {
                     self.focus_tool(idx);
-                    if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Stream {
+                    if matches!(
+                        self.config.ui.sidebar_style,
+                        imp_core::config::SidebarStyle::Stream
+                            | imp_core::config::SidebarStyle::Inspector
+                    ) {
                         self.sidebar.detail_scroll = usize::MAX;
                     }
                 }
@@ -5083,6 +5119,8 @@ impl App {
                     })
                     .collect::<Vec<_>>()
                     .join("");
+                let inline_output_enabled = self.config.ui.effective_chat_tool_display()
+                    == imp_core::config::ChatToolDisplay::Interleaved;
                 // Attach result to the matching display tool call
                 if let Some(tc) = self.find_tool_call_mut(&tool_call_id) {
                     tc.output = Some(output_text.clone());
@@ -5092,8 +5130,10 @@ impl App {
                     tc.details = result.details.clone();
                     tc.is_error = is_error;
                     // Auto-expand failed tool calls so the error is immediately visible
+                    // when inline tool output is enabled. In the default inspector flow,
+                    // the selected sidebar owns full error details instead.
                     if is_error {
-                        tc.expanded = true;
+                        tc.expanded = inline_output_enabled;
                     }
                 }
 

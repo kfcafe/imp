@@ -90,6 +90,14 @@ pub fn sidebar_sub_areas(
     };
 
     match style {
+        SidebarStyle::Inspector => {
+            let full = Rect {
+                x: sidebar_area.x,
+                width: sidebar_area.width,
+                ..content
+            };
+            (full, full)
+        }
         SidebarStyle::Stream => {
             // Stream: single scrollable pane — top covers everything
             let full = Rect {
@@ -251,6 +259,22 @@ impl Widget for SidebarView<'_> {
         }
 
         match self.ui_config.sidebar_style {
+            SidebarStyle::Inspector => {
+                let selected_tc = self.selected.and_then(|i| self.tool_calls.get(i)).copied();
+                if let Some(lines) = self.precomputed_detail_lines {
+                    render_detail_from_lines(lines, self.theme, self.detail_scroll, content, buf);
+                } else {
+                    render_detail(
+                        selected_tc,
+                        self.theme,
+                        self.highlighter,
+                        self.detail_scroll,
+                        self.ui_config,
+                        content,
+                        buf,
+                    );
+                }
+            }
             SidebarStyle::Stream => {
                 if let Some(lines) = self.precomputed_stream_lines {
                     render_stream_from_lines(lines, self.theme, self.detail_scroll, content, buf);
@@ -1250,6 +1274,18 @@ mod tests {
         let mut out = Vec::new();
         wrap_into("", 10, &mut out);
         assert_eq!(out, vec![""]);
+    }
+
+    #[test]
+    fn inspector_sidebar_uses_full_area_for_detail() {
+        let area = Rect::new(10, 2, 40, 12);
+        let (list, detail) = sidebar_sub_areas(area, 3, SidebarStyle::Inspector);
+
+        assert_eq!(list, detail);
+        assert_eq!(detail.x, area.x);
+        assert_eq!(detail.width, area.width);
+        assert_eq!(detail.y, area.y);
+        assert_eq!(detail.height, area.height);
     }
 
     // ── Tool output lines ───────────────────────────────────────

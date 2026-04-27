@@ -31,20 +31,91 @@ pub enum AgentMode {
     Auditor,
 }
 
+const WORKER_TOOLS: &[&str] = &[
+    "read", "scan", "web", "recall", "write", "edit", "shell", "git", "mana", "ask",
+];
+const ORCHESTRATOR_TOOLS: &[&str] = &[
+    "read", "scan", "web", "recall", "mana", "git", "ask", "spawn",
+];
+const PLANNER_TOOLS: &[&str] = &["read", "scan", "web", "recall", "git", "mana", "ask"];
+const REVIEWER_TOOLS: &[&str] = &["read", "scan", "web", "recall", "git", "ask"];
+const AUDITOR_TOOLS: &[&str] = &["read", "scan", "web", "recall", "git", "mana"];
+
+const WORKER_MANA_ACTIONS: &[&str] = &[
+    "show",
+    "update",
+    "status",
+    "list",
+    "logs",
+    "next",
+    "verify",
+    "notes_append",
+];
+const ORCHESTRATOR_MANA_ACTIONS: &[&str] = &[
+    "status",
+    "list",
+    "show",
+    "create",
+    "close",
+    "update",
+    "run",
+    "run_state",
+    "evaluate",
+    "claim",
+    "release",
+    "logs",
+    "agents",
+    "next",
+    "tree",
+    "reopen",
+    "verify",
+    "fail",
+    "delete",
+    "dep_add",
+    "dep_remove",
+    "fact_create",
+    "fact_verify",
+    "notes_append",
+    "decision_add",
+    "decision_resolve",
+];
+const PLANNER_MANA_ACTIONS: &[&str] = &[
+    "status",
+    "list",
+    "show",
+    "create",
+    "update",
+    "next",
+    "tree",
+    "dep_add",
+    "dep_remove",
+    "fact_create",
+    "notes_append",
+    "decision_add",
+    "decision_resolve",
+];
+const AUDITOR_MANA_ACTIONS: &[&str] = &[
+    "status",
+    "list",
+    "show",
+    "logs",
+    "agents",
+    "next",
+    "tree",
+    "verify",
+    "fact_verify",
+];
+
 impl AgentMode {
     /// Tool names this mode permits. An empty slice means "allow all" (Full).
     pub fn allowed_tool_names(&self) -> &'static [&'static str] {
         match self {
             AgentMode::Full => &[],
-            AgentMode::Worker => &[
-                "read", "scan", "web", "recall", "write", "edit", "shell", "git", "mana", "ask",
-            ],
-            AgentMode::Orchestrator => &[
-                "read", "scan", "web", "recall", "mana", "git", "ask", "spawn",
-            ],
-            AgentMode::Planner => &["read", "scan", "web", "recall", "git", "mana", "ask"],
-            AgentMode::Reviewer => &["read", "scan", "web", "recall", "git", "ask"],
-            AgentMode::Auditor => &["read", "scan", "web", "recall", "git", "mana"],
+            AgentMode::Worker => WORKER_TOOLS,
+            AgentMode::Orchestrator => ORCHESTRATOR_TOOLS,
+            AgentMode::Planner => PLANNER_TOOLS,
+            AgentMode::Reviewer => REVIEWER_TOOLS,
+            AgentMode::Auditor => AUDITOR_TOOLS,
         }
     }
 
@@ -59,72 +130,11 @@ impl AgentMode {
     /// Mana sub-actions this mode permits. An empty slice means "allow all" (Full).
     pub fn allowed_mana_actions(&self) -> &'static [&'static str] {
         match self {
-            AgentMode::Full => &[],
-            AgentMode::Worker => &[
-                "show",
-                "update",
-                "status",
-                "list",
-                "logs",
-                "next",
-                "verify",
-                "notes_append",
-            ],
-            AgentMode::Orchestrator => &[
-                "status",
-                "list",
-                "show",
-                "create",
-                "close",
-                "update",
-                "run",
-                "run_state",
-                "evaluate",
-                "claim",
-                "release",
-                "logs",
-                "agents",
-                "next",
-                "tree",
-                "reopen",
-                "verify",
-                "fail",
-                "delete",
-                "dep_add",
-                "dep_remove",
-                "fact_create",
-                "fact_verify",
-                "notes_append",
-                "decision_add",
-                "decision_resolve",
-            ],
-            AgentMode::Planner => &[
-                "status",
-                "list",
-                "show",
-                "create",
-                "update",
-                "next",
-                "tree",
-                "dep_add",
-                "dep_remove",
-                "fact_create",
-                "notes_append",
-                "decision_add",
-                "decision_resolve",
-            ],
-            AgentMode::Reviewer => &[],
-            AgentMode::Auditor => &[
-                "status",
-                "list",
-                "show",
-                "logs",
-                "agents",
-                "next",
-                "tree",
-                "verify",
-                "fact_verify",
-            ],
+            AgentMode::Full | AgentMode::Reviewer => &[],
+            AgentMode::Worker => WORKER_MANA_ACTIONS,
+            AgentMode::Orchestrator => ORCHESTRATOR_MANA_ACTIONS,
+            AgentMode::Planner => PLANNER_MANA_ACTIONS,
+            AgentMode::Auditor => AUDITOR_MANA_ACTIONS,
         }
     }
 
@@ -556,19 +566,19 @@ impl Default for UiConfig {
         Self {
             sidebar_style: SidebarStyle::default(),
             tool_output: ToolOutputDisplay::default(),
-            tool_output_lines: 10,
-            read_max_lines: 500,
-            sidebar_width: 40,
-            word_wrap: true,
-            animations: AnimationLevel::Minimal,
+            tool_output_lines: default_tool_output_lines(),
+            read_max_lines: default_read_max_lines(),
+            sidebar_width: default_sidebar_width(),
+            word_wrap: default_true(),
+            animations: AnimationLevel::default(),
             hide_tools_in_chat: false,
             chat_tool_display: ChatToolDisplay::default(),
-            auto_open_sidebar: true,
-            sidebar_auto_open_width: 120,
-            thinking_lines: 5,
-            streaming_lines: 5,
-            mouse_scroll_lines: 3,
-            keyboard_scroll_lines: 20,
+            auto_open_sidebar: default_true(),
+            sidebar_auto_open_width: default_sidebar_auto_open_width(),
+            thinking_lines: default_thinking_lines(),
+            streaming_lines: default_streaming_lines(),
+            mouse_scroll_lines: default_mouse_scroll_lines(),
+            keyboard_scroll_lines: default_keyboard_scroll_lines(),
             mouse_capture: false,
             show_timestamps: false,
             show_cost: true,
@@ -625,10 +635,10 @@ fn default_user_limit() -> usize {
 impl Default for LearningConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            skill_nudge_threshold: 8,
-            memory_char_limit: 2200,
-            user_char_limit: 1400,
+            enabled: default_true(),
+            skill_nudge_threshold: default_nudge_threshold(),
+            memory_char_limit: default_memory_limit(),
+            user_char_limit: default_user_limit(),
         }
     }
 }
@@ -773,11 +783,20 @@ impl Config {
         if other.enabled_models.is_some() {
             self.enabled_models = other.enabled_models;
         }
+        if other.theme.is_some() {
+            self.theme = other.theme;
+        }
+        if other.learning != LearningConfig::default() {
+            self.learning = other.learning;
+        }
         if other.ui != UiConfig::default() {
             self.ui = other.ui;
         }
         if other.web != WebConfig::default() {
             self.web = other.web;
+        }
+        if other.lua != LuaConfig::default() {
+            self.lua = other.lua;
         }
         if other.personality != PersonalityConfig::default() {
             self.personality.merge(other.personality);
@@ -814,15 +833,7 @@ impl Config {
 }
 
 fn parse_agent_mode(s: &str) -> Option<AgentMode> {
-    match s.to_lowercase().as_str() {
-        "full" => Some(AgentMode::Full),
-        "worker" => Some(AgentMode::Worker),
-        "orchestrator" => Some(AgentMode::Orchestrator),
-        "planner" => Some(AgentMode::Planner),
-        "reviewer" => Some(AgentMode::Reviewer),
-        "auditor" => Some(AgentMode::Auditor),
-        _ => None,
-    }
+    AgentMode::from_name(s)
 }
 
 fn parse_thinking_level(s: &str) -> Option<ThinkingLevel> {
@@ -1121,6 +1132,37 @@ role = "assistant"
     }
 
     #[test]
+    fn config_merge_includes_theme_learning_and_lua() {
+        let mut base = Config::default();
+        let overlay = Config {
+            theme: Some("light".into()),
+            learning: LearningConfig {
+                enabled: false,
+                skill_nudge_threshold: 3,
+                memory_char_limit: 1000,
+                user_char_limit: 700,
+            },
+            lua: LuaConfig {
+                allow_native_tool_calls: Some(false),
+                allow_shell_exec: Some(true),
+                allow_http: None,
+                allow_secrets: None,
+                allowed_env: Some(vec!["HOME".into()]),
+            },
+            ..Default::default()
+        };
+
+        base.merge(overlay);
+
+        assert_eq!(base.theme.as_deref(), Some("light"));
+        assert_eq!(base.learning.skill_nudge_threshold, 3);
+        assert!(!base.learning.enabled);
+        assert_eq!(base.lua.allow_native_tool_calls, Some(false));
+        assert_eq!(base.lua.allow_shell_exec, Some(true));
+        assert_eq!(base.lua.allowed_env, Some(vec!["HOME".into()]));
+    }
+
+    #[test]
     fn config_merge_guardrails_preserves_unspecified_fields() {
         let mut base = Config::default();
         base.guardrails.enabled = Some(true);
@@ -1395,11 +1437,11 @@ model = "sonnet"
     }
 
     #[test]
-    fn agent_mode_planner_blocks_mana_close() {
+    fn agent_mode_planner_blocks_mana_close_and_run() {
         let mode = AgentMode::Planner;
         assert!(!mode.allows_mana_action("close"));
         assert!(!mode.allows_mana_action("run"));
-        assert!(!mode.allows_mana_action("update"));
+        assert!(mode.allows_mana_action("update"));
         assert!(mode.allows_tool("git"));
     }
 

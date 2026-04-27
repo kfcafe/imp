@@ -244,8 +244,9 @@ impl SettingsState {
             }
             SettingsField::SidebarStyle => {
                 self.sidebar_style = match self.sidebar_style {
+                    SidebarStyle::Inspector => SidebarStyle::Stream,
                     SidebarStyle::Stream => SidebarStyle::Split,
-                    SidebarStyle::Split => SidebarStyle::Stream,
+                    SidebarStyle::Split => SidebarStyle::Inspector,
                 };
             }
             SettingsField::ToolOutput => {
@@ -386,8 +387,9 @@ impl SettingsState {
             }
             SettingsField::SidebarStyle => {
                 self.sidebar_style = match self.sidebar_style {
-                    SidebarStyle::Stream => SidebarStyle::Split,
+                    SidebarStyle::Inspector => SidebarStyle::Split,
                     SidebarStyle::Split => SidebarStyle::Stream,
+                    SidebarStyle::Stream => SidebarStyle::Inspector,
                 };
             }
             SettingsField::ToolOutput => {
@@ -1009,6 +1011,7 @@ impl Widget for SettingsView<'_> {
         row += 1;
 
         let sidebar_label = match self.state.sidebar_style {
+            SidebarStyle::Inspector => "inspector",
             SidebarStyle::Stream => "stream",
             SidebarStyle::Split => "split",
         };
@@ -1501,6 +1504,26 @@ mod tests {
     use imp_core::config::Config;
     use imp_llm::auth::AuthStore;
     use imp_llm::model::ModelRegistry;
+
+    #[test]
+    fn sidebar_style_cycles_include_inspector() {
+        let registry = ModelRegistry::with_builtins();
+        let models = registry.list().to_vec();
+        let auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
+        let mut state = SettingsState::new(&Config::default(), &models[0].id, &models, &auth_store);
+        state.selected = FIELDS
+            .iter()
+            .position(|field| matches!(field, SettingsField::SidebarStyle))
+            .unwrap();
+
+        assert_eq!(state.sidebar_style, SidebarStyle::Inspector);
+        state.cycle_forward();
+        assert_eq!(state.sidebar_style, SidebarStyle::Stream);
+        state.cycle_forward();
+        assert_eq!(state.sidebar_style, SidebarStyle::Split);
+        state.cycle_backward();
+        assert_eq!(state.sidebar_style, SidebarStyle::Stream);
+    }
 
     #[test]
     fn save_field_scrolls_into_view_on_short_panels() {
