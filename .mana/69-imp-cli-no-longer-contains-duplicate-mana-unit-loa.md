@@ -20,7 +20,7 @@ notes: |-
   Graph hygiene 2026-04-24: fact remains substantively true, but verify drifted because helper names now live in `imp-core/src/mana_worker.rs` / docs rather than `imp-cli/src/main.rs`. Updated verify to keep the negative check on imp-cli while checking canonical helper names in mana_worker/docs.
 labels:
 - fact
-verify: cd /Users/asher/tower && ! rg -n "struct ManaUnit|fn load_mana_unit|fn find_mana_dir|fn parse_mana_unit" imp/crates/imp-cli/src/main.rs && rg -n "load_assignment_with_mana_dir|assemble_prefill|build_task_context|build_task_prompt" imp/crates/imp-core/src/mana_worker.rs docs/rebuild/imp-worker-boundary-plan.md
+verify: cd /Users/asher/imp && ! rg -n "struct ManaUnit|fn load_mana_unit|fn find_mana_dir|fn parse_mana_unit" crates/imp-cli/src/main.rs && rg -n "load_assignment_with_mana_dir|assemble_prefill|build_task_context|build_task_prompt" crates/imp-core/src/mana_worker.rs docs/rebuild/imp-worker-boundary-plan.md
 kind: epic
 unit_type: fact
 last_verified: '2026-04-09T23:16:10.195220Z'

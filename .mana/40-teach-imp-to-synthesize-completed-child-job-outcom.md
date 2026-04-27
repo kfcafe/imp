@@ -23,7 +23,7 @@ labels:
 - context
 dependencies:
 - '38'
-verify: cd /Users/asher/tower && rg -qi 'synthesize' imp/crates/imp-core/src/system_prompt.rs && rg -q 'After child jobs complete' imp/crates/imp-core/src/system_prompt.rs && cargo test -p imp-core system_prompt_delegation && cargo check -p imp-core
+verify: cd /Users/asher/imp && rg -qi 'synthesize' crates/imp-core/src/system_prompt.rs && rg -q 'After child jobs complete' crates/imp-core/src/system_prompt.rs && cargo test -p imp-core system_prompt_delegation && cargo check -p imp-core
 kind: job
 paths:
 - crates/imp-core/src/agent.rs

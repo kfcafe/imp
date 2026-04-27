@@ -22,7 +22,7 @@ notes: |2-
 labels:
 - bug
 - imp-core
-verify: cd /Users/asher/tower && timeout 30 cargo test -p imp-core compaction_resume 2>&1 | grep "test result:" | grep -v "0 passed"
+verify: cd /Users/asher/imp && timeout 30 cargo test -p imp-core compaction_resume 2>&1 | grep "test result:" | grep -v "0 passed"
 fail_first: true
 attempts: 1
 history:

@@ -26,7 +26,7 @@ labels:
 - panic
 dependencies:
 - '258.1'
-verify: cd /Users/asher/tower && cargo test -p imp-tui && cargo test -p imp-cli run_interactive
+verify: cd /Users/asher/imp && cargo test -p imp-tui && cargo test -p imp-cli run_interactive
 kind: job
 paths:
 - /Users/asher/imp/crates/imp-tui/src/terminal.rs

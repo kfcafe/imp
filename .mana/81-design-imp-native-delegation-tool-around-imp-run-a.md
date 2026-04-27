@@ -839,7 +839,7 @@ labels:
 - tools
 - orchestration
 - delegation
-verify: cd /Users/asher/tower && test -f docs/rebuild/imp-delegation-tool-and-runtime.md && rg -q 'imp run' docs/rebuild/imp-delegation-tool-and-runtime.md && rg -q 'WorkerAssignment' docs/rebuild/imp-delegation-tool-and-runtime.md && rg -q 'mana' docs/rebuild/imp-delegation-tool-and-runtime.md && rg -q 'delegation' docs/rebuild/imp-delegation-tool-and-runtime.md
+verify: cd /Users/asher/imp && test -f docs/rebuild/imp-delegation-tool-and-runtime.md && rg -q 'imp run' docs/rebuild/imp-delegation-tool-and-runtime.md && rg -q 'WorkerAssignment' docs/rebuild/imp-delegation-tool-and-runtime.md && rg -q 'mana' docs/rebuild/imp-delegation-tool-and-runtime.md && rg -q 'delegation' docs/rebuild/imp-delegation-tool-and-runtime.md
 checkpoint: cfc6cee411f353d311fb044002b2c84346ab1ac4
 verify_hash: '30b3c150f0a6cfd72f7d6bbb64bfb3aea99f092b99803aae2b5b427bd96a6568'
 kind: job

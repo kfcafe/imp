@@ -24,7 +24,7 @@ labels:
 - install
 - docs
 - competitive-analysis
-verify: cd /Users/asher/tower/imp && mana list --status open >/dev/null
+verify: cd /Users/asher/imp && mana list --status open >/dev/null
 kind: epic
 feature: true
 ---

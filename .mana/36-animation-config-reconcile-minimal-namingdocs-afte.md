@@ -10,7 +10,7 @@ labels:
 - animation
 - cleanup
 - config
-verify: cd /Users/asher/tower/imp && ! grep -q '#\[serde(alias = "full")\]' crates/imp-core/src/config.rs && ! grep -q 'Restrained motion with concise state-specific labels' crates/imp-core/src/config.rs && cargo check -p imp-core && cargo check -p imp-tui
+verify: cd /Users/asher/imp && ! grep -q '#\[serde(alias = "full")\]' crates/imp-core/src/config.rs && ! grep -q 'Restrained motion with concise state-specific labels' crates/imp-core/src/config.rs && cargo check -p imp-core && cargo check -p imp-tui
 fail_first: true
 kind: epic
 ---

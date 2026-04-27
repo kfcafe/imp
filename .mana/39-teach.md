@@ -27,7 +27,7 @@ labels:
 - prompting
 dependencies:
 - '38'
-verify: cd /Users/asher/tower && rg -q 'decompos' imp/crates/imp-core/src/system_prompt.rs && rg -q 'child.job\|child_job' imp/crates/imp-core/src/system_prompt.rs && cargo test -p imp-core system_prompt && cargo check -p imp-core
+verify: cd /Users/asher/imp && rg -q 'decompos' crates/imp-core/src/system_prompt.rs && rg -q 'child.job\|child_job' crates/imp-core/src/system_prompt.rs && cargo test -p imp-core system_prompt && cargo check -p imp-core
 kind: job
 ---
 

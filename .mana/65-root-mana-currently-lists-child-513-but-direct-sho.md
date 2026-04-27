@@ -8,7 +8,7 @@ created_at: '2026-04-09T12:06:03.352370Z'
 updated_at: '2026-04-24T05:33:46.770414Z'
 labels:
 - fact
-verify: cd /Users/asher/tower && mana list --all --parent 51 | rg -q '51\.3' && ! mana show 51.3 >/dev/null 2>&1
+verify: cd /Users/asher/imp && mana list --all --parent 51 | rg -q '51\.3' && ! mana show 51.3 >/dev/null 2>&1
 checkpoint: cfc6cee411f353d311fb044002b2c84346ab1ac4
 verify_hash: '9ea7ebd138b3bb3dc3b016a7e9e63131c46c17ab66df3538fb63209ff69abebd'
 kind: epic

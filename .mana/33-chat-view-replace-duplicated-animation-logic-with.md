@@ -9,7 +9,7 @@ updated_at: '2026-03-27T08:03:57.381159Z'
 labels:
 - animation
 - cleanup
-verify: cd /Users/asher/tower/imp && test $(grep -c 'spinner_frame' crates/imp-tui/src/views/chat.rs) -eq 0 && test $(grep -c 'waiting_badge' crates/imp-tui/src/views/chat.rs) -eq 0 && grep -q 'activity_label' crates/imp-tui/src/views/chat.rs && cargo check -p imp-tui 2>&1
+verify: cd /Users/asher/imp && test $(grep -c 'spinner_frame' crates/imp-tui/src/views/chat.rs) -eq 0 && test $(grep -c 'waiting_badge' crates/imp-tui/src/views/chat.rs) -eq 0 && grep -q 'activity_label' crates/imp-tui/src/views/chat.rs && cargo check -p imp-tui 2>&1
 fail_first: true
 kind: epic
 ---

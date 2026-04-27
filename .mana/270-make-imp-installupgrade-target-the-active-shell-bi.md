@@ -22,13 +22,13 @@ notes: |-
 
   ---
   2026-04-24T03:53:28.019169+00:00
-  Patched ~/uu so `uu install` now supports a repo-local post-install hook: if `tools/uu-post-install` or `tools/uu-post-install.sh` exists, it is appended after the normal install steps. Then added imp/tools/uu-post-install.sh to run `imp install-local` (or `$HOME/.cargo/bin/imp install-local` as fallback). This makes `uu install` from the imp repo root the one-command local install/upgrade flow that repairs the active shell `imp` path automatically. Updated imp README to recommend `uu install` as the preferred source install/upgrade flow. Verified in uu with targeted tests and dry-run output: `uu install -n -C /Users/asher/tower/imp` now shows both `cargo install --path .` and `bash tools/uu-post-install.sh`.
+  Patched ~/uu so `uu install` now supports a repo-local post-install hook: if `tools/uu-post-install` or `tools/uu-post-install.sh` exists, it is appended after the normal install steps. Then added imp/tools/uu-post-install.sh to run `imp install-local` (or `$HOME/.cargo/bin/imp install-local` as fallback). This makes `uu install` from the imp repo root the one-command local install/upgrade flow that repairs the active shell `imp` path automatically. Updated imp README to recommend `uu install` as the preferred source install/upgrade flow. Verified in uu with targeted tests and dry-run output: `uu install -n -C /Users/asher/imp` now shows both `cargo install --path .` and `bash tools/uu-post-install.sh`.
 design: 'Treat `cargo install` success as insufficient. The install UX must verify command resolution, not just artifact creation. Prefer a narrow operator-trust fix: either refresh the active shim/symlink in the expected shell bin dir or fail loudly with a concrete repair command when the active `imp` path does not match the new install location. Keep the solution reversible and easy to reason about.'
 verify: bash -lc 'command -v imp && imp --help >/dev/null'
 kind: job
 paths:
-- /Users/asher/tower/imp/README.md
-- /Users/asher/tower/imp/crates/imp-cli/src/lib.rs
+- /Users/asher/imp/README.md
+- /Users/asher/imp/crates/imp-cli/src/lib.rs
 decisions:
 - '`uu install` cannot reliably make `imp` in the user''s shell point at the fresh binary from the imp repo alone while `uu` remains a thin wrapper around `cargo install --path .`. Cargo install only writes to its own install root (typically `~/.cargo/bin`) and provides no post-install hook to repair a shadow binary earlier on PATH (for example `~/bin/imp`). Therefore, making `uu install` alone sufficient requires either a uu-side feature/change or a deliberate PATH policy change, not just imp repo changes.'
 - 'A fully program-agnostic `uu install` that ''installs to system'' is not a safe default. Install semantics differ by ecosystem (Cargo, Go, uv/pip, npm, make/cmake, etc.), and many installs intentionally target user-local bins, virtual envs, or project deps rather than a system command path. The better abstraction is explicit command activation: let projects declare or let uu infer which executable names should be made active in a preferred user bin dir, with opt-in flags/policy for activation behavior. Default should remain non-destructive; activation should be explicit or policy-driven rather than silently writing to system paths.'

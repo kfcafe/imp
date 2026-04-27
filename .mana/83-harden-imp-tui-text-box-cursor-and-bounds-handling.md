@@ -22,7 +22,7 @@ labels:
 - imp
 - tui
 - hardening
-verify: cd /Users/asher/tower && cargo test -p imp-tui cursor_screen_position_tracks_soft_wraps -- --nocapture
+verify: cd /Users/asher/imp && cargo test -p imp-tui cursor_screen_position_tracks_soft_wraps -- --nocapture
 verify_timeout: 120
 kind: job
 ---

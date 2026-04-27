@@ -26,8 +26,8 @@ notes: |-
 verify: cargo test -p imp-llm model::tests
 kind: job
 paths:
-- /Users/asher/tower/imp/crates/imp-llm/src/model.rs
-- /Users/asher/tower/imp/crates/imp-cli/src/lib.rs
+- /Users/asher/imp/crates/imp-llm/src/model.rs
+- /Users/asher/imp/crates/imp-cli/src/lib.rs
 ---
 
 Add first-class model registry support for the newly released ChatGPT 5.5 / GPT-5.5 models in imp. Inspect existing OpenAI model metadata, alias resolution, and tests in crates/imp-llm/src/model.rs plus any CLI/runtime assumptions. Add the new model IDs and aliases in a minimal way that preserves existing behavior and lets users select the new model by explicit name or obvious alias. Keep scope to model resolution and surfaced metadata only; do not change provider auth flows unless required by inspected code.

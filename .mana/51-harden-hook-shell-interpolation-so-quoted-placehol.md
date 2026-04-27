@@ -15,7 +15,7 @@ labels:
 - hooks
 - shell
 - imp-core
-verify: cd /Users/asher/tower/imp && cargo test -p imp-core hook_interpolation_quoted_placeholder hook_after_tool_call_nonblocking_quoted_command -- --nocapture
+verify: cd /Users/asher/imp && cargo test -p imp-core hook_interpolation_quoted_placeholder hook_after_tool_call_nonblocking_quoted_command -- --nocapture
 kind: job
 ---
 

@@ -13,7 +13,7 @@ labels:
 - tools
 - anthropic
 - imp-core
-verify: cd /Users/asher/tower/imp && rg -n '^\s*"(oneOf|anyOf|allOf|enum|not)"\s*:' crates/imp-core/src/tools && cargo test -p imp-core schema_ -- --nocapture
+verify: cd /Users/asher/imp && rg -n '^\s*"(oneOf|anyOf|allOf|enum|not)"\s*:' crates/imp-core/src/tools && cargo test -p imp-core schema_ -- --nocapture
 verify_timeout: 120
 kind: job
 paths:

@@ -9,7 +9,7 @@ updated_at: '2026-03-27T08:04:22.260666Z'
 labels:
 - animation
 - cleanup
-verify: cd /Users/asher/tower/imp && ! grep -q 'const SPINNER' crates/imp-tui/src/views/sidebar.rs && grep -q 'spinner_frame' crates/imp-tui/src/views/sidebar.rs && grep -q 'AnimationLevel' crates/imp-tui/src/views/sidebar.rs && cargo check -p imp-tui 2>&1 | tail -1 | grep -q 'could not compile' && exit 1 || cargo check -p imp-tui 2>&1
+verify: cd /Users/asher/imp && ! grep -q 'const SPINNER' crates/imp-tui/src/views/sidebar.rs && grep -q 'spinner_frame' crates/imp-tui/src/views/sidebar.rs && grep -q 'AnimationLevel' crates/imp-tui/src/views/sidebar.rs && cargo check -p imp-tui 2>&1 | tail -1 | grep -q 'could not compile' && exit 1 || cargo check -p imp-tui 2>&1
 fail_first: true
 kind: epic
 ---

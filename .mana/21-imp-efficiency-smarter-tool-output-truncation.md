@@ -57,7 +57,7 @@ notes: |2
   ```
   grep: imp/crates/imp-core/src/tools/grep.rs: No such file or directory
   ```
-verify: cd /Users/asher/tower && grep -q 'DEFAULT_LIMIT.*50\|of.*matches\|of.*results' imp/crates/imp-core/src/tools/grep.rs
+verify: cd /Users/asher/imp && grep -q 'DEFAULT_LIMIT.*50\|of.*matches\|of.*results' crates/imp-core/src/tools/grep.rs
 checkpoint: '55c295c8901f6c58954da8e2bae9bbb1c578e7f8'
 verify_hash: '55ad6a7f846ba231c25ba58d6f6c5c10b2a7a0e13d71a340161f3109ae693c58'
 attempts: 2

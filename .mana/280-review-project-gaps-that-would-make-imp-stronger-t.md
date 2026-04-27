@@ -5,7 +5,7 @@ slug: review-project-gaps-that-would-make-imp-stronger-t
 status: open
 priority: 1
 created_at: '2026-04-27T19:23:43.040906Z'
-updated_at: '2026-04-27T19:36:25.552034Z'
+updated_at: '2026-04-27T20:02:52.220399Z'
 acceptance: User receives a concise prioritized review; no code modifications are made.
 notes: |-
   ---
@@ -28,6 +28,21 @@ notes: |-
   - Checkpoints are more live than older review suggests: `CheckpointState` is wired into write/git snapshots, `ImpSession` persists checkpoint records, and TUI has restore command/tests. Remaining gap is productization/discoverability/timeline/diff, not raw mechanism.
   - Provider/auth duplication remains visible: `imp_session.rs` owns `resolve_runtime_connection`/`resolve_api_key`; `imp-cli/src/lib.rs` and `imp-tui/src/app.rs` still have local provider API-key/login helpers and ChatGPT routing checks.
   - Hotspot sizes are now larger than older review: app.rs 7078, agent.rs 5782, imp-cli lib.rs 5679, tools/mana.rs 3514.
+
+  ---
+  2026-04-27T20:01:37.315247+00:00
+  User clarified comparison target: compare imp against https://github.com/dirac-run/dirac, not imp against its own baseline. Need inspect Dirac repo/public docs and update gap analysis accordingly.
+
+  ---
+  2026-04-27T20:02:52.220396+00:00
+  Dirac comparison evidence:
+  - Cloned https://github.com/dirac-run/dirac shallow into temp and inspected README, evals, package metadata, tool handlers, prompts, and file layout.
+  - Dirac positioning: token-efficient coding agent; claims 64.8% average API cost reduction, 8/8 success on 8 public complex refactor evals with avg $0.18, and 65.2% Terminal-Bench-2 on gemini-3-flash-preview.
+  - Dirac core differentiators in README/package/walkthroughs: hash-anchored edits, AST-native precision, multi-file batching, high-bandwidth context, native tool calling only, VS Code + CLI distribution, Plan Mode/Yolo Mode/history.
+  - Inspected Dirac implementation evidence: `src/core/task/tools/handlers/EditFileToolHandler.ts` batches all edit_file blocks in a turn; `edit-file/BatchProcessor.ts` groups by path, applies edits in memory, requests combined approval, saves, then runs diagnostics in parallel; `GetFunctionToolHandler.ts` uses `ASTAnchorBridge` and function hashes; `GetFileSkeletonToolHandler.ts` extracts AST skeletons/call graph; `FindSymbolReferencesToolHandler.ts` uses `SymbolIndexService`; `ReplaceSymbolToolHandler.ts` replaces AST symbol ranges and diagnostics; `src/shared/tools.ts` exposes get_function/get_file_skeleton/find_symbol_references/edit_file/replace_symbol/rename_symbol.
+  - Dirac prompt snapshots explicitly instruct surgical tools before full file reads, line-hash protocol, and batching all non-overlapping edits into one tool call.
+  - Dirac has broader IDE/product packaging than imp today: VS Code extension marketplace, webview UI, walkthroughs, editor diagnostics/diff integration, command palette/context menu entries, CLI, ACP stubs.
+  - Dirac also has weaknesses relative to imp: no mana-style durable work graph/verify gates/handoff substrate, no explicit Rust-native worker runtime boundary, no project-durable task orchestration comparable to mana, apparent large TS surface inherited from Cline with 136k TS LOC, and benchmark/readme heavily optimized around coding/refactor efficiency rather than broader agent runtime/policy graph.
 labels:
 - analysis
 - imp

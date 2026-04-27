@@ -41,7 +41,7 @@ labels:
 - tools
 - esc
 - runtime
-verify: cd /Users/asher/tower/imp && cargo test -p imp-tui esc cancel -- --nocapture && cargo test -p imp-core agent_cancel tools::bash -- --nocapture && cargo check -p imp-tui -p imp-core
+verify: cd /Users/asher/imp && cargo test -p imp-tui esc cancel -- --nocapture && cargo test -p imp-core agent_cancel tools::bash -- --nocapture && cargo check -p imp-tui -p imp-core
 checkpoint: aee2b76bf088b6bdc571dd8f17db28ad8ef4c55f
 verify_hash: eac499c1adee0ca5cb02d7250f0070c1009db94a77ffad2258d9a347d557187b
 attempts: 1

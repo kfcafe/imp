@@ -9,7 +9,7 @@ updated_at: '2026-03-27T08:03:57.381192Z'
 labels:
 - animation
 - cleanup
-verify: 'cd /Users/asher/tower/imp && ! grep -q ''animation_level: AnimationLevel'' crates/imp-tui/src/views/editor.rs && ! grep -q ''tick: u64'' crates/imp-tui/src/views/editor.rs && cargo check -p imp-tui 2>&1'
+verify: 'cd /Users/asher/imp && ! grep -q ''animation_level: AnimationLevel'' crates/imp-tui/src/views/editor.rs && ! grep -q ''tick: u64'' crates/imp-tui/src/views/editor.rs && cargo check -p imp-tui 2>&1'
 fail_first: true
 kind: epic
 ---

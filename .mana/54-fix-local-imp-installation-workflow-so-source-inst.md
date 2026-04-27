@@ -15,7 +15,7 @@ labels:
 - install
 - cli
 - ux
-verify: cd /Users/asher/tower/imp && cargo check -p imp-cli && test -n "install-workflow-diagnosed"
+verify: cd /Users/asher/imp && cargo check -p imp-cli && test -n "install-workflow-diagnosed"
 kind: job
 ---
 
@@ -23,7 +23,7 @@ Goal: diagnose and fix local imp installation friction so the normal install pat
 
 Current state:
 - User normally uses `uu install` to install imp.
-- Running install at `/Users/asher/tower/imp` currently hits a virtual-manifest error because `Cargo.toml` at the repo root is a workspace manifest, not a package manifest.
+- Running install at `/Users/asher/imp` currently hits a virtual-manifest error because `Cargo.toml` at the repo root is a workspace manifest, not a package manifest.
 - A copied built binary to `/Users/asher/bin/imp` was observed to die with SIGKILL when invoked in this tool environment, but the cause is not yet isolated.
 - Need to inspect the install workflow, likely `uu install` behavior, imp-cli packaging, and any repo-level affordances/documentation or thin wrapper needed to make install intent obvious and reliable.
 

@@ -451,7 +451,7 @@ labels:
 - cli
 - tui
 - ux
-verify: cd /Users/asher/tower && test -f docs/rebuild/imp-cli-first-surface.md && rg -q 'CLI-first' docs/rebuild/imp-cli-first-surface.md && rg -q 'TUI as adapter' docs/rebuild/imp-cli-first-surface.md && rg -q 'run_print_mode' docs/rebuild/imp-cli-first-surface.md && rg -q 'run_interactive' docs/rebuild/imp-cli-first-surface.md
+verify: cd /Users/asher/imp && test -f docs/rebuild/imp-cli-first-surface.md && rg -q 'CLI-first' docs/rebuild/imp-cli-first-surface.md && rg -q 'TUI as adapter' docs/rebuild/imp-cli-first-surface.md && rg -q 'run_print_mode' docs/rebuild/imp-cli-first-surface.md && rg -q 'run_interactive' docs/rebuild/imp-cli-first-surface.md
 kind: job
 decisions:
 - 'Decision: adopt a CLI-first imp command grammar centered on explicit surfaces. Canonical families are `imp chat` for human authoring, `imp prompt` for one-shot prompt/print, `imp run <unit-id>` for the machine-facing mana-worker runtime, `imp view` for browsing/inspection, and `imp tui` for explicit fullscreen presentation. Plain `imp` should eventually equal `imp chat` after a staged compatibility migration rather than remaining fullscreen by default or becoming a heuristic launcher.'

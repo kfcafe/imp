@@ -28,7 +28,7 @@ labels:
 - ui-state
 - hooks
 - ask
-verify: cd /Users/asher/tower/imp && cargo test -p imp-tui error -- --nocapture && cargo check -p imp-tui
+verify: cd /Users/asher/imp && cargo test -p imp-tui error -- --nocapture && cargo check -p imp-tui
 kind: job
 ---
 

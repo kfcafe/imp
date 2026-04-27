@@ -12,7 +12,7 @@ labels:
 - imp-tui
 dependencies:
 - '28'
-verify: 'cd /Users/asher/tower/imp && rg ''name: "memory"|name: "recall"|name: "plan"'' crates/imp-tui/src/views/command_palette.rs && rg ''"/memory|"/recall|"/plan'' crates/imp-tui/src/app.rs && rg ''persistent memory|past sessions|mana-backed planning|resume|fork'' crates/imp-tui/src/views/welcome.rs && cargo check -p imp-tui'
+verify: 'cd /Users/asher/imp && rg ''name: "memory"|name: "recall"|name: "plan"'' crates/imp-tui/src/views/command_palette.rs && rg ''"/memory|"/recall|"/plan'' crates/imp-tui/src/app.rs && rg ''persistent memory|past sessions|mana-backed planning|resume|fork'' crates/imp-tui/src/views/welcome.rs && cargo check -p imp-tui'
 fail_first: true
 kind: epic
 ---
