@@ -392,12 +392,14 @@ pub struct Agent {
     event_tx: mpsc::Sender<AgentEvent>,
     command_tx: mpsc::Sender<AgentCommand>,
     command_rx: mpsc::Receiver<AgentCommand>,
+    cancel_token: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Handle for controlling the agent from outside.
 pub struct AgentHandle {
     pub event_rx: mpsc::Receiver<AgentEvent>,
     pub command_tx: mpsc::Sender<AgentCommand>,
+    pub cancel_token: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -418,6 +420,7 @@ impl Agent {
     pub fn new(model: Model, cwd: PathBuf) -> (Self, AgentHandle) {
         let (event_tx, event_rx) = mpsc::channel(256);
         let (command_tx, command_rx) = mpsc::channel(32);
+        let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut hooks = HookRunner::new();
         let background_event_tx = event_tx.clone();
         hooks.set_background_reporter(Arc::new(move |event: HookBackgroundEvent| {
@@ -474,11 +477,13 @@ impl Agent {
             event_tx,
             command_tx: command_tx.clone(),
             command_rx,
+            cancel_token: Arc::clone(&cancel_token),
         };
 
         let handle = AgentHandle {
             event_rx,
             command_tx,
+            cancel_token,
         };
 
         (agent, handle)
@@ -497,6 +502,8 @@ impl Agent {
 
         self.messages.push(Message::user(&prompt));
 
+        self.cancel_token
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let mut turn: u32 = 0;
         let mut total_usage = Usage::default();
         let mut cancelled = false;
@@ -533,6 +540,8 @@ impl Agent {
             while let Ok(cmd) = self.command_rx.try_recv() {
                 match cmd {
                     AgentCommand::Cancel => {
+                        self.cancel_token
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
                         cancelled = true;
                         break;
                     }
@@ -639,7 +648,8 @@ impl Agent {
             let mut saw_first_text_delta = false;
             let mut saw_first_tool_call = false;
             let mut saw_provider_message_end = false;
-            let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cancel_token = Arc::clone(&self.cancel_token);
+            cancel_token.store(false, std::sync::atomic::Ordering::Relaxed);
 
             while let Some(event_result) = stream.next().await {
                 // Check for cancel during event processing

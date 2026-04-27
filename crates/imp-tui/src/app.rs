@@ -2702,13 +2702,28 @@ impl App {
             // First Ctrl+C: clear editor
             self.editor.clear();
             self.ctrl_c_count = 0;
-        } else if self.is_streaming {
-            // Second: abort streaming
-            if let Some(ref handle) = self.agent_handle {
+        } else if self.is_streaming || self.agent_task.is_some() {
+            let already_cancelled = self.agent_handle.as_ref().is_some_and(|handle| {
+                handle
+                    .cancel_token
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            });
+            if already_cancelled {
+                if let Some(task) = self.agent_task.take() {
+                    task.abort();
+                }
+                self.agent_handle = None;
+            } else if let Some(ref handle) = self.agent_handle {
                 let _ = handle.command_tx.try_send(AgentCommand::Cancel);
+                handle
+                    .cancel_token
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
             }
             self.suppress_completion_notification = true;
             self.is_streaming = false;
+            if let Some(last) = self.latest_streaming_message_mut() {
+                last.is_streaming = false;
+            }
             self.ctrl_c_count = 0;
         } else {
             // Third: quit
@@ -5718,6 +5733,7 @@ mod session_lifecycle {
         app.agent_handle = Some(AgentHandle {
             event_rx,
             command_tx,
+            cancel_token: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         app.agent_task = Some(tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -5746,6 +5762,7 @@ mod session_lifecycle {
         app.agent_handle = Some(AgentHandle {
             event_rx,
             command_tx,
+            cancel_token: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         app.agent_task = None;
 
@@ -5767,6 +5784,7 @@ mod session_lifecycle {
         app.agent_handle = Some(AgentHandle {
             event_rx,
             command_tx,
+            cancel_token: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         app.agent_task = Some(tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -5787,6 +5805,50 @@ mod session_lifecycle {
         if let Some(task) = app.agent_task.take() {
             task.abort();
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn esc_cancel_first_requests_cancel_second_aborts_stuck_agent_task() {
+        let mut app = make_app();
+        let (_event_tx, event_rx) = tokio::sync::mpsc::channel(4);
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(4);
+        let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        app.agent_handle = Some(AgentHandle {
+            event_rx,
+            command_tx,
+            cancel_token: Arc::clone(&cancel_token),
+        });
+        app.agent_task = Some(tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(())
+        }));
+        app.is_streaming = true;
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: true,
+            timestamp: imp_llm::now(),
+        });
+
+        app.handle_cancel();
+
+        assert!(cancel_token.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(matches!(command_rx.try_recv(), Ok(AgentCommand::Cancel)));
+        assert!(
+            app.agent_task.is_some(),
+            "first Esc should allow graceful cancellation"
+        );
+        assert!(!app.is_streaming);
+        assert!(!app.messages.last().unwrap().is_streaming);
+
+        app.handle_cancel();
+
+        assert!(app.agent_task.is_none(), "second Esc should abort a stuck task");
+        assert!(app.agent_handle.is_none());
     }
 
     #[test]
