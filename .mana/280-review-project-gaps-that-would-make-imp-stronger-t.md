@@ -5,9 +5,9 @@ slug: review-project-gaps-that-would-make-imp-stronger-t
 status: open
 priority: 1
 created_at: '2026-04-27T19:23:43.040906Z'
-updated_at: '2026-04-27T21:46:09.982029Z'
+updated_at: '2026-04-27T21:58:00.843869Z'
 acceptance: User receives a concise prioritized review; no code modifications are made.
-notes: |
+notes: |-
   ---
   2026-04-27T19:23:49.503774+00:00
   Read-only review evidence gathered:
@@ -49,6 +49,11 @@ notes: |
   ```
   sh: line 0: test: analysis-only}: binary operator expected
   ```
+
+
+  ---
+  2026-04-27T21:58:00.843855+00:00
+  Corrected malformed verify command from `test -n "analysis-only"} aisuiu` to the intended read-only analysis sentinel `test -n "analysis-only"`. Prior failed attempt was caused by the malformed verify string, not by analysis work failing.
 labels:
 - analysis
 - imp
@@ -64,7 +69,7 @@ history:
   result: fail
   exit_code: 2
   output_snippet: 'sh: line 0: test: analysis-only}: binary operator expected'
-kind: job
+kind: task
 ---
 
 ## Goal

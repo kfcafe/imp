@@ -1974,6 +1974,7 @@ dependencies = [
  "glob",
  "libc",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yml",

@@ -454,18 +454,18 @@ impl AuthStore {
 
     /// Resolve all stored secret fields for a provider into a map.
     pub fn resolve_secret_fields(&self, provider: &str) -> Result<HashMap<String, String>> {
-        match self.stored.get(provider) {
-            Some(StoredCredential::SecretFields { fields }) => fields
+        match self.stored_credential(provider) {
+            Some((stored_provider, StoredCredential::SecretFields { fields })) => fields
                 .iter()
                 .map(|field| {
-                    self.resolve_secret_field(provider, field)
+                    self.resolve_secret_field(stored_provider, field)
                         .map(|value| (field.clone(), value))
                 })
                 .collect(),
-            Some(StoredCredential::ApiKey { key }) => {
+            Some((_stored_provider, StoredCredential::ApiKey { key })) => {
                 Ok(HashMap::from([("api_key".to_string(), key.clone())]))
             }
-            Some(StoredCredential::OAuth(oauth)) => Ok(HashMap::from([(
+            Some((_stored_provider, StoredCredential::OAuth(oauth))) => Ok(HashMap::from([(
                 "access_token".to_string(),
                 oauth.access_token.clone(),
             )])),
@@ -1265,6 +1265,23 @@ mod tests {
             field_lookup_candidates("secrets_key"),
             vec!["secrets_key".to_string(), "secret_key".to_string()]
         );
+    }
+
+    #[test]
+    fn resolve_secret_fields_uses_provider_alias_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = test_store(path);
+
+        store
+            .store_secret_fields(
+                "Render",
+                HashMap::from([("api_key".to_string(), "render-secret".to_string())]),
+            )
+            .unwrap();
+
+        let fields = store.resolve_secret_fields("render").unwrap();
+        assert_eq!(fields.get("api_key").map(String::as_str), Some("render-secret"));
     }
 
     #[test]
