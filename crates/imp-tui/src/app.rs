@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,7 @@ use imp_core::compaction::{
 };
 use imp_core::config::Config;
 use imp_core::personality::default_soul_markdown;
-use imp_core::session::{SessionEntry, SessionInfo, SessionManager};
+use imp_core::session::{SessionEntry, SessionManager};
 use imp_core::Error as ImpCoreError;
 use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelMeta, ModelRegistry, ProviderRegistry};
@@ -60,10 +60,7 @@ use crate::views::sidebar::{
     build_detail_render_data, build_detail_text_surface_from_plain_lines, build_stream_lines,
     sidebar_sub_areas, Sidebar, SidebarDetailRenderData, SidebarView,
 };
-use crate::views::startup::{
-    summarize_inline, truncate_preview, StartupAction, StartupPanelData, StartupPanelView,
-    StartupSection,
-};
+use crate::views::startup::{summarize_inline, StartupAction, StartupPanelData, StartupPanelView, StartupSection};
 use crate::views::status::StatusInfo;
 use crate::views::tools::DisplayToolCall;
 use crate::views::tree::{flatten_tree, TreeView, TreeViewState};
@@ -145,169 +142,6 @@ fn prompt_text_for_secret_provider(provider: &str) -> String {
     lines.push(String::new());
     lines.push("First enter a comma-separated field list (default: api_key).".into());
     lines.push("Then imp will prompt for each field value.".into());
-    lines.join("\n")
-}
-
-fn startup_recent_sessions(cwd: &Path) -> Vec<SessionInfo> {
-    let session_dir = imp_core::storage::global_sessions_dir();
-    let mut sessions = SessionManager::list(&session_dir).unwrap_or_default();
-    sessions.sort_by(|a, b| startup_session_sort_key(a, cwd).cmp(&startup_session_sort_key(b, cwd)));
-    sessions.truncate(3);
-    sessions
-}
-
-fn startup_session_sort_key(session: &SessionInfo, cwd: &Path) -> (u8, std::cmp::Reverse<u64>, std::cmp::Reverse<u64>) {
-    let session_path = Path::new(&session.cwd);
-    let same_project = if session.cwd == cwd.to_string_lossy() {
-        0
-    } else if session_path == cwd {
-        0
-    } else if session_path.starts_with(cwd) || cwd.starts_with(session_path) {
-        1
-    } else if session_path.file_name() == cwd.file_name() {
-        2
-    } else {
-        3
-    };
-    (
-        same_project,
-        std::cmp::Reverse(session.updated_at),
-        std::cmp::Reverse(session.created_at),
-    )
-}
-
-fn startup_session_preview_line(session: &SessionInfo, max_chars: usize) -> String {
-    let preview = session
-        .summary
-        .as_deref()
-        .filter(|summary| !summary.trim().is_empty())
-        .map(|summary| summary.trim().to_string())
-        .or_else(|| {
-            session
-                .first_message
-                .as_deref()
-                .filter(|text| !text.trim().is_empty())
-                .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
-        })
-        .unwrap_or_else(|| "(no summary yet)".to_string());
-    truncate_chars_with_suffix(&preview, max_chars, "…")
-}
-
-fn startup_project_label(path: &str) -> String {
-    Path::new(path)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| ".".to_string())
-}
-
-fn startup_format_age(updated_at: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let delta = now.saturating_sub(updated_at);
-    if delta < 60 {
-        "just now".into()
-    } else if delta < 3600 {
-        format!("{}m ago", delta / 60)
-    } else if delta < 86400 {
-        format!("{}h ago", delta / 3600)
-    } else {
-        format!("{}d ago", delta / 86400)
-    }
-}
-
-fn startup_quickstart_lines(
-    repo_label: &str,
-    tool_count: usize,
-    skill_count: usize,
-    has_agents_docs: bool,
-    has_project_soul: bool,
-    has_mana: bool,
-    has_recent_sessions: bool,
-    needs_auth: bool,
-) -> Vec<String> {
-    let mut lines = Vec::new();
-
-    if needs_auth {
-        lines.push("• first: run /setup so imp can connect to a provider".to_string());
-    }
-
-    lines.push(format!(
-        "• try: inspect {repo_label} and explain how this repo is organized"
-    ));
-
-    if has_agents_docs {
-        lines.push(
-            "• try: read the local instructions and tell me how to work well here".to_string(),
-        );
-    }
-
-    if has_project_soul {
-        lines.push(
-            "• try: summarize the project soul and what it changes in imp's behavior"
-                .to_string(),
-        );
-    }
-
-    if has_mana {
-        lines.push(
-            "• try: inspect mana and tell me what work is active or should happen next"
-                .to_string(),
-        );
-    }
-
-    if has_recent_sessions {
-        lines.push(
-            "• try: summarize the most relevant recent session before we continue"
-                .to_string(),
-        );
-    }
-
-    lines.push(format!(
-        "• available now: {tool_count} tools and {skill_count} discovered skills"
-    ));
-
-    lines.truncate(5);
-    lines
-}
-
-fn build_generated_prompt_preview(
-    visible_prompt_tools: &[String],
-    mode: imp_core::config::AgentMode,
-    cwd: &std::path::Path,
-    learning_enabled: bool,
-    guardrail_profile: imp_core::guardrails::GuardrailProfile,
-    personality: &imp_core::personality::PersonalityProfile,
-    provider_id: Option<&str>,
-) -> String {
-    let mut lines = Vec::new();
-    lines.push(personality.identity.render_sentence());
-    lines.push(String::new());
-    lines.push("Available tools:".to_string());
-    for tool in visible_prompt_tools {
-        lines.push(format!("- {tool}"));
-    }
-    lines.push(String::new());
-    lines.push("Execution discipline and tool-usage doctrine are active.".to_string());
-    lines.push(format!("Mode: {:?}", mode));
-    lines.push(format!("Guardrails: {guardrail_profile:?}"));
-    lines.push(format!(
-        "Learning enabled: {}",
-        if learning_enabled { "yes" } else { "no" }
-    ));
-    if let Some(provider) = provider_id {
-        lines.push(format!("Resolved provider context: {provider}"));
-    }
-    lines.push(format!(
-        "Environment: cwd={}, os={}, home={}",
-        cwd.display(),
-        std::env::consts::OS,
-        std::env::var("HOME").unwrap_or_default()
-    ));
-    lines.push(String::new());
-    lines.push("Excluded from this preview: AGENTS.md / CLAUDE.md, skill files, soul.md, mana facts, project memory status, and other file-backed prompt context.".to_string());
     lines.join("\n")
 }
 
@@ -555,7 +389,7 @@ fn provider_logged_in(auth_store: &AuthStore, provider: &str) -> bool {
 }
 
 fn oauth_provider(provider: &str) -> bool {
-    matches!(provider, "anthropic" | "openai" | "openai-codex")
+    matches!(provider, "anthropic" | "openai" | "openai-codex" | "kimi-code")
 }
 
 fn parse_secret_field_names(input: &str) -> Vec<String> {
@@ -602,6 +436,22 @@ fn model_picker_chatgpt_oauth_models(
         .collect()
 }
 
+fn merge_model_options_with_oauth_only_models(
+    mut models: Vec<ModelMeta>,
+    oauth_only_models: Vec<ModelMeta>,
+) -> Vec<ModelMeta> {
+    if oauth_only_models.is_empty() {
+        return models;
+    }
+
+    let insert_at = models
+        .iter()
+        .rposition(|model| model.provider == "openai")
+        .map_or(models.len(), |index| index + 1);
+    models.splice(insert_at..insert_at, oauth_only_models);
+    models
+}
+
 fn filtered_model_options(
     registry: &ModelRegistry,
     config: &Config,
@@ -611,8 +461,10 @@ fn filtered_model_options(
 
     match &config.enabled_models {
         Some(enabled) if !enabled.is_empty() => {
-            let mut available_models = registry.list().to_vec();
-            available_models.extend(oauth_only_models);
+            let available_models = merge_model_options_with_oauth_only_models(
+                registry.list().to_vec(),
+                oauth_only_models,
+            );
 
             let available_ids: HashSet<&str> = available_models.iter().map(|m| m.id.as_str()).collect();
             let enabled_ids: HashSet<String> = enabled
@@ -627,14 +479,13 @@ fn filtered_model_options(
                 .collect()
         }
         _ => {
-            let mut visible_models: Vec<ModelMeta> = registry
+            let visible_models: Vec<ModelMeta> = registry
                 .list()
                 .iter()
                 .filter(|model| auth_store.has_credentials(&model.provider))
                 .cloned()
                 .collect();
-            visible_models.extend(oauth_only_models);
-            visible_models
+            merge_model_options_with_oauth_only_models(visible_models, oauth_only_models)
         }
     }
 }
@@ -1319,10 +1170,6 @@ impl App {
     fn build_startup_surface(&self) -> StartupSurfaceData {
         let user_config_dir = imp_core::config::Config::user_config_dir();
         let skills = imp_core::resources::discover_skills(&self.cwd, &user_config_dir);
-        let agents_docs = imp_core::resources::discover_agents_md(&self.cwd, &user_config_dir);
-        let has_agents_docs = !agents_docs.is_empty();
-        let has_project_soul = imp_core::resources::discover_project_soul(&self.cwd).is_some();
-        let has_mana = imp_core::mana_prompt_context::nearest_mana_dir(&self.cwd).is_some();
         let lua_extensions = discover_extensions(&user_config_dir, Some(&self.cwd));
         let repo_label = self
             .cwd
@@ -1374,7 +1221,6 @@ impl App {
         } else {
             "needs auth"
         };
-        let needs_auth = provider_auth != "ready";
         let web_summary = self
             .config
             .web
@@ -1398,24 +1244,11 @@ impl App {
             .unwrap_or_else(|| "new chat".to_string());
         let session_lines = vec![
             format!("• project: {repo_label}"),
-            format!("• cwd: {}", self.cwd.display()),
             format!("• session: {session_name}"),
             format!("• model: {}", self.model_name),
             format!("• provider: {provider_id} ({provider_auth})"),
             format!("• thinking: {:?}", self.thinking_level),
             format!("• web: {web_summary}"),
-            format!("• lua extensions: {lua_extension_summary}"),
-            format!(
-                "• slash commands: {}",
-                summarize_inline(
-                    command_lines
-                        .iter()
-                        .filter_map(|line| line.trim().strip_prefix('•'))
-                        .map(|line| line.trim().to_string())
-                        .collect(),
-                    4,
-                )
-            ),
         ];
 
         let visible_prompt_tools = {
@@ -1430,140 +1263,84 @@ impl App {
             names
         };
 
-        let generated_prompt_preview = build_generated_prompt_preview(
-            &visible_prompt_tools,
-            self.config.mode,
-            self.cwd.as_path(),
-            self.config.learning.enabled,
-            self.config.guardrails.resolve_effective_profile(&self.cwd),
-            &self.config.personality.profile,
-            self.current_model_meta_for_persistence()
-                .as_ref()
-                .map(|meta| meta.provider.as_str()),
-        );
-        let prompt_preview = truncate_preview(&generated_prompt_preview, 18, 1800);
-        let prompt_tokens = imp_core::context::estimate_tokens(&generated_prompt_preview);
-
-        let recent_sessions = startup_recent_sessions(&self.cwd);
-        let has_recent_sessions = !recent_sessions.is_empty();
-        let recent_session_lines = if recent_sessions.is_empty() {
-            vec!["• none yet — use /resume once you have saved chats".to_string()]
-        } else {
-            let mut lines = Vec::new();
-            for session in &recent_sessions {
-                let title = session
-                    .title(28)
-                    .unwrap_or_else(|| "(unnamed session)".to_string());
-                let meta = format!(
-                    "{} • {} msg • {}",
-                    startup_project_label(&session.cwd),
-                    session.message_count,
-                    startup_format_age(session.updated_at)
-                );
-                let preview = startup_session_preview_line(session, 56);
-                lines.push(format!("• {title}"));
-                lines.push(format!("  {meta}"));
-                lines.push(format!("  {preview}"));
-            }
-            lines.push("• /resume opens full browse + search".to_string());
-            lines
-        };
-
         let actions = vec![
             StartupAction {
                 trigger: "type".to_string(),
-                label: "give imp a concrete task".to_string(),
-                description: format!("inspect {repo_label}, explain code, or make a change"),
+                label: "start".to_string(),
+                description: "question, goal, sketch, or task".to_string(),
             },
             StartupAction {
                 trigger: "/resume".to_string(),
-                label: "return to earlier work".to_string(),
-                description: "browse and search saved sessions".to_string(),
-            },
-            StartupAction {
-                trigger: "/setup".to_string(),
-                label: "connect providers".to_string(),
-                description: format!("provider {provider_id}; web {web_summary}"),
-            },
-            StartupAction {
-                trigger: "Ctrl+L".to_string(),
-                label: "switch model".to_string(),
-                description: format!("current: {}", self.model_name),
+                label: "sessions".to_string(),
+                description: "browse and search saved work".to_string(),
             },
             StartupAction {
                 trigger: "/settings".to_string(),
-                label: "adjust runtime".to_string(),
-                description: format!("mode {mode}; thinking {:?}", self.thinking_level),
+                label: "runtime".to_string(),
+                description: format!("{mode}; thinking {:?}", self.thinking_level),
             },
             StartupAction {
-                trigger: "/help".to_string(),
-                label: "see commands + shortcuts".to_string(),
-                description: "discover memory, sessions, and other paths".to_string(),
+                trigger: "Ctrl+L".to_string(),
+                label: "model".to_string(),
+                description: format!("{}", self.model_name),
             },
+        ];
+
+        let tool_lines = visible_prompt_tools
+            .iter()
+            .map(|name| format!("• {name}"))
+            .collect::<Vec<_>>();
+
+        let skill_lines = if skills.is_empty() {
+            vec!["• none discovered".to_string()]
+        } else {
+            let mut lines = skills
+                .iter()
+                .take(8)
+                .map(|skill| format!("• {}", skill.name))
+                .collect::<Vec<_>>();
+            let hidden = skills.len().saturating_sub(lines.len());
+            if hidden > 0 {
+                lines.push(format!("… +{hidden} more"));
+            }
+            lines
+        };
+
+        let command_names = command_lines
+            .iter()
+            .filter_map(|line| line.trim().strip_prefix('•'))
+            .map(|line| line.trim().to_string())
+            .collect::<Vec<_>>();
+        let extension_lines = vec![
+            format!("• lua: {lua_extension_summary}"),
+            format!("• lua commands: {}", summarize_inline(command_names, 5)),
+            "• shell: /new, /model, /resume, /settings, /personality, /setup".to_string(),
+            format!("• mode: {mode}"),
         ];
 
         let sections = vec![
             StartupSection {
-                title: "quickstart".to_string(),
-                lines: startup_quickstart_lines(
-                    &repo_label,
-                    visible_prompt_tools.len(),
-                    skills.len(),
-                    has_agents_docs,
-                    has_project_soul,
-                    has_mana,
-                    has_recent_sessions,
-                    needs_auth,
-                ),
-            },
-            StartupSection {
-                title: "this session".to_string(),
+                title: "session".to_string(),
                 lines: session_lines,
             },
             StartupSection {
-                title: "available here".to_string(),
-                lines: vec![
-                    format!(
-                        "• built-in tools: {}",
-                        summarize_inline(
-                            visible_prompt_tools
-                                .iter()
-                                .take(6)
-                                .map(|name| name.to_string())
-                                .collect(),
-                            4,
-                        )
-                    ),
-                    format!(
-                        "• skills: {}",
-                        if skills.is_empty() {
-                            "none discovered".to_string()
-                        } else {
-                            summarize_inline(
-                                skills.iter().map(|skill| skill.name.clone()).collect(),
-                                3,
-                            )
-                        }
-                    ),
-                    "• sessions can be resumed or forked later".to_string(),
-                    "• planning and follow-up work can go into mana".to_string(),
-                ],
+                title: "tools".to_string(),
+                lines: tool_lines,
             },
             StartupSection {
-                title: "recent sessions".to_string(),
-                lines: recent_session_lines,
+                title: "skills".to_string(),
+                lines: skill_lines,
+            },
+            StartupSection {
+                title: "extensions".to_string(),
+                lines: extension_lines,
             },
         ];
 
         StartupSurfaceData {
             panel: StartupPanelData {
-                headline: "imp is ready. start with a request, not a blank screen.".to_string(),
-                subtitle: "You already have project context, runtime defaults, and the fastest next actions in view.".to_string(),
-                hint: "Smaller layouts keep the next action list first; wider layouts also show session state, recent work, and a prompt preview.".to_string(),
                 actions,
                 sections,
-                prompt_preview,
-                prompt_tokens,
             },
         }
     }
@@ -3315,7 +3092,7 @@ impl App {
                     "  /reload     — reload config\n",
                     "  /settings   — edit settings\n",
                     "  /personality — customize imp personality\n",
-                    "  /login [provider]   — OAuth login (Anthropic/OpenAI)\n",
+                    "  /login [provider]   — OAuth login (Anthropic/OpenAI/Kimi Code)\n",
                     "  /secrets [provider] — save/list API keys & service secrets\n",
                     "  /help       — this message\n",
                     "  /quit       — exit",
@@ -3667,6 +3444,7 @@ impl App {
         let status_message = match provider {
             "anthropic" => "Opening browser for Anthropic login...",
             "openai" | "openai-codex" => "Opening browser for OpenAI / ChatGPT login...",
+            "kimi-code" => "Opening browser for Kimi Code login...",
             _ => {
                 self.messages.push(DisplayMessage {
                     role: MessageRole::Error,
@@ -3710,6 +3488,19 @@ impl App {
                         )
                         .await
                 }
+                "kimi-code" => {
+                    imp_llm::oauth::kimi_code::KimiCodeOAuth::new()
+                        .login(
+                            |url| {
+                                open_url(url);
+                            },
+                            |_msg| {
+                                // Messages are silently dropped in the TUI background task;
+                                // the browser URL is the primary signal.
+                            },
+                        )
+                        .await
+                }
                 _ => unreachable!(),
             };
 
@@ -3738,6 +3529,12 @@ impl App {
                             );
                             let _ = store.store(
                                 "openai-codex",
+                                imp_llm::auth::StoredCredential::OAuth(credential),
+                            );
+                        }
+                        "kimi-code" => {
+                            let _ = store.store(
+                                "kimi-code",
                                 imp_llm::auth::StoredCredential::OAuth(credential),
                             );
                         }
@@ -5445,7 +5242,9 @@ mod session_lifecycle {
     #[test]
     fn filtered_model_options_includes_chatgpt_oauth_only_models() {
         let registry = ModelRegistry::with_builtins();
-        let mut auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
+        let tmp = tempfile::tempdir().unwrap();
+        let auth_path = tmp.path().join("auth.json");
+        let mut auth_store = AuthStore::new(auth_path);
         auth_store
             .store(
                 "openai",
@@ -5463,12 +5262,24 @@ mod session_lifecycle {
             .find(|model| model.id == "gpt-5.5")
             .expect("gpt-5.5 should be visible for ChatGPT OAuth users");
         assert_eq!(model.provider, "openai");
+
+        let openai_model_index = models
+            .iter()
+            .position(|model| model.id == "gpt-5.3-codex-spark")
+            .expect("built-in OpenAI model should be visible");
+        let oauth_model_index = models
+            .iter()
+            .position(|model| model.id == "gpt-5.5")
+            .expect("ChatGPT OAuth-only model should be visible");
+        assert!(openai_model_index < oauth_model_index);
     }
 
     #[test]
     fn filtered_model_options_hides_chatgpt_oauth_only_models_when_openai_api_key_exists() {
         let registry = ModelRegistry::with_builtins();
-        let mut auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
+        let tmp = tempfile::tempdir().unwrap();
+        let auth_path = tmp.path().join("auth.json");
+        let mut auth_store = AuthStore::new(auth_path);
         auth_store
             .store(
                 "openai",

@@ -269,8 +269,13 @@ impl ImpSession {
 
         // 3. Resolve model + provider route
         let model_registry = ModelRegistry::with_builtins();
-        let (model, _provider_name, api_key) = if let Some(model) = options.model_override.as_ref() {
-            (clone_model(model), model.meta.provider.clone(), String::new())
+        let (model, _provider_name, api_key) = if let Some(model) = options.model_override.as_ref()
+        {
+            (
+                clone_model(model),
+                model.meta.provider.clone(),
+                String::new(),
+            )
         } else {
             let runtime_connection = resolve_runtime_connection(
                 RuntimeConnectionIntent {
@@ -524,6 +529,14 @@ impl ImpSession {
             .map_err(|_| Error::Config("Agent not running".into()))
     }
 
+    /// Force-abort the current agent task when graceful cancellation does not finish.
+    pub fn abort(&mut self) {
+        if let Some(task) = self.agent_task.take() {
+            task.abort();
+            self.completed_run_result = Some(Err(Error::Cancelled));
+        }
+    }
+
     // ── Events ──────────────────────────────────────────────────
 
     /// Receive the next event from the agent.
@@ -714,7 +727,7 @@ impl ImpSession {
 async fn resolve_api_key(auth_store: &mut AuthStore, provider: &str) -> Result<ApiKey> {
     let result = match provider {
         "openai-codex" => auth_store.resolve_chatgpt_oauth().await,
-        "anthropic" => auth_store.resolve_with_refresh(provider).await,
+        "anthropic" | "kimi-code" => auth_store.resolve_with_refresh(provider).await,
         _ => auth_store.resolve(provider),
     };
     result.map_err(|e| Error::Config(format!("Auth failed for {provider}: {e}")))
@@ -1198,6 +1211,63 @@ mod tests {
         assert!(next.is_none());
 
         session.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abort_marks_wait_as_cancelled() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let (agent, handle) = Agent::new(
+            test_model_with_events(vec![Ok(StreamEvent::MessageEnd {
+                message: AssistantMessage {
+                    content: vec![ContentBlock::Text { text: "done".into() }],
+                    usage: None,
+                    stop_reason: StopReason::EndTurn,
+                    timestamp: 1,
+                },
+            })]),
+            cwd.clone(),
+        );
+        let mut session = ImpSession {
+            agent: Some(agent),
+            handle,
+            session_mgr: SessionManager::in_memory(),
+            config: Config::default(),
+            model: test_model_with_events(vec![Ok(StreamEvent::MessageEnd {
+                message: AssistantMessage {
+                    content: vec![ContentBlock::Text { text: "done".into() }],
+                    usage: None,
+                    stop_reason: StopReason::EndTurn,
+                    timestamp: 1,
+                },
+            })]),
+            auth_store: AuthStore::new(tmp.path().join("auth.json")),
+            model_registry: ModelRegistry::with_builtins(),
+            cwd,
+            agent_task: Some(tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                (Agent::new(
+                    test_model_with_events(vec![Ok(StreamEvent::MessageEnd {
+                        message: AssistantMessage {
+                            content: vec![ContentBlock::Text { text: "done".into() }],
+                            usage: None,
+                            stop_reason: StopReason::EndTurn,
+                            timestamp: 1,
+                        },
+                    })]),
+                    PathBuf::from("/tmp"),
+                )
+                .0, Ok(()))
+            })),
+            completed_run_result: None,
+            pending_persistence_errors: VecDeque::new(),
+            context_prefill: Vec::new(),
+            context_prefill_injected: false,
+        };
+
+        session.abort();
+        let result = session.wait().await;
+        assert!(matches!(result, Err(Error::Cancelled)));
     }
 
     #[tokio::test]

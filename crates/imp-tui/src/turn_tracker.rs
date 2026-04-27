@@ -4,6 +4,18 @@
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
+fn abbreviate_home_path(path: &str) -> String {
+    for prefix in ["/Users/", "/home/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            if let Some((_, suffix)) = rest.split_once('/') {
+                return format!("~/{suffix}");
+            }
+            return "~".to_string();
+        }
+    }
+    path.to_string()
+}
+
 /// Tracks tool calls, file accesses, and command runs during a single agent turn.
 ///
 /// Designed to be reset at `AgentStart` and queried at any point during or
@@ -91,18 +103,19 @@ impl TurnTracker {
         match name {
             "read" => {
                 if let Some(path) = args["path"].as_str() {
-                    self.files_read.insert(path.to_string());
+                    self.files_read.insert(abbreviate_home_path(path));
                 }
             }
             "edit" | "multi_edit" => {
                 if let Some(path) = args["path"].as_str() {
-                    self.files_written.insert(path.to_string());
+                    self.files_written.insert(abbreviate_home_path(path));
                 }
             }
             "write" => {
                 if let Some(path) = args["path"].as_str() {
-                    self.files_written.insert(path.to_string());
-                    self.files_created.insert(path.to_string());
+                    let path = abbreviate_home_path(path);
+                    self.files_written.insert(path.clone());
+                    self.files_created.insert(path);
                 }
             }
             "bash" => {
@@ -144,17 +157,17 @@ mod tests {
     fn classifies_read_and_write_tools() {
         let mut tracker = TurnTracker::new();
 
-        tracker.record_tool_start("id-1", "read", &json!({"path": "/tmp/foo.txt"}));
-        tracker.record_tool_start("id-2", "write", &json!({"path": "/tmp/bar.txt"}));
-        tracker.record_tool_start("id-3", "edit", &json!({"path": "/tmp/baz.txt"}));
+        tracker.record_tool_start("id-1", "read", &json!({"path": "/Users/test/foo.txt"}));
+        tracker.record_tool_start("id-2", "write", &json!({"path": "/Users/test/bar.txt"}));
+        tracker.record_tool_start("id-3", "edit", &json!({"path": "/Users/test/baz.txt"}));
 
         assert_eq!(tracker.tool_calls_started, 3);
-        assert!(tracker.files_read.contains("/tmp/foo.txt"));
-        assert!(tracker.files_written.contains("/tmp/bar.txt"));
-        assert!(tracker.files_created.contains("/tmp/bar.txt"));
-        assert!(tracker.files_written.contains("/tmp/baz.txt"));
+        assert!(tracker.files_read.contains("~/foo.txt"));
+        assert!(tracker.files_written.contains("~/bar.txt"));
+        assert!(tracker.files_created.contains("~/bar.txt"));
+        assert!(tracker.files_written.contains("~/baz.txt"));
         // edit should NOT go into files_created
-        assert!(!tracker.files_created.contains("/tmp/baz.txt"));
+        assert!(!tracker.files_created.contains("~/baz.txt"));
 
         tracker.record_tool_end("id-1", false);
         tracker.record_tool_end("id-2", false);
@@ -214,7 +227,7 @@ mod tests {
             tracker.record_tool_start(
                 &format!("id-{i}"),
                 "read",
-                &json!({"path": "/tmp/same.txt"}),
+                &json!({"path": "/Users/test/same.txt"}),
             );
         }
 

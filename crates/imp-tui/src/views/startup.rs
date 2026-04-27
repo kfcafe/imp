@@ -21,13 +21,8 @@ pub struct StartupSection {
 
 #[derive(Debug, Clone, Default)]
 pub struct StartupPanelData {
-    pub headline: String,
-    pub subtitle: String,
-    pub hint: String,
     pub actions: Vec<StartupAction>,
     pub sections: Vec<StartupSection>,
-    pub prompt_preview: String,
-    pub prompt_tokens: u32,
 }
 
 pub struct StartupPanelView<'a> {
@@ -48,10 +43,7 @@ impl Widget for StartupPanelView<'_> {
         }
 
         let outer = Block::default()
-            .title(Line::from(vec![
-                Span::styled(" imp ", self.theme.accent_style()),
-                Span::styled("ready", self.theme.muted_style()),
-            ]))
+            .title(Line::from(Span::styled(" imp ", self.theme.accent_style())))
             .borders(Borders::ALL)
             .border_style(self.theme.border_style());
         let inner = outer.inner(area);
@@ -60,86 +52,23 @@ impl Widget for StartupPanelView<'_> {
         if inner.height < 12 {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(2), Constraint::Min(3)])
+                .constraints([Constraint::Length(3), Constraint::Min(3)])
                 .split(inner);
-            render_header(chunks[0], buf, self.theme, self.data);
-            render_actions(chunks[1], buf, self.theme, &self.data.actions);
+            render_actions(chunks[0], buf, self.theme, &self.data.actions);
+            render_sections(chunks[1], buf, self.theme, &self.data.sections);
             return;
         }
 
-        let show_prompt = should_show_prompt_preview(
-            inner.width,
-            inner.height,
-            !self.data.prompt_preview.is_empty(),
-        );
-        let prompt_height = if show_prompt {
-            (inner.height / 4).clamp(6, 10)
-        } else {
-            0
-        };
-        let header_height = if inner.width < 48 { 3 } else { 4 };
         let actions_height = action_block_height(inner.width, self.data.actions.len());
 
-        let chunks = if prompt_height > 0 {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(header_height),
-                    Constraint::Length(actions_height),
-                    Constraint::Min(6),
-                    Constraint::Length(prompt_height),
-                ])
-                .split(inner)
-        } else {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(header_height),
-                    Constraint::Length(actions_height),
-                    Constraint::Min(6),
-                ])
-                .split(inner)
-        };
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(actions_height), Constraint::Min(6)])
+            .split(inner);
 
-        render_header(chunks[0], buf, self.theme, self.data);
-        render_actions(chunks[1], buf, self.theme, &self.data.actions);
-        render_sections(chunks[2], buf, self.theme, &self.data.sections);
-
-        if prompt_height > 0 {
-            render_prompt_preview(chunks[3], buf, self.theme, self.data);
-        }
+        render_actions(chunks[0], buf, self.theme, &self.data.actions);
+        render_sections(chunks[1], buf, self.theme, &self.data.sections);
     }
-}
-
-fn render_header(area: Rect, buf: &mut Buffer, theme: &Theme, data: &StartupPanelData) {
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-
-    let mut text = vec![Line::from(Span::styled(
-        data.headline.as_str(),
-        Style::default().add_modifier(Modifier::BOLD),
-    ))];
-
-    if area.height >= 2 {
-        let secondary = if area.width < 48 {
-            data.hint.as_str()
-        } else {
-            data.subtitle.as_str()
-        };
-        text.push(Line::from(Span::styled(secondary, theme.muted_style())));
-    }
-
-    if area.height >= 3 && area.width >= 48 {
-        text.push(Line::from(vec![
-            Span::styled("Tip: ", theme.accent_style()),
-            Span::styled(data.hint.as_str(), theme.muted_style()),
-        ]));
-    }
-
-    Paragraph::new(text)
-        .wrap(Wrap { trim: false })
-        .render(area, buf);
 }
 
 fn render_actions(area: Rect, buf: &mut Buffer, theme: &Theme, actions: &[StartupAction]) {
@@ -148,7 +77,10 @@ fn render_actions(area: Rect, buf: &mut Buffer, theme: &Theme, actions: &[Startu
     }
 
     let block = Block::default()
-        .title(Line::from(Span::styled(" next actions ", theme.header_style())))
+        .title(Line::from(Span::styled(
+            " common actions ",
+            theme.header_style(),
+        )))
         .borders(Borders::ALL)
         .border_style(theme.accent_style());
     let inner = block.inner(area);
@@ -178,14 +110,14 @@ fn render_action_lines(area: Rect, buf: &mut Buffer, theme: &Theme, actions: &[S
         .map(|action| {
             Line::from(vec![
                 Span::styled(
-                format!(" {:<10}", action.trigger),
-                theme.accent_style().add_modifier(Modifier::BOLD),
-            ),
-                Span::styled(action.label.clone(), Style::default()),
-                Span::styled(
-                    format!(" — {}", action.description),
-                    theme.muted_style(),
+                    format!(" {:<11}", action.trigger),
+                    theme.accent_style().add_modifier(Modifier::BOLD),
                 ),
+                Span::styled(
+                    action.label.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  {}", action.description), theme.muted_style()),
             ])
         })
         .collect::<Vec<_>>();
@@ -202,6 +134,17 @@ fn render_sections(area: Rect, buf: &mut Buffer, theme: &Theme, sections: &[Star
 
     let visible_count = visible_section_count(area.width, area.height, sections.len());
     let visible_sections = &sections[..visible_count];
+
+    if area.width >= 96 {
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25), Constraint::Percentage(25)])
+            .split(area);
+        for (section, rect) in visible_sections.iter().zip(columns.iter().copied()) {
+            render_section(rect, buf, theme, section);
+        }
+        return;
+    }
 
     match visible_sections.len() {
         0 => {}
@@ -261,10 +204,11 @@ fn render_sections(area: Rect, buf: &mut Buffer, theme: &Theme, sections: &[Star
             }
         }
         _ => {
-            let constraints = vec![
-                Constraint::Length((area.height / visible_sections.len() as u16).max(3));
-                visible_sections.len()
-            ];
+            let constraints =
+                vec![
+                    Constraint::Length((area.height / visible_sections.len() as u16).max(3));
+                    visible_sections.len()
+                ];
             let rows = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints(constraints)
@@ -297,7 +241,7 @@ fn render_section(area: Rect, buf: &mut Buffer, theme: &Theme, section: &Startup
         section
             .lines
             .iter()
-            .map(|line| Line::from(Span::raw(line.clone())))
+            .map(|line| render_section_line(line, theme))
             .collect()
     };
 
@@ -306,27 +250,23 @@ fn render_section(area: Rect, buf: &mut Buffer, theme: &Theme, section: &Startup
         .render(inner, buf);
 }
 
-fn render_prompt_preview(area: Rect, buf: &mut Buffer, theme: &Theme, data: &StartupPanelData) {
-    if area.height < 3 || area.width < 20 {
-        return;
+fn render_section_line(line: &str, theme: &Theme) -> Line<'static> {
+    if let Some(rest) = line.strip_prefix("• ") {
+        if let Some((label, value)) = rest.split_once(':') {
+            return Line::from(vec![
+                Span::styled("• ", theme.accent_style()),
+                Span::styled(format!("{label}:"), theme.muted_style()),
+                Span::raw(value.to_string()),
+            ]);
+        }
+
+        return Line::from(vec![
+            Span::styled("• ", theme.accent_style()),
+            Span::raw(rest.to_string()),
+        ]);
     }
 
-    let block = Block::default()
-        .title(Line::from(vec![
-            Span::styled(" prompt preview ", theme.header_style()),
-            Span::styled(
-                format!("~{} tok · excludes file-backed context", data.prompt_tokens),
-                theme.muted_style(),
-            ),
-        ]))
-        .borders(Borders::ALL)
-        .border_style(theme.border_style());
-    let inner = block.inner(area);
-    block.render(area, buf);
-
-    Paragraph::new(data.prompt_preview.as_str())
-        .wrap(Wrap { trim: false })
-        .render(inner, buf);
+    Line::from(Span::styled(line.to_string(), theme.muted_style()))
 }
 
 fn action_block_height(width: u16, action_count: usize) -> u16 {
@@ -339,10 +279,6 @@ fn action_block_height(width: u16, action_count: usize) -> u16 {
     } else {
         (action_count as u16 + 2).clamp(4, 8)
     }
-}
-
-fn should_show_prompt_preview(width: u16, height: u16, has_preview: bool) -> bool {
-    has_preview && width >= 70 && height >= 24
 }
 
 fn visible_section_count(width: u16, height: u16, total: usize) -> usize {

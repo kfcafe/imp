@@ -48,7 +48,11 @@ pub fn create_provider(name: &str) -> Option<Box<dyn Provider>> {
                 .into_iter()
                 .cloned()
                 .collect();
-            Some(Box::new(OpenAiCompatProvider::new(name, base_url, models)))
+            let mut provider = OpenAiCompatProvider::new(name, base_url, models);
+            if name == "kimi-code" {
+                provider = provider.with_default_headers(crate::oauth::kimi_code::common_headers());
+            }
+            Some(Box::new(provider))
         }
     }
 }

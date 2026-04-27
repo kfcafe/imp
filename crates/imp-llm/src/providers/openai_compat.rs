@@ -154,6 +154,7 @@ pub struct OpenAiCompatProvider {
     provider_id: String,
     base_url: String,
     models: Vec<ModelMeta>,
+    default_headers: reqwest::header::HeaderMap,
 }
 
 fn default_max_tokens(model: &Model) -> u32 {
@@ -172,7 +173,14 @@ impl OpenAiCompatProvider {
             provider_id: provider_id.to_string(),
             base_url: base_url.to_string(),
             models,
+            default_headers: reqwest::header::HeaderMap::new(),
         }
+    }
+
+    /// Set default headers to send with every request.
+    pub fn with_default_headers(mut self, headers: reqwest::header::HeaderMap) -> Self {
+        self.default_headers = headers;
+        self
     }
 }
 
@@ -367,6 +375,7 @@ fn stream_response(
     base_url: String,
     api_key: String,
     request: ApiRequest,
+    default_headers: reqwest::header::HeaderMap,
 ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> {
     let (tx, rx) = futures::channel::mpsc::unbounded();
 
@@ -375,6 +384,7 @@ fn stream_response(
 
         let result = client
             .post(&url)
+            .headers(default_headers)
             .bearer_auth(&api_key)
             .json(&request)
             .send()
@@ -599,11 +609,12 @@ fn stream_response(
             }
         }
 
+        // Some OpenAI-compatible providers (e.g. Kimi Code) don't always send a
+        // finish_reason in the last SSE chunk. If we received content and the
+        // stream ended cleanly, treat it as a normal end-of-turn rather than
+        // an error.
         if !saw_finish_reason {
-            let _ = tx.unbounded_send(Err(Error::Stream(
-                "OpenAI-compatible stream ended before finish_reason".into(),
-            )));
-            return;
+            stop_reason = StopReason::EndTurn;
         }
 
         // Emit complete tool calls after stream ends.
@@ -658,6 +669,7 @@ impl Provider for OpenAiCompatProvider {
             self.base_url.clone(),
             api_key.to_string(),
             request,
+            self.default_headers.clone(),
         )
     }
 

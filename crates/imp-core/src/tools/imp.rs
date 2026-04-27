@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use imp_llm::ThinkingLevel;
 use imp_llm::{AssistantMessage, ContentBlock};
 use serde_json::json;
+use std::time::Duration;
 
 use super::{Tool, ToolContext, ToolOutput};
 use crate::config::AgentMode;
@@ -10,6 +11,9 @@ use crate::imp_session::{ImpSession, SessionChoice, SessionOptions};
 use crate::mana_worker::{self, WorkerRunOptions};
 
 pub struct ImpTool;
+
+const DEFAULT_AD_HOC_SPAWN_TIMEOUT_SECS: u64 = 300;
+const AD_HOC_SPAWN_CANCEL_GRACE_SECS: u64 = 5;
 
 #[async_trait]
 impl Tool for ImpTool {
@@ -61,6 +65,10 @@ impl Tool for ImpTool {
                 "max_turns": { "type": "number" },
                 "max_tokens": { "type": "number" },
                 "system_prompt": { "type": "string" },
+                "timeout_secs": {
+                    "type": "number",
+                    "description": "Maximum wall-clock time for ad_hoc spawn before it is cancelled and returns an error. Defaults to 300 seconds."
+                },
                 "no_tools": { "type": "boolean" },
                 "idempotency_key": {
                     "type": "string",
@@ -294,7 +302,24 @@ async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Resu
     })
 }
 
+fn ad_hoc_spawn_timeout_secs(params: &serde_json::Value) -> u64 {
+    params
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DEFAULT_AD_HOC_SPAWN_TIMEOUT_SECS)
+}
+
+fn ad_hoc_spawn_timeout_error(timeout_secs: u64) -> Error {
+    Error::Tool(format!(
+        "ad_hoc spawn timed out after {timeout_secs}s and was cancelled"
+    ))
+}
+
 async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Result<ToolOutput> {
+    let timeout_secs = ad_hoc_spawn_timeout_secs(&params);
+    let timeout = Duration::from_secs(timeout_secs);
+    let cancel_grace = Duration::from_secs(AD_HOC_SPAWN_CANCEL_GRACE_SECS);
     let prompt = params
         .get("prompt")
         .and_then(|v| v.as_str())
@@ -347,9 +372,22 @@ async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Re
         .await
         .map_err(|e| Error::Tool(e.to_string()))?;
     session
-        .prompt_and_wait(prompt)
+        .prompt(prompt)
         .await
         .map_err(|e| Error::Tool(e.to_string()))?;
+    match tokio::time::timeout(timeout, session.wait()).await {
+        Ok(result) => result.map_err(|e| Error::Tool(e.to_string()))?,
+        Err(_) => {
+            let _ = session.cancel().await;
+            if tokio::time::timeout(cancel_grace, session.wait())
+                .await
+                .is_err()
+            {
+                session.abort();
+            }
+            return Err(ad_hoc_spawn_timeout_error(timeout_secs));
+        }
+    }
 
     let final_text = extract_final_assistant_text(&session);
     let outcome = build_ad_hoc_spawn_outcome(final_text);
@@ -369,6 +407,7 @@ async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Re
             idempotency_key,
             json!({
                 "final_text": outcome.final_text,
+                "timeout_secs": timeout_secs,
             }),
         ),
         is_error: false,
@@ -456,6 +495,20 @@ mod tests {
             schema["properties"]["prompt"]["type"].as_str(),
             Some("string")
         );
+        assert_eq!(
+            schema["properties"]["timeout_secs"]["type"].as_str(),
+            Some("number")
+        );
+    }
+
+    #[test]
+    fn ad_hoc_spawn_timeout_defaults_when_missing_or_invalid() {
+        assert_eq!(ad_hoc_spawn_timeout_secs(&json!({})), DEFAULT_AD_HOC_SPAWN_TIMEOUT_SECS);
+        assert_eq!(
+            ad_hoc_spawn_timeout_secs(&json!({"timeout_secs": 0})),
+            DEFAULT_AD_HOC_SPAWN_TIMEOUT_SECS
+        );
+        assert_eq!(ad_hoc_spawn_timeout_secs(&json!({"timeout_secs": 12})), 12);
     }
 
     #[tokio::test]

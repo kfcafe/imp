@@ -377,8 +377,24 @@ impl AuthStore {
         if let Some(StoredCredential::OAuth(oauth)) = self.stored.get(provider) {
             if oauth.is_expired() {
                 let refresh_token = oauth.refresh_token.clone();
-                let oauth_client = crate::oauth::anthropic::AnthropicOAuth::new();
-                match oauth_client.refresh_token(&refresh_token).await {
+                let result = match provider {
+                    "anthropic" => {
+                        crate::oauth::anthropic::AnthropicOAuth::new()
+                            .refresh_token(&refresh_token)
+                            .await
+                    }
+                    "kimi-code" => {
+                        crate::oauth::kimi_code::KimiCodeOAuth::new()
+                            .refresh_token(&refresh_token)
+                            .await
+                    }
+                    _ => {
+                        return Err(crate::error::Error::Auth(format!(
+                            "OAuth refresh not implemented for provider: {provider}"
+                        )));
+                    }
+                };
+                match result {
                     Ok(new_cred) => {
                         self.store(provider, StoredCredential::OAuth(new_cred))?;
                     }
@@ -509,6 +525,11 @@ pub fn oauth_display_info_for_credential(
             using_subscription: true,
         }),
         "openai" | "openai-codex" => decode_openai_oauth_display_info(&credential.access_token),
+        "kimi-code" => Some(OAuthDisplayInfo {
+            account_id: None,
+            plan: Some("Kimi Code".into()),
+            using_subscription: true,
+        }),
         _ => None,
     }
 }

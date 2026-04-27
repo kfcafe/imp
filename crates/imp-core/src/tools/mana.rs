@@ -8,7 +8,7 @@ use mana::commands::next::ScoredUnit;
 use mana::commands::run::{NativeRunParams, RunSummary, RunTarget, RunUnitStatus, RunView};
 use mana::stream::StreamEvent;
 use mana_core::ops::claim::ClaimParams;
-use mana_core::unit::{OnFailAction, UnitKind};
+use mana_core::unit::{OnFailAction, UnitType};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -850,17 +850,17 @@ fn parse_on_fail(value: &serde_json::Value) -> Result<Option<OnFailAction>> {
     }
 }
 
-fn parse_unit_kind(value: &serde_json::Value) -> Result<Option<UnitKind>> {
+fn parse_unit_kind(value: &serde_json::Value) -> Result<Option<UnitType>> {
     let Some(raw) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
 
     match raw {
-        "epic" => Ok(Some(UnitKind::Epic)),
-        "job" => Ok(Some(UnitKind::Job)),
-        "fact" => Ok(Some(UnitKind::Fact)),
+        "epic" => Ok(Some(UnitType::Epic)),
+        "task" | "job" => Ok(Some(UnitType::Task)),
+        "fact" => Ok(Some(UnitType::Fact)),
         other => Err(crate::error::Error::Tool(format!(
-            "kind must be one of: epic, job, fact (got {other})"
+            "type must be one of: epic, task, fact (legacy alias: job; got {other})"
         ))),
     }
 }
@@ -1335,7 +1335,7 @@ impl Tool for ManaTool {
         );
         properties.insert(
             "kind".into(),
-            json!({ "type": "string", "enum": ["epic", "job", "fact"], "description": "Explicit mana unit kind" }),
+            json!({ "type": "string", "enum": ["epic", "task", "fact", "job"], "description": "Explicit mana unit type (`job` is a legacy alias for `task`)" }),
         );
         properties.insert(
             "feature".into(),
@@ -2904,7 +2904,11 @@ mod tests {
         };
         let tool = ManaTool::default();
         let result = tool
-            .execute("call_show_archived", json!({ "action": "show", "id": "1" }), ctx)
+            .execute(
+                "call_show_archived",
+                json!({ "action": "show", "id": "1" }),
+                ctx,
+            )
             .await
             .unwrap();
 
@@ -2944,7 +2948,11 @@ mod tests {
         };
         let tool = ManaTool::default();
         let result = tool
-            .execute("call_tree_archived", json!({ "action": "tree", "id": "1" }), ctx)
+            .execute(
+                "call_tree_archived",
+                json!({ "action": "tree", "id": "1" }),
+                ctx,
+            )
             .await
             .unwrap();
 

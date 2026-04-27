@@ -111,6 +111,7 @@ use imp_llm::auth::{AuthStore, StoredCredential};
 use imp_llm::model::{ModelRegistry, ProviderMeta, ProviderRegistry};
 use imp_llm::oauth::anthropic::AnthropicOAuth;
 use imp_llm::oauth::chatgpt::ChatGptOAuth;
+use imp_llm::oauth::kimi_code::KimiCodeOAuth;
 use imp_llm::provider::ThinkingLevel;
 use imp_llm::providers::create_provider;
 use imp_llm::{truncate_chars_with_suffix, Message, Model, StreamEvent};
@@ -346,9 +347,9 @@ enum Commands {
     Personality,
     /// Run the terminal-native setup wizard
     Setup,
-    /// Log in to a provider. OAuth is supported for Anthropic and OpenAI/ChatGPT; Kimi uses a guided API-key setup.
+    /// Log in to a provider. OAuth is supported for Anthropic, OpenAI/ChatGPT, and Kimi Code.
     Login {
-        /// Provider to configure (`anthropic`, `openai`, or `kimi`). Defaults to anthropic.
+        /// Provider to configure (`anthropic`, `openai`, `kimi`, or `kimi-code`). Defaults to anthropic.
         provider: Option<String>,
     },
     /// Save, list, or remove API credentials in secure imp auth storage
@@ -1301,6 +1302,23 @@ async fn run_secrets_login(provider_name: &str) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+/// Try to import existing Kimi CLI OAuth credentials from `~/.kimi/credentials/kimi-code.json`.
+fn try_import_kimi_cli_credentials() -> Option<imp_llm::auth::OAuthCredential> {
+    let path = std::path::PathBuf::from(
+        std::env::var_os("HOME")?
+    ).join(".kimi").join("credentials").join("kimi-code.json");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let access_token = json["access_token"].as_str()?.to_string();
+    let refresh_token = json["refresh_token"].as_str()?.to_string();
+    let expires_at = json["expires_at"].as_f64()? as u64;
+    Some(imp_llm::auth::OAuthCredential {
+        access_token,
+        refresh_token,
+        expires_at,
+    })
+}
+
 async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let _ = imp_core::storage::reconcile_legacy_into_global_root();
     let auth_path = imp_core::storage::global_auth_path();
@@ -1308,8 +1326,14 @@ async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>
         AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
 
     let canonical_provider = provider_alias(provider_name);
+    // For login, "kimi" maps to the Kimi Code OAuth flow rather than Moonshot API key.
+    let login_provider = if provider_name.trim().eq_ignore_ascii_case("kimi") {
+        "kimi-code"
+    } else {
+        &canonical_provider
+    };
 
-    if canonical_provider == "anthropic" {
+    if login_provider == "anthropic" {
         let oauth = AnthropicOAuth::new();
 
         eprintln!("Opening browser for Anthropic login...");
@@ -1340,7 +1364,7 @@ async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>
             imp_llm::auth::StoredCredential::OAuth(credential),
         )?;
         eprintln!("{}", oauth_login_success_message(&auth_store, "anthropic"));
-    } else if canonical_provider == "openai" || canonical_provider == "openai-codex" {
+    } else if login_provider == "openai" || login_provider == "openai-codex" {
         let oauth = ChatGptOAuth::new();
 
         eprintln!("Opening browser for OpenAI / ChatGPT login...");
@@ -1378,6 +1402,40 @@ async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>
             "{}",
             oauth_login_success_message(&auth_store, "openai-codex")
         );
+    } else if login_provider == "kimi-code" {
+        // Try importing existing kimi-cli credentials first.
+        if let Some(credential) = try_import_kimi_cli_credentials() {
+            auth_store.store(
+                "kimi-code",
+                imp_llm::auth::StoredCredential::OAuth(credential),
+            )?;
+            eprintln!("Imported Kimi Code credentials from kimi-cli.");
+            eprintln!("{}", oauth_login_success_message(&auth_store, "kimi-code"));
+            return Ok(());
+        }
+
+        let oauth = KimiCodeOAuth::new();
+
+        eprintln!("Opening browser for Kimi Code login...");
+        eprintln!("If the browser doesn't open, visit the URL printed below.");
+
+        let credential = oauth
+            .login(
+                |url| {
+                    eprintln!("\n{url}\n");
+                    let _ = open_url(url);
+                },
+                |msg| {
+                    eprintln!("{msg}");
+                },
+            )
+            .await?;
+
+        auth_store.store(
+            "kimi-code",
+            imp_llm::auth::StoredCredential::OAuth(credential),
+        )?;
+        eprintln!("{}", oauth_login_success_message(&auth_store, "kimi-code"));
     } else if canonical_provider == "moonshot" {
         let registry = ProviderRegistry::with_builtins();
         let provider = registry
@@ -1482,7 +1540,7 @@ async fn run_setup_mode() -> Result<(), Box<dyn std::error::Error>> {
 
     if !provider_has_auth(&auth_store, provider) {
         println!("No auth detected for {}.", provider.name);
-        if provider.id == "anthropic" || provider.id == "openai" {
+        if provider.id == "anthropic" || provider.id == "openai" || provider.id == "kimi-code" {
             let mode = prompt_input_line("Choose auth mode [login|key]> ")?;
             if mode.eq_ignore_ascii_case("login") {
                 run_login(provider.id).await?;
@@ -1647,7 +1705,7 @@ async fn resolve_provider_api_key(
 ) -> Result<imp_llm::auth::ApiKey, imp_llm::Error> {
     match provider_name {
         "openai-codex" => auth_store.resolve_chatgpt_oauth().await,
-        "anthropic" => auth_store.resolve_with_refresh(provider_name).await,
+        "anthropic" | "kimi-code" => auth_store.resolve_with_refresh(provider_name).await,
         _ => auth_store.resolve(provider_name),
     }
 }
@@ -3516,14 +3574,14 @@ impl ChatTurnSummaryState {
         match tool_name {
             "read" => {
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                    self.read_paths.insert(path.to_string());
+                    self.read_paths.insert(abbreviate_home_path(path));
                 } else {
                     self.other_tools += 1;
                 }
             }
             "write" | "edit" | "multi_edit" => {
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                    self.changed_paths.insert(path.to_string());
+                    self.changed_paths.insert(abbreviate_home_path(path));
                 } else {
                     self.other_tools += 1;
                 }
@@ -3580,6 +3638,18 @@ impl ChatTurnSummaryState {
         parts.push(format!("cost ${cost_total:.4}"));
         format!("summary: {}", parts.join(" · "))
     }
+}
+
+fn abbreviate_home_path(path: &str) -> String {
+    for prefix in ["/Users/", "/home/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            if let Some((_, suffix)) = rest.split_once('/') {
+                return format!("~/{suffix}");
+            }
+            return "~".to_string();
+        }
+    }
+    path.to_string()
 }
 
 fn print_chat_status(session: &ImpSession) {
@@ -3651,21 +3721,70 @@ async fn build_chat_session(
 
 fn format_chat_tool_summary(tool_name: &str, args: &Value) -> String {
     match tool_name {
-        "bash" => args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .map(|c| truncate_chars_with_suffix(c, 60, "…"))
-            .unwrap_or_default(),
+        "bash" => {
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim_start();
+            if command.is_empty() {
+                String::new()
+            } else if command.starts_with("rg ")
+                || command.starts_with("grep ")
+                || command.starts_with("fd ")
+                || command.starts_with("find ")
+                || command == "find"
+                || command.starts_with("ls ")
+                || command == "ls"
+            {
+                "search".to_string()
+            } else if command.contains("check")
+                || command.contains("test")
+                || command.contains("verify")
+                || command.contains("lint")
+            {
+                "check".to_string()
+            } else {
+                "run".to_string()
+            }
+        }
         "read" | "write" | "edit" => args
             .get("path")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        "scan" => args
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+            .map(abbreviate_home_path)
+            .unwrap_or_default(),
+        "scan" => {
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match action {
+                "extract" => args
+                    .get("files")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .map(abbreviate_home_path)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_else(|| "extract".to_string()),
+                "scan" => args
+                    .get("directory")
+                    .and_then(|v| v.as_str())
+                    .map(abbreviate_home_path)
+                    .unwrap_or_default(),
+                _ => {
+                    if action == tool_name {
+                        String::new()
+                    } else {
+                        action.to_string()
+                    }
+                }
+            }
+        }
         "mana" => args
             .get("action")
             .and_then(|v| v.as_str())

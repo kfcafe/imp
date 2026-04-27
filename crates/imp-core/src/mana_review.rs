@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use mana_core::unit::{Status, Unit, UnitKind};
+use mana_core::unit::{Status, Unit, UnitType};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,9 +144,9 @@ impl ManaReviewUnitKind {
 
     pub fn from_unit(unit: &Unit) -> Self {
         match unit.kind {
-            UnitKind::Epic => Self::Epic,
-            UnitKind::Job => Self::Job,
-            UnitKind::Fact => Self::Fact,
+            UnitType::Epic => Self::Epic,
+            UnitType::Task => Self::Job,
+            UnitType::Fact => Self::Fact,
         }
     }
 }

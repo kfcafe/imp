@@ -30,6 +30,12 @@ pub fn login_providers(_registry: &ProviderRegistry) -> Vec<LoginProviderOption>
             description: "OpenAI / ChatGPT account (OAuth)",
             logged_in: false,
         },
+        LoginProviderOption {
+            id: "kimi-code",
+            label: "Kimi Code",
+            description: "Kimi Code subscription (OAuth)",
+            logged_in: false,
+        },
     ]
 }
 

@@ -23,11 +23,9 @@ use std::path::{Path, PathBuf};
 use imp_llm::ThinkingLevel;
 use mana_core::api;
 use mana_core::ops::close::{CloseOpts, CloseOutcome, VerifyFailureResult};
-use tokio::process::Command as TokioCommand;
+use mana_core::ops::verify as mana_verify;
+use tower_contracts::evidence::{ArtifactKind, ArtifactRef, VerifierResult, VerifierStatus};
 pub use tower_contracts::worker::{WorkerAssignment, WorkerAttempt, WorkerResult, WorkerStatus};
-use tower_contracts::evidence::{
-    ArtifactKind, ArtifactRef, VerifierResult, VerifierStatus,
-};
 
 use crate::context_prefill::{self, AssembledContext, FileSpec, PrefillConfig};
 use crate::imp_session::{ImpSession, SessionChoice, SessionOptions};
@@ -410,7 +408,12 @@ pub async fn finalize_worker_run(
             .map(str::trim)
             .filter(|verify| !verify.is_empty())
         {
-            let (passed, output) = run_verify_command(verify, &assignment.workspace_root).await?;
+            let (passed, output) = run_verify_command(
+                &assignment.id,
+                verify,
+                &assignment.workspace_root,
+            )
+            .await?;
             verify_passed = Some(passed);
             verify_output = output;
             if passed {
@@ -580,7 +583,10 @@ fn map_verify_failed_close_outcome(
         format!("Unit {unit_id} failed during close because verify failed.")
     };
     let error = if result.output.trim().is_empty() {
-        Some(format!("Verify command failed during close: {}", result.verify_command))
+        Some(format!(
+            "Verify command failed during close: {}",
+            result.verify_command
+        ))
     } else {
         Some(format!(
             "Verify command failed during close: {}\n{}",
@@ -653,45 +659,55 @@ pub async fn run_worker_assignment(
 }
 
 async fn run_verify_command(
+    unit_id: &str,
     verify: &str,
     cwd: &Path,
 ) -> Result<(bool, Option<String>), Box<dyn std::error::Error>> {
-    let output = run_shell_command(verify, cwd).output().await?;
-
-    let verify_output = if output.status.success() {
-        None
+    let verify = verify.trim();
+    let working_dir = cwd.to_path_buf();
+    let verify_cmd = verify.to_string();
+    let mana_dir = cwd.join(".mana");
+    let timeout_secs = if mana_dir.exists() {
+        match api::get_unit(&mana_dir, unit_id) {
+            Ok(unit) => {
+                let config = mana_core::config::Config::load_with_extends(&mana_dir).ok();
+                unit.effective_verify_timeout(config.as_ref().and_then(|c| c.verify_timeout))
+            }
+            Err(_) => None,
+        }
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        None
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        mana_verify::run_verify_command(&verify_cmd, &working_dir, timeout_secs)
+    })
+    .await
+    .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?
+    .map_err(|e| -> Box<dyn std::error::Error> {
+        Box::new(std::io::Error::other(e.to_string()))
+    })?;
+
+    let output = if result.passed {
+        None
+    } else if result.timed_out {
+        Some(match result.timeout_secs {
+            Some(secs) => format!("Verify timed out after {secs}s"),
+            None => "Verify timed out".to_string(),
+        })
+    } else {
+        let stderr = result.stderr.trim();
+        let stdout = result.stdout.trim();
         if !stderr.is_empty() {
-            Some(stderr)
+            Some(stderr.to_string())
         } else if !stdout.is_empty() {
-            Some(stdout)
+            Some(stdout.to_string())
         } else {
             None
         }
     };
 
-    Ok((output.status.success(), verify_output))
-}
-
-fn run_shell_command(command: &str, cwd: &Path) -> TokioCommand {
-    #[cfg(target_os = "windows")]
-    let mut shell = {
-        let mut shell = TokioCommand::new("cmd");
-        shell.args(["/C", command]);
-        shell
-    };
-
-    #[cfg(not(target_os = "windows"))]
-    let mut shell = {
-        let mut shell = TokioCommand::new("sh");
-        shell.args(["-lc", command]);
-        shell
-    };
-
-    shell.current_dir(cwd);
-    shell
+    Ok((result.passed, output))
 }
 
 /// Build a task prompt string from a worker assignment.
@@ -972,17 +988,40 @@ mod tests {
     #[tokio::test]
     async fn run_verify_command_captures_stderr_without_printing() {
         let dir = tempfile::tempdir().unwrap();
-        let (passed, output) = run_verify_command("printf 'boom' >&2; exit 1", dir.path())
-            .await
-            .unwrap();
+        let (passed, output) =
+            run_verify_command("missing", "printf 'boom' >&2; exit 1", dir.path())
+                .await
+                .unwrap();
         assert!(!passed);
         assert_eq!(output.as_deref(), Some("boom"));
     }
 
     #[tokio::test]
+    async fn run_verify_command_reports_timeout_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let mana_dir = dir.path().join(".mana");
+        std::fs::create_dir_all(&mana_dir).unwrap();
+        let unit = mana_core::unit::Unit {
+            verify_timeout: Some(1),
+            verify: Some("python3 -c 'import time; time.sleep(2)'".to_string()),
+            ..mana_core::unit::Unit::new("11", "Slow verify")
+        };
+        unit.to_file(mana_dir.join("11-slow-verify.md")).unwrap();
+        let (passed, output) = run_verify_command(
+            "11",
+            "python3 -c 'import time; time.sleep(2)'",
+            dir.path(),
+        )
+        .await
+        .unwrap();
+        assert!(!passed);
+        assert_eq!(output.as_deref(), Some("Verify timed out after 1s"));
+    }
+
+    #[tokio::test]
     async fn run_verify_command_falls_back_to_stdout_when_stderr_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let (passed, output) = run_verify_command("printf 'nope'; exit 1", dir.path())
+        let (passed, output) = run_verify_command("missing", "printf 'nope'; exit 1", dir.path())
             .await
             .unwrap();
         assert!(!passed);

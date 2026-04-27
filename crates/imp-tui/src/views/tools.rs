@@ -10,6 +10,59 @@ use serde_json::Value;
 use crate::animation::spinner_frame;
 use crate::theme::Theme;
 
+fn abbreviate_home_path(path: &str) -> String {
+    for prefix in ["/Users/", "/home/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            if let Some((_, suffix)) = rest.split_once('/') {
+                return format!("~/{suffix}");
+            }
+            return "~".to_string();
+        }
+    }
+    path.to_string()
+}
+
+fn abbreviate_path_list(items: &[Value]) -> String {
+    items
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(abbreviate_home_path)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn shell_summary(args: &Value) -> String {
+    let command = args
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim_start();
+    if command.is_empty() {
+        return String::new();
+    }
+
+    let label = if command.starts_with("rg ")
+        || command.starts_with("grep ")
+        || command.starts_with("fd ")
+        || command.starts_with("find ")
+        || command == "find"
+        || command.starts_with("ls ")
+        || command == "ls"
+    {
+        "search"
+    } else if command.contains("check")
+        || command.contains("test")
+        || command.contains("verify")
+        || command.contains("lint")
+    {
+        "check"
+    } else {
+        "run"
+    };
+
+    label.to_string()
+}
+
 /// A tool call ready for display.
 #[derive(Debug, Clone)]
 pub struct DisplayToolCall {
@@ -142,33 +195,34 @@ impl DisplayToolCall {
             "read" => args
                 .get("path")
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            "bash" => {
-                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                let truncated = truncate_chars_with_suffix(cmd, 80, "…");
-                format!("$ {truncated}")
-            }
+                .map(abbreviate_home_path)
+                .unwrap_or_default(),
+            "bash" => shell_summary(args),
             "edit" | "write" => args
                 .get("path")
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+                .map(abbreviate_home_path)
+                .unwrap_or_default(),
             "scan" => {
                 let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
                 match action {
                     "extract" => args
                         .get("files")
                         .and_then(|v| v.as_array())
-                        .map(|items| {
-                            items
-                                .iter()
-                                .filter_map(|v| v.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        })
+                        .map(|items| abbreviate_path_list(items))
                         .unwrap_or_else(|| "extract".to_string()),
-                    _ => action.to_string(),
+                    "scan" => args
+                        .get("directory")
+                        .and_then(|v| v.as_str())
+                        .map(abbreviate_home_path)
+                        .unwrap_or_default(),
+                    _ => {
+                        if action == name {
+                            String::new()
+                        } else {
+                            action.to_string()
+                        }
+                    }
                 }
             }
             "mana" => format_mana_args(args),
@@ -394,7 +448,7 @@ fn push_field(fields: &mut Vec<String>, key: &str, value: Option<String>) {
 fn value_to_short_string(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
-        Value::String(s) => Some(truncate_chars_with_suffix(s, 32, "…")),
+        Value::String(s) => Some(truncate_chars_with_suffix(&abbreviate_home_path(s), 32, "…")),
         Value::Bool(b) => Some(b.to_string()),
         Value::Number(n) => Some(n.to_string()),
         Value::Array(items) => {
@@ -631,16 +685,12 @@ mod tests {
 
     #[test]
     fn short_args_bash() {
-        // "cargo test -p imp-tui" is 21 chars, > 20, so truncated to 17 + "…"
-        assert_eq!(
-            short_args("$ cargo test -p imp-tui"),
-            "$ cargo test -p imp…"
-        );
+        assert_eq!(short_args("check"), "check");
     }
 
     #[test]
     fn short_args_bash_short() {
-        assert_eq!(short_args("$ ls -la"), "$ ls -la");
+        assert_eq!(short_args("run"), "run");
     }
 
     #[test]
@@ -651,6 +701,30 @@ mod tests {
     #[test]
     fn short_args_short_text() {
         assert_eq!(short_args("pattern"), "pattern");
+    }
+
+    #[test]
+    fn abbreviates_user_home_paths() {
+        assert_eq!(abbreviate_home_path("/Users/test/src/main.rs"), "~/src/main.rs");
+        assert_eq!(abbreviate_home_path("/home/test/src/main.rs"), "~/src/main.rs");
+    }
+
+    #[test]
+    fn make_args_summary_hides_bash_command_text() {
+        let summary = DisplayToolCall::make_args_summary(
+            "bash",
+            &serde_json::json!({"command": "cargo test -p imp-tui"}),
+        );
+        assert_eq!(summary, "check");
+    }
+
+    #[test]
+    fn make_args_summary_abbreviates_scan_directory() {
+        let summary = DisplayToolCall::make_args_summary(
+            "scan",
+            &serde_json::json!({"action": "scan", "directory": "/Users/test/project"}),
+        );
+        assert_eq!(summary, "~/project");
     }
 
     #[test]

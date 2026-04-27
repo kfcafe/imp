@@ -3131,7 +3131,11 @@ mod tests {
 
     #[tokio::test]
     async fn agent_does_not_queue_mana_basics_hint_when_no_tools_available() {
-        let provider = Arc::new(MockProvider::new(vec![text_response("Loaded basics skill", 100, 20)]));
+        let provider = Arc::new(MockProvider::new(vec![text_response(
+            "Loaded basics skill",
+            100,
+            20,
+        )]));
 
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
@@ -3156,7 +3160,10 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(user_texts, vec!["Check mana status and logs for my unit".to_string()]);
+        assert_eq!(
+            user_texts,
+            vec!["Check mana status and logs for my unit".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -3170,9 +3177,7 @@ mod tests {
         agent.tools.retain(|_| false);
 
         let events_task = tokio::spawn(collect_events(handle));
-        let result = agent
-            .run("Check mana status and finish".to_string())
-            .await;
+        let result = agent.run("Check mana status and finish".to_string()).await;
         drop(agent);
 
         assert!(result.is_ok());

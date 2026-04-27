@@ -127,6 +127,14 @@ pub fn builtin_providers() -> Vec<ProviderMeta> {
             api_style: ApiStyle::OpenAiCompat,
         },
         ProviderMeta {
+            id: "kimi-code",
+            name: "Kimi Code",
+            env_vars: &["KIMICODE_API_KEY"],
+            api_base_url: Some("https://api.kimi.com/coding"),
+            docs_url: "code.kimi.com",
+            api_style: ApiStyle::OpenAiCompat,
+        },
+        ProviderMeta {
             id: "groq",
             name: "Groq",
             env_vars: &["GROQ_API_KEY"],
@@ -476,6 +484,20 @@ fn builtin_models() -> Vec<ModelMeta> {
             capabilities: Capabilities {
                 reasoning: true,
                 images: false,
+                tool_use: true,
+            },
+        },
+        // -- Kimi Code --
+        ModelMeta {
+            id: "kimi-for-coding".into(),
+            provider: "kimi-code".into(),
+            name: "Kimi for Coding".into(),
+            context_window: 262_144,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: true,
                 tool_use: true,
             },
         },
@@ -917,6 +939,9 @@ fn builtin_aliases() -> Vec<(String, String)> {
         ("kimi-k2.5".into(), "kimi-k2.5".into()),
         ("kimi-thinking".into(), "kimi-k2-thinking".into()),
         ("kimi-k2-thinking".into(), "kimi-k2-thinking".into()),
+        // Kimi Code
+        ("kimi-code".into(), "kimi-for-coding".into()),
+        ("kimi-for-coding".into(), "kimi-for-coding".into()),
         // Groq
         ("llama-groq".into(), "llama-3.3-70b-versatile".into()),
     ]
