@@ -481,7 +481,7 @@ impl Widget for EditorView<'_> {
         let mut bottom_spans = Vec::new();
         let mut push_part = |text: String, style: Style| {
             if !bottom_spans.is_empty() {
-                bottom_spans.push(Span::styled(" • ".to_string(), self.theme.muted_style()));
+                bottom_spans.push(Span::styled(" · ".to_string(), self.theme.muted_style()));
             }
             bottom_spans.push(Span::styled(text, style));
         };
