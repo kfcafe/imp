@@ -167,12 +167,12 @@ fn build_ad_hoc_spawn_outcome(final_text: Option<String>) -> AdHocSpawnOutcome {
     }
 }
 
-fn unit_worker_status_is_error(status: tower_contracts::worker::WorkerStatus) -> bool {
+fn unit_worker_status_is_error(status: mana_worker::WorkerStatus) -> bool {
     matches!(
         status,
-        tower_contracts::worker::WorkerStatus::Failed
-            | tower_contracts::worker::WorkerStatus::Blocked
-            | tower_contracts::worker::WorkerStatus::Cancelled
+        mana_worker::WorkerStatus::Failed
+            | mana_worker::WorkerStatus::Blocked
+            | mana_worker::WorkerStatus::Cancelled
     )
 }
 
@@ -253,25 +253,25 @@ async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Resu
         .clone()
         .filter(|text| !text.trim().is_empty())
         .unwrap_or_else(|| match outcome.result.status {
-            tower_contracts::worker::WorkerStatus::Completed => {
+            mana_worker::WorkerStatus::Completed => {
                 format!(
                     "Spawned worker for unit {} completed successfully.",
                     assignment.id
                 )
             }
-            tower_contracts::worker::WorkerStatus::AwaitingVerify => {
+            mana_worker::WorkerStatus::AwaitingVerify => {
                 format!(
                     "Spawned worker for unit {} completed and is awaiting verify.",
                     assignment.id
                 )
             }
-            tower_contracts::worker::WorkerStatus::Failed => {
+            mana_worker::WorkerStatus::Failed => {
                 format!("Spawned worker for unit {} failed.", assignment.id)
             }
-            tower_contracts::worker::WorkerStatus::Blocked => {
+            mana_worker::WorkerStatus::Blocked => {
                 format!("Spawned worker for unit {} is blocked.", assignment.id)
             }
-            tower_contracts::worker::WorkerStatus::Cancelled => {
+            mana_worker::WorkerStatus::Cancelled => {
                 format!("Spawned worker for unit {} was cancelled.", assignment.id)
             }
         });
@@ -639,19 +639,19 @@ mod tests {
     #[test]
     fn unit_worker_status_is_error_for_failed_blocked_and_cancelled_only() {
         assert!(!unit_worker_status_is_error(
-            tower_contracts::worker::WorkerStatus::Completed
+            mana_worker::WorkerStatus::Completed
         ));
         assert!(!unit_worker_status_is_error(
-            tower_contracts::worker::WorkerStatus::AwaitingVerify
+            mana_worker::WorkerStatus::AwaitingVerify
         ));
         assert!(unit_worker_status_is_error(
-            tower_contracts::worker::WorkerStatus::Failed
+            mana_worker::WorkerStatus::Failed
         ));
         assert!(unit_worker_status_is_error(
-            tower_contracts::worker::WorkerStatus::Blocked
+            mana_worker::WorkerStatus::Blocked
         ));
         assert!(unit_worker_status_is_error(
-            tower_contracts::worker::WorkerStatus::Cancelled
+            mana_worker::WorkerStatus::Cancelled
         ));
     }
 

@@ -6,6 +6,7 @@ pub mod compaction;
 pub mod config;
 pub mod context;
 pub mod context_prefill;
+pub mod contracts;
 pub mod error;
 pub mod error_display;
 pub mod guardrails;

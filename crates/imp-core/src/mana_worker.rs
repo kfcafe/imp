@@ -20,12 +20,12 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::contracts::evidence::{ArtifactKind, ArtifactRef, VerifierResult, VerifierStatus};
+pub use crate::contracts::worker::{WorkerAssignment, WorkerAttempt, WorkerResult, WorkerStatus};
 use imp_llm::ThinkingLevel;
 use mana_core::api;
 use mana_core::ops::close::{CloseOpts, CloseOutcome, VerifyFailureResult};
 use mana_core::ops::verify as mana_verify;
-use tower_contracts::evidence::{ArtifactKind, ArtifactRef, VerifierResult, VerifierStatus};
-pub use tower_contracts::worker::{WorkerAssignment, WorkerAttempt, WorkerResult, WorkerStatus};
 
 use crate::context_prefill::{self, AssembledContext, FileSpec, PrefillConfig};
 use crate::imp_session::{ImpSession, SessionChoice, SessionOptions};
@@ -37,7 +37,8 @@ use crate::tools::LuaToolLoader;
 // Shared contract re-exports
 // ---------------------------------------------------------------------------
 
-// Canonical worker assignment/outcome vocabulary now lives in tower-contracts.
+// Canonical worker assignment/outcome vocabulary lives in imp-owned contracts
+// until mana also needs a versioned shared protocol crate.
 // Re-export it here to keep current imp-core call sites stable during migration.
 
 // ---------------------------------------------------------------------------

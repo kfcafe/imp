@@ -1537,7 +1537,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml",
- "tower-contracts",
  "tree-sitter",
  "tree-sitter-go",
  "tree-sitter-python",
@@ -3688,14 +3687,6 @@ dependencies = [
  "tokio",
  "tower-layer",
  "tower-service",
-]
-
-[[package]]
-name = "tower-contracts"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
