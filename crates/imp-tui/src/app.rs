@@ -1163,6 +1163,22 @@ impl App {
         }
     }
 
+    fn selected_tool_call(&self) -> Option<DisplayToolCall> {
+        let index = match self.tool_focus {
+            Some(index) => index,
+            None if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Inspector => {
+                self.total_tool_calls().checked_sub(1)?
+            }
+            None => return None,
+        };
+
+        self.messages
+            .iter()
+            .flat_map(|message| message.tool_calls.iter())
+            .nth(index)
+            .cloned()
+    }
+
     fn cached_sidebar_detail_render(
         &mut self,
         width: u16,
@@ -1474,25 +1490,22 @@ impl App {
         if let Some(sidebar_area) = sidebar_area {
             let tc_count = self.total_tool_calls();
             let sub = sidebar_sub_areas(sidebar_area, tc_count, self.config.ui.sidebar_style);
-            let selected_tc_index = self.tool_focus;
-
             let stream_lines =
                 if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Stream {
                     Some(self.cached_sidebar_stream_lines(sub.0.width).clone())
                 } else {
                     None
                 };
+            let selected_index = self.tool_focus.or_else(|| {
+                (self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Inspector)
+                    .then(|| self.total_tool_calls().checked_sub(1))
+                    .flatten()
+            });
             let detail_render = if matches!(
                 self.config.ui.sidebar_style,
                 imp_core::config::SidebarStyle::Split | imp_core::config::SidebarStyle::Inspector
             ) {
-                let selected_tc_owned = selected_tc_index.and_then(|i| {
-                    self.messages
-                        .iter()
-                        .flat_map(|m| m.tool_calls.iter())
-                        .nth(i)
-                        .cloned()
-                });
+                let selected_tc_owned = self.selected_tool_call();
                 Some(
                     self.cached_sidebar_detail_render(sub.1.width, selected_tc_owned.as_ref())
                         .clone(),
@@ -1508,7 +1521,7 @@ impl App {
                 .collect();
             let mut view = SidebarView::new(
                 all_tool_calls,
-                self.tool_focus,
+                selected_index,
                 &self.theme,
                 &self.highlighter,
                 self.tick,
@@ -2219,6 +2232,7 @@ impl App {
     fn focus_tool(&mut self, index: usize) {
         self.tool_focus = Some(index);
         self.sidebar.open = true;
+        self.sidebar.reset_detail_scroll();
         self.active_pane = match self.config.ui.sidebar_style {
             imp_core::config::SidebarStyle::Split => Pane::SidebarList,
             imp_core::config::SidebarStyle::Inspector | imp_core::config::SidebarStyle::Stream => {
@@ -2226,7 +2240,6 @@ impl App {
             }
         };
         if self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Split {
-            self.sidebar.reset_detail_scroll();
             self.sidebar.ensure_selected_visible(index);
         }
     }
@@ -5887,7 +5900,10 @@ mod session_lifecycle {
 
         app.handle_cancel();
 
-        assert!(app.agent_task.is_none(), "second Esc should abort a stuck task");
+        assert!(
+            app.agent_task.is_none(),
+            "second Esc should abort a stuck task"
+        );
         assert!(app.agent_handle.is_none());
     }
 
@@ -6460,6 +6476,48 @@ mod session_lifecycle {
         let text = app.selection_text().unwrap();
         assert_eq!(text, "ello");
         assert_eq!(app.active_pane, Pane::Chat);
+    }
+
+    #[test]
+    fn inspector_defaults_to_latest_tool_when_no_focus() {
+        let mut app = make_app();
+        app.config.ui.sidebar_style = imp_core::config::SidebarStyle::Inspector;
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: vec![crate::views::tools::DisplayToolCall {
+                id: "tc-latest".into(),
+                name: "bash".into(),
+                args_summary: "$ pwd".into(),
+                output: Some("/tmp/test".into()),
+                details: serde_json::Value::Null,
+                is_error: false,
+                expanded: false,
+                streaming_lines: Vec::new(),
+                streaming_output: String::new(),
+            }],
+            assistant_blocks: Vec::new(),
+            is_streaming: false,
+            timestamp: 0,
+        });
+
+        let selected = app.selected_tool_call().expect("latest tool selected");
+
+        assert_eq!(selected.id, "tc-latest");
+    }
+
+    #[test]
+    fn focusing_tool_resets_inspector_scroll() {
+        let mut app = make_app();
+        app.config.ui.sidebar_style = imp_core::config::SidebarStyle::Inspector;
+        app.sidebar.detail_scroll = 12;
+
+        app.focus_tool(0);
+
+        assert_eq!(app.tool_focus, Some(0));
+        assert_eq!(app.active_pane, Pane::SidebarDetail);
+        assert_eq!(app.sidebar.detail_scroll, 0);
     }
 
     #[test]

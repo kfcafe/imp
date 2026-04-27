@@ -595,6 +595,10 @@ impl UiConfig {
     pub fn effective_chat_tool_display(&self) -> ChatToolDisplay {
         if self.hide_tools_in_chat {
             ChatToolDisplay::Hidden
+        } else if self.sidebar_style == SidebarStyle::Inspector
+            && self.chat_tool_display == ChatToolDisplay::Interleaved
+        {
+            ChatToolDisplay::Summary
         } else {
             self.chat_tool_display
         }
@@ -878,6 +882,19 @@ mod tests {
             AutoCompactionMode::Disabled
         );
         assert_eq!(config.guardrails, GuardrailConfig::default());
+    }
+
+    #[test]
+    fn inspector_sidebar_keeps_tool_calls_in_chat_summary() {
+        let mut ui = UiConfig {
+            sidebar_style: SidebarStyle::Inspector,
+            chat_tool_display: ChatToolDisplay::Interleaved,
+            ..Default::default()
+        };
+        assert_eq!(ui.effective_chat_tool_display(), ChatToolDisplay::Summary);
+
+        ui.chat_tool_display = ChatToolDisplay::Hidden;
+        assert_eq!(ui.effective_chat_tool_display(), ChatToolDisplay::Hidden);
     }
 
     #[test]

@@ -618,12 +618,21 @@ fn styled_detail_lines(
         ))];
     };
 
+    let header = tc.header_line_animated_focused(theme, 0, true, ui_config.animations);
     let full_config = UiConfig {
         tool_output: ToolOutputDisplay::Full,
         word_wrap: ui_config.word_wrap,
         ..*ui_config
     };
-    styled_output_lines(tc, &full_config, highlighter, theme, content_w)
+    let mut lines = vec![header];
+    lines.extend(styled_output_lines(
+        tc,
+        &full_config,
+        highlighter,
+        theme,
+        content_w.saturating_sub(2),
+    ));
+    lines
 }
 
 fn styled_output_lines(
@@ -1302,6 +1311,35 @@ mod tests {
             streaming_lines: Vec::new(),
             streaming_output: String::new(),
         }
+    }
+
+    #[test]
+    fn inspector_detail_includes_selected_tool_header_and_full_output() {
+        let tc = make_tc("bash", "$ printf", Some("line1\nline2"), false);
+        let config = UiConfig {
+            sidebar_style: SidebarStyle::Inspector,
+            tool_output: ToolOutputDisplay::Compact,
+            tool_output_lines: 1,
+            word_wrap: false,
+            ..Default::default()
+        };
+
+        let render = build_detail_render_data(
+            Some(&tc),
+            &config,
+            &crate::highlight::Highlighter::new(),
+            &Theme::default(),
+            80,
+        );
+
+        assert!(render.plain_lines.iter().any(|line| line.contains("bash")));
+        assert!(render
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("$ printf")));
+        assert!(render.plain_lines.iter().any(|line| line == "line1"));
+        assert!(render.plain_lines.iter().any(|line| line == "line2"));
+        assert!(!render.plain_lines.iter().any(|line| line == "…"));
     }
 
     #[test]
