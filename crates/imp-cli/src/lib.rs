@@ -111,7 +111,7 @@ use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, Widg
 use imp_core::usage::{UsageCostBreakdown, UsageRecordSource, UsageTokens};
 use imp_core::TimingEvent;
 use imp_llm::auth::{AuthStore, StoredCredential};
-use imp_llm::model::{ModelRegistry, ProviderMeta, ProviderRegistry};
+use imp_llm::model::{ModelMeta, ModelRegistry, ProviderMeta, ProviderRegistry};
 use imp_llm::oauth::anthropic::AnthropicOAuth;
 use imp_llm::oauth::chatgpt::ChatGptOAuth;
 use imp_llm::oauth::kimi_code::KimiCodeOAuth;
@@ -1504,6 +1504,7 @@ fn open_url(url: &str) -> std::io::Result<()> {
 fn provider_has_auth(auth_store: &AuthStore, meta: &ProviderMeta) -> bool {
     meta.env_vars.iter().any(|v| std::env::var(v).is_ok())
         || auth_store.stored.contains_key(meta.id)
+        || (meta.id == "moonshot" && auth_store.stored.contains_key("kimi-code"))
 }
 
 fn save_auth_secret_fields(
@@ -1518,6 +1519,30 @@ fn save_auth_secret_fields(
     Ok(())
 }
 
+fn setup_visible_provider(provider_id: &str) -> bool {
+    provider_id != "kimi-code"
+}
+
+fn setup_models_for_provider(registry: &ModelRegistry, provider_id: &str) -> Vec<ModelMeta> {
+    let mut models: Vec<ModelMeta> = registry
+        .list_by_provider(provider_id)
+        .into_iter()
+        .cloned()
+        .collect();
+
+    if provider_id == "openai" {
+        for mut model in imp_llm::model::builtin_openai_codex_models() {
+            if models.iter().any(|existing| existing.id == model.id) {
+                continue;
+            }
+            model.provider = "openai".into();
+            models.push(model);
+        }
+    }
+
+    models
+}
+
 async fn run_setup_mode() -> Result<(), Box<dyn std::error::Error>> {
     let _ = imp_core::storage::reconcile_legacy_into_global_root();
     let cwd = std::env::current_dir()?;
@@ -1530,7 +1555,11 @@ async fn run_setup_mode() -> Result<(), Box<dyn std::error::Error>> {
     println!("imp setup");
     println!("=========");
 
-    let providers = provider_registry.list();
+    let providers: Vec<&ProviderMeta> = provider_registry
+        .list()
+        .iter()
+        .filter(|provider| setup_visible_provider(provider.id))
+        .collect();
     println!("Providers:");
     for (idx, provider) in providers.iter().enumerate() {
         let status = if provider_has_auth(&auth_store, provider) {
@@ -1551,7 +1580,7 @@ async fn run_setup_mode() -> Result<(), Box<dyn std::error::Error>> {
 
     if !provider_has_auth(&auth_store, provider) {
         println!("No auth detected for {}.", provider.name);
-        if provider.id == "anthropic" || provider.id == "openai" || provider.id == "kimi-code" {
+        if provider.id == "anthropic" || provider.id == "openai" || provider.id == "moonshot" {
             let mode = prompt_input_line("Choose auth mode [login|key]> ")?;
             if mode.eq_ignore_ascii_case("login") {
                 run_login(provider.id).await?;
@@ -1570,7 +1599,7 @@ async fn run_setup_mode() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let models = model_registry.list_by_provider(provider.id);
+    let models = setup_models_for_provider(&model_registry, provider.id);
     if models.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -1591,7 +1620,7 @@ async fn run_setup_mode() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|n| n.checked_sub(1))
         .filter(|idx| *idx < models.len())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid model selection"))?;
-    let model = models[model_index];
+    let model = &models[model_index];
     config.model = Some(model.id.clone());
 
     println!();
@@ -4813,6 +4842,31 @@ mod tests {
             .unwrap()
             .clone();
         assert!(provider_has_auth(&auth_store, &provider));
+    }
+
+    #[test]
+    fn setup_provider_list_hides_kimi_code() {
+        let registry = ProviderRegistry::with_builtins();
+        let providers: Vec<&ProviderMeta> = registry
+            .list()
+            .iter()
+            .filter(|provider| setup_visible_provider(provider.id))
+            .collect();
+
+        assert!(providers.iter().any(|provider| provider.id == "moonshot"));
+        assert!(!providers.iter().any(|provider| provider.id == "kimi-code"));
+    }
+
+    #[test]
+    fn setup_openai_models_include_gpt_5_5() {
+        let registry = ModelRegistry::with_builtins();
+        let models = setup_models_for_provider(&registry, "openai");
+
+        let gpt_5_5 = models
+            .iter()
+            .find(|model| model.id == "gpt-5.5")
+            .expect("OpenAI setup model list should include GPT-5.5");
+        assert_eq!(gpt_5_5.provider, "openai");
     }
 
     #[test]

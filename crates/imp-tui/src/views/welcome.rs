@@ -140,12 +140,13 @@ impl WelcomeState {
         let providers: Vec<ProviderStatus> = registry
             .list()
             .iter()
+            .filter(|meta| is_setup_visible_provider(meta.id))
             .map(|meta| {
                 let env_detected = meta.env_vars.iter().any(|v| std::env::var(v).is_ok());
                 ProviderStatus {
                     meta: meta.clone(),
                     env_detected,
-                    stored: auth_store.stored.contains_key(meta.id),
+                    stored: provider_stored_for_setup(&auth_store, meta.id),
                 }
             })
             .collect();
@@ -393,12 +394,41 @@ impl WelcomeState {
     }
 }
 
+fn is_setup_visible_provider(provider_id: &str) -> bool {
+    provider_id != "kimi-code"
+}
+
+fn provider_stored_for_setup(auth_store: &AuthStore, provider_id: &str) -> bool {
+    auth_store.stored.contains_key(provider_id)
+        || (provider_id == "moonshot" && auth_store.stored.contains_key("kimi-code"))
+}
+
 fn filter_models_for_provider(all_models: &[ModelMeta], provider_id: &str) -> Vec<ModelMeta> {
-    all_models
+    let mut models: Vec<ModelMeta> = all_models
         .iter()
         .filter(|m| m.provider == provider_id)
         .cloned()
-        .collect()
+        .collect();
+
+    match provider_id {
+        "openai" => append_missing_openai_setup_models(&mut models),
+        "openai-codex" if models.is_empty() => {
+            models = imp_llm::model::builtin_openai_codex_models();
+        }
+        _ => {}
+    }
+
+    models
+}
+
+fn append_missing_openai_setup_models(models: &mut Vec<ModelMeta>) {
+    for mut model in imp_llm::model::builtin_openai_codex_models() {
+        if models.iter().any(|existing| existing.id == model.id) {
+            continue;
+        }
+        model.provider = "openai".into();
+        models.push(model);
+    }
 }
 
 /// Detect whether this is a first run that needs the welcome flow.
@@ -1036,5 +1066,33 @@ mod tests {
         assert!(state.selected_web_provider().is_none());
         assert!(state.check_auth_resolved().is_err());
         assert!(state.check_web_auth_resolved().is_err());
+    }
+
+    #[test]
+    fn setup_hides_kimi_code_provider_under_moonshot() {
+        let registry = ModelRegistry::with_builtins();
+        let models = registry.list().to_vec();
+        let state = WelcomeState::new(&models);
+
+        assert!(state
+            .providers
+            .iter()
+            .any(|provider| provider.meta.id == "moonshot"));
+        assert!(!state
+            .providers
+            .iter()
+            .any(|provider| provider.meta.id == "kimi-code"));
+    }
+
+    #[test]
+    fn openai_setup_models_include_gpt_5_5() {
+        let registry = ModelRegistry::with_builtins();
+        let models = filter_models_for_provider(registry.list(), "openai");
+
+        let gpt_5_5 = models
+            .iter()
+            .find(|model| model.id == "gpt-5.5")
+            .expect("OpenAI setup model list should include GPT-5.5");
+        assert_eq!(gpt_5_5.provider, "openai");
     }
 }
