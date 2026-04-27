@@ -3,18 +3,160 @@ use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use regex::Regex;
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+
+use imp_llm::auth::AuthStore;
 
 use super::{
     truncate_head, truncate_tail, Tool, ToolContext, ToolOutput, ToolUpdate, TruncationResult,
 };
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_OUTPUT_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
+
+const SECRET_REDACTION: &str = "[REDACTED_SECRET]";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SecretEnvBinding {
+    env: String,
+    provider: String,
+    field: String,
+}
+
+struct ResolvedSecretEnvBinding {
+    binding: SecretEnvBinding,
+    value: String,
+}
+
+fn parse_secret_env_bindings(value: Option<&Value>) -> Result<Vec<SecretEnvBinding>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let entries = value
+        .as_array()
+        .ok_or_else(|| Error::Tool("secret_env must be an array".into()))?;
+    let mut bindings = Vec::with_capacity(entries.len());
+    let mut env_names = std::collections::HashSet::new();
+
+    for entry in entries {
+        let object = entry
+            .as_object()
+            .ok_or_else(|| Error::Tool("secret_env entries must be objects".into()))?;
+        let env = required_secret_binding_string(object, "env")?;
+        let provider = required_secret_binding_string(object, "provider")?;
+        let field = required_secret_binding_string(object, "field")?;
+        if !is_valid_env_name(&env) {
+            return Err(Error::Tool(format!(
+                "secret_env env name '{env}' is invalid; use uppercase letters, digits, and underscores, not starting with a digit"
+            )));
+        }
+        if !env_names.insert(env.clone()) {
+            return Err(Error::Tool(format!(
+                "duplicate secret_env binding for env var {env}"
+            )));
+        }
+        bindings.push(SecretEnvBinding {
+            env,
+            provider,
+            field,
+        });
+    }
+
+    Ok(bindings)
+}
+
+fn required_secret_binding_string(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<String> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| Error::Tool(format!("secret_env entries require non-empty {key}")))
+}
+
+fn is_valid_env_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_uppercase())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit())
+}
+
+fn binding_descriptor(binding: &SecretEnvBinding) -> String {
+    format!("{}<-{}.{}", binding.env, binding.provider, binding.field)
+}
+
+fn command_secret_binding_allowed(ctx: &ToolContext, binding: &SecretEnvBinding) -> bool {
+    let policy = &ctx.config.secrets.commands;
+    policy.enabled
+        && policy.allowed.iter().any(|allowed| {
+            allowed.env == binding.env
+                && allowed.provider == binding.provider
+                && allowed.field == binding.field
+        })
+}
+
+fn resolve_secret_env_bindings(
+    ctx: &ToolContext,
+    bindings: Vec<SecretEnvBinding>,
+) -> Result<Vec<ResolvedSecretEnvBinding>> {
+    if bindings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    for binding in &bindings {
+        if !command_secret_binding_allowed(ctx, binding) {
+            return Err(Error::Tool(format!(
+                "secret_env binding {} is not allowed by config policy",
+                binding_descriptor(binding)
+            )));
+        }
+    }
+
+    let auth_path = crate::storage::existing_global_auth_path()
+        .unwrap_or_else(crate::storage::global_auth_path);
+    let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
+
+    bindings
+        .into_iter()
+        .map(|binding| {
+            let descriptor = binding_descriptor(&binding);
+            auth_store
+                .resolve_secret_field(&binding.provider, &binding.field)
+                .map(|value| ResolvedSecretEnvBinding { binding, value })
+                .map_err(|_| Error::Tool(format!("missing secret for {descriptor}")))
+        })
+        .collect()
+}
+
+fn redact_injected_secrets(text: &str, resolved: &[ResolvedSecretEnvBinding]) -> String {
+    resolved.iter().fold(text.to_string(), |redacted, binding| {
+        if binding.value.is_empty() {
+            redacted
+        } else {
+            redacted.replace(&binding.value, SECRET_REDACTION)
+        }
+    })
+}
+
+fn secret_binding_details(resolved: &[ResolvedSecretEnvBinding]) -> Vec<String> {
+    resolved
+        .iter()
+        .map(|binding| binding_descriptor(&binding.binding))
+        .collect()
+}
 
 /// Check whether the rush backend should be used.
 ///
@@ -204,7 +346,20 @@ impl Tool for BashTool {
             "properties": {
                 "command": { "type": "string" },
                 "timeout": { "type": "number" },
-                "workdir": { "type": "string" }
+                "workdir": { "type": "string" },
+                "secret_env": {
+                    "type": "array",
+                    "description": "Metadata-only stored secret bindings to inject into the child environment. Raw secret values are resolved internally and redacted from output.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "env": { "type": "string" },
+                            "provider": { "type": "string" },
+                            "field": { "type": "string" }
+                        },
+                        "required": ["env", "provider", "field"]
+                    }
+                }
             },
             "required": ["command"]
         })
@@ -239,11 +394,18 @@ impl Tool for BashTool {
             ctx
         };
 
-        run_command(command, timeout_secs, &ctx).await
+        let secret_env = parse_secret_env_bindings(params.get("secret_env"))?;
+
+        run_command(command, timeout_secs, &ctx, secret_env).await
     }
 }
 
-async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Result<ToolOutput> {
+async fn run_command(
+    command: &str,
+    timeout_secs: u64,
+    ctx: &ToolContext,
+    secret_env: Vec<SecretEnvBinding>,
+) -> Result<ToolOutput> {
     // Check cancellation before spawning.
     if ctx.is_cancelled() {
         return Ok(ToolOutput {
@@ -254,6 +416,8 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
             is_error: true,
         });
     }
+
+    let resolved_secret_env = resolve_secret_env_bindings(ctx, secret_env)?;
 
     // Try the rush in-process backend when available.
     #[cfg(feature = "rush-backend")]
@@ -268,8 +432,9 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
                 output
             };
             let sanitized = sanitize_output_text(&transformed);
+            let redacted = redact_injected_secrets(&sanitized, &resolved_secret_env);
             // Stream the output lines so callers see incremental progress.
-            for line in sanitized.lines() {
+            for line in redacted.lines() {
                 let _ = ctx
                     .update_tx
                     .send(ToolUpdate {
@@ -281,7 +446,7 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
                     .await;
             }
 
-            let mut result_text = sanitized;
+            let mut result_text = redacted;
             if timed_out {
                 result_text.push_str(&format!("\n[Command timed out after {timeout_secs}s]"));
             }
@@ -294,6 +459,7 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
                     "cancelled": false,
                     "truncated": truncated,
                     "backend": "rush",
+                    "injected_secrets": secret_binding_details(&resolved_secret_env),
                 }),
                 is_error: exit_code != 0,
             });
@@ -314,6 +480,10 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        for binding in &resolved_secret_env {
+            cmd.env(&binding.binding.env, &binding.value);
+        }
 
         // Create a new process group so we can kill the entire tree.
         #[cfg(unix)]
@@ -370,6 +540,7 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
                     Ok(Some(line)) => {
                         if !line.bytes().any(|b| b == 0) {
                             let clean = sanitize_output_text(&line);
+                            let clean = redact_injected_secrets(&clean, &resolved_secret_env);
                             if !clean.is_empty() {
                                 append_line(&mut output, &clean, &ctx.update_tx).await;
                             }
@@ -384,6 +555,7 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
                     Ok(Some(line)) => {
                         if !line.bytes().any(|b| b == 0) {
                             let clean = sanitize_output_text(&line);
+                            let clean = redact_injected_secrets(&clean, &resolved_secret_env);
                             if !clean.is_empty() {
                                 append_line(&mut output, &clean, &ctx.update_tx).await;
                             }
@@ -446,6 +618,7 @@ async fn run_command(command: &str, timeout_secs: u64, ctx: &ToolContext) -> Res
         "cancelled": cancelled,
         "truncated": truncated,
         "command": command,
+        "injected_secrets": secret_binding_details(&resolved_secret_env),
     });
 
     Ok(ToolOutput {
@@ -508,6 +681,7 @@ async fn kill_process_group(_child: &tokio::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{CommandSecretsConfig, Config, SecretEnvBindingPolicy, SecretsConfig};
     use crate::ui::NullInterface;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
@@ -536,8 +710,106 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(crate::config::Config::default()),
         };
         (ctx, rx)
+    }
+
+    fn allow_test_secret(ctx: &mut ToolContext) {
+        ctx.config = Arc::new(Config {
+            secrets: SecretsConfig {
+                commands: CommandSecretsConfig {
+                    enabled: true,
+                    allowed: vec![SecretEnvBindingPolicy {
+                        provider: "test-service".to_string(),
+                        field: "api_key".to_string(),
+                        env: "SECRET_TOKEN".to_string(),
+                    }],
+                },
+            },
+            ..Config::default()
+        });
+    }
+
+    #[tokio::test]
+    async fn secret_env_injects_allowed_secret_and_redacts_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("TEST_SERVICE_API_KEY", "native-secret-value");
+        let (mut ctx, _rx) = test_ctx(tmp.path());
+        allow_test_secret(&mut ctx);
+
+        let result = run_command(
+            "printf '%s' \"$SECRET_TOKEN\"",
+            DEFAULT_TIMEOUT_SECS,
+            &ctx,
+            vec![SecretEnvBinding {
+                env: "SECRET_TOKEN".to_string(),
+                provider: "test-service".to_string(),
+                field: "api_key".to_string(),
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.is_error);
+        let text = result.text_content().unwrap();
+        assert!(text.contains(SECRET_REDACTION));
+        assert!(!text.contains("native-secret-value"));
+        assert_eq!(
+            result.details["injected_secrets"][0].as_str(),
+            Some("SECRET_TOKEN<-test-service.api_key")
+        );
+        assert!(!result.details.to_string().contains("native-secret-value"));
+    }
+
+    #[tokio::test]
+    async fn secret_env_denies_unconfigured_binding() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("TEST_SERVICE_API_KEY", "native-secret-value");
+        let (ctx, _rx) = test_ctx(tmp.path());
+
+        let err = match run_command(
+            "true",
+            DEFAULT_TIMEOUT_SECS,
+            &ctx,
+            vec![SecretEnvBinding {
+                env: "SECRET_TOKEN".to_string(),
+                provider: "test-service".to_string(),
+                field: "api_key".to_string(),
+            }],
+        )
+        .await
+        {
+            Ok(_) => panic!("expected policy denial"),
+            Err(err) => err,
+        };
+
+        let message = err.to_string();
+        assert!(message.contains("not allowed by config policy"));
+        assert!(!message.contains("native-secret-value"));
+    }
+
+    #[tokio::test]
+    async fn secret_env_rejects_duplicate_env_bindings() {
+        let err = parse_secret_env_bindings(Some(&serde_json::json!([
+            {"env":"SECRET_TOKEN", "provider":"one", "field":"api_key"},
+            {"env":"SECRET_TOKEN", "provider":"two", "field":"api_key"}
+        ])))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("duplicate secret_env binding"));
+    }
+
+    #[tokio::test]
+    async fn secret_env_rejects_invalid_env_name() {
+        let err = parse_secret_env_bindings(Some(&serde_json::json!([
+            {"env":"secret-token", "provider":"one", "field":"api_key"}
+        ])))
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("env name 'secret-token' is invalid"));
     }
 
     #[tokio::test]
@@ -545,7 +817,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, _rx) = test_ctx(tmp.path());
 
-        let result = run_command("echo hello world", DEFAULT_TIMEOUT_SECS, &ctx)
+        let result = run_command("echo hello world", DEFAULT_TIMEOUT_SECS, &ctx, Vec::new())
             .await
             .unwrap();
 
@@ -563,7 +835,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, _rx) = test_ctx(tmp.path());
 
-        let result = run_command("exit 42", DEFAULT_TIMEOUT_SECS, &ctx)
+        let result = run_command("exit 42", DEFAULT_TIMEOUT_SECS, &ctx, Vec::new())
             .await
             .unwrap();
 
@@ -576,7 +848,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (ctx, _rx) = test_ctx(tmp.path());
 
-        let result = run_command("sleep 60", 1, &ctx).await.unwrap();
+        let result = run_command("sleep 60", 1, &ctx, Vec::new()).await.unwrap();
 
         assert!(result.details["timed_out"].as_bool().unwrap());
         let text = match &result.content[0] {
@@ -595,7 +867,7 @@ mod tests {
         ctx.cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
-        let result = run_command("sleep 60", DEFAULT_TIMEOUT_SECS, &ctx)
+        let result = run_command("sleep 60", DEFAULT_TIMEOUT_SECS, &ctx, Vec::new())
             .await
             .unwrap();
 
@@ -613,8 +885,9 @@ mod tests {
         let (ctx, _rx) = test_ctx(tmp.path());
         let cancelled = Arc::clone(&ctx.cancelled);
 
-        let task =
-            tokio::spawn(async move { run_command("sleep 60", DEFAULT_TIMEOUT_SECS, &ctx).await });
+        let task = tokio::spawn(async move {
+            run_command("sleep 60", DEFAULT_TIMEOUT_SECS, &ctx, Vec::new()).await
+        });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
 
@@ -632,6 +905,7 @@ mod tests {
                 "echo line1; echo line2; echo line3",
                 DEFAULT_TIMEOUT_SECS,
                 &ctx,
+                Vec::new(),
             )
             .await
         });
@@ -659,6 +933,7 @@ mod tests {
             "echo stdout_line; echo stderr_line >&2",
             DEFAULT_TIMEOUT_SECS,
             &ctx,
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -682,6 +957,7 @@ mod tests {
             "echo 'side effect content' > side_effect.txt",
             DEFAULT_TIMEOUT_SECS,
             &ctx,
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -697,7 +973,7 @@ mod tests {
         std::fs::write(tmp.path().join("testfile.txt"), "content").unwrap();
         let (ctx, _rx) = test_ctx(tmp.path());
 
-        let result = run_command("ls testfile.txt", DEFAULT_TIMEOUT_SECS, &ctx)
+        let result = run_command("ls testfile.txt", DEFAULT_TIMEOUT_SECS, &ctx, Vec::new())
             .await
             .unwrap();
 
@@ -718,6 +994,7 @@ mod tests {
             "printf '\\033[1;31mred\\033[0m\\n'",
             DEFAULT_TIMEOUT_SECS,
             &ctx,
+            Vec::new(),
         )
         .await
         .unwrap();

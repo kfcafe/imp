@@ -301,6 +301,7 @@ mod tests {
             turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: std::sync::Arc::new(crate::config::Config::default()),
         }
     }
 

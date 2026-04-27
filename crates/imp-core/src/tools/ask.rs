@@ -183,6 +183,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(crate::config::Config::default()),
         }
     }
 
@@ -239,6 +240,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(crate::config::Config::default()),
         };
 
         let tool = AskTool;

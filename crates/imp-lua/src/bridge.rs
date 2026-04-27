@@ -1,8 +1,7 @@
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use async_trait::async_trait;
-use imp_core::config::Config;
+use imp_core::storage;
 use imp_core::tools::lua::{parameter_schema_from_lua, tool_output_from_lua_result};
 use imp_core::tools::{Tool, ToolContext, ToolOutput, ToolRegistry};
 use imp_core::Error as CoreError;
@@ -231,7 +230,9 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
     let exec_fn = lua.create_function(
         move |lua_inner, (cmd, args, opts): (String, Option<Table>, Option<Table>)| {
             if !allow_shell_exec.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(mlua::Error::external("imp.exec() is disabled for this runtime"));
+                return Err(mlua::Error::external(
+                    "imp.exec() is disabled for this runtime",
+                ));
             }
             let mut command = Command::new("sh");
             command.arg("-c");
@@ -252,6 +253,12 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
             if let Some(opts_table) = &opts {
                 if let Ok(Some(cwd)) = opts_table.get::<Option<String>>("cwd") {
                     command.current_dir(cwd);
+                }
+                if let Ok(Some(env_table)) = opts_table.get::<Option<Table>>("env") {
+                    for pair in env_table.pairs::<String, String>() {
+                        let (name, value) = pair?;
+                        command.env(name, value);
+                    }
                 }
             }
 
@@ -422,7 +429,8 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
                     "imp.secret() is disabled for this runtime",
                 ));
             }
-            let auth_path: PathBuf = Config::user_config_dir().join("auth.json");
+            let auth_path =
+                storage::existing_global_auth_path().unwrap_or_else(storage::global_auth_path);
             let auth_store =
                 AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
             let field = field.unwrap_or_else(|| "api_key".to_string());
@@ -443,7 +451,8 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
                     "imp.secret_fields() is disabled for this runtime",
                 ));
             }
-            let auth_path: PathBuf = Config::user_config_dir().join("auth.json");
+            let auth_path =
+                storage::existing_global_auth_path().unwrap_or_else(storage::global_auth_path);
             let auth_store =
                 AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
             match auth_store.resolve_secret_fields(&provider) {

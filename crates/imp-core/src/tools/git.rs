@@ -1064,6 +1064,7 @@ mod tests {
             mode,
             read_max_lines: 500,
             turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
+            config: Arc::new(crate::config::Config::default()),
         }
     }
 

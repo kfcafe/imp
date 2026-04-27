@@ -105,6 +105,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 imp_core::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(imp_core::config::Config::default()),
             lua_tool_loader: None,
         }
     }
@@ -130,10 +131,18 @@ mod tests {
             .expect("runtime should initialize");
         let guard = runtime.lock().unwrap();
 
-        assert!(!guard.allow_native_tool_calls().load(std::sync::atomic::Ordering::Relaxed));
-        assert!(guard.allow_shell_exec().load(std::sync::atomic::Ordering::Relaxed));
-        assert!(guard.allow_http().load(std::sync::atomic::Ordering::Relaxed));
-        assert!(guard.allow_secrets().load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!guard
+            .allow_native_tool_calls()
+            .load(std::sync::atomic::Ordering::Relaxed));
+        assert!(guard
+            .allow_shell_exec()
+            .load(std::sync::atomic::Ordering::Relaxed));
+        assert!(guard
+            .allow_http()
+            .load(std::sync::atomic::Ordering::Relaxed));
+        assert!(guard
+            .allow_secrets()
+            .load(std::sync::atomic::Ordering::Relaxed));
         assert!(guard.allowed_env().lock().unwrap().contains("ALLOWED_ONE"));
     }
 
@@ -1084,7 +1093,10 @@ mod tests {
         );
         assert!(result.is_err(), "disabled imp.exec() should error");
         let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("imp.exec() is disabled"), "unexpected error: {err}");
+        assert!(
+            err.contains("imp.exec() is disabled"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1108,6 +1120,28 @@ mod tests {
     }
 
     #[test]
+    fn imp_exec_passes_scoped_env_to_child_process() {
+        let rt = make_runtime();
+        rt.set_allow_shell_exec(true);
+
+        rt.exec(
+            r#"
+            local result = imp.exec("printf %s \"$IMP_LUA_CHILD_SECRET\"", nil, {
+                env = { IMP_LUA_CHILD_SECRET = "child-only-value" },
+            })
+            _test_stdout = result.stdout
+            _test_exit = result.exit_code
+        "#,
+        )
+        .unwrap();
+
+        let stdout: String = rt.lua().globals().get("_test_stdout").unwrap();
+        let exit_code: i32 = rt.lua().globals().get("_test_exit").unwrap();
+        assert_eq!(stdout, "child-only-value");
+        assert_eq!(exit_code, 0);
+    }
+
+    #[test]
     fn imp_secret_errors_when_disabled() {
         let rt = make_runtime();
         let result = rt.exec(
@@ -1117,7 +1151,10 @@ mod tests {
         );
         assert!(result.is_err(), "disabled imp.secret() should error");
         let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("imp.secret() is disabled"), "unexpected error: {err}");
+        assert!(
+            err.contains("imp.secret() is disabled"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1149,7 +1186,10 @@ mod tests {
             );
             assert!(result.is_err(), "disabled imp.http.get() should error");
             let err = format!("{}", result.unwrap_err());
-            assert!(err.contains("imp.http.get() is disabled"), "unexpected error: {err}");
+            assert!(
+                err.contains("imp.http.get() is disabled"),
+                "unexpected error: {err}"
+            );
         })
         .await
         .unwrap();

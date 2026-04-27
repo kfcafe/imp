@@ -304,6 +304,28 @@ impl LuaConfig {
     }
 }
 
+/// Native command secret-injection policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretsConfig {
+    #[serde(default)]
+    pub commands: CommandSecretsConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandSecretsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub allowed: Vec<SecretEnvBindingPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvBindingPolicy {
+    pub provider: String,
+    pub field: String,
+    pub env: String,
+}
+
 /// Top-level configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -369,6 +391,10 @@ pub struct Config {
     /// Shipped Lua extension runtime policy.
     #[serde(default)]
     pub lua: LuaConfig,
+
+    /// Secret injection policy for native command execution.
+    #[serde(default)]
+    pub secrets: SecretsConfig,
 
     /// Personality settings, including identity sentence and saved profiles.
     #[serde(default)]
@@ -801,6 +827,9 @@ impl Config {
         }
         if other.lua != LuaConfig::default() {
             self.lua = other.lua;
+        }
+        if other.secrets != SecretsConfig::default() {
+            self.secrets = other.secrets;
         }
         if other.personality != PersonalityConfig::default() {
             self.personality.merge(other.personality);

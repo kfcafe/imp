@@ -562,6 +562,7 @@ export default function dynamicToolsExtension(pi: ExtensionAPI) {
             mode: AgentMode::Full,
             read_max_lines: 0,
             turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
+            config: Arc::new(crate::config::Config::default()),
         }
     }
 }

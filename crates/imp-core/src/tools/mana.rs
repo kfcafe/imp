@@ -2408,6 +2408,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(crate::config::Config::default()),
         };
 
         let tool = ManaTool::default();
@@ -2473,6 +2474,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(crate::config::Config::default()),
         };
         (ctx, tempfile::tempdir().unwrap())
     }
@@ -2513,6 +2515,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(crate::config::Config::default()),
         };
         (ctx, tempfile::tempdir().unwrap(), widgets)
     }
@@ -2734,6 +2737,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(crate::config::Config::default()),
         };
         let tool = ManaTool::default();
         let reopened = tool
@@ -2767,6 +2771,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(crate::config::Config::default()),
         };
         let verify = tool
             .execute(
@@ -2799,6 +2804,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(crate::config::Config::default()),
         };
         let fact = tool.execute("call_fact", json!({ "action": "fact_create", "fact_title": "Auth fact", "verify": "test -d .mana", "description": "fact body", "ttl_days": 7 }), ctx3).await.unwrap();
         assert_eq!(fact.details["unit"]["unit_type"], "fact");
@@ -2901,6 +2907,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(crate::config::Config::default()),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -2945,6 +2952,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(crate::config::Config::default()),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -3002,6 +3010,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(crate::config::Config::default()),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -3052,6 +3061,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(crate::config::Config::default()),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -3283,6 +3293,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(crate::config::Config::default()),
         };
 
         let tool = ManaTool::default();

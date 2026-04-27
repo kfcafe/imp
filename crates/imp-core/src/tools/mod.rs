@@ -147,6 +147,8 @@ pub struct ToolContext {
     pub read_max_lines: usize,
     /// Turn-scoped runtime accumulator for between-turn mana review packets.
     pub turn_mana_review: Arc<std::sync::Mutex<TurnManaReviewAccumulator>>,
+    /// Resolved runtime config for tool-specific policy checks.
+    pub config: Arc<crate::config::Config>,
 }
 
 /// In-session file content cache. Avoids re-reading files that haven't changed.

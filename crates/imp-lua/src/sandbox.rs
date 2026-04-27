@@ -82,6 +82,7 @@ impl LuaCallContext {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 imp_core::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            config: Arc::new(imp_core::config::Config::default()),
         }
     }
 }

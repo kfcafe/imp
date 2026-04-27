@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use imp_llm::provider::RetryPolicy;
 
-use crate::config::{AgentMode, ContextConfig, ContinuePolicy};
+use crate::config::{AgentMode, Config, ContextConfig, ContinuePolicy};
 use crate::error::Result;
 use crate::guardrails::{self, GuardrailConfig, GuardrailLevel, GuardrailProfile};
 use crate::hooks::{HookBackgroundEvent, HookEvent, HookRunner};
@@ -388,6 +388,8 @@ pub struct Agent {
     queued_confidence_continue_nudge: bool,
     /// Runtime-side turn-scoped between-turn mana review accumulator.
     turn_mana_review: Arc<std::sync::Mutex<TurnManaReviewAccumulator>>,
+    /// Resolved runtime config for tool-specific policy checks.
+    pub config: Arc<Config>,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_tx: mpsc::Sender<AgentCommand>,
@@ -472,6 +474,7 @@ impl Agent {
             continue_policy: ContinuePolicy::Disabled,
             queued_confidence_continue_nudge: false,
             turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
+            config: Arc::new(Config::default()),
             lua_tool_loader: None,
 
             event_tx,
@@ -1242,6 +1245,7 @@ impl Agent {
                     mode: self.mode,
                     read_max_lines: self.read_max_lines,
                     turn_mana_review: self.turn_mana_review.clone(),
+                    config: self.config.clone(),
                 };
 
                 // Forward tool output deltas to event stream
