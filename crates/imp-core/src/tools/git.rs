@@ -348,6 +348,10 @@ async fn status_action(cwd: &Path, repo_root: &Path) -> Result<ToolOutput> {
     })
 }
 
+fn non_empty_param<'a>(params: &'a serde_json::Value, field_name: &str) -> Option<&'a str> {
+    params.get(field_name)?.as_str().filter(|s| !s.trim().is_empty())
+}
+
 async fn diff_action(
     cwd: &Path,
     repo_root: &Path,
@@ -355,8 +359,8 @@ async fn diff_action(
 ) -> Result<ToolOutput> {
     let files = parse_string_array(params, "files")?;
     let cached = params["cached"].as_bool().unwrap_or(false);
-    let base = params["base"].as_str();
-    let head = params["head"].as_str();
+    let base = non_empty_param(params, "base");
+    let head = non_empty_param(params, "head");
 
     let mut args = vec!["diff".to_string()];
     if let Some(base) = base {
@@ -1117,6 +1121,26 @@ mod tests {
         let text = extract_text(&result);
         assert!(text.contains("state: clean"));
         assert_eq!(result.details["clean"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn git_diff_ignores_empty_ref_fields() {
+        let dir = setup_repo();
+        let tool = GitTool;
+
+        let result = tool
+            .execute(
+                "c-diff",
+                json!({"action": "diff", "base": "", "head": ""}),
+                test_ctx(dir.path(), AgentMode::Worker),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(extract_text(&result), "No diff.");
+        assert_eq!(result.details["base"], json!(null));
+        assert_eq!(result.details["head"], json!(null));
     }
 
     #[tokio::test]
