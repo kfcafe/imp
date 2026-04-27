@@ -73,6 +73,7 @@ impl Tool for LuaTool {
             lua_tool_loader: ctx.lua_tool_loader,
             mode: ctx.mode,
             read_max_lines: ctx.read_max_lines,
+            config: ctx.config,
         };
 
         tokio::task::spawn_blocking(move || {
@@ -436,7 +437,7 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
             let field = field.unwrap_or_else(|| "api_key".to_string());
             match auth_store.resolve_secret_field(&provider, &field) {
                 Ok(value) => Ok(Value::String(lua_inner.create_string(&value)?)),
-                Err(_) => Ok(Value::Nil),
+                Err(error) => Err(mlua::Error::external(error.to_string())),
             }
         },
     )?;
@@ -463,7 +464,7 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
                     }
                     Ok(Value::Table(table))
                 }
-                Err(_) => Ok(Value::Nil),
+                Err(error) => Err(mlua::Error::external(error.to_string())),
             }
         })?;
     imp.set("secret_fields", secret_fields_fn)?;

@@ -110,7 +110,7 @@ use imp_core::session::{SessionEntry, SessionManager};
 use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
 use imp_core::usage::{UsageCostBreakdown, UsageRecordSource, UsageTokens};
 use imp_core::TimingEvent;
-use imp_llm::auth::{AuthStore, StoredCredential};
+use imp_llm::auth::{AuthStore, SecretFieldStatus, SecretStatus, StoredCredential};
 use imp_llm::model::{ModelMeta, ModelRegistry, ProviderMeta, ProviderRegistry};
 use imp_llm::oauth::anthropic::AnthropicOAuth;
 use imp_llm::oauth::chatgpt::ChatGptOAuth;
@@ -408,7 +408,7 @@ enum SecretsCommand {
     List,
     /// Alias for list
     Ls,
-    /// Show metadata for one configured provider/service
+    /// Show status for one configured provider/service
     Show {
         /// Provider/service to inspect
         provider: String,
@@ -418,6 +418,8 @@ enum SecretsCommand {
         /// Provider/service to inspect
         provider: String,
     },
+    /// Verify that configured secrets are readable from secure storage
+    Doctor,
     /// Remove a configured provider/service from secure storage
     Remove {
         /// Provider/service to remove
@@ -991,6 +993,23 @@ fn run_list_models() {
     }
 }
 
+fn canonical_provider_name(name: &str) -> String {
+    provider_alias(name)
+}
+
+fn resolve_stored_provider_name(auth_store: &AuthStore, name: &str) -> Option<String> {
+    let canonical = canonical_provider_name(name);
+    if auth_store.stored.contains_key(&canonical) {
+        return Some(canonical);
+    }
+
+    auth_store
+        .stored
+        .keys()
+        .find(|stored| stored.eq_ignore_ascii_case(&canonical))
+        .cloned()
+}
+
 fn oauth_login_success_message(auth_store: &AuthStore, provider: &str) -> String {
     auth_store
         .oauth_display_info(provider)
@@ -1150,6 +1169,7 @@ async fn run_secrets_command(
         Some(SecretsCommand::Remove { provider }) | Some(SecretsCommand::Rm { provider }) => {
             run_secrets_remove(provider)
         }
+        Some(SecretsCommand::Doctor) => run_secrets_doctor(),
         Some(SecretsCommand::Set { provider }) => run_secrets_login(provider).await,
         None => {
             let provider = provider.ok_or_else(|| {
@@ -1163,6 +1183,69 @@ async fn run_secrets_command(
     }
 }
 
+#[derive(Debug)]
+struct SecretListRow {
+    id: String,
+    display_name: String,
+    kind: String,
+    fields: String,
+    status: String,
+}
+
+fn secret_status_label(status: Option<&SecretStatus>) -> String {
+    let Some(status) = status else {
+        return "unknown".to_string();
+    };
+    if status.is_usable() {
+        return "ok".to_string();
+    }
+
+    let broken_fields: Vec<String> = status
+        .fields
+        .iter()
+        .filter_map(|(field, field_status)| match field_status {
+            SecretFieldStatus::Present => None,
+            SecretFieldStatus::Missing => Some(format!("{field}:missing")),
+            SecretFieldStatus::Error(_) => Some(format!("{field}:error")),
+        })
+        .collect();
+
+    if broken_fields.is_empty() {
+        "broken".to_string()
+    } else {
+        format!("broken ({})", broken_fields.join(", "))
+    }
+}
+
+fn secret_kind_and_fields(entry: &StoredCredential) -> (String, String) {
+    match entry {
+        StoredCredential::OAuth(_) => ("oauth".to_string(), "access_token".to_string()),
+        StoredCredential::ApiKey { .. } => ("api_key".to_string(), "api_key".to_string()),
+        StoredCredential::SecretFields { fields } => {
+            let kind = if fields.len() == 1 && fields.first().map(String::as_str) == Some("api_key")
+            {
+                "api_key".to_string()
+            } else {
+                format!("{} fields", fields.len())
+            };
+            (kind, fields.join(", "))
+        }
+    }
+}
+
+fn secret_status_detail(status: &SecretStatus) -> String {
+    status
+        .fields
+        .iter()
+        .map(|(field, field_status)| match field_status {
+            SecretFieldStatus::Present => format!("{field}: ok"),
+            SecretFieldStatus::Missing => format!("{field}: missing from secure storage"),
+            SecretFieldStatus::Error(error) => format!("{field}: secure storage error: {error}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn run_secrets_list() -> Result<(), Box<dyn std::error::Error>> {
     let _ = imp_core::storage::reconcile_legacy_into_global_root();
     let auth_path = imp_core::storage::global_auth_path();
@@ -1174,7 +1257,7 @@ fn run_secrets_list() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let registry = ProviderRegistry::with_builtins();
-    let mut rows: Vec<(String, String, String)> = auth_store
+    let mut rows: Vec<SecretListRow> = auth_store
         .stored
         .iter()
         .map(|(name, entry)| {
@@ -1182,67 +1265,77 @@ fn run_secrets_list() -> Result<(), Box<dyn std::error::Error>> {
                 .find(name)
                 .map(|meta| meta.name.to_string())
                 .unwrap_or_else(|| name.clone());
-            let kind = match entry {
-                StoredCredential::OAuth(_) => "oauth".to_string(),
-                StoredCredential::ApiKey { .. } => "api_key".to_string(),
-                StoredCredential::SecretFields { fields } => {
-                    if fields.len() == 1 && fields.first().map(String::as_str) == Some("api_key") {
-                        "api_key".to_string()
-                    } else {
-                        format!("{} fields", fields.len())
-                    }
-                }
-            };
-            let fields = match entry {
-                StoredCredential::OAuth(_) => "access_token".to_string(),
-                StoredCredential::ApiKey { .. } => "api_key".to_string(),
-                StoredCredential::SecretFields { fields } => fields.join(", "),
-            };
-            (name.clone(), display_name, kind + "|" + &fields)
+            let (kind, fields) = secret_kind_and_fields(entry);
+            let status = secret_status_label(auth_store.secret_status(name).as_ref());
+            SecretListRow {
+                id: name.clone(),
+                display_name,
+                kind,
+                fields,
+                status,
+            }
         })
         .collect();
 
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
 
     let provider_w = rows
         .iter()
-        .map(|(id, display, _)| format!("{} ({})", display, id).len())
+        .map(|row| format!("{} ({})", row.display_name, row.id).len())
         .max()
         .unwrap_or(8)
         .max("Provider".len());
     let kind_w = rows
         .iter()
-        .filter_map(|(_, _, payload)| payload.split_once('|').map(|(kind, _)| kind.len()))
+        .map(|row| row.kind.len())
         .max()
         .unwrap_or(4)
         .max("Kind".len());
+    let status_w = rows
+        .iter()
+        .map(|row| row.status.len())
+        .max()
+        .unwrap_or(6)
+        .max("Status".len());
 
     println!(
-        "{:<provider_w$}  {:<kind_w$}  {}",
+        "{:<provider_w$}  {:<kind_w$}  {:<status_w$}  {}",
         "Provider",
         "Kind",
+        "Status",
         "Fields",
         provider_w = provider_w,
-        kind_w = kind_w
+        kind_w = kind_w,
+        status_w = status_w
     );
     println!(
-        "{:-<provider_w$}  {:-<kind_w$}  {:-<6}",
+        "{:-<provider_w$}  {:-<kind_w$}  {:-<status_w$}  {:-<6}",
+        "",
         "",
         "",
         "",
         provider_w = provider_w,
-        kind_w = kind_w
+        kind_w = kind_w,
+        status_w = status_w
     );
 
-    for (id, display_name, payload) in rows {
-        let (kind, fields) = payload.split_once('|').unwrap_or(("", ""));
+    let has_broken = rows.iter().any(|row| row.status != "ok");
+    for row in rows {
         println!(
-            "{:<provider_w$}  {:<kind_w$}  {}",
-            format!("{} ({})", display_name, id),
-            kind,
-            fields,
+            "{:<provider_w$}  {:<kind_w$}  {:<status_w$}  {}",
+            format!("{} ({})", row.display_name, row.id),
+            row.kind,
+            row.status,
+            row.fields,
             provider_w = provider_w,
-            kind_w = kind_w
+            kind_w = kind_w,
+            status_w = status_w
+        );
+    }
+
+    if has_broken {
+        eprintln!(
+            "\nSome secret metadata points at missing secure-storage values. Re-save with `imp secrets <provider>` or run `imp secrets doctor` for details."
         );
     }
 
@@ -1250,11 +1343,18 @@ fn run_secrets_list() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_secrets_show(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let provider = provider_alias(provider);
+    let requested_provider = canonical_provider_name(provider);
     let auth_path = imp_core::storage::global_auth_path();
     let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
     let registry = ProviderRegistry::with_builtins();
 
+    let provider =
+        resolve_stored_provider_name(&auth_store, &requested_provider).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("No saved credentials for {requested_provider}."),
+            )
+        })?;
     let entry = auth_store.stored.get(&provider).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -1267,18 +1367,88 @@ fn run_secrets_show(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
         .map(|meta| meta.name.to_string())
         .unwrap_or_else(|| provider.to_string());
 
-    let (kind, fields): (&str, Vec<String>) = match entry {
-        StoredCredential::OAuth(_) => ("oauth", vec!["access_token".into()]),
-        StoredCredential::ApiKey { .. } => ("api_key", vec!["api_key".into()]),
-        StoredCredential::SecretFields { fields } => ("secret_fields", fields.clone()),
-    };
+    let (kind, fields) = secret_kind_and_fields(entry);
+    let status = auth_store.secret_status(&provider).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("No saved credentials for {provider}."),
+        )
+    })?;
 
     println!("Provider : {} ({})", display_name, provider);
     println!("Kind     : {}", kind);
-    println!("Fields   : {}", fields.join(", "));
+    println!("Fields   : {}", fields);
     println!("Storage  : secure keychain + auth metadata");
+    println!("Status   : {}", secret_status_label(Some(&status)));
     println!("Values   : hidden");
+    println!("\n{}", secret_status_detail(&status));
+
+    if !status.is_usable() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "Saved metadata for {provider} exists, but one or more secret values are missing or unreadable. Re-save with `imp secrets {provider}`."
+            ),
+        )
+        .into());
+    }
+
     Ok(())
+}
+
+fn run_secrets_doctor() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = imp_core::storage::reconcile_legacy_into_global_root();
+    let auth_path = imp_core::storage::global_auth_path();
+    let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
+
+    if auth_store.stored.is_empty() {
+        println!("No saved credentials.");
+        return Ok(());
+    }
+
+    let registry = ProviderRegistry::with_builtins();
+    let mut providers: Vec<_> = auth_store.stored.keys().cloned().collect();
+    providers.sort();
+
+    let mut broken = Vec::new();
+    for provider in providers {
+        let display_name = registry
+            .find(&provider)
+            .map(|meta| meta.name.to_string())
+            .unwrap_or_else(|| provider.clone());
+        let status = auth_store.secret_status(&provider).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("No saved credentials for {provider}."),
+            )
+        })?;
+        println!(
+            "{} ({}) — {}",
+            display_name,
+            provider,
+            secret_status_label(Some(&status))
+        );
+        for line in secret_status_detail(&status).lines() {
+            println!("  {line}");
+        }
+        if !status.is_usable() {
+            broken.push(provider);
+        }
+    }
+
+    if broken.is_empty() {
+        return Ok(());
+    }
+
+    eprintln!(
+        "\nBroken secrets: {}. Re-save each with `imp secrets <provider>`; metadata without keychain values cannot authenticate.",
+        broken.join(", ")
+    );
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("{} saved secret provider(s) are not usable", broken.len()),
+    )
+    .into())
 }
 
 fn run_secrets_remove(provider: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1502,9 +1672,12 @@ fn open_url(url: &str) -> std::io::Result<()> {
 }
 
 fn provider_has_auth(auth_store: &AuthStore, meta: &ProviderMeta) -> bool {
-    meta.env_vars.iter().any(|v| std::env::var(v).is_ok())
-        || auth_store.stored.contains_key(meta.id)
-        || (meta.id == "moonshot" && auth_store.stored.contains_key("kimi-code"))
+    meta.env_vars.iter().any(|v| {
+        std::env::var(v)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+    }) || auth_store.has_credentials(meta.id)
+        || (meta.id == "moonshot" && auth_store.has_credentials("kimi-code"))
 }
 
 fn save_auth_secret_fields(

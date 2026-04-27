@@ -5,7 +5,7 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use imp_core::config::{AgentMode, LuaCapabilityPolicy};
+use imp_core::config::{AgentMode, Config, LuaCapabilityPolicy};
 use imp_core::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
 use imp_core::ui::UserInterface;
 use mlua::Lua;
@@ -62,6 +62,7 @@ pub struct LuaCallContext {
     pub lua_tool_loader: Option<imp_core::tools::LuaToolLoader>,
     pub mode: AgentMode,
     pub read_max_lines: usize,
+    pub config: Arc<Config>,
 }
 
 impl LuaCallContext {
@@ -82,7 +83,7 @@ impl LuaCallContext {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 imp_core::mana_review::TurnManaReviewAccumulator::default(),
             )),
-            config: Arc::new(imp_core::config::Config::default()),
+            config: Arc::clone(&self.config),
         }
     }
 }

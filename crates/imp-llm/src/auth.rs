@@ -11,6 +11,40 @@ use crate::error::Result;
 
 pub type ApiKey = String;
 const KEYRING_SERVICE: &str = "imp";
+const LEGACY_KEYRING_SERVICES: &[&str] = &["imp-cli", "impeccable", "mana"];
+
+fn provider_lookup_candidates(provider: &str) -> Vec<String> {
+    let mut candidates = vec![provider.to_string()];
+    let lower = provider.to_lowercase();
+    if lower != provider {
+        candidates.push(lower);
+    }
+    if provider == "render" {
+        candidates.push("Render".to_string());
+    }
+    dedupe_strings(candidates)
+}
+
+fn field_lookup_candidates(field: &str) -> Vec<String> {
+    let mut candidates = vec![field.to_string()];
+    if field == "secrets_key" {
+        candidates.push("secret_key".to_string());
+    }
+    if field == "secret_key" {
+        candidates.push("secrets_key".to_string());
+    }
+    dedupe_strings(candidates)
+}
+
+fn dedupe_strings(values: Vec<String>) -> Vec<String> {
+    let mut deduped = Vec::new();
+    for value in values {
+        if !deduped.contains(&value) {
+            deduped.push(value);
+        }
+    }
+    deduped
+}
 
 trait SecretBackend: Send + Sync {
     fn get(&self, provider: &str, field: &str) -> Result<Option<String>>;
@@ -21,9 +55,44 @@ trait SecretBackend: Send + Sync {
 struct KeyringBackend;
 
 impl KeyringBackend {
-    fn entry(provider: &str, field: &str) -> Result<keyring::Entry> {
-        keyring::Entry::new(KEYRING_SERVICE, &format!("{provider}:{field}"))
+    fn entry(service: &str, provider: &str, field: &str) -> Result<keyring::Entry> {
+        keyring::Entry::new(service, &format!("{provider}:{field}"))
             .map_err(|e| crate::error::Error::Auth(format!("Secure storage init failed: {e}")))
+    }
+
+    fn read_entry(service: &str, provider: &str, field: &str) -> Result<Option<String>> {
+        let entry = Self::entry(service, provider, field)?;
+        match entry.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(Self::map_error("read", provider, field, error)),
+        }
+    }
+
+    fn lookup_secret(provider: &str, field: &str) -> Result<Option<String>> {
+        let providers = provider_lookup_candidates(provider);
+        let fields = field_lookup_candidates(field);
+        for candidate_provider in &providers {
+            for candidate_field in &fields {
+                if let Some(value) =
+                    Self::read_entry(KEYRING_SERVICE, candidate_provider, candidate_field)?
+                {
+                    return Ok(Some(value));
+                }
+            }
+        }
+        for service in LEGACY_KEYRING_SERVICES {
+            for candidate_provider in &providers {
+                for candidate_field in &fields {
+                    if let Some(value) =
+                        Self::read_entry(service, candidate_provider, candidate_field)?
+                    {
+                        return Ok(Some(value));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn map_error(
@@ -40,26 +109,44 @@ impl KeyringBackend {
 
 impl SecretBackend for KeyringBackend {
     fn get(&self, provider: &str, field: &str) -> Result<Option<String>> {
-        let entry = Self::entry(provider, field)?;
-        match entry.get_password() {
-            Ok(value) => Ok(Some(value)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(Self::map_error("read", provider, field, error)),
-        }
+        Self::lookup_secret(provider, field)
     }
 
     fn set(&self, provider: &str, field: &str, value: &str) -> Result<()> {
-        let entry = Self::entry(provider, field)?;
+        let entry = Self::entry(KEYRING_SERVICE, provider, field)?;
         entry
             .set_password(value)
             .map_err(|error| Self::map_error("write", provider, field, error))
     }
 
     fn delete(&self, provider: &str, field: &str) -> Result<()> {
-        let entry = Self::entry(provider, field)?;
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(Self::map_error("delete", provider, field, error)),
+        let providers = provider_lookup_candidates(provider);
+        let fields = field_lookup_candidates(field);
+        let mut first_error = None;
+        for service in
+            std::iter::once(KEYRING_SERVICE).chain(LEGACY_KEYRING_SERVICES.iter().copied())
+        {
+            for candidate_provider in &providers {
+                for candidate_field in &fields {
+                    let entry = Self::entry(service, candidate_provider, candidate_field)?;
+                    match entry.delete_credential() {
+                        Ok(()) | Err(keyring::Error::NoEntry) => {}
+                        Err(error) if first_error.is_none() => {
+                            first_error = Some(Self::map_error(
+                                "delete",
+                                candidate_provider,
+                                candidate_field,
+                                error,
+                            ));
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 }
@@ -84,6 +171,33 @@ pub enum StoredCredential {
     ApiKey { key: String },
     OAuth(OAuthCredential),
     SecretFields { fields: Vec<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretFieldStatus {
+    Present,
+    Missing,
+    Error(String),
+}
+
+impl SecretFieldStatus {
+    #[must_use]
+    pub fn is_present(&self) -> bool {
+        matches!(self, Self::Present)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretStatus {
+    pub provider: String,
+    pub fields: Vec<(String, SecretFieldStatus)>,
+}
+
+impl SecretStatus {
+    #[must_use]
+    pub fn is_usable(&self) -> bool {
+        self.fields.iter().all(|(_, status)| status.is_present())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,29 +308,10 @@ impl AuthStore {
             .insert(provider.to_string(), trimmed.to_string());
     }
 
-    /// Check whether credentials exist for a provider without producing an error.
-    /// Returns true if any of: runtime key, stored credential, or env var is available.
+    /// Check whether credentials are usable for a provider without producing an error.
+    /// Returns true if a runtime key, readable stored credential, or env var is available.
     pub fn has_credentials(&self, provider: &str) -> bool {
-        if self.runtime_keys.contains_key(provider) {
-            return true;
-        }
-        if self.stored.contains_key(provider) {
-            return true;
-        }
-        // Check env vars via the provider registry
-        let registry = crate::model::ProviderRegistry::with_builtins();
-        if let Some(meta) = registry.find(provider) {
-            for env_var in meta.env_vars {
-                if std::env::var(env_var)
-                    .ok()
-                    .filter(|v| !v.trim().is_empty())
-                    .is_some()
-                {
-                    return true;
-                }
-            }
-        }
-        false
+        self.resolve(provider).is_ok()
     }
 
     /// Resolution order: runtime override -> stored -> env var -> error.
@@ -245,15 +340,15 @@ impl AuthStore {
             }
         }
 
-        if let Some(credential) = self.stored.get(provider) {
+        if let Some((stored_provider, credential)) = self.stored_credential(provider) {
             match credential {
                 StoredCredential::ApiKey { key } if field == "api_key" => return Ok(key.clone()),
                 StoredCredential::SecretFields { fields } => {
                     if fields.iter().any(|name| name == field) {
                         return self
                             .backend
-                            .get(provider, field)?
-                            .ok_or_else(|| missing_secret_error(provider, field));
+                            .get(stored_provider, field)?
+                            .ok_or_else(|| missing_secret_error(stored_provider, field));
                     }
                 }
                 StoredCredential::OAuth(_) => {}
@@ -306,6 +401,55 @@ impl AuthStore {
             },
         );
         self.save()
+    }
+
+    fn stored_credential(&self, provider: &str) -> Option<(&str, &StoredCredential)> {
+        provider_lookup_candidates(provider)
+            .into_iter()
+            .find_map(|candidate| {
+                self.stored
+                    .get_key_value(&candidate)
+                    .map(|(stored_provider, credential)| (stored_provider.as_str(), credential))
+            })
+    }
+
+    /// Check whether stored secret metadata points at readable secure-storage values.
+    pub fn secret_status(&self, provider: &str) -> Option<SecretStatus> {
+        let (stored_provider, credential) = self.stored_credential(provider)?;
+        let fields = match credential {
+            StoredCredential::SecretFields { fields } => fields
+                .iter()
+                .map(|field| {
+                    let status = match self.backend.get(stored_provider, field) {
+                        Ok(Some(value)) if !value.trim().is_empty() => SecretFieldStatus::Present,
+                        Ok(_) => SecretFieldStatus::Missing,
+                        Err(error) => SecretFieldStatus::Error(error.to_string()),
+                    };
+                    (field.clone(), status)
+                })
+                .collect(),
+            StoredCredential::ApiKey { key } => vec![(
+                "api_key".to_string(),
+                if key.trim().is_empty() {
+                    SecretFieldStatus::Missing
+                } else {
+                    SecretFieldStatus::Present
+                },
+            )],
+            StoredCredential::OAuth(oauth) => vec![(
+                "access_token".to_string(),
+                if oauth.access_token.trim().is_empty() {
+                    SecretFieldStatus::Missing
+                } else {
+                    SecretFieldStatus::Present
+                },
+            )],
+        };
+
+        Some(SecretStatus {
+            provider: stored_provider.to_string(),
+            fields,
+        })
     }
 
     /// Resolve all stored secret fields for a provider into a map.
@@ -509,7 +653,7 @@ fn env_var_name(provider: &str, field: &str) -> String {
 
 fn missing_secret_error(provider: &str, field: &str) -> crate::error::Error {
     crate::error::Error::Auth(format!(
-        "No secret field '{field}' found for {provider}. Set {} or run `imp login {provider}`.",
+        "No readable secret field '{field}' found for {provider}. Set {} or run `imp secrets {provider}` to save it again.",
         env_var_name(provider, field)
     ))
 }
@@ -1101,6 +1245,48 @@ mod tests {
         std::env::remove_var("GOOGLE_API_KEY");
         let result = store.resolve("google");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn provider_lookup_candidates_include_legacy_render_casing() {
+        assert_eq!(
+            provider_lookup_candidates("render"),
+            vec!["render".to_string(), "Render".to_string()]
+        );
+        assert_eq!(
+            provider_lookup_candidates("Render"),
+            vec!["Render".to_string(), "render".to_string()]
+        );
+    }
+
+    #[test]
+    fn field_lookup_candidates_support_porkbun_secret_key_typo() {
+        assert_eq!(
+            field_lookup_candidates("secrets_key"),
+            vec!["secrets_key".to_string(), "secret_key".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_secret_status_reports_missing_keychain_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = test_store(path);
+        store.stored.insert(
+            "google".into(),
+            StoredCredential::SecretFields {
+                fields: vec!["api_key".into()],
+            },
+        );
+
+        let status = store.secret_status("google").unwrap();
+        assert_eq!(status.provider, "google");
+        assert_eq!(
+            status.fields,
+            vec![("api_key".to_string(), SecretFieldStatus::Missing)]
+        );
+        assert!(!status.is_usable());
+        assert!(!store.has_credentials("google"));
     }
 
     #[test]

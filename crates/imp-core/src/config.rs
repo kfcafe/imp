@@ -283,8 +283,13 @@ pub struct LuaConfig {
 
 impl LuaConfig {
     #[must_use]
-    pub fn resolve_policy(&self, _mode: AgentMode) -> LuaCapabilityPolicy {
+    pub fn resolve_policy(&self, mode: AgentMode) -> LuaCapabilityPolicy {
         let mut policy = LuaCapabilityPolicy::default();
+        // Worker agents inherit the user's explicit Lua secret capability so
+        // agent-invoked extension tools behave the same as the parent session.
+        if matches!(mode, AgentMode::Worker) {
+            policy.allow_secrets = self.allow_secrets.unwrap_or(false);
+        }
         if let Some(value) = self.allow_native_tool_calls {
             policy.allow_native_tool_calls = value;
         }
@@ -1431,6 +1436,27 @@ model = "sonnet"
         assert!(policy.allow_secrets);
         assert!(policy.allowed_env.contains("OPENAI_API_KEY"));
         assert!(policy.allowed_env.contains("HOME"));
+    }
+
+    #[test]
+    fn worker_lua_policy_preserves_configured_secret_access() {
+        let enabled = LuaConfig {
+            allow_secrets: Some(true),
+            ..Default::default()
+        };
+        assert!(enabled.resolve_policy(AgentMode::Worker).allow_secrets);
+
+        let disabled = LuaConfig {
+            allow_secrets: Some(false),
+            ..Default::default()
+        };
+        assert!(!disabled.resolve_policy(AgentMode::Worker).allow_secrets);
+
+        assert!(
+            !LuaConfig::default()
+                .resolve_policy(AgentMode::Worker)
+                .allow_secrets
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use imp_llm::auth::AuthStore;
+use imp_llm::auth::{AuthStore, StoredCredential};
 
 use super::{
     truncate_head, truncate_tail, Tool, ToolContext, ToolOutput, ToolUpdate, TruncationResult,
@@ -133,10 +133,23 @@ fn resolve_secret_env_bindings(
         .into_iter()
         .map(|binding| {
             let descriptor = binding_descriptor(&binding);
+            let has_auth_metadata = matches!(
+                auth_store.stored.get(&binding.provider),
+                Some(StoredCredential::SecretFields { fields })
+                    if fields.iter().any(|field| field == &binding.field)
+            );
             auth_store
                 .resolve_secret_field(&binding.provider, &binding.field)
                 .map(|value| ResolvedSecretEnvBinding { binding, value })
-                .map_err(|_| Error::Tool(format!("missing secret for {descriptor}")))
+                .map_err(|error| {
+                    if has_auth_metadata {
+                        Error::Tool(format!(
+                            "missing keychain value for {descriptor}; auth metadata exists but secure storage read failed: {error}"
+                        ))
+                    } else {
+                        Error::Tool(format!("missing secret for {descriptor}: {error}"))
+                    }
+                })
         })
         .collect()
 }

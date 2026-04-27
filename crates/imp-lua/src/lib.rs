@@ -946,6 +946,7 @@ mod tests {
             mode: imp_core::config::AgentMode::Full,
             read_max_lines: 500,
             lua_tool_loader: None,
+            config: Arc::new(imp_core::config::Config::default()),
         }
     }
 

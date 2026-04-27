@@ -434,8 +434,9 @@ fn provider_logged_in(auth_store: &AuthStore, provider: &str) -> bool {
         "openai" => {
             auth_store.get_oauth("openai").is_some()
                 || auth_store.get_oauth("openai-codex").is_some()
+                || auth_store.has_credentials("openai")
         }
-        _ => auth_store.stored.contains_key(provider),
+        _ => auth_store.has_credentials(provider),
     }
 }
 
