@@ -76,6 +76,13 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::Save,
 ];
 
+fn field_index(field: SettingsField) -> usize {
+    FIELDS
+        .iter()
+        .position(|candidate| *candidate == field)
+        .expect("settings field is registered")
+}
+
 /// State for the settings overlay.
 #[derive(Debug, Clone)]
 pub struct SettingsState {
@@ -136,7 +143,7 @@ impl SettingsState {
             model_options: models.iter().map(|m| m.id.clone()).collect(),
             chosen_models: config.enabled_models.clone().unwrap_or_default(),
             theme_name: config.theme.clone().unwrap_or_else(|| "default".into()),
-            theme_options: vec!["default".into(), "light".into()],
+            theme_options: theme_options(config.theme.as_deref()),
             thinking_level: config.thinking.unwrap_or(ThinkingLevel::Medium),
             max_tokens: config.max_tokens.unwrap_or(4096),
             max_turns: config.max_turns.unwrap_or(100),
@@ -209,14 +216,13 @@ impl SettingsState {
             }
             SettingsField::Theme => {
                 if !self.theme_options.is_empty() {
-                    if let Some(idx) = self
+                    let idx = self
                         .theme_options
                         .iter()
                         .position(|t| *t == self.theme_name)
-                    {
-                        let next = (idx + 1) % self.theme_options.len();
-                        self.theme_name = self.theme_options[next].clone();
-                    }
+                        .unwrap_or(0);
+                    let next = (idx + 1) % self.theme_options.len();
+                    self.theme_name = self.theme_options[next].clone();
                 }
             }
             SettingsField::ThinkingLevel => {
@@ -324,18 +330,17 @@ impl SettingsState {
             }
             SettingsField::Theme => {
                 if !self.theme_options.is_empty() {
-                    if let Some(idx) = self
+                    let idx = self
                         .theme_options
                         .iter()
                         .position(|t| *t == self.theme_name)
-                    {
-                        let prev = if idx == 0 {
-                            self.theme_options.len() - 1
-                        } else {
-                            idx - 1
-                        };
-                        self.theme_name = self.theme_options[prev].clone();
-                    }
+                        .unwrap_or(0);
+                    let prev = if idx == 0 {
+                        self.theme_options.len() - 1
+                    } else {
+                        idx - 1
+                    };
+                    self.theme_name = self.theme_options[prev].clone();
                 }
             }
             SettingsField::ThinkingLevel => {
@@ -619,6 +624,16 @@ impl SettingsState {
     }
 }
 
+fn theme_options(current: Option<&str>) -> Vec<String> {
+    let mut options = vec!["default".to_string(), "light".to_string()];
+    if let Some(current) = current.filter(|value| !value.trim().is_empty()) {
+        if !options.iter().any(|option| option == current) {
+            options.push(current.to_string());
+        }
+    }
+    options
+}
+
 fn next_thinking(level: ThinkingLevel) -> ThinkingLevel {
     match level {
         ThinkingLevel::Off => ThinkingLevel::Low,
@@ -695,23 +710,46 @@ fn visit_settings_rows(mut visit: impl FnMut(SettingsRow, u16)) {
     visit(SettingsRow::Header, row);
     row += 2;
 
-    for field_idx in 0..=5 {
-        visit(SettingsRow::Field(field_idx), row);
-        row += 1;
-    }
+    let sections: &[&[SettingsField]] = &[
+        &[
+            SettingsField::Model,
+            SettingsField::ChosenModels,
+            SettingsField::Theme,
+            SettingsField::ThinkingLevel,
+            SettingsField::MaxTokens,
+            SettingsField::MaxTurns,
+        ],
+        &[SettingsField::ObservationMask, SettingsField::ShellBackend],
+        &[
+            SettingsField::ReadMaxLines,
+            SettingsField::SidebarWidth,
+            SettingsField::WordWrap,
+            SettingsField::Animations,
+            SettingsField::AutoOpenSidebar,
+            SettingsField::SidebarAutoOpenWidth,
+            SettingsField::ThinkingLines,
+            SettingsField::StreamingLines,
+            SettingsField::MouseScrollLines,
+            SettingsField::KeyboardScrollLines,
+            SettingsField::ShowTimestamps,
+            SettingsField::ShowCost,
+            SettingsField::ShowContextUsage,
+            SettingsField::NotifyOnAgentComplete,
+            SettingsField::ContinuePolicy,
+            SettingsField::WebSearchProvider,
+            SettingsField::TavilyApiKey,
+            SettingsField::ExaApiKey,
+        ],
+    ];
 
-    row += 1;
-
-    for field_idx in 6..=7 {
-        visit(SettingsRow::Field(field_idx), row);
-        row += 1;
-    }
-
-    row += 1;
-
-    for field_idx in 8..=29 {
-        visit(SettingsRow::Field(field_idx), row);
-        row += 1;
+    for (section_idx, section) in sections.iter().enumerate() {
+        if section_idx > 0 {
+            row += 1;
+        }
+        for field in *section {
+            visit(SettingsRow::Field(field_index(*field)), row);
+            row += 1;
+        }
     }
 
     row += 1;
@@ -818,7 +856,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            0,
+            field_index(SettingsField::Model),
             "Model",
             &self.state.model,
             "← →",
@@ -850,10 +888,10 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            2,
-            "Theme",
+            field_index(SettingsField::Theme),
+            "Color theme",
             &self.state.theme_name,
-            "← →",
+            "← → (UI colors)",
         );
 
         render_field(
@@ -863,7 +901,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            3,
+            field_index(SettingsField::ThinkingLevel),
             "Thinking level",
             thinking_label(self.state.thinking_level),
             "← →",
@@ -883,7 +921,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            4,
+            field_index(SettingsField::MaxTokens),
             "Max tokens",
             &max_tokens_val,
             "← → / type",
@@ -902,7 +940,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            5,
+            field_index(SettingsField::MaxTurns),
             "Max turns",
             &max_turns_val,
             "← → / type",
@@ -924,7 +962,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            6,
+            field_index(SettingsField::ObservationMask),
             "Observation mask",
             &obs_val,
             "← →",
@@ -937,7 +975,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            7,
+            field_index(SettingsField::ShellBackend),
             "Shell backend",
             shell_label(&self.state.shell_backend),
             "← →",
@@ -959,7 +997,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            8,
+            field_index(SettingsField::ReadMaxLines),
             "Read max lines",
             &rml_val,
             "← → / type (0 = no limit)",
@@ -979,7 +1017,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            9,
+            field_index(SettingsField::SidebarWidth),
             "Inspector width",
             &sw_val,
             "← → / type",
@@ -992,7 +1030,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            10,
+            field_index(SettingsField::WordWrap),
             "Word wrap",
             if self.state.word_wrap { "on" } else { "off" },
             "← →",
@@ -1005,7 +1043,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            11,
+            field_index(SettingsField::Animations),
             "Animations",
             animation_label(self.state.animations),
             "← →",
@@ -1018,7 +1056,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            16,
+            field_index(SettingsField::AutoOpenSidebar),
             "Auto-open sidebar",
             if self.state.auto_open_sidebar {
                 "on"
@@ -1042,7 +1080,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            17,
+            field_index(SettingsField::SidebarAutoOpenWidth),
             "Auto-open width",
             &sao_val,
             "← → / type",
@@ -1062,7 +1100,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            18,
+            field_index(SettingsField::ThinkingLines),
             "Thinking lines",
             &thinking_lines_val,
             "← → / type",
@@ -1082,7 +1120,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            19,
+            field_index(SettingsField::StreamingLines),
             "Streaming lines",
             &streaming_lines_val,
             "← → / type",
@@ -1102,7 +1140,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            20,
+            field_index(SettingsField::MouseScrollLines),
             "Mouse scroll",
             &mouse_scroll_val,
             "← → / type",
@@ -1122,7 +1160,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            21,
+            field_index(SettingsField::KeyboardScrollLines),
             "Keyboard scroll",
             &keyboard_scroll_val,
             "← → / type",
@@ -1135,7 +1173,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            22,
+            field_index(SettingsField::ShowTimestamps),
             "Show timestamps",
             if self.state.show_timestamps {
                 "on"
@@ -1151,7 +1189,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            23,
+            field_index(SettingsField::ShowCost),
             "Show cost",
             if self.state.show_cost { "on" } else { "off" },
             "← →",
@@ -1163,7 +1201,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            24,
+            field_index(SettingsField::ShowContextUsage),
             "Show context",
             if self.state.show_context_usage {
                 "on"
@@ -1180,7 +1218,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            25,
+            field_index(SettingsField::NotifyOnAgentComplete),
             "Bell on done",
             if self.state.notify_on_agent_complete {
                 "on"
@@ -1197,7 +1235,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            26,
+            field_index(SettingsField::ContinuePolicy),
             "Auto-continue",
             match self.state.continue_policy {
                 ContinuePolicy::Disabled => "disabled",
@@ -1215,7 +1253,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            27,
+            field_index(SettingsField::WebSearchProvider),
             "Web provider",
             match self.state.web_search_provider {
                 None => "auto",
@@ -1246,7 +1284,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            28,
+            field_index(SettingsField::TavilyApiKey),
             "Tavily API key",
             &tavily_val,
             "Enter to edit",
@@ -1271,7 +1309,7 @@ impl Widget for SettingsView<'_> {
             inner,
             scroll_offset,
             &mut row,
-            29,
+            field_index(SettingsField::ExaApiKey),
             "Exa API key",
             &exa_val,
             "Enter to edit",
@@ -1386,9 +1424,33 @@ mod tests {
 
     #[test]
     fn save_field_scrolls_into_view_on_short_panels() {
-        assert_eq!(selected_settings_row(FIELDS.len() - 1), 35);
-        assert_eq!(total_settings_rows(), 36);
-        assert_eq!(settings_scroll_offset(FIELDS.len() - 1, 10), 26);
+        assert_eq!(selected_settings_row(FIELDS.len() - 1), 31);
+        assert_eq!(total_settings_rows(), 32);
+        assert_eq!(settings_scroll_offset(FIELDS.len() - 1, 10), 22);
+    }
+
+    #[test]
+    fn custom_theme_value_is_selectable_and_cycles() {
+        let registry = ModelRegistry::with_builtins();
+        let models = registry.list().to_vec();
+        let auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
+        let config = Config {
+            theme: Some("custom-highlighter".into()),
+            ..Config::default()
+        };
+        let mut state = SettingsState::new(&config, &models[0].id, &models, &auth_store);
+
+        assert_eq!(state.theme_name, "custom-highlighter");
+        assert!(state
+            .theme_options
+            .iter()
+            .any(|theme| theme == "custom-highlighter"));
+
+        state.selected = field_index(SettingsField::Theme);
+        state.cycle_forward();
+        assert_eq!(state.theme_name, "default");
+        state.cycle_backward();
+        assert_eq!(state.theme_name, "custom-highlighter");
     }
 
     #[test]
