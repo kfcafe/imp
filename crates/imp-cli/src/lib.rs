@@ -88,11 +88,11 @@ impl StartupTimer {
 
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::ffi::OsString;
 use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use imp_core::config::{AnimationLevel, Config, ToolOutputDisplay};
 use imp_core::format_error_for_display;
 use imp_core::tools::web::types::SearchProvider;
+use std::ffi::OsString;
 
 use imp_core::imp_session::{
     resolve_runtime_connection, ImpSession, ResolvedRuntimeConnection, RuntimeConnectionIntent,
@@ -617,7 +617,9 @@ fn find_imp_on_path_from(path: Option<OsString>) -> Option<PathBuf> {
 }
 
 fn path_contains_dir(path: Option<OsString>, dir: &std::path::Path) -> bool {
-    split_path_entries(path).into_iter().any(|entry| entry == dir)
+    split_path_entries(path)
+        .into_iter()
+        .any(|entry| entry == dir)
 }
 
 fn preferred_user_install_path(home: &std::path::Path, path: Option<OsString>) -> PathBuf {
@@ -674,7 +676,10 @@ fn install_binary_to(source: &std::path::Path, dest: &std::path::Path) -> io::Re
     Ok(())
 }
 
-fn run_install_local(dest_override: Option<PathBuf>, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn run_install_local(
+    dest_override: Option<PathBuf>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let current_exe = std::env::current_exe()?;
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -717,7 +722,9 @@ fn run_install_local(dest_override: Option<PathBuf>, dry_run: bool) -> Result<()
             println!(
                 "Installed to {}, but `imp` is not currently on PATH. Add {} to PATH.",
                 dest.display(),
-                dest.parent().map(|p| p.display().to_string()).unwrap_or_default()
+                dest.parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
             );
         }
     }
@@ -1291,9 +1298,7 @@ async fn run_secrets_login(provider_name: &str) -> Result<(), Box<dyn std::error
     let canonical_provider = provider_alias(provider_name);
     let registry = ProviderRegistry::with_builtins();
     let provider_meta = registry.find(&canonical_provider);
-    let display_name = provider_meta
-        .map(|p| p.name)
-        .unwrap_or(&canonical_provider);
+    let display_name = provider_meta.map(|p| p.name).unwrap_or(&canonical_provider);
     let docs_hint = provider_meta.map(|p| p.docs_url).unwrap_or("");
 
     let fields = prompt_for_secret_fields(&canonical_provider, display_name, docs_hint)?;
@@ -1304,9 +1309,10 @@ async fn run_secrets_login(provider_name: &str) -> Result<(), Box<dyn std::error
 
 /// Try to import existing Kimi CLI OAuth credentials from `~/.kimi/credentials/kimi-code.json`.
 fn try_import_kimi_cli_credentials() -> Option<imp_llm::auth::OAuthCredential> {
-    let path = std::path::PathBuf::from(
-        std::env::var_os("HOME")?
-    ).join(".kimi").join("credentials").join("kimi-code.json");
+    let path = std::path::PathBuf::from(std::env::var_os("HOME")?)
+        .join(".kimi")
+        .join("credentials")
+        .join("kimi-code.json");
     let content = std::fs::read_to_string(&path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
     let access_token = json["access_token"].as_str()?.to_string();
@@ -1451,12 +1457,14 @@ async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>
 
         let value = prompt_input_line("api_key> ")?;
         if value.trim().is_empty() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "No api_key entered. Aborting.").into());
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "No api_key entered. Aborting.",
+            )
+            .into());
         }
-        auth_store.store_secret_fields(
-            "moonshot",
-            HashMap::from([("api_key".to_string(), value)]),
-        )?;
+        auth_store
+            .store_secret_fields("moonshot", HashMap::from([("api_key".to_string(), value)]))?;
         eprintln!("{}", kimi_api_login_success_message(&auth_store));
     } else {
         return Err(io::Error::new(
@@ -3754,10 +3762,7 @@ fn format_chat_tool_summary(tool_name: &str, args: &Value) -> String {
             .map(abbreviate_home_path)
             .unwrap_or_default(),
         "scan" => {
-            let action = args
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
             match action {
                 "extract" => args
                     .get("files")
@@ -3820,7 +3825,7 @@ async fn execute_chat_shell_command(
                 }
                 _ => {
                     println!(
-                        "Shell commands\n  :help [topic]      Show commands and quick guidance\n  :status            Show current shell/session status\n  :new               Start a fresh session\n  :resume            Continue the most recent session for this cwd\n  :compact           Compact older context (planned)\n  :settings          Edit a guided subset of imp settings\n  :personality       Edit soul/personality tunables and source\n  :setup             Run the setup wizard\n  :view <area>       Open `imp view` for sessions, tree, logs, or checkpoints\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nCompatibility\n  Slash-prefixed forms like `/help` and `/view` still work during migration,\n  but `:` is the preferred shell grammar."
+                        "Shell commands\n  :help [topic]      Show commands and quick guidance\n  :status            Show current shell/session status\n  :new               Start a fresh session\n  :resume            Continue the most recent session for this cwd\n  :compact           Compact older context (planned)\n  :settings          Edit a guided subset of imp settings\n  :personality       Edit soul/personality tunables and source\n  :setup             Run the setup wizard\n  :view <area>       Open `imp view` for sessions, tree, logs, or checkpoints\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nTools\n  web.read can read web pages and public YouTube URLs (metadata + captions when available).\n\nCompatibility\n  Slash-prefixed forms like `/help` and `/view` still work during migration,\n  but `:` is the preferred shell grammar."
                     );
                 }
             }
@@ -4449,10 +4454,7 @@ mod tests {
             Box::pin(futures_util::stream::iter(events))
         }
 
-        async fn resolve_auth(
-            &self,
-            _auth: &AuthStore,
-        ) -> imp_llm::Result<imp_llm::auth::ApiKey> {
+        async fn resolve_auth(&self, _auth: &AuthStore) -> imp_llm::Result<imp_llm::auth::ApiKey> {
             Ok("test-key".to_string())
         }
 
@@ -4619,12 +4621,15 @@ mod tests {
             .await
             .expect("finalize worker run");
 
-        assert_eq!(outcome.result.status, imp_core::mana_worker::WorkerStatus::Completed);
+        assert_eq!(
+            outcome.result.status,
+            imp_core::mana_worker::WorkerStatus::Completed
+        );
         assert_eq!(outcome.verify_passed, Some(true));
         assert!(outcome.closed_after_verify);
 
-        let archived = mana_core::ops::show::get(&temp.path().join(".mana"), "1")
-            .expect("show closed unit");
+        let archived =
+            mana_core::ops::show::get(&temp.path().join(".mana"), "1").expect("show closed unit");
         assert!(archived.unit.is_archived);
         assert_eq!(archived.unit.status.to_string(), "closed");
     }
@@ -4859,7 +4864,9 @@ mod tests {
     #[test]
     fn resolve_install_destination_prefers_active_user_imp_path() {
         let home = PathBuf::from("/Users/test");
-        let path = Some(OsString::from("/Users/test/bin:/Users/test/.cargo/bin:/usr/bin"));
+        let path = Some(OsString::from(
+            "/Users/test/bin:/Users/test/.cargo/bin:/usr/bin",
+        ));
         let active_imp = Some(PathBuf::from("/Users/test/bin/imp"));
 
         let dest = resolve_install_destination(&home, path, active_imp, None);
@@ -4868,7 +4875,9 @@ mod tests {
     #[test]
     fn resolve_install_destination_falls_back_to_path_preference_when_imp_missing() {
         let home = PathBuf::from("/Users/test");
-        let path = Some(OsString::from("/Users/test/bin:/Users/test/.cargo/bin:/usr/bin"));
+        let path = Some(OsString::from(
+            "/Users/test/bin:/Users/test/.cargo/bin:/usr/bin",
+        ));
 
         let dest = resolve_install_destination(&home, path, None, None);
         assert_eq!(dest, PathBuf::from("/Users/test/bin/imp"));

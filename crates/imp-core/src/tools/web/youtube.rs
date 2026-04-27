@@ -101,29 +101,45 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
         &initial_player_response,
         visitor_data.as_deref(),
     )
-    .await?;
+    .await;
 
-    if caption_source.segments.is_empty() {
-        return Err(YouTubeError::TranscriptEmpty);
-    }
-
-    let text = format_video_context(
-        video_id.as_str(),
-        &watch_url,
-        &metadata,
-        &caption_source.selected_track,
-        &caption_source.segments,
-    );
     let title = metadata
         .title
         .clone()
         .unwrap_or_else(|| format!("YouTube video {}", video_id.as_str()));
-    let diagnostics = build_diagnostics(
-        &caption_source.tracks,
-        &caption_source.selected_track,
-        caption_source.segments.len(),
-        caption_source.source_client,
-    );
+    let (text, diagnostics) = match caption_source {
+        Ok(caption_source) if !caption_source.segments.is_empty() => (
+            format_video_context(
+                video_id.as_str(),
+                &watch_url,
+                &metadata,
+                &caption_source.selected_track,
+                &caption_source.segments,
+            ),
+            build_diagnostics(
+                &caption_source.tracks,
+                &caption_source.selected_track,
+                caption_source.segments.len(),
+                caption_source.source_client,
+            ),
+        ),
+        Ok(caption_source) => (
+            format_metadata_only_context(video_id.as_str(), &watch_url, &metadata),
+            build_metadata_only_diagnostics(Some(&format!(
+                "Caption tracks were found, but no transcript segments were extracted from {}.",
+                caption_source.source_client
+            ))),
+        ),
+        Err(err @ (YouTubeError::CaptionTracksMissing | YouTubeError::NoUsableCaptionTrack)) => (
+            format_metadata_only_context(video_id.as_str(), &watch_url, &metadata),
+            build_metadata_only_diagnostics(Some(&err.to_string())),
+        ),
+        Err(err @ (YouTubeError::TranscriptEmpty | YouTubeError::TranscriptParse(_))) => (
+            format_metadata_only_context(video_id.as_str(), &watch_url, &metadata),
+            build_metadata_only_diagnostics(Some(&err.to_string())),
+        ),
+        Err(err) => return Err(err),
+    };
 
     let was_redirected = final_url != watch_url;
 
@@ -648,6 +664,39 @@ fn format_video_context(
     output.trim().to_string()
 }
 
+fn format_metadata_only_context(
+    video_id: &str,
+    canonical_url: &str,
+    metadata: &VideoMetadata,
+) -> String {
+    let mut output = String::new();
+    output.push_str("# YouTube Video Context\n\n");
+    output.push_str("## Source\n");
+    output.push_str(&format!("- URL: {canonical_url}\n"));
+    output.push_str(&format!("- Video ID: {video_id}\n"));
+    push_optional(&mut output, "- Title", metadata.title.as_deref());
+    push_optional(&mut output, "- Channel", metadata.author.as_deref());
+    push_optional(&mut output, "- Channel ID", metadata.channel_id.as_deref());
+    push_optional(
+        &mut output,
+        "- Duration seconds",
+        metadata.duration_seconds.as_deref(),
+    );
+    push_optional(&mut output, "- Views", metadata.view_count.as_deref());
+    push_optional(&mut output, "- Published", metadata.publish_date.as_deref());
+    push_optional(&mut output, "- Uploaded", metadata.upload_date.as_deref());
+
+    if let Some(description) = metadata.description.as_deref() {
+        output.push_str("\n## Description\n");
+        output.push_str(description.trim());
+        output.push('\n');
+    }
+
+    output.push_str("\n## Transcript\n");
+    output.push_str("Transcript unavailable. YouTube metadata was extracted, but no usable caption/transcript body was available for this video.\n");
+    output.trim().to_string()
+}
+
 fn build_diagnostics(
     tracks: &[CaptionTrack],
     selected_track: &CaptionTrack,
@@ -667,6 +716,18 @@ fn build_diagnostics(
             segment_count
         ),
     ]
+}
+
+fn build_metadata_only_diagnostics(reason: Option<&str>) -> Vec<String> {
+    let mut diagnostics = vec![
+        "YouTube extraction used native HTTP metadata path; no video/audio was downloaded."
+            .to_string(),
+        "Transcript unavailable; returning metadata-only YouTube context.".to_string(),
+    ];
+    if let Some(reason) = reason.filter(|reason| !reason.trim().is_empty()) {
+        diagnostics.push(format!("Transcript unavailable reason: {reason}"));
+    }
+    diagnostics
 }
 
 fn push_optional(output: &mut String, label: &str, value: Option<&str>) {
@@ -864,6 +925,33 @@ pub(crate) mod tests {
         assert!(url.contains("fmt=json3"));
     }
 
+    #[test]
+    fn youtube_formats_metadata_only_context_with_clear_transcript_marker() {
+        let metadata = VideoMetadata {
+            title: Some("No captions example".into()),
+            author: Some("Example Channel".into()),
+            ..VideoMetadata::default()
+        };
+        let text = format_metadata_only_context(
+            "McO_xcf4IYw",
+            "https://www.youtube.com/watch?v=McO_xcf4IYw",
+            &metadata,
+        );
+        assert!(text.contains("No captions example"));
+        assert!(text.contains("Transcript unavailable"));
+    }
+
+    #[test]
+    fn youtube_metadata_only_diagnostics_include_reason() {
+        let diagnostics = build_metadata_only_diagnostics(Some("captions disabled"));
+        assert!(diagnostics
+            .iter()
+            .any(|line| line.contains("metadata-only")));
+        assert!(diagnostics
+            .iter()
+            .any(|line| line.contains("captions disabled")));
+    }
+
     #[tokio::test]
     #[ignore = "network smoke test for YouTube extraction"]
     async fn youtube_reads_sample_video_over_http() {
@@ -874,7 +962,8 @@ pub(crate) mod tests {
         let page = fetch_and_extract(&client, "https://www.youtube.com/watch?v=McO_xcf4IYw")
             .await
             .unwrap();
-        assert!(page.text.contains("How to Build & Sell AI Services"));
+        assert!(page.text.contains("# YouTube Video Context"));
+        assert!(page.text.contains("- Video ID: McO_xcf4IYw"));
         assert!(page.text.contains("## Transcript"));
         assert!(page.content_length > 1000);
     }

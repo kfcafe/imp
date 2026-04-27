@@ -3116,6 +3116,7 @@ impl App {
                     "  /login [provider]   — OAuth login (Anthropic/OpenAI/Kimi Code)\n",
                     "  /secrets [provider] — save/list API keys & service secrets\n",
                     "  /help       — this message\n",
+                    "\nTools: web.read supports web pages and public YouTube URLs (metadata + captions when available).\n",
                     "  /quit       — exit",
                 ));
             }

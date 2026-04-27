@@ -241,6 +241,8 @@ imp secrets rm my-service
 
 Saved keys now live in **imp's secure auth storage**: secret values go to your OS keychain when available, while `~/.config/imp/auth.json` keeps only metadata. Once saved, the `web` tool will auto-detect them even if you have not exported the env vars in your shell.
 
+The `web` tool can also read YouTube watch, shorts, embed, and `youtu.be` URLs natively. It fetches public video metadata and captions/transcripts over HTTP without `yt-dlp`, media downloads, or a web-search API key. YouTube extraction is best-effort because YouTube's internal client profiles change; when captions are unavailable, imp returns metadata-only context with diagnostics instead of pretending a transcript exists.
+
 The first-run setup flow now also includes an optional web-search step where you can choose Tavily, Exa, or skip for now.
 
 Provider selection order for the `web` tool:
