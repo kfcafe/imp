@@ -5,7 +5,7 @@ slug: review-project-gaps-that-would-make-imp-stronger-t
 status: open
 priority: 1
 created_at: '2026-04-27T19:23:43.040906Z'
-updated_at: '2026-04-27T19:23:55.205563Z'
+updated_at: '2026-04-27T19:36:25.552034Z'
 acceptance: User receives a concise prioritized review; no code modifications are made.
 notes: |-
   ---
@@ -18,6 +18,16 @@ notes: |-
   - Largest files by current wc: imp-tui/app.rs 7078, imp-core/agent.rs 5782, imp-cli/lib.rs 5679, imp-core/tools/mana.rs 3514, imp-llm/providers/anthropic.rs 2463, imp-core/session.rs 2334, imp-tui/views/sidebar.rs 1781, imp-core/imp_session.rs 1777, imp-core/system_prompt.rs 1725, imp-core/config.rs 1550.
   - Existing mana roadmap already tracks many major gaps: 47 rebuild epic, 47.2 core decomposition, 47.3 runner/worktree/sandbox, 47.4 policy, 47.5 evidence, 27 mana tool UX, 29 discoverability, 37 usage reporting, 44 guest-runtime, 46 maturity pass, 267 opencode lessons.
   - Review synthesis: biggest gaps are not missing random features; they are making existing strengths reliable, visible, enforceable, and measurable: shared runtime bootstrap, hard policy boundaries, cancellation/tool execution semantics, evidence/eval loop, mana-aware context read path, productized checkpoints/planning, and install/onboarding polish.
+
+  ---
+  2026-04-27T19:36:25.552031+00:00
+  Continuation/deeper inspection corrections:
+  - Mana facts/status read path is no longer purely a proposal gap: `builder.rs` calls `mana_prompt_context::load_session_prompt_context(&cwd)` when explicit facts are empty, and `mana_prompt_context.rs` maps `mana_core::api::memory_context` into prompt facts + compact project memory status. Remaining gap is likely wiki/index integration and relevance/quality, not basic facts injection.
+  - Cancellation has improved since `IMP_DEEP_REVIEW.md`: `agent.rs` now stores a shared `cancel_token`, passes it into `ToolContext`, and `tools/bash.rs` waits for cancellation and kills the process group. Remaining gap is proving coverage across all long-running tools and TUI Esc state, not basic bash cancellation only.
+  - Lua policy has improved: `LuaRuntime::new()` defaults shell/http/secrets/env deny, but native tool calls still default allow and `LuaConfig::resolve_policy(_mode)` ignores mode. Remaining high-value gap is making mode-aware policy authoritative and deny/least-privilege for native tool access.
+  - Checkpoints are more live than older review suggests: `CheckpointState` is wired into write/git snapshots, `ImpSession` persists checkpoint records, and TUI has restore command/tests. Remaining gap is productization/discoverability/timeline/diff, not raw mechanism.
+  - Provider/auth duplication remains visible: `imp_session.rs` owns `resolve_runtime_connection`/`resolve_api_key`; `imp-cli/src/lib.rs` and `imp-tui/src/app.rs` still have local provider API-key/login helpers and ChatGPT routing checks.
+  - Hotspot sizes are now larger than older review: app.rs 7078, agent.rs 5782, imp-cli lib.rs 5679, tools/mana.rs 3514.
 labels:
 - analysis
 - imp

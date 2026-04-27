@@ -23,7 +23,7 @@ and stronger memory-safety validation around `imp-core`.
 ## Typical workflow
 
 ```bash
-cd /Users/asher/tower/imp
+cd ~/imp
 bash tools/run-benchmarks.sh
 bash tools/run-leaks.sh
 bash tools/run-miri.sh

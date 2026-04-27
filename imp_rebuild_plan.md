@@ -2,7 +2,7 @@
 
 Status: active planning draft
 Audience: `imp` maintainers
-Scope: `~/tower/imp`
+Scope: `~/imp`
 
 This file converts `imp_rebuild_strategy.md` into an execution plan with a strict order of operations.
 
@@ -40,7 +40,7 @@ No TypeScript-first runtime split for the active rebuild.
 
 ### 2. Shared workflow types move out of `imp-core`
 
-The `mana ↔ imp ↔ runner` boundary should be expressed through the Tower shared contracts crate.
+The `mana ↔ imp ↔ runner` boundary should be expressed through the imp-owned contracts module.
 
 ### 3. Runner concerns are real architecture, not glue
 

@@ -2,7 +2,7 @@
 
 Status: draft
 Audience: `imp` and Tower maintainers
-Scope: `~/tower/imp`
+Scope: `~/imp`
 
 ---
 

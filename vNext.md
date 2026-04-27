@@ -2,7 +2,7 @@
 
 Status: proposed roadmap (source-of-truth draft)
 Audience: `imp` maintainers
-Scope: product/runtime direction for `~/tower/imp`
+Scope: product/runtime direction for `~/imp`
 
 This document turns the Hermes comparison work (mana units `266`, `266.1`, `266.2`, `266.3`, epic `266.4`) and the recent imp documentation set into a ranked, concrete vNext roadmap.
 
@@ -15,10 +15,10 @@ It should be read alongside:
 - `docs/proposals/guest-runtime-extension-substrate.md`
 - `docs/proposals/script-tool-boundaries-and-policy.md`
 - `docs/proposals/imp-memory-architecture-and-mana-boundary.md`
-- `../docs/rebuild/imp-shared-runtime-startup-map.md`
-- `../docs/rebuild/imp-command-grammar.md`
-- `../docs/rebuild/imp-delegation-tool-and-runtime.md`
-- `../docs/rebuild/mana-imp-ownership-boundary.md`
+- `../tower/docs/rebuild/imp-shared-runtime-startup-map.md`
+- `../tower/docs/rebuild/imp-command-grammar.md`
+- `../tower/docs/rebuild/imp-delegation-tool-and-runtime.md`
+- `../tower/docs/rebuild/mana-imp-ownership-boundary.md`
 
 ---
 
@@ -82,7 +82,7 @@ The Hermes comparison was useful, but the more important update is that recent i
 
 ### 1. CLI-first is now a product-direction input, not an optional UX taste
 
-From `../docs/rebuild/imp-command-grammar.md`:
+From `../tower/docs/rebuild/imp-command-grammar.md`:
 - long-term target: `imp == imp chat`
 - `imp tui` becomes the explicit fullscreen path
 - `imp run <unit-id>` remains the canonical machine-facing single-unit runtime
@@ -94,7 +94,7 @@ Implication for vNext:
 
 ### 2. Shared runtime bootstrap is a first-order architectural seam
 
-From `../docs/rebuild/imp-shared-runtime-startup-map.md`:
+From `../tower/docs/rebuild/imp-shared-runtime-startup-map.md`:
 - `ImpSession::create()` is already the strongest canonical startup path,
 - RPC and TUI still manually duplicate provider/auth/model/runtime assembly,
 - the first high-value extraction seam is a shared runtime bootstrap consumed by `ImpSession`, RPC, and TUI.
@@ -104,7 +104,7 @@ Implication for vNext:
 
 ### 3. `imp run` and the native `mana` tool already define the intended worker/orchestration split
 
-From `docs/proposals/imp-run-worker-contract-and-mana-run-handoff.md` and `../docs/rebuild/imp-delegation-tool-and-runtime.md`:
+From `docs/proposals/imp-run-worker-contract-and-mana-run-handoff.md` and `../tower/docs/rebuild/imp-delegation-tool-and-runtime.md`:
 - native `mana` inside imp is the first-class orchestration UX,
 - `mana run` remains orchestration/dispatch,
 - `imp run` is the canonical single-unit worker runtime,
@@ -128,7 +128,7 @@ Implication for vNext:
 
 ### 5. Memory and ownership boundaries are more explicit now
 
-From `docs/proposals/imp-memory-architecture-and-mana-boundary.md` and `../docs/rebuild/mana-imp-ownership-boundary.md`:
+From `docs/proposals/imp-memory-architecture-and-mana-boundary.md` and `../tower/docs/rebuild/mana-imp-ownership-boundary.md`:
 - imp has layered memory scopes,
 - `mana` owns project-durable work memory and future synthesized knowledge,
 - `imp` owns personal/global memory, live context assembly, and final prompt rendering,

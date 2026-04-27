@@ -26,7 +26,7 @@ line. Each entry is 1-3 lines of dense, actionable text.
 ```markdown
 User runs macOS 15, Homebrew, Docker Desktop. Shell: zsh. Editor: neovim.
 §
-Project ~/tower uses Rust workspace with sccache. Build with cargo check -p <crate>.
+Project ~/imp uses a Rust workspace. Build with cargo check -p <crate>.
 §
 User prefers concise responses. Dislikes verbose explanations.
 ```
@@ -102,7 +102,7 @@ MEMORY (your personal notes) [67% — 1,474/2,200 chars]
 ══════════════════════════════════════════════
 User runs macOS 15, Homebrew, Docker Desktop. Shell: zsh. Editor: neovim.
 §
-Project ~/tower uses Rust workspace with sccache. ...
+Project ~/imp uses a Rust workspace. ...
 ══════════════════════════════════════════════
 USER PROFILE [45% — 630/1,400 chars]
 ══════════════════════════════════════════════
