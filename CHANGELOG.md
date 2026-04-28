@@ -16,6 +16,13 @@ Suggested categories:
 - Documentation
 - Internal
 
+## [0.1.2] - 2026-04-28
+
+### Fixed
+
+- Deduplicated discovered instruction files so identical global `agents.md`/`AGENTS.md` content is not injected repeatedly into trivial prompts.
+- Avoided reinjecting the same global `.imp/agents.md` when it is also discovered while walking ancestor project directories.
+
 ## [0.1.1] - 2026-04-28
 
 ### Documentation
@@ -62,6 +69,7 @@ Initial crates.io release of the imp crate family.
 - Standardized published crates on MIT license metadata.
 - Added crates.io metadata and versioned internal dependencies for published crates.
 
-[Unreleased]: https://github.com/kfcafe/imp/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/kfcafe/imp/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/kfcafe/imp/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/kfcafe/imp/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kfcafe/imp/releases/tag/v0.1.0
