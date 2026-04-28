@@ -96,7 +96,7 @@ fn extract_interface(
         name.clone(),
         TypeInfo {
             name,
-            source: file.to_string(),
+            source: source_loc(file, node),
             kind: TypeKind::Interface,
             visibility,
             implements,
@@ -121,7 +121,7 @@ fn extract_type_alias(
         name.clone(),
         TypeInfo {
             name,
-            source: file.to_string(),
+            source: source_loc(file, node),
             kind: TypeKind::TypeAlias,
             visibility,
             ..Default::default()
@@ -146,7 +146,7 @@ fn extract_enum(
         name.clone(),
         TypeInfo {
             name,
-            source: file.to_string(),
+            source: source_loc(file, node),
             kind: TypeKind::Enum,
             variants,
             visibility,
@@ -193,7 +193,7 @@ fn extract_class(
         name.clone(),
         TypeInfo {
             name,
-            source: file.to_string(),
+            source: source_loc(file, node),
             kind: TypeKind::Class,
             visibility,
             implements,
@@ -252,7 +252,7 @@ fn extract_class_methods(
                 qualified,
                 FunctionInfo {
                     name: name.clone(),
-                    source: file.to_string(),
+                    source: source_loc(file, &child),
                     signature,
                     visibility: Visibility::Public,
                     is_async,
@@ -292,7 +292,7 @@ fn extract_function_decl(
         name.clone(),
         FunctionInfo {
             name,
-            source: file.to_string(),
+            source: source_loc(file, node),
             signature,
             visibility,
             is_async,
@@ -338,7 +338,7 @@ fn extract_lexical_functions(
                 name.clone(),
                 FunctionInfo {
                     name,
-                    source: file.to_string(),
+                    source: source_loc(file, node),
                     signature,
                     visibility: visibility.clone(),
                     is_async,
@@ -357,6 +357,10 @@ fn has_child_kind(node: &Node, kind: &str) -> bool {
 
 fn node_text(node: &Node, source: &str) -> String {
     source[node.byte_range()].to_string()
+}
+
+fn source_loc(file: &str, node: &Node) -> String {
+    format!("{}:{}", file, node.start_position().row + 1)
 }
 
 #[cfg(test)]

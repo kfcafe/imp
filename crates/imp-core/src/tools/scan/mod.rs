@@ -71,7 +71,7 @@ impl Tool for ScanTool {
     }
 
     fn description(&self) -> &str {
-        "Analyze code structure with tree-sitter. Use before broad text search when you need symbols, definitions, file outlines, or coherent code blocks; extract exact blocks with file:line, file:start-end, or file#symbol."
+        "Analyze code structure with tree-sitter. Use before broad text search when you need symbols, definitions, file skeletons/outlines, or coherent code blocks; extract exact blocks with file:line, file:start-end, or file#symbol."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -81,12 +81,12 @@ impl Tool for ScanTool {
                 "action": {
                     "type": "string",
                     "enum": ["extract", "build", "scan"],
-                    "description": "Operation to perform: 'scan' outlines a directory, 'build' outlines specific files, and 'extract' returns exact code blocks from file:line, file:start-end, or file#symbol targets."
+                    "description": "Operation to perform: 'scan' outlines a directory as compact skeletons, 'build' outlines specific files as compact skeletons, and 'extract' returns exact code blocks from file:line, file:start-end, or file#symbol targets."
                 },
                 "files": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Files to analyze for action='build', or extraction targets for action='extract' such as src/lib.rs:42, src/lib.rs:40-80, or src/lib.rs#MyStruct."
+                    "description": "Files to analyze for action='build', or extraction targets for action='extract'. Extract target forms: file#symbol, file:start-end, file:line. Examples: src/lib.rs#Agent, src/lib.rs:40-80, src/lib.rs:42."
                 },
                 "directory": {
                     "type": "string",
@@ -296,6 +296,7 @@ fn format_result(
         sections.push(format!("Task: {task}"));
     }
     sections.push(format!("Files analyzed: {}", files.len()));
+    sections.push("Output: compact code skeleton with symbol kind and line ranges. Use `scan extract` targets like file#symbol, file:start-end, or file:line for exact code.".to_string());
 
     // Group types and functions by source file
     let mut file_types: BTreeMap<&str, Vec<&TypeInfo>> = BTreeMap::new();
@@ -417,16 +418,20 @@ fn format_type(t: &TypeInfo) -> String {
         out.push_str(&format!(" [{}]", t.implements.join(", ")));
     }
 
+    out.push_str(&format!(" @ {}", t.source));
+
     out
 }
 
 fn format_function(f: &FunctionInfo) -> String {
     let vis = format_visibility(&f.visibility);
-    if !f.signature.is_empty() {
+    let mut out = if !f.signature.is_empty() {
         format!("{vis}{}", f.signature)
     } else {
         format!("{vis}fn {}", f.name)
-    }
+    };
+    out.push_str(&format!(" @ {}", f.source));
+    out
 }
 
 fn format_visibility(vis: &Visibility) -> &'static str {
@@ -495,6 +500,9 @@ struct CodeBlock {
     start_line: usize,
     end_line: usize,
     kind: Option<String>,
+    symbol: Option<String>,
+    language: Option<String>,
+    truncated: bool,
     code: String,
 }
 
@@ -519,6 +527,9 @@ fn execute_extract(targets: &[String], ctx: &ToolContext) -> ToolOutput {
                 start_line: 0,
                 end_line: 0,
                 kind: None,
+                symbol: None,
+                language: language_for_path(Path::new(&file)).map(str::to_string),
+                truncated: false,
                 code: format!("Error: could not read {file}"),
             });
             continue;
@@ -543,6 +554,9 @@ fn execute_extract(targets: &[String], ctx: &ToolContext) -> ToolOutput {
                         start_line: start + 1,
                         end_line: end,
                         kind: None,
+                        symbol: None,
+                        language: language_for_path(&path).map(str::to_string),
+                        truncated: false,
                         code: lines[start..end].join("\n"),
                     });
                 }
@@ -556,6 +570,9 @@ fn execute_extract(targets: &[String], ctx: &ToolContext) -> ToolOutput {
                     start_line: s + 1,
                     end_line: e,
                     kind: None,
+                    symbol: None,
+                    language: language_for_path(&path).map(str::to_string),
+                    truncated: false,
                     code: lines[s..e].join("\n"),
                 });
             }
@@ -571,6 +588,9 @@ fn execute_extract(targets: &[String], ctx: &ToolContext) -> ToolOutput {
                         start_line: 0,
                         end_line: 0,
                         kind: None,
+                        symbol: Some(name.clone()),
+                        language: language_for_path(&path).map(str::to_string),
+                        truncated: false,
                         code: format!("Symbol '{name}' not found in {file}"),
                     });
                 }
@@ -660,6 +680,9 @@ fn extract_blocks_at_lines(
                     start_line: start + 1,
                     end_line: end + 1,
                     kind: Some(node.kind().to_string()),
+                    symbol: None,
+                    language: language_for_path(path).map(str::to_string),
+                    truncated: false,
                     code: lines[s..e].join("\n"),
                 });
             }
@@ -715,6 +738,9 @@ fn extract_symbol(source: &str, path: &Path, name: &str) -> Option<CodeBlock> {
         start_line: start + 1,
         end_line: end + 1,
         kind: Some(node.kind().to_string()),
+        symbol: Some(name.to_string()),
+        language: language_for_path(path).map(str::to_string),
+        truncated: false,
         code: lines[s..e].join("\n"),
     })
 }
@@ -772,6 +798,17 @@ fn node_has_name(node: tree_sitter::Node, source: &str, name: &str) -> bool {
     false
 }
 
+fn language_for_path(path: &Path) -> Option<&'static str> {
+    match path.extension().and_then(|e| e.to_str())? {
+        "rs" => Some("rust"),
+        "ts" | "tsx" => Some("typescript"),
+        "js" | "jsx" => Some("javascript"),
+        "py" => Some("python"),
+        "go" => Some("go"),
+        _ => None,
+    }
+}
+
 fn format_blocks(blocks: &[CodeBlock]) -> String {
     let mut sections = Vec::with_capacity(blocks.len());
 
@@ -785,6 +822,15 @@ fn format_blocks(blocks: &[CodeBlock]) -> String {
         if let Some(kind) = &block.kind {
             header.push_str(&format!(" ({kind})"));
         }
+        let details = json!({
+            "path": block.file.to_string_lossy(),
+            "symbol": block.symbol,
+            "kind": block.kind,
+            "language": block.language,
+            "start_line": block.start_line,
+            "end_line": block.end_line,
+            "truncated": block.truncated,
+        });
 
         let fence = match block.file.extension().and_then(|e| e.to_str()) {
             Some("rs") => "rust",
@@ -794,7 +840,10 @@ fn format_blocks(blocks: &[CodeBlock]) -> String {
             Some("go") => "go",
             _ => "text",
         };
-        sections.push(format!("{header}\n```{fence}\n{}\n```", block.code));
+        sections.push(format!(
+            "{header}\nDetails: {details}\n```{fence}\n{}\n```",
+            block.code
+        ));
     }
 
     sections.join("\n\n")
@@ -924,5 +973,80 @@ pub fn start(config: &Config) -> Result<()> { todo!() }
         assert!(output.contains("pub enum Mode { Debug, Release }"));
         assert!(output.contains("pub fn start"));
         assert!(output.contains("-> Result<()>"));
+    }
+
+    #[test]
+    fn skeleton_output_includes_line_ranges_and_target_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("lib.rs");
+        std::fs::write(
+            &file,
+            r#"
+pub struct Config { pub host: String, pub port: u16 }
+pub fn start(config: &Config) -> Result<()> { todo!() }
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(std::slice::from_ref(&file), tmp.path());
+        let output = format_result(&result, &[file], tmp.path(), "build", None);
+
+        assert!(output.contains("compact code skeleton"));
+        assert!(output.contains("file#symbol"));
+        assert!(output.contains("pub struct Config"));
+        assert!(output.contains(" @ lib.rs:2"));
+        assert!(output.contains("pub fn start"));
+        assert!(output.contains(" @ lib.rs:3"));
+    }
+
+    #[test]
+    fn symbol_extract_includes_structured_details() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("lib.rs");
+        std::fs::write(
+            &file,
+            r#"
+pub struct Config {
+    pub host: String,
+}
+
+pub fn start(config: &Config) -> Result<()> { todo!() }
+"#,
+        )
+        .unwrap();
+
+        let found =
+            extract_symbol(&std::fs::read_to_string(&file).unwrap(), &file, "Config").unwrap();
+        let output = format_blocks(&[CodeBlock {
+            file: PathBuf::from("lib.rs"),
+            ..found
+        }]);
+
+        assert!(output.contains("Details:"));
+        assert!(output.contains("\"symbol\":\"Config\""));
+        assert!(output.contains("\"language\":\"rust\""));
+        assert!(output.contains("\"start_line\":2"));
+        assert!(output.contains("pub struct Config"));
+    }
+
+    #[test]
+    fn typescript_skeleton_output_includes_line_ranges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("models.ts");
+        std::fs::write(
+            &file,
+            r#"
+export interface User { name: string; }
+export async function fetchUser(id: string): Promise<User> { return {} as User; }
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(std::slice::from_ref(&file), tmp.path());
+        let output = format_result(&result, &[file], tmp.path(), "build", None);
+
+        assert!(output.contains("pub interface User @ models.ts:2"));
+        assert!(output.contains("pub async function fetchUser"));
+        assert!(output.contains(" @ models.ts:3"));
     }
 }

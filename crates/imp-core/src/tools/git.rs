@@ -349,7 +349,10 @@ async fn status_action(cwd: &Path, repo_root: &Path) -> Result<ToolOutput> {
 }
 
 fn non_empty_param<'a>(params: &'a serde_json::Value, field_name: &str) -> Option<&'a str> {
-    params.get(field_name)?.as_str().filter(|s| !s.trim().is_empty())
+    params
+        .get(field_name)?
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
 }
 
 async fn diff_action(
