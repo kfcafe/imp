@@ -2903,7 +2903,9 @@ fn next_action_assessment_to_json(assessment: &imp_core::agent::NextActionAssess
             "repeated_action": assessment.runtime.repeated_action,
             "execution_stop_reason": assessment.runtime.execution_stop_reason,
             "work_completed": assessment.runtime.work_completed,
-            "no_progress": assessment.runtime.no_progress,
+            "execution_debt": assessment.runtime.execution_debt,
+            "execution_evidence": assessment.runtime.execution_evidence,
+            "planning_only_progress": assessment.runtime.planning_only_progress,
         },
         "mana": {
             "stop_reason": assessment.mana.stop_reason,
