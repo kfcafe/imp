@@ -217,13 +217,13 @@ impl AgentMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ShellBackend {
-    /// Use `sh -c` (default, always available).
+    /// Use a POSIX-compatible shell command. Defaults to `bash -c`.
     #[default]
     Sh,
-    /// Use the rush library API (`rush::run`). Falls back to `sh` if
+    /// Use the rush library API (`rush::run`). Falls back to the configured shell if
     /// the `rush-backend` feature is not compiled in.
     Rush,
-    /// Connect to a running rush daemon over Unix socket. Falls back to `sh`
+    /// Connect to a running rush daemon over Unix socket. Falls back to the configured shell
     /// if the daemon is not reachable.
     RushDaemon,
 }
@@ -231,15 +231,19 @@ pub enum ShellBackend {
 /// Shell-related configuration for the Bash tool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ShellConfig {
-    /// Which shell backend to use. Defaults to `"sh"`.
+    /// Which shell backend to use. Defaults to the standard command shell.
     #[serde(default)]
     pub backend: ShellBackend,
+    /// Shell executable used for command execution. Defaults to `bash`.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 impl Default for ShellConfig {
     fn default() -> Self {
         Self {
             backend: ShellBackend::Sh,
+            command: None,
         }
     }
 }

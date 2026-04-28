@@ -72,7 +72,7 @@ imp chat                         # CLI chat shell
 imp -p "Summarize this repo"      # one-shot prompt
 imp @src/main.rs "Explain this"   # prompt with file context
 imp -c                            # continue recent session
-imp mana 12.1                     # execute a mana unit
+imp run 12.1                      # execute a mana unit directly
 ```
 
 Platform/source notes:
@@ -270,7 +270,8 @@ imp is the runtime that executes those records.
 ```bash
 mana init
 mana create "Fix CSV export" --verify "cargo test csv::export"
-imp mana <unit-id>
+imp
+# ask: "work on mana unit 12.1"
 ```
 
 ### Why mana
@@ -285,9 +286,19 @@ Agent work is fragile when plans, failures, and completion criteria live only in
 
 ### Running mana work with imp
 
+For most use, open imp and ask it to work from mana:
+
+```bash
+imp
+# "work on mana unit 12.1"
+# "show me the next mana task and start it"
+```
+
+For direct CLI execution:
+
 ```bash
 mana show 12.1
-imp mana 12.1
+imp run 12.1
 mana show 12.1
 ```
 
@@ -305,7 +316,7 @@ A weak verify gate is broad or ambiguous:
 cargo test
 ```
 
-Compatibility note: `imp run <unit-id>` remains available during migration, but `imp mana <unit-id>` is the preferred command.
+`imp mana <unit-id>` is also supported as an explicit mana subcommand, but `imp run <unit-id>` is the clearer direct-execution command.
 
 ---
 
@@ -349,7 +360,7 @@ Example:
 
 ```bash
 IMP_MODE=reviewer imp chat
-IMP_MODE=worker imp mana 5.1
+IMP_MODE=worker imp run 5.1
 ```
 
 Disallowed tools are not included in the model prompt and are still blocked at execution time.
@@ -545,7 +556,7 @@ See `crates/imp-core/examples/sdk_session.rs` for a working example.
 
 ### RPC / process integration
 
-imp has CLI/RPC-oriented surfaces in active development. Prefer the Rust SDK for embedded Rust hosts and `imp chat` / `imp mana` for human-operated local workflows.
+imp has CLI/RPC-oriented surfaces in active development. Prefer the Rust SDK for embedded Rust hosts, `imp` / `imp chat` for human-operated local workflows, and `imp run <unit-id>` for direct mana unit execution.
 
 ---
 
@@ -623,8 +634,8 @@ imp chat                    # open CLI chat shell
 imp -p "prompt"              # one-shot prompt
 imp @file "prompt"           # prompt with file context
 imp -c                       # continue most recent session
-imp mana <unit-id>           # execute mana unit
-imp run <unit-id>            # compatibility alias during migration
+imp run <unit-id>            # execute mana unit directly
+imp mana <unit-id>           # explicit mana subcommand, also supported
 
 imp login [provider]         # OAuth / guided auth
 imp secrets list             # list saved credential metadata

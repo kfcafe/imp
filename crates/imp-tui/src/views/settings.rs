@@ -1,6 +1,6 @@
 use imp_core::config::{
-    AnimationLevel, ChatToolDisplay, Config, ContextConfig, ContinuePolicy, ShellBackend,
-    ShellConfig, SidebarStyle, ToolOutputDisplay,
+    AnimationLevel, ChatToolDisplay, Config, ContextConfig, ContinuePolicy, SidebarStyle,
+    ToolOutputDisplay,
 };
 use imp_core::tools::web::types::SearchProvider;
 use imp_llm::auth::AuthStore;
@@ -24,7 +24,6 @@ pub enum SettingsField {
     MaxTokens,
     MaxTurns,
     ObservationMask,
-    ShellBackend,
     ReadMaxLines,
     SidebarWidth,
     WordWrap,
@@ -54,7 +53,6 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::MaxTokens,
     SettingsField::MaxTurns,
     SettingsField::ObservationMask,
-    SettingsField::ShellBackend,
     SettingsField::ReadMaxLines,
     SettingsField::SidebarWidth,
     SettingsField::WordWrap,
@@ -96,7 +94,6 @@ pub struct SettingsState {
     pub max_tokens: u32,
     pub max_turns: u32,
     pub observation_mask: f64,
-    pub shell_backend: ShellBackend,
     pub sidebar_style: SidebarStyle,
     pub tool_output: ToolOutputDisplay,
     pub tool_output_lines: usize,
@@ -148,7 +145,6 @@ impl SettingsState {
             max_tokens: config.max_tokens.unwrap_or(4096),
             max_turns: config.max_turns.unwrap_or(100),
             observation_mask: config.context.observation_mask_threshold,
-            shell_backend: config.shell.backend.clone(),
             sidebar_style: config.ui.sidebar_style,
             tool_output: config.ui.tool_output,
             tool_output_lines: config.ui.tool_output_lines,
@@ -230,9 +226,6 @@ impl SettingsState {
             }
             SettingsField::MaxTokens => {
                 self.max_tokens = self.max_tokens.saturating_add(256).min(128_000);
-            }
-            SettingsField::ShellBackend => {
-                self.shell_backend = next_shell(&self.shell_backend);
             }
             SettingsField::MaxTurns => {
                 self.max_turns = self.max_turns.saturating_add(10);
@@ -348,9 +341,6 @@ impl SettingsState {
             }
             SettingsField::MaxTokens => {
                 self.max_tokens = self.max_tokens.saturating_sub(256).max(1);
-            }
-            SettingsField::ShellBackend => {
-                self.shell_backend = prev_shell(&self.shell_backend);
             }
             SettingsField::MaxTurns => {
                 self.max_turns = self.max_turns.saturating_sub(10).max(1);
@@ -572,9 +562,6 @@ impl SettingsState {
             observation_mask_threshold: self.observation_mask,
             ..config.context.clone()
         };
-        config.shell = ShellConfig {
-            backend: self.shell_backend.clone(),
-        };
         config.ui = imp_core::config::UiConfig {
             sidebar_style: SidebarStyle::Inspector,
             tool_output: ToolOutputDisplay::Full,
@@ -656,22 +643,6 @@ fn prev_thinking(level: ThinkingLevel) -> ThinkingLevel {
     }
 }
 
-fn next_shell(backend: &ShellBackend) -> ShellBackend {
-    match backend {
-        ShellBackend::Sh => ShellBackend::Rush,
-        ShellBackend::Rush => ShellBackend::RushDaemon,
-        ShellBackend::RushDaemon => ShellBackend::Sh,
-    }
-}
-
-fn prev_shell(backend: &ShellBackend) -> ShellBackend {
-    match backend {
-        ShellBackend::Sh => ShellBackend::RushDaemon,
-        ShellBackend::Rush => ShellBackend::Sh,
-        ShellBackend::RushDaemon => ShellBackend::Rush,
-    }
-}
-
 fn thinking_label(level: ThinkingLevel) -> &'static str {
     match level {
         ThinkingLevel::Off => "Off",
@@ -680,14 +651,6 @@ fn thinking_label(level: ThinkingLevel) -> &'static str {
         ThinkingLevel::Medium => "Medium",
         ThinkingLevel::High => "High",
         ThinkingLevel::XHigh => "XHigh",
-    }
-}
-
-fn shell_label(backend: &ShellBackend) -> &'static str {
-    match backend {
-        ShellBackend::Sh => "sh",
-        ShellBackend::Rush => "rush",
-        ShellBackend::RushDaemon => "rush-daemon",
     }
 }
 
@@ -719,7 +682,7 @@ fn visit_settings_rows(mut visit: impl FnMut(SettingsRow, u16)) {
             SettingsField::MaxTokens,
             SettingsField::MaxTurns,
         ],
-        &[SettingsField::ObservationMask, SettingsField::ShellBackend],
+        &[SettingsField::ObservationMask],
         &[
             SettingsField::ReadMaxLines,
             SettingsField::SidebarWidth,
@@ -965,19 +928,6 @@ impl Widget for SettingsView<'_> {
             field_index(SettingsField::ObservationMask),
             "Observation mask",
             &obs_val,
-            "← →",
-        );
-
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::ShellBackend),
-            "Shell backend",
-            shell_label(&self.state.shell_backend),
             "← →",
         );
 

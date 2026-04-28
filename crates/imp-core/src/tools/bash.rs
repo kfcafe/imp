@@ -222,28 +222,18 @@ fn run_via_rush(
 }
 
 /// Detect which shell to use for command execution.
-/// Prefers rush if available on PATH, falls back to sh.
-fn detect_shell() -> String {
+/// Defaults to bash, with IMP_SHELL and config.shell.command as overrides.
+fn detect_shell(config: &crate::config::ShellConfig) -> String {
     // IMP_SHELL overrides everything (also used by tests to force sh)
     if let Ok(shell) = std::env::var("IMP_SHELL") {
         return shell;
     }
-    // Prefer rush — dogfood it as the default shell backend.
-    // Cached after first PATH lookup.
-    use std::sync::OnceLock;
-    static RUSH_PATH: OnceLock<Option<String>> = OnceLock::new();
-    if let Some(path) = RUSH_PATH.get_or_init(|| {
-        std::process::Command::new("which")
-            .arg("rush")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|p| !p.is_empty())
-    }) {
-        return path.clone();
+
+    if let Some(shell) = config.command.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return shell.to_string();
     }
-    "sh".to_string()
+
+    "bash".to_string()
 }
 
 fn sanitize_output_text(text: &str) -> String {
@@ -481,8 +471,8 @@ async fn run_command(
     }
 
     let mut child = {
-        // Use rush if available and configured, otherwise sh
-        let shell = detect_shell();
+        // Use configured shell for standard command execution.
+        let shell = detect_shell(&ctx.config.shell);
         let mut cmd = Command::new(&shell);
         cmd.arg("-c")
             .arg(command)
