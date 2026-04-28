@@ -1374,9 +1374,9 @@ mod tests {
 
     #[test]
     fn save_field_scrolls_into_view_on_short_panels() {
-        assert_eq!(selected_settings_row(FIELDS.len() - 1), 31);
-        assert_eq!(total_settings_rows(), 32);
-        assert_eq!(settings_scroll_offset(FIELDS.len() - 1, 10), 22);
+        assert_eq!(selected_settings_row(FIELDS.len() - 1), 30);
+        assert_eq!(total_settings_rows(), 31);
+        assert_eq!(settings_scroll_offset(FIELDS.len() - 1, 10), 21);
     }
 
     #[test]

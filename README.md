@@ -271,7 +271,7 @@ imp is the runtime that executes those records.
 mana init
 mana create "Fix CSV export" --verify "cargo test csv::export"
 imp
-# ask: "work on mana unit 12.1"
+# ask: "work on 12.1"
 ```
 
 ### Why mana
@@ -290,8 +290,8 @@ For most use, open imp and ask it to work from mana:
 
 ```bash
 imp
-# "work on mana unit 12.1"
-# "show me the next mana task and start it"
+# "work on 12.1"
+# "show me the next task and work on it"
 ```
 
 For direct CLI execution:

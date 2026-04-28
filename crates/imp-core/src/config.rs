@@ -962,6 +962,9 @@ after_write = ["zig fmt --check ."]
 observation_mask_threshold = 0.5
 mask_window = 5
 
+[shell]
+command = "zsh"
+
 [web]
 search_provider = "exa"
 "#,
@@ -984,6 +987,7 @@ search_provider = "exa"
             config.guardrails.after_write,
             Some(vec!["zig fmt --check .".into()])
         );
+        assert_eq!(config.shell.command.as_deref(), Some("zsh"));
         assert_eq!(
             config.web.search_provider,
             Some(crate::tools::web::types::SearchProvider::Exa)
