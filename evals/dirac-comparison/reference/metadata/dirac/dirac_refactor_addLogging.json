@@ -1,0 +1,110 @@
+{
+  "agent": "dirac",
+  "task": "addLogging",
+  "name": "dirac_refactor_addLogging",
+  "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_addLogging",
+  "changed_files": [
+    {
+      "old_path": "extensions/vscode-colorize-perf-tests/src/colorizer.test.ts",
+      "new_path": "extensions/vscode-colorize-perf-tests/src/colorizer.test.ts"
+    },
+    {
+      "old_path": "src/vs/editor/browser/coreCommands.ts",
+      "new_path": "src/vs/editor/browser/coreCommands.ts"
+    },
+    {
+      "old_path": "src/vs/editor/browser/editorExtensions.ts",
+      "new_path": "src/vs/editor/browser/editorExtensions.ts"
+    },
+    {
+      "old_path": "src/vs/editor/contrib/linkedEditing/browser/linkedEditing.ts",
+      "new_path": "src/vs/editor/contrib/linkedEditing/browser/linkedEditing.ts"
+    },
+    {
+      "old_path": "src/vs/editor/contrib/rename/browser/rename.ts",
+      "new_path": "src/vs/editor/contrib/rename/browser/rename.ts"
+    },
+    {
+      "old_path": "src/vs/editor/test/browser/testCodeEditor.ts",
+      "new_path": "src/vs/editor/test/browser/testCodeEditor.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/test/browser/actions/chatExecuteActions.test.ts",
+      "new_path": "src/vs/workbench/contrib/chat/test/browser/actions/chatExecuteActions.test.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/test/browser/plugins/pluginInstallService.test.ts",
+      "new_path": "src/vs/workbench/contrib/chat/test/browser/plugins/pluginInstallService.test.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/terminal/browser/terminalInstance.ts",
+      "new_path": "src/vs/workbench/contrib/terminal/browser/terminalInstance.ts"
+    },
+    {
+      "old_path": "test/automation/src/quickaccess.ts",
+      "new_path": "test/automation/src/quickaccess.ts"
+    },
+    {
+      "old_path": "test/automation/src/terminal.ts",
+      "new_path": "test/automation/src/terminal.ts"
+    },
+    {
+      "old_path": "test/sanity/src/uiTest.ts",
+      "new_path": "test/sanity/src/uiTest.ts"
+    }
+  ],
+  "file_count": 12,
+  "indexes": [
+    {
+      "old_blob": "2076a96d6b3",
+      "new_blob": "73c94126e98"
+    },
+    {
+      "old_blob": "9331eea48ff",
+      "new_blob": "353f63b1e2d"
+    },
+    {
+      "old_blob": "d5961dd4f1e",
+      "new_blob": "4b47db11de8"
+    },
+    {
+      "old_blob": "09f9257f2d7",
+      "new_blob": "54bb7cfe53d"
+    },
+    {
+      "old_blob": "cf675f54cf4",
+      "new_blob": "4f17ede4134"
+    },
+    {
+      "old_blob": "adede234180",
+      "new_blob": "4baf3fba5a4"
+    },
+    {
+      "old_blob": "3465f33300b",
+      "new_blob": "0bdf3f0567c"
+    },
+    {
+      "old_blob": "db448e31734",
+      "new_blob": "8c3964adb28"
+    },
+    {
+      "old_blob": "75894ea61eb",
+      "new_blob": "9a69662eab7"
+    },
+    {
+      "old_blob": "f28ec436636",
+      "new_blob": "efd89c0bed5"
+    },
+    {
+      "old_blob": "70d807a6e4a",
+      "new_blob": "2649efb7055"
+    },
+    {
+      "old_blob": "96733481e96",
+      "new_blob": "45246e52a2f"
+    }
+  ],
+  "added_lines": 247,
+  "removed_lines": 182,
+  "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_addLogging"
+}

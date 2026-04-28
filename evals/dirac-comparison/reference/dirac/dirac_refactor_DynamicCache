@@ -1,0 +1,215 @@
+diff --git a/src/transformers/cache_utils.py b/src/transformers/cache_utils.py
+index ac324ebb62..ccb2aa867b 100644
+--- a/src/transformers/cache_utils.py
++++ b/src/transformers/cache_utils.py
+@@ -1263,6 +1263,7 @@ class DynamicCache(Cache):
+             )
+         else:
+             super().__init__(layers=layers, offloading=offloading, offload_only_non_sliding=offload_only_non_sliding)
++        self.is_stale = False
+ 
+     def __iter__(self):
+         for layer in self.layers:
+diff --git a/src/transformers/models/cohere2/modular_cohere2.py b/src/transformers/models/cohere2/modular_cohere2.py
+index d19055a1b7..3dcbd601aa 100644
+--- a/src/transformers/models/cohere2/modular_cohere2.py
++++ b/src/transformers/models/cohere2/modular_cohere2.py
+@@ -194,7 +194,15 @@ class Cohere2Attention(CohereAttention):
+             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+ 
+         if past_key_values is not None:
+-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
++            if isinstance(past_key_values, DynamicCache) and past_key_values.is_stale:
++                import warnings
++
++                warnings.warn(
++                    "The cache is stale and will not be updated. This might lead to incorrect results.",
++                    UserWarning,
++                )
++            else:
++                key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+ 
+         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+             self.config._attn_implementation, eager_attention_forward
+diff --git a/src/transformers/models/deepseek_v3/modular_deepseek_v3.py b/src/transformers/models/deepseek_v3/modular_deepseek_v3.py
+index 3c62a564a3..f8e75494fd 100644
+--- a/src/transformers/models/deepseek_v3/modular_deepseek_v3.py
++++ b/src/transformers/models/deepseek_v3/modular_deepseek_v3.py
+@@ -6,7 +6,7 @@ import torch.nn.functional as F
+ from torch import nn
+ 
+ from ... import initialization as init
+-from ...cache_utils import Cache
++from ...cache_utils import Cache, DynamicCache
+ from ...modeling_flash_attention_utils import FlashAttentionKwargs
+ from ...modeling_layers import GenericForSequenceClassification, GenericForTokenClassification
+ from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+@@ -256,7 +256,15 @@ class DeepseekV3Attention(nn.Module):
+         key_states = torch.cat((k_pass, k_rot), dim=-1)
+ 
+         if past_key_values is not None:
+-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
++            if isinstance(past_key_values, DynamicCache) and past_key_values.is_stale:
++                import warnings
++
++                warnings.warn(
++                    "The cache is stale and will not be updated. This might lead to incorrect results.",
++                    UserWarning,
++                )
++            else:
++                key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+ 
+         if is_flash_attention_requested(self.config) and self.qk_head_dim != self.v_head_dim:
+             value_states = F.pad(value_states, [0, self.qk_head_dim - self.v_head_dim])
+diff --git a/src/transformers/models/gemma4/modular_gemma4.py b/src/transformers/models/gemma4/modular_gemma4.py
+index a972738022..3a56e62c7e 100644
+--- a/src/transformers/models/gemma4/modular_gemma4.py
++++ b/src/transformers/models/gemma4/modular_gemma4.py
+@@ -985,7 +985,14 @@ class Gemma4TextAttention(nn.Module):
+             value_states = value_states.transpose(1, 2)
+ 
+         if past_key_values is not None:
+-            if not self.is_kv_shared_layer:
++            if isinstance(past_key_values, DynamicCache) and past_key_values.is_stale:
++                import warnings
++
++                warnings.warn(
++                    "The cache is stale and will not be updated. This might lead to incorrect results.",
++                    UserWarning,
++                )
++            elif not self.is_kv_shared_layer:
+                 key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+             if self.store_full_length_kv:
+                 if not hasattr(past_key_values, "shared_layers"):
+diff --git a/src/transformers/models/llama4/modeling_llama4.py b/src/transformers/models/llama4/modeling_llama4.py
+index 08d50bd63f..79635922bd 100644
+--- a/src/transformers/models/llama4/modeling_llama4.py
++++ b/src/transformers/models/llama4/modeling_llama4.py
+@@ -389,7 +389,15 @@ class Llama4TextAttention(nn.Module):
+         key_states = key_states.transpose(1, 2)
+ 
+         if past_key_values is not None:
+-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
++            if isinstance(past_key_values, DynamicCache) and past_key_values.is_stale:
++                import warnings
++
++                warnings.warn(
++                    "The cache is stale and will not be updated. This might lead to incorrect results.",
++                    UserWarning,
++                )
++            else:
++                key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+ 
+         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+             self.config._attn_implementation, eager_attention_forward
+diff --git a/src/transformers/models/ministral3/modular_ministral3.py b/src/transformers/models/ministral3/modular_ministral3.py
+index 0a925f5d40..543097c89d 100644
+--- a/src/transformers/models/ministral3/modular_ministral3.py
++++ b/src/transformers/models/ministral3/modular_ministral3.py
+@@ -2,7 +2,7 @@ from collections.abc import Callable
+ 
+ import torch
+ 
+-from ...cache_utils import Cache
++from ...cache_utils import Cache, DynamicCache
+ from ...modeling_flash_attention_utils import FlashAttentionKwargs
+ from ...modeling_layers import (
+     GenericForQuestionAnswering,
+@@ -57,7 +57,15 @@ class Ministral3Attention(MistralAttention):
+         ).to(query_states.dtype)
+ 
+         if past_key_values is not None:
+-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
++            if isinstance(past_key_values, DynamicCache) and past_key_values.is_stale:
++                import warnings
++
++                warnings.warn(
++                    "The cache is stale and will not be updated. This might lead to incorrect results.",
++                    UserWarning,
++                )
++            else:
++                key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+ 
+         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+             self.config._attn_implementation, eager_attention_forward
+diff --git a/src/transformers/models/mistral4/modular_mistral4.py b/src/transformers/models/mistral4/modular_mistral4.py
+index acd9f1f601..8d91a99b1a 100644
+--- a/src/transformers/models/mistral4/modular_mistral4.py
++++ b/src/transformers/models/mistral4/modular_mistral4.py
+@@ -18,7 +18,7 @@ import torch.nn.functional as F
+ from torch import nn
+ 
+ from ... import initialization as init
+-from ...cache_utils import Cache
++from ...cache_utils import Cache, DynamicCache
+ from ...modeling_flash_attention_utils import FlashAttentionKwargs
+ from ...modeling_layers import GenericForSequenceClassification, GenericForTokenClassification
+ from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+@@ -191,7 +191,15 @@ class Mistral4Attention(DeepseekV3Attention):
+         ).to(query_states.dtype)
+ 
+         if past_key_values is not None:
+-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
++            if isinstance(past_key_values, DynamicCache) and past_key_values.is_stale:
++                import warnings
++
++                warnings.warn(
++                    "The cache is stale and will not be updated. This might lead to incorrect results.",
++                    UserWarning,
++                )
++            else:
++                key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+ 
+         if is_flash_attention_requested(self.config) and self.qk_head_dim != self.v_head_dim:
+             value_states = F.pad(value_states, [0, self.qk_head_dim - self.v_head_dim])
+diff --git a/src/transformers/models/olmo3/modular_olmo3.py b/src/transformers/models/olmo3/modular_olmo3.py
+index 81325db7cc..d6f6c583a6 100644
+--- a/src/transformers/models/olmo3/modular_olmo3.py
++++ b/src/transformers/models/olmo3/modular_olmo3.py
+@@ -126,7 +126,15 @@ class Olmo3Attention(Olmo2Attention):
+         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+ 
+         if past_key_values is not None:
+-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
++            if isinstance(past_key_values, DynamicCache) and past_key_values.is_stale:
++                import warnings
++
++                warnings.warn(
++                    "The cache is stale and will not be updated. This might lead to incorrect results.",
++                    UserWarning,
++                )
++            else:
++                key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+ 
+         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+             self.config._attn_implementation, eager_attention_forward
+diff --git a/src/transformers/models/qwen3/modular_qwen3.py b/src/transformers/models/qwen3/modular_qwen3.py
+index 73cde6d89a..3591440224 100644
+--- a/src/transformers/models/qwen3/modular_qwen3.py
++++ b/src/transformers/models/qwen3/modular_qwen3.py
+@@ -17,7 +17,7 @@ from collections.abc import Callable
+ 
+ import torch
+ 
+-from ...cache_utils import Cache
++from ...cache_utils import Cache, DynamicCache
+ from ...modeling_flash_attention_utils import FlashAttentionKwargs
+ from ...modeling_outputs import CausalLMOutputWithPast
+ from ...modeling_utils import ALL_ATTENTION_FUNCTIONS
+@@ -84,7 +84,15 @@ class Qwen3Attention(LlamaAttention):
+         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+ 
+         if past_key_values is not None:
+-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
++            if isinstance(past_key_values, DynamicCache) and past_key_values.is_stale:
++                import warnings
++
++                warnings.warn(
++                    "The cache is stale and will not be updated. This might lead to incorrect results.",
++                    UserWarning,
++                )
++            else:
++                key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+ 
+         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+             self.config._attn_implementation, eager_attention_forward

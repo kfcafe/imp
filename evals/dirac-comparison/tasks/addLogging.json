@@ -1,0 +1,14 @@
+{
+  "id": "addLogging",
+  "source": "github.com/dirac-run/dirac evals/README.md master",
+  "repo": "https://github.com/microsoft/vscode.git",
+  "commit": null,
+  "prompt": "Find every exact definition of runCommand across the entire repository and add simple console.log statements to track their entry and exit. Ensure the exit logging is guaranteed to fire regardless of early returns or errors, without modifying any existing imports or method signatures.",
+  "imp_command": "imp --provider $PROVIDER --model $MODEL --print < prompt.md",
+  "verifier": "repo-specific type/lint command TBD after pinning commit",
+  "dirac_reference": {
+    "patch": "evals/dirac-comparison/reference/dirac/dirac_refactor_addLogging",
+    "metadata": "evals/dirac-comparison/reference/metadata/dirac/dirac_refactor_addLogging.json",
+    "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_addLogging"
+  }
+}

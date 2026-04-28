@@ -1,0 +1,110 @@
+diff --git a/src/transformers/generation/configuration_utils.py b/src/transformers/generation/configuration_utils.py
+index f8702dde29..9c268f6693 100644
+--- a/src/transformers/generation/configuration_utils.py
++++ b/src/transformers/generation/configuration_utils.py
+@@ -131,6 +131,11 @@ class GenerationConfig(PushToHubMixin):
+             the current pass after allocated time has been passed.
+         stop_strings (`str or list[str]`, *optional*):
+             A string or a list of strings that should terminate generation if the model outputs them.
++        entropy_threshold (`float`, *optional*):
++            Threshold for the Shannon entropy of the prediction scores. If the entropy exceeds this threshold,
++            generation will stop.
++        entropy_patience (`int`, *optional*, defaults to 1):
++            Number of consecutive steps for which the entropy must exceed the threshold before stopping.
+ 
+         > Parameters that control the generation strategy used
+ 
+@@ -359,6 +364,10 @@ class GenerationConfig(PushToHubMixin):
+         self.max_time = kwargs.pop("max_time", None)
+         self.stop_strings = kwargs.pop("stop_strings", None)
+ 
++        # Parameters that control the entropy-based stopping criteria
++        self.entropy_threshold = kwargs.pop("entropy_threshold", None)
++        self.entropy_patience = kwargs.pop("entropy_patience", 1)
++
+         # Parameters that control the generation strategy used
+         self.do_sample = kwargs.pop("do_sample", None)
+         self.num_beams = kwargs.pop("num_beams", None)
+diff --git a/src/transformers/generation/stopping_criteria.py b/src/transformers/generation/stopping_criteria.py
+index b57136f534..79203c4c8f 100644
+--- a/src/transformers/generation/stopping_criteria.py
++++ b/src/transformers/generation/stopping_criteria.py
+@@ -492,6 +492,52 @@ class ConfidenceCriteria(StoppingCriteria):
+         return False
+ 
+ 
++
++class EntropyStoppingCriteria(StoppingCriteria):
++    """
++    This class can be used to stop generation whenever the entropy of the prediction scores exceeds a certain
++    threshold.
++
++    Args:
++        entropy_threshold (`float`):
++            The threshold for the Shannon entropy of the prediction scores.
++        entropy_patience (`int`, *optional*, defaults to 1):
++            The number of consecutive steps for which the entropy must exceed the threshold before stopping.
++    """
++
++    def __init__(self, entropy_threshold: float, entropy_patience: int = 1):
++        self.entropy_threshold = entropy_threshold
++        self.entropy_patience = entropy_patience
++        self.patience_counter = None
++
++    @add_start_docstrings(STOPPING_CRITERIA_INPUTS_DOCSTRING)
++    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
++        if scores is None or (isinstance(scores, (list, tuple)) and len(scores) == 0):
++            return torch.zeros(input_ids.shape[0], device=input_ids.device, dtype=torch.bool)
++
++        # Get the latest scores
++        if isinstance(scores, (list, tuple)):
++            latest_scores = scores[-1]
++        else:
++            latest_scores = scores
++
++        # Compute Shannon entropy
++        probs = F.softmax(latest_scores, dim=-1)
++        # Use a small epsilon to avoid log(0)
++        entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
++
++        if self.patience_counter is None or self.patience_counter.shape[0] != input_ids.shape[0]:
++            self.patience_counter = torch.zeros(input_ids.shape[0], device=input_ids.device, dtype=torch.long)
++
++        # Move patience_counter to the same device as entropy
++        self.patience_counter = self.patience_counter.to(entropy.device)
++
++        high_entropy = entropy > self.entropy_threshold
++        self.patience_counter = (self.patience_counter + 1) * high_entropy
++
++        return self.patience_counter >= self.entropy_patience
++
++
+ class StoppingCriteriaList(list):
+     @add_start_docstrings(STOPPING_CRITERIA_INPUTS_DOCSTRING)
+     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
+diff --git a/src/transformers/generation/utils.py b/src/transformers/generation/utils.py
+index ffb7266a5b..def46827ff 100644
+--- a/src/transformers/generation/utils.py
++++ b/src/transformers/generation/utils.py
+@@ -100,6 +100,7 @@ from .logits_process import (
+ )
+ from .stopping_criteria import (
+     ConfidenceCriteria,
++    EntropyStoppingCriteria,
+     EosTokenCriteria,
+     MaxLengthCriteria,
+     MaxTimeCriteria,
+@@ -1292,6 +1293,13 @@ class GenerationMixin(ContinuousMixin):
+             criteria.append(
+                 ConfidenceCriteria(assistant_confidence_threshold=generation_config.assistant_confidence_threshold)
+             )
++        if generation_config.entropy_threshold is not None:
++            criteria.append(
++                EntropyStoppingCriteria(
++                    entropy_threshold=generation_config.entropy_threshold,
++                    entropy_patience=generation_config.entropy_patience,
++                )
++            )
+         criteria = self._merge_criteria_processor_list(criteria, stopping_criteria)
+         return criteria
+ 

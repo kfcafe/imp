@@ -1,0 +1,214 @@
+{
+  "agent": "dirac",
+  "task": "latency",
+  "name": "dirac_refactor_latency",
+  "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_latency",
+  "changed_files": [
+    {
+      "old_path": "src/transformers/pipelines/any_to_any.py",
+      "new_path": "src/transformers/pipelines/any_to_any.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/audio_classification.py",
+      "new_path": "src/transformers/pipelines/audio_classification.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/automatic_speech_recognition.py",
+      "new_path": "src/transformers/pipelines/automatic_speech_recognition.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/base.py",
+      "new_path": "src/transformers/pipelines/base.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/depth_estimation.py",
+      "new_path": "src/transformers/pipelines/depth_estimation.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/document_question_answering.py",
+      "new_path": "src/transformers/pipelines/document_question_answering.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/feature_extraction.py",
+      "new_path": "src/transformers/pipelines/feature_extraction.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/fill_mask.py",
+      "new_path": "src/transformers/pipelines/fill_mask.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/image_classification.py",
+      "new_path": "src/transformers/pipelines/image_classification.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/image_feature_extraction.py",
+      "new_path": "src/transformers/pipelines/image_feature_extraction.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/image_segmentation.py",
+      "new_path": "src/transformers/pipelines/image_segmentation.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/image_text_to_text.py",
+      "new_path": "src/transformers/pipelines/image_text_to_text.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/keypoint_matching.py",
+      "new_path": "src/transformers/pipelines/keypoint_matching.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/mask_generation.py",
+      "new_path": "src/transformers/pipelines/mask_generation.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/object_detection.py",
+      "new_path": "src/transformers/pipelines/object_detection.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/table_question_answering.py",
+      "new_path": "src/transformers/pipelines/table_question_answering.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/text_classification.py",
+      "new_path": "src/transformers/pipelines/text_classification.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/text_generation.py",
+      "new_path": "src/transformers/pipelines/text_generation.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/text_to_audio.py",
+      "new_path": "src/transformers/pipelines/text_to_audio.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/token_classification.py",
+      "new_path": "src/transformers/pipelines/token_classification.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/video_classification.py",
+      "new_path": "src/transformers/pipelines/video_classification.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/zero_shot_audio_classification.py",
+      "new_path": "src/transformers/pipelines/zero_shot_audio_classification.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/zero_shot_classification.py",
+      "new_path": "src/transformers/pipelines/zero_shot_classification.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/zero_shot_image_classification.py",
+      "new_path": "src/transformers/pipelines/zero_shot_image_classification.py"
+    },
+    {
+      "old_path": "src/transformers/pipelines/zero_shot_object_detection.py",
+      "new_path": "src/transformers/pipelines/zero_shot_object_detection.py"
+    }
+  ],
+  "file_count": 25,
+  "indexes": [
+    {
+      "old_blob": "4ae91d5a17",
+      "new_blob": "a822dc3384"
+    },
+    {
+      "old_blob": "6e173111aa",
+      "new_blob": "f06ea1a352"
+    },
+    {
+      "old_blob": "58349d0b10",
+      "new_blob": "d8f177cd26"
+    },
+    {
+      "old_blob": "916576c4c6",
+      "new_blob": "867440eb08"
+    },
+    {
+      "old_blob": "03ee70673d",
+      "new_blob": "8c9f984906"
+    },
+    {
+      "old_blob": "de976f9d87",
+      "new_blob": "76b2c3a5bc"
+    },
+    {
+      "old_blob": "a37f147605",
+      "new_blob": "320eb3920f"
+    },
+    {
+      "old_blob": "1ea7c487be",
+      "new_blob": "56e5d486dc"
+    },
+    {
+      "old_blob": "18a570df6e",
+      "new_blob": "1ba34c1ff1"
+    },
+    {
+      "old_blob": "d049957a41",
+      "new_blob": "6302acf58a"
+    },
+    {
+      "old_blob": "49854beb5a",
+      "new_blob": "4e9a749ec4"
+    },
+    {
+      "old_blob": "7d28b91ab2",
+      "new_blob": "1a603383e3"
+    },
+    {
+      "old_blob": "d75656a7db",
+      "new_blob": "2be0d141d2"
+    },
+    {
+      "old_blob": "920ce9d0a3",
+      "new_blob": "bb6bcfc12c"
+    },
+    {
+      "old_blob": "0a4fba996d",
+      "new_blob": "799f1891bc"
+    },
+    {
+      "old_blob": "96bcc863cb",
+      "new_blob": "d0dd9a8570"
+    },
+    {
+      "old_blob": "ab9a5d8efb",
+      "new_blob": "9d5cd7ac2a"
+    },
+    {
+      "old_blob": "6a0b2966d0",
+      "new_blob": "4c1c3e74d1"
+    },
+    {
+      "old_blob": "81c6e34f95",
+      "new_blob": "0dd6e78e5e"
+    },
+    {
+      "old_blob": "7deca9dc90",
+      "new_blob": "8fa75f5bb2"
+    },
+    {
+      "old_blob": "4e2ff77cbe",
+      "new_blob": "ec987348e1"
+    },
+    {
+      "old_blob": "03c1a8d1c1",
+      "new_blob": "ffee3362d6"
+    },
+    {
+      "old_blob": "d88772310d",
+      "new_blob": "f8ad014644"
+    },
+    {
+      "old_blob": "d129c58365",
+      "new_blob": "5781f8fd30"
+    },
+    {
+      "old_blob": "7f353afd74",
+      "new_blob": "c71b9a7bda"
+    }
+  ],
+  "added_lines": 200,
+  "removed_lines": 9,
+  "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_latency"
+}

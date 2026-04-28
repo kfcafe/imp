@@ -1,0 +1,182 @@
+{
+  "agent": "dirac",
+  "task": "IOverlayWidget",
+  "name": "dirac_refactor_IOverlayWidget",
+  "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_IOverlayWidget",
+  "changed_files": [
+    {
+      "old_path": "src/vs/editor/browser/editorBrowser.ts",
+      "new_path": "src/vs/editor/browser/editorBrowser.ts"
+    },
+    {
+      "old_path": "src/vs/editor/browser/observableCodeEditor.ts",
+      "new_path": "src/vs/editor/browser/observableCodeEditor.ts"
+    },
+    {
+      "old_path": "src/vs/editor/browser/widget/diffEditor/utils.ts",
+      "new_path": "src/vs/editor/browser/widget/diffEditor/utils.ts"
+    },
+    {
+      "old_path": "src/vs/editor/contrib/find/browser/findOptionsWidget.ts",
+      "new_path": "src/vs/editor/contrib/find/browser/findOptionsWidget.ts"
+    },
+    {
+      "old_path": "src/vs/editor/contrib/find/browser/findWidget.ts",
+      "new_path": "src/vs/editor/contrib/find/browser/findWidget.ts"
+    },
+    {
+      "old_path": "src/vs/editor/contrib/hover/browser/glyphHoverWidget.ts",
+      "new_path": "src/vs/editor/contrib/hover/browser/glyphHoverWidget.ts"
+    },
+    {
+      "old_path": "src/vs/editor/contrib/stickyScroll/browser/stickyScrollWidget.ts",
+      "new_path": "src/vs/editor/contrib/stickyScroll/browser/stickyScrollWidget.ts"
+    },
+    {
+      "old_path": "src/vs/editor/contrib/suggest/browser/suggestWidgetDetails.ts",
+      "new_path": "src/vs/editor/contrib/suggest/browser/suggestWidgetDetails.ts"
+    },
+    {
+      "old_path": "src/vs/editor/contrib/zoneWidget/browser/zoneWidget.ts",
+      "new_path": "src/vs/editor/contrib/zoneWidget/browser/zoneWidget.ts"
+    },
+    {
+      "old_path": "src/vs/editor/standalone/browser/iPadShowKeyboard/iPadShowKeyboard.ts",
+      "new_path": "src/vs/editor/standalone/browser/iPadShowKeyboard/iPadShowKeyboard.ts"
+    },
+    {
+      "old_path": "src/vs/editor/standalone/browser/quickInput/standaloneQuickInputService.ts",
+      "new_path": "src/vs/editor/standalone/browser/quickInput/standaloneQuickInputService.ts"
+    },
+    {
+      "old_path": "src/vs/monaco.d.ts",
+      "new_path": "src/vs/monaco.d.ts"
+    },
+    {
+      "old_path": "src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorInputContribution.ts",
+      "new_path": "src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorInputContribution.ts"
+    },
+    {
+      "old_path": "src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorWidgetContribution.ts",
+      "new_path": "src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorWidgetContribution.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/browser/codeeditor.ts",
+      "new_path": "src/vs/workbench/browser/codeeditor.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts",
+      "new_path": "src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingExplanationWidget.ts",
+      "new_path": "src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingExplanationWidget.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/browser/promptSyntax/promptCodingAgentActionOverlay.ts",
+      "new_path": "src/vs/workbench/contrib/chat/browser/promptSyntax/promptCodingAgentActionOverlay.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/mergeEditor/browser/view/fixedZoneWidget.ts",
+      "new_path": "src/vs/workbench/contrib/mergeEditor/browser/view/fixedZoneWidget.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/preferences/browser/keybindingWidgets.ts",
+      "new_path": "src/vs/workbench/contrib/preferences/browser/keybindingWidgets.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/testing/browser/codeCoverageDecorations.ts",
+      "new_path": "src/vs/workbench/contrib/testing/browser/codeCoverageDecorations.ts"
+    }
+  ],
+  "file_count": 21,
+  "indexes": [
+    {
+      "old_blob": "0c018c2a75b",
+      "new_blob": "fcd7f47256b"
+    },
+    {
+      "old_blob": "4c415ec53dd",
+      "new_blob": "1385057136c"
+    },
+    {
+      "old_blob": "a9601480ad5",
+      "new_blob": "f9c051b3bd3"
+    },
+    {
+      "old_blob": "dab491acd42",
+      "new_blob": "843203ca990"
+    },
+    {
+      "old_blob": "03e698c3e87",
+      "new_blob": "52879a91bf3"
+    },
+    {
+      "old_blob": "1c741fc3b8b",
+      "new_blob": "7d55873f781"
+    },
+    {
+      "old_blob": "2a7c1cf5b1b",
+      "new_blob": "50ef2b67f0f"
+    },
+    {
+      "old_blob": "9d42306730d",
+      "new_blob": "b312b02efac"
+    },
+    {
+      "old_blob": "96820f1eafd",
+      "new_blob": "5934d959995"
+    },
+    {
+      "old_blob": "3c3ce892ce9",
+      "new_blob": "2c592a962d5"
+    },
+    {
+      "old_blob": "4aa28793eff",
+      "new_blob": "c8f330a4239"
+    },
+    {
+      "old_blob": "5b0047e74a3",
+      "new_blob": "99961b4420d"
+    },
+    {
+      "old_blob": "ed6ccc8912f",
+      "new_blob": "bc1248b00fd"
+    },
+    {
+      "old_blob": "7c4c463f391",
+      "new_blob": "b6b8d02b5ef"
+    },
+    {
+      "old_blob": "81f18b872bc",
+      "new_blob": "16e7c60ed79"
+    },
+    {
+      "old_blob": "2e43b458f3d",
+      "new_blob": "b2f0301993e"
+    },
+    {
+      "old_blob": "0623aea19ca",
+      "new_blob": "c2c3015ac45"
+    },
+    {
+      "old_blob": "b3de9d98131",
+      "new_blob": "725679efbe7"
+    },
+    {
+      "old_blob": "6d36ed7ac14",
+      "new_blob": "b7a7eb855c8"
+    },
+    {
+      "old_blob": "b6a6170b071",
+      "new_blob": "a31dbe85c97"
+    },
+    {
+      "old_blob": "37fac8335cb",
+      "new_blob": "079eec70d18"
+    }
+  ],
+  "added_lines": 79,
+  "removed_lines": 0,
+  "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_IOverlayWidget"
+}

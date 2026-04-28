@@ -46,6 +46,16 @@ Each run writes a directory under `results/<timestamp>-<task>-<provider>-<model>
 }
 ```
 
+## Dirac reference patches
+
+Import the published Dirac output patches and metadata with:
+
+```sh
+evals/dirac-comparison/import-reference.py --agent dirac
+```
+
+This caches raw patches under `reference/dirac/`, writes per-patch metadata under `reference/metadata/dirac/`, and updates `reference/manifest.json` with changed files, line counts, and patch `index` blob IDs. The reference diffs are comparison evidence, not proof of the upstream starting commit by themselves.
+
 ## Running one task
 
 Use `run-one.sh` for the smallest reproducible path. It is dry-run friendly and can initialize a result directory without invoking an LLM.

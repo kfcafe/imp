@@ -1,0 +1,531 @@
+diff --git a/src/vs/sessions/contrib/copilotChatSessions/browser/copilotChatSessionsProvider.ts b/src/vs/sessions/contrib/copilotChatSessions/browser/copilotChatSessionsProvider.ts
+index 9990b803d50..e0ad9d0b785 100644
+--- a/src/vs/sessions/contrib/copilotChatSessions/browser/copilotChatSessionsProvider.ts
++++ b/src/vs/sessions/contrib/copilotChatSessions/browser/copilotChatSessionsProvider.ts
+@@ -1193,7 +1193,7 @@ export class CopilotChatSessionsProvider extends Disposable implements ISessions
+ 		}
+ 
+ 		// Send request
+-		const result = await this.chatService.sendRequest(session.resource, query, sendOptions);
++		const result = await this.chatService.sendRequest({ sessionResource: session.resource, message: query, options: sendOptions });
+ 		if (result.kind === 'rejected') {
+ 			throw new Error(`[DefaultCopilotProvider] sendRequest rejected: ${result.reason}`);
+ 		}
+diff --git a/src/vs/sessions/contrib/remoteAgentHost/browser/remoteAgentHostSessionsProvider.ts b/src/vs/sessions/contrib/remoteAgentHost/browser/remoteAgentHostSessionsProvider.ts
+index 226abe28731..f172ae46a0a 100644
+--- a/src/vs/sessions/contrib/remoteAgentHost/browser/remoteAgentHostSessionsProvider.ts
++++ b/src/vs/sessions/contrib/remoteAgentHost/browser/remoteAgentHostSessionsProvider.ts
+@@ -463,7 +463,7 @@ export class RemoteAgentHostSessionsProvider extends Disposable implements ISess
+ 
+ 		// Send request through the chat service, which delegates to the
+ 		// AgentHostSessionHandler content provider for turn handling
+-		const result = await this._chatService.sendRequest(session.resource, query, sendOptions);
++		const result = await this._chatService.sendRequest({ sessionResource: session.resource, message: query, options: sendOptions });
+ 		if (result.kind === 'rejected') {
+ 			throw new Error(`[RemoteAgentHost] sendRequest rejected: ${result.reason}`);
+ 		}
+diff --git a/src/vs/workbench/contrib/chat/browser/actions/chatContinueInAction.ts b/src/vs/workbench/contrib/chat/browser/actions/chatContinueInAction.ts
+index 1f5732b9cd6..e564f9bf35c 100644
+--- a/src/vs/workbench/contrib/chat/browser/actions/chatContinueInAction.ts
++++ b/src/vs/workbench/contrib/chat/browser/actions/chatContinueInAction.ts
+@@ -504,11 +504,15 @@ export class CreateRemoteAgentJobAction {
+ 			);
+ 
+ 			await chatService.removeRequest(sessionResource, addedRequest.id);
+-			const sendResult = await chatService.sendRequest(sessionResource, userPrompt, {
++			const sendResult = await chatService.sendRequest({
++				sessionResource,
++				message: userPrompt,
++				options: {
+ 				agentIdSilent: continuationTargetType,
+ 				attachedContext: attachedContext.asArray(),
+ 				userSelectedModelId: widget.input.currentLanguageModel,
+ 				...widget.getModeRequestOptions()
++				}
+ 			});
+ 
+ 			if (ChatSendResult.isSent(sendResult)) {
+diff --git a/src/vs/workbench/contrib/chat/browser/aiCustomization/customizationCreatorService.ts b/src/vs/workbench/contrib/chat/browser/aiCustomization/customizationCreatorService.ts
+index cec5c423ff0..fd42bf2e11f 100644
+--- a/src/vs/workbench/contrib/chat/browser/aiCustomization/customizationCreatorService.ts
++++ b/src/vs/workbench/contrib/chat/browser/aiCustomization/customizationCreatorService.ts
+@@ -78,7 +78,10 @@ export class CustomizationCreatorService {
+ 			return;
+ 		}
+ 
+-		await this.chatService.sendRequest(sessionResource, userMessage, {
++		await this.chatService.sendRequest({
++			sessionResource,
++			message: userMessage,
++			options: {
+ 			modeInfo: {
+ 				kind: ChatModeKind.Agent,
+ 				isBuiltin: false,
+@@ -90,6 +93,7 @@ export class CustomizationCreatorService {
+ 					toolReferences: [],
+ 				},
+ 			},
++			}
+ 		});
+ 	}
+ 
+diff --git a/src/vs/workbench/contrib/chat/browser/chatSessions/chatSessions.contribution.ts b/src/vs/workbench/contrib/chat/browser/chatSessions/chatSessions.contribution.ts
+index edb32b33b3d..78281beae50 100644
+--- a/src/vs/workbench/contrib/chat/browser/chatSessions/chatSessions.contribution.ts
++++ b/src/vs/workbench/contrib/chat/browser/chatSessions/chatSessions.contribution.ts
+@@ -563,7 +563,7 @@ export class ChatSessionsService extends Disposable implements IChatSessionsServ
+ 								attachedContext = [promptFile, ...(attachedContext ?? [])];
+ 							}
+ 
+-							const result = await chatService.sendRequest(resource, chatOptions.prompt, { agentIdSilent: type, attachedContext });
++							const result = await chatService.sendRequest({ sessionResource: resource, message: chatOptions.prompt, options: { agentIdSilent: type, attachedContext } });
+ 							if (result.kind === 'queued') {
+ 								await result.deferred;
+ 							} else if (result.kind === 'sent') {
+@@ -1375,7 +1375,7 @@ async function openChatSession(accessor: ServicesAccessor, openOptions: NewChatS
+ 			if (promptFile) {
+ 				attachedContext = [promptFile, ...(attachedContext ?? [])];
+ 			}
+-			await chatService.sendRequest(resource, chatSendOptions.prompt, { agentIdSilent: openOptions.type, attachedContext });
++			await chatService.sendRequest({ sessionResource: resource, message: chatSendOptions.prompt, options: { agentIdSilent: openOptions.type, attachedContext } });
+ 		} catch (e) {
+ 			logService.error(`Failed to send initial request to '${openOptions.type}' chat session with contextOptions: ${JSON.stringify(chatSendOptions)}`, e);
+ 		}
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatConfirmationContentPart.ts b/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatConfirmationContentPart.ts
+index e7e7ba79921..f8de8b4d7b1 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatConfirmationContentPart.ts
++++ b/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatConfirmationContentPart.ts
+@@ -54,7 +54,7 @@ export class ChatConfirmationContentPart extends Disposable implements IChatCont
+ 				options.location = widget?.location;
+ 				Object.assign(options, widget?.getModeRequestOptions());
+ 
+-				const result = await this.chatService.sendRequest(element.sessionResource, prompt, options);
++				const result = await this.chatService.sendRequest({ sessionResource: element.sessionResource, message: prompt, options });
+ 				if (ChatSendResult.isSent(result)) {
+ 					confirmation.isUsed = true;
+ 					confirmationWidget.setShowButtons(false);
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatErrorConfirmationPart.ts b/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatErrorConfirmationPart.ts
+index fe4903eff3b..4b21c91f1e1 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatErrorConfirmationPart.ts
++++ b/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatErrorConfirmationPart.ts
+@@ -60,7 +60,7 @@ export class ChatErrorConfirmationContentPart extends Disposable implements ICha
+ 				options.userSelectedModelId = widget?.input.currentLanguageModel;
+ 				Object.assign(options, widget?.getModeRequestOptions());
+ 				this.chatAccessibilityService.acceptRequest(element.sessionResource);
+-				await chatService.sendRequest(element.sessionResource, prompt, options);
++				await chatService.sendRequest({ sessionResource: element.sessionResource, message: prompt, options });
+ 			}));
+ 		});
+ 	}
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatMarkdownDecorationsRenderer.ts b/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatMarkdownDecorationsRenderer.ts
+index 560e9ecf849..9b72f673d56 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatMarkdownDecorationsRenderer.ts
++++ b/src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatMarkdownDecorationsRenderer.ts
+@@ -186,13 +186,16 @@ export class ChatMarkdownDecorationsRenderer {
+ 					return;
+ 				}
+ 
+-				this.chatService.sendRequest(widget.viewModel!.sessionResource, agent.metadata.sampleRequest ?? '',
+-					{
++				this.chatService.sendRequest({
++					sessionResource: widget.viewModel!.sessionResource,
++					message: agent.metadata.sampleRequest ?? '',
++					options: {
+ 						location: widget.location,
+ 						agentId: agent.id,
+ 						userSelectedModelId: widget.input.currentLanguageModel,
+ 						modeInfo: widget.input.currentModeInfo
+-					});
++					}
++				});
+ 			}));
+ 		} else {
+ 			container = this.renderResourceWidget(nameWithLeader, undefined, store);
+@@ -223,12 +226,16 @@ export class ChatMarkdownDecorationsRenderer {
+ 			}
+ 
+ 			const command = agent.slashCommands.find(c => c.name === args.command);
+-			this.chatService.sendRequest(widget.viewModel!.sessionResource, command?.sampleRequest ?? '', {
+-				location: widget.location,
+-				agentId: agent.id,
+-				slashCommand: args.command,
+-				userSelectedModelId: widget.input.currentLanguageModel,
+-				modeInfo: widget.input.currentModeInfo
++			this.chatService.sendRequest({
++				sessionResource: widget.viewModel!.sessionResource,
++				message: command?.sampleRequest ?? '',
++				options: {
++					location: widget.location,
++					agentId: agent.id,
++					slashCommand: args.command,
++					userSelectedModelId: widget.input.currentLanguageModel,
++					modeInfo: widget.input.currentModeInfo
++				}
+ 			});
+ 		}));
+ 
+diff --git a/src/vs/workbench/contrib/chat/browser/widget/chatWidget.ts b/src/vs/workbench/contrib/chat/browser/widget/chatWidget.ts
+index 7689707940f..73c3dfe298a 100644
+--- a/src/vs/workbench/contrib/chat/browser/widget/chatWidget.ts
++++ b/src/vs/workbench/contrib/chat/browser/widget/chatWidget.ts
+@@ -2413,19 +2413,22 @@ export class ChatWidget extends Disposable implements IChatWidget {
+ 		const resolvedImageVariables = await this._resolveDirectoryImageAttachments(requestInputs.attachedContext.asArray());
+ 		const submittedSessionResource = this.viewModel.sessionResource;
+ 
+-		const result = await this.chatService.sendRequest(this.viewModel.sessionResource, requestInputs.input, {
+-			userSelectedModelId: this.input.currentLanguageModel,
+-			location: this.location,
+-			locationData: this._location.resolveData?.(),
+-			parserContext: { selectedAgent: this._lastSelectedAgent, mode: this.input.currentModeKind, attachmentCapabilities: this._lastSelectedAgent?.capabilities ?? this.attachmentCapabilities },
+-			attachedContext: requestInputs.attachedContext.asArray(),
+-			resolvedVariables: resolvedImageVariables,
+-			noCommandDetection: options?.noCommandDetection,
+-			...this.getModeRequestOptions(),
+-			modeInfo: this.input.currentModeInfo,
+-			agentIdSilent: this._lockedAgent?.id,
+-			queue: options?.queue,
+-
++		const result = await this.chatService.sendRequest({
++			sessionResource: this.viewModel.sessionResource,
++			message: requestInputs.input,
++			options: {
++				userSelectedModelId: this.input.currentLanguageModel,
++				location: this.location,
++				locationData: this._location.resolveData?.(),
++				parserContext: { selectedAgent: this._lastSelectedAgent, mode: this.input.currentModeKind, attachmentCapabilities: this._lastSelectedAgent?.capabilities ?? this.attachmentCapabilities },
++				attachedContext: requestInputs.attachedContext.asArray(),
++				resolvedVariables: resolvedImageVariables,
++				noCommandDetection: options?.noCommandDetection,
++				...this.getModeRequestOptions(),
++				modeInfo: this.input.currentModeInfo,
++				agentIdSilent: this._lockedAgent?.id,
++				queue: options?.queue,
++			}
+ 		});
+ 
+ 		if (ChatSendResult.isRejected(result)) {
+diff --git a/src/vs/workbench/contrib/chat/common/chatService/chatService.ts b/src/vs/workbench/contrib/chat/common/chatService/chatService.ts
+index 2fd59394973..995494b8700 100644
+--- a/src/vs/workbench/contrib/chat/common/chatService/chatService.ts
++++ b/src/vs/workbench/contrib/chat/common/chatService/chatService.ts
+@@ -1398,6 +1398,13 @@ export interface IChatSendRequestOptions {
+ 
+ }
+ 
++
++export interface IChatSendRequest {
++	readonly sessionResource: URI;
++	readonly message: string;
++	readonly options?: IChatSendRequestOptions;
++}
++
+ export type IChatModelReference = IReference<IChatModel>;
+ 
+ export const IChatService = createDecorator<IChatService>('IChatService');
+@@ -1461,7 +1468,7 @@ export interface IChatService {
+ 	 * Sends a chat request for the given session.
+ 	 * @returns A result indicating whether the request was sent, queued, or rejected.
+ 	 */
+-	sendRequest(sessionResource: URI, message: string, options?: IChatSendRequestOptions): Promise<ChatSendResult>;
++	sendRequest(request: IChatSendRequest): Promise<ChatSendResult>;
+ 
+ 	getSessionTitle(sessionResource: URI): string | undefined;
+ 	setSessionTitle(sessionResource: URI, title: string): void;
+diff --git a/src/vs/workbench/contrib/chat/common/chatService/chatServiceImpl.ts b/src/vs/workbench/contrib/chat/common/chatService/chatServiceImpl.ts
+index 387af583779..fb217b5b4b0 100644
+--- a/src/vs/workbench/contrib/chat/common/chatService/chatServiceImpl.ts
++++ b/src/vs/workbench/contrib/chat/common/chatService/chatServiceImpl.ts
+@@ -41,7 +41,7 @@ import { ChatModel, ChatRequestModel, ChatRequestRemovalReason, IChatModel, ICha
+ import { ChatModelStore, IStartSessionProps } from '../model/chatModelStore.js';
+ import { chatAgentLeader, ChatRequestAgentPart, ChatRequestAgentSubcommandPart, ChatRequestSlashCommandPart, ChatRequestTextPart, chatSubcommandLeader, getPromptText, IParsedChatRequest } from '../requestParser/chatParserTypes.js';
+ import { ChatRequestParser } from '../requestParser/chatRequestParser.js';
+-import { ChatMcpServersStarting, ChatPendingRequestChangeClassification, ChatPendingRequestChangeEvent, ChatPendingRequestChangeEventName, ChatRequestQueueKind, ChatSendResult, ChatSendResultQueued, ChatSendResultSent, ChatStopCancellationNoopClassification, ChatStopCancellationNoopEvent, ChatStopCancellationNoopEventName, IChatCompleteResponse, IChatDetail, IChatFollowup, IChatModelReference, IChatProgress, IChatQuestionAnswers, IChatSendRequestOptions, IChatSendRequestResponseState, IChatService, IChatSessionContext, IChatSessionStartOptions, IChatUserActionEvent, ResponseModelState } from './chatService.js';
++import { ChatMcpServersStarting, ChatPendingRequestChangeClassification, ChatPendingRequestChangeEvent, ChatPendingRequestChangeEventName, ChatRequestQueueKind, ChatSendResult, ChatSendResultQueued, ChatSendResultSent, ChatStopCancellationNoopClassification, ChatStopCancellationNoopEvent, ChatStopCancellationNoopEventName, IChatCompleteResponse, IChatDetail, IChatFollowup, IChatModelReference, IChatProgress, IChatQuestionAnswers, IChatSendRequest, IChatSendRequestOptions, IChatSendRequestResponseState, IChatService, IChatSessionContext, IChatSessionStartOptions, IChatUserActionEvent, ResponseModelState } from './chatService.js';
+ import { ChatRequestTelemetry, ChatServiceTelemetry } from './chatServiceTelemetry.js';
+ import { IChatSessionsService, localChatSessionType } from '../chatSessionsService.js';
+ import { ChatSessionStore, IChatSessionEntryMetadata } from '../model/chatSessionStore.js';
+@@ -885,7 +885,8 @@ export class ChatService extends Disposable implements IChatService {
+ 		return { kind: 'queued', deferred: deferred.p };
+ 	}
+ 
+-	async sendRequest(sessionResource: URI, request: string, options?: IChatSendRequestOptions): Promise<ChatSendResult> {
++	async sendRequest(requestData: IChatSendRequest): Promise<ChatSendResult> {
++		let { sessionResource, message: request, options } = requestData;
+ 		this.trace('sendRequest', `sessionResource: ${sessionResource.toString()}, message: ${request.substring(0, 20)}${request.length > 20 ? '[...]' : ''}}`);
+ 
+ 
+@@ -1743,9 +1744,13 @@ export class ChatService extends Disposable implements IChatService {
+ 
+ 		// Re-send remaining queued requests
+ 		for (const pending of pendingRequests) {
+-			void this.sendRequest(targetResource, pending.request.message.text, {
+-				...pending.sendOptions,
+-				queue: pending.kind,
++			void this.sendRequest({
++				sessionResource: targetResource,
++				message: pending.request.message.text,
++				options: {
++					...pending.sendOptions,
++					queue: pending.kind,
++				}
+ 			});
+ 		}
+ 	}
+diff --git a/src/vs/workbench/contrib/chat/test/common/chatService/chatService.test.ts b/src/vs/workbench/contrib/chat/test/common/chatService/chatService.test.ts
+index afa76442175..398f86feb1e 100644
+--- a/src/vs/workbench/contrib/chat/test/common/chatService/chatService.test.ts
++++ b/src/vs/workbench/contrib/chat/test/common/chatService/chatService.test.ts
+@@ -42,7 +42,7 @@ import { TestMcpService } from '../../../../mcp/test/common/testMcpService.js';
+ import { IChatVariablesService } from '../../../common/attachments/chatVariables.js';
+ import { IChatDebugService } from '../../../common/chatDebugService.js';
+ import { ChatDebugServiceImpl } from '../../../common/chatDebugServiceImpl.js';
+-import { ChatRequestQueueKind, ChatSendResult, IChatFollowup, IChatModelReference, IChatService, ResponseModelState } from '../../../common/chatService/chatService.js';
++import { ChatRequestQueueKind, ChatSendResult, IChatFollowup, IChatModelReference, IChatSendRequest, IChatService, ResponseModelState } from '../../../common/chatService/chatService.js';
+ import { ChatService } from '../../../common/chatService/chatServiceImpl.js';
+ import { ChatAgentLocation, ChatModeKind } from '../../../common/constants.js';
+ import { IChatEditingService, IChatEditingSession } from '../../../common/editing/chatEditingService.js';
+@@ -285,7 +285,7 @@ suite('ChatService', () => {
+ 
+ 		const modelRef = testDisposables.add(startSessionModel(testService));
+ 		const model = modelRef.object;
+-		const response = await testService.sendRequest(model.sessionResource, `@${chatAgentWithUsedContextId} test request`);
++		const response = await testService.sendRequest({ sessionResource: model.sessionResource, message: `@${chatAgentWithUsedContextId} test request` });
+ 		ChatSendResult.assertSent(response);
+ 		await response.data.responseCompletePromise;
+ 
+@@ -311,21 +311,21 @@ suite('ChatService', () => {
+ 		const model = modelRef.object;
+ 
+ 		// Send a request to default agent
+-		const response = await testService.sendRequest(model.sessionResource, `test request`, { agentId: 'defaultAgent' });
++		const response = await testService.sendRequest({ sessionResource: model.sessionResource, message: `test request`, options: { agentId: 'defaultAgent' } });
+ 		ChatSendResult.assertSent(response);
+ 		await response.data.responseCompletePromise;
+ 		assert.strictEqual(model.getRequests().length, 1);
+ 		assert.strictEqual(model.getRequests()[0].response?.result?.metadata?.historyLength, 0);
+ 
+ 		// Send a request to agent2- it can't see the default agent's message
+-		const response2 = await testService.sendRequest(model.sessionResource, `test request`, { agentId: 'agent2' });
++		const response2 = await testService.sendRequest({ sessionResource: model.sessionResource, message: `test request`, options: { agentId: 'agent2' } });
+ 		ChatSendResult.assertSent(response2);
+ 		await response2.data.responseCompletePromise;
+ 		assert.strictEqual(model.getRequests().length, 2);
+ 		assert.strictEqual(model.getRequests()[1].response?.result?.metadata?.historyLength, 0);
+ 
+ 		// Send a request to defaultAgent - the default agent can see agent2's message
+-		const response3 = await testService.sendRequest(model.sessionResource, `test request`, { agentId: 'defaultAgent' });
++		const response3 = await testService.sendRequest({ sessionResource: model.sessionResource, message: `test request`, options: { agentId: 'defaultAgent' } });
+ 		ChatSendResult.assertSent(response3);
+ 		await response3.data.responseCompletePromise;
+ 		assert.strictEqual(model.getRequests().length, 3);
+@@ -343,12 +343,12 @@ suite('ChatService', () => {
+ 
+ 		await assertSnapshot(toSnapshotExportData(model));
+ 
+-		const response = await testService.sendRequest(model.sessionResource, `@${chatAgentWithUsedContextId} test request`);
++		const response = await testService.sendRequest({ sessionResource: model.sessionResource, message: `@${chatAgentWithUsedContextId} test request` });
+ 		ChatSendResult.assertSent(response);
+ 		await response.data.responseCompletePromise;
+ 		assert.strictEqual(model.getRequests().length, 1);
+ 
+-		const response2 = await testService.sendRequest(model.sessionResource, `test request 2`);
++		const response2 = await testService.sendRequest({ sessionResource: model.sessionResource, message: `test request 2` });
+ 		ChatSendResult.assertSent(response2);
+ 		await response2.data.responseCompletePromise;
+ 		assert.strictEqual(model.getRequests().length, 2);
+@@ -368,7 +368,7 @@ suite('ChatService', () => {
+ 			const chatModel1 = chatModel1Ref.object;
+ 			assert.strictEqual(chatModel1.getRequests().length, 0);
+ 
+-			const response = await testService.sendRequest(chatModel1.sessionResource, `@${chatAgentWithUsedContextId} test request`);
++			const response = await testService.sendRequest({ sessionResource: chatModel1.sessionResource, message: `@${chatAgentWithUsedContextId} test request` });
+ 			ChatSendResult.assertSent(response);
+ 
+ 			await response.data.responseCompletePromise;
+@@ -399,7 +399,7 @@ suite('ChatService', () => {
+ 			const chatModel1 = chatModel1Ref.object;
+ 			assert.strictEqual(chatModel1.getRequests().length, 0);
+ 
+-			const response = await testService.sendRequest(chatModel1.sessionResource, `@${chatAgentWithUsedContextId} test request`);
++			const response = await testService.sendRequest({ sessionResource: chatModel1.sessionResource, message: `@${chatAgentWithUsedContextId} test request` });
+ 			ChatSendResult.assertSent(response);
+ 
+ 			await response.data.responseCompletePromise;
+@@ -462,16 +462,20 @@ suite('ChatService', () => {
+ 		const model = modelRef.object;
+ 
+ 		// Start a request that will wait
+-		const response = await testService.sendRequest(model.sessionResource, 'first request', { agentId: 'slowAgent' });
++		const response = await testService.sendRequest({ sessionResource: model.sessionResource, message: 'first request', options: { agentId: 'slowAgent' } });
+ 		ChatSendResult.assertSent(response);
+ 
+ 		// Wait for the agent to start processing
+ 		await requestStarted.p;
+ 
+ 		// Queue a steering message while the first request is still in progress
+-		const steeringResponse = await testService.sendRequest(model.sessionResource, 'steering message', {
+-			agentId: 'slowAgent',
+-			queue: ChatRequestQueueKind.Steering
++		const steeringResponse = await testService.sendRequest({
++			sessionResource: model.sessionResource,
++			message: 'steering message',
++			options: {
++				agentId: 'slowAgent',
++				queue: ChatRequestQueueKind.Steering
++			}
+ 		});
+ 		assert.strictEqual(steeringResponse.kind, 'queued');
+ 
+@@ -507,16 +511,16 @@ suite('ChatService', () => {
+ 		const model = modelRef.object;
+ 
+ 		// Start a request that will wait
+-		const response = await testService.sendRequest(model.sessionResource, 'first request', { agentId: 'slowAgent' });
++		const response = await testService.sendRequest({ sessionResource: model.sessionResource, message: 'first request', options: { agentId: 'slowAgent' } });
+ 		ChatSendResult.assertSent(response);
+ 
+ 		// Wait for the agent to start processing
+ 		await requestStarted.p;
+ 
+ 		// Queue 3 steering messages while the first request is in progress
+-		const steering1 = await testService.sendRequest(model.sessionResource, 'steering1', { agentId: 'slowAgent', queue: ChatRequestQueueKind.Steering });
+-		const steering2 = await testService.sendRequest(model.sessionResource, 'steering2', { agentId: 'slowAgent', queue: ChatRequestQueueKind.Steering });
+-		const steering3 = await testService.sendRequest(model.sessionResource, 'steering3', { agentId: 'slowAgent', queue: ChatRequestQueueKind.Steering });
++		const steering1 = await testService.sendRequest({ sessionResource: model.sessionResource, message: 'steering1', options: { agentId: 'slowAgent', queue: ChatRequestQueueKind.Steering } });
++		const steering2 = await testService.sendRequest({ sessionResource: model.sessionResource, message: 'steering2', options: { agentId: 'slowAgent', queue: ChatRequestQueueKind.Steering } });
++		const steering3 = await testService.sendRequest({ sessionResource: model.sessionResource, message: 'steering3', options: { agentId: 'slowAgent', queue: ChatRequestQueueKind.Steering } });
+ 		assert.ok(ChatSendResult.isQueued(steering1));
+ 		assert.ok(ChatSendResult.isQueued(steering2));
+ 		assert.ok(ChatSendResult.isQueued(steering3));
+@@ -559,7 +563,7 @@ suite('ChatService', () => {
+ 		const model = modelRef.object;
+ 
+ 		// Disabled hooks are reported for every request, but the hint should only be shown once per workspace.
+-		const response = await testService.sendRequest(model.sessionResource, 'test request');
++		const response = await testService.sendRequest({ sessionResource: model.sessionResource, message: 'test request' });
+ 		ChatSendResult.assertSent(response);
+ 		await response.data.responseCompletePromise;
+ 
+@@ -574,7 +578,7 @@ suite('ChatService', () => {
+ 		assert.ok(hasHookHint, 'Response should contain the disabledClaudeHooks hint');
+ 
+ 		// Sending another request should NOT show the hint again (shown only once per workspace)
+-		const response2 = await testService.sendRequest(model.sessionResource, 'second request');
++		const response2 = await testService.sendRequest({ sessionResource: model.sessionResource, message: 'second request' });
+ 		ChatSendResult.assertSent(response2);
+ 		await response2.data.responseCompletePromise;
+ 
+@@ -607,7 +611,7 @@ suite('ChatService', () => {
+ 		const modelRef = testDisposables.add(startSessionModel(testService));
+ 		const model = modelRef.object;
+ 
+-		const response = await testService.sendRequest(model.sessionResource, 'first request');
++		const response = await testService.sendRequest({ sessionResource: model.sessionResource, message: 'first request' });
+ 		ChatSendResult.assertSent(response);
+ 		await response.data.responseCompletePromise;
+ 
+@@ -653,7 +657,7 @@ suite('ChatService', () => {
+ 		const modelRef = testDisposables.add(startSessionModel(testService));
+ 		const model = modelRef.object;
+ 
+-		const response = await testService.sendRequest(model.sessionResource, 'test request', { agentId: 'slowAgent' });
++		const response = await testService.sendRequest({ sessionResource: model.sessionResource, message: 'test request', options: { agentId: 'slowAgent' } });
+ 		ChatSendResult.assertSent(response);
+ 
+ 		await requestStarted.p;
+@@ -687,7 +691,7 @@ suite('ChatService', () => {
+ 		const modelRef = testDisposables.add(startSessionModel(testService));
+ 		const model = modelRef.object;
+ 
+-		const response = await testService.sendRequest(model.sessionResource, 'test request', { agentId: 'hangingAgent' });
++		const response = await testService.sendRequest({ sessionResource: model.sessionResource, message: 'test request', options: { agentId: 'hangingAgent' } });
+ 		ChatSendResult.assertSent(response);
+ 
+ 		await requestStarted.p;
+@@ -727,12 +731,12 @@ suite('ChatService', () => {
+ 		const source = sourceRef.object;
+ 
+ 		// Start a blocking request on source
+-		const response = await testService.sendRequest(source.sessionResource, 'first request', { agentId: 'slowAgent' });
++		const response = await testService.sendRequest({ sessionResource: source.sessionResource, message: 'first request', options: { agentId: 'slowAgent' } });
+ 		ChatSendResult.assertSent(response);
+ 		await requestStarted.p;
+ 
+ 		// Queue a request while the first is in progress
+-		const queued = await testService.sendRequest(source.sessionResource, 'queued request', { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued });
++		const queued = await testService.sendRequest({ sessionResource: source.sessionResource, message: 'queued request', options: { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued } });
+ 		assert.ok(ChatSendResult.isQueued(queued));
+ 
+ 		// Remove the queued request from source
+@@ -743,7 +747,7 @@ suite('ChatService', () => {
+ 		// Re-send it on a new target session through the normal queue path
+ 		const targetRef = testDisposables.add(startSessionModel(testService));
+ 		const target = targetRef.object;
+-		const resent = await testService.sendRequest(target.sessionResource, 'queued request', { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued, pauseQueue: true });
++		const resent = await testService.sendRequest({ sessionResource: target.sessionResource, message: 'queued request', options: { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued, pauseQueue: true } });
+ 		assert.ok(ChatSendResult.isQueued(resent));
+ 		assert.strictEqual(target.getPendingRequests().length, 1);
+ 
+@@ -794,14 +798,14 @@ suite('ChatService', () => {
+ 		const source = sourceRef.object;
+ 
+ 		// Step 1: Send request 1 (blocks on firstRequestGate)
+-		const response1 = await testService.sendRequest(source.sessionResource, 'request-1', { agentId: 'slowAgent' });
++		const response1 = await testService.sendRequest({ sessionResource: source.sessionResource, message: 'request-1', options: { agentId: 'slowAgent' } });
+ 		ChatSendResult.assertSent(response1);
+ 		await firstRequestStarted.p;
+ 
+ 		// Step 2: Queue 3 more requests while request 1 is in progress
+-		const q1 = await testService.sendRequest(source.sessionResource, 'queued-1', { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued });
+-		const q2 = await testService.sendRequest(source.sessionResource, 'queued-2', { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued });
+-		const q3 = await testService.sendRequest(source.sessionResource, 'queued-3', { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued });
++		const q1 = await testService.sendRequest({ sessionResource: source.sessionResource, message: 'queued-1', options: { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued } });
++		const q2 = await testService.sendRequest({ sessionResource: source.sessionResource, message: 'queued-2', options: { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued } });
++		const q3 = await testService.sendRequest({ sessionResource: source.sessionResource, message: 'queued-3', options: { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued } });
+ 		assert.ok(ChatSendResult.isQueued(q1));
+ 		assert.ok(ChatSendResult.isQueued(q2));
+ 		assert.ok(ChatSendResult.isQueued(q3));
+@@ -835,9 +839,9 @@ suite('ChatService', () => {
+ 		assert.strictEqual(source.getPendingRequests().length, 0);
+ 
+ 		// Re-send ALL 3 on the target through the normal queue path
+-		const resent1 = await testService.sendRequest(target.sessionResource, 'queued-1', { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued, pauseQueue: true });
+-		const resent2 = await testService.sendRequest(target.sessionResource, 'queued-2', { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued, pauseQueue: true });
+-		const resent3 = await testService.sendRequest(target.sessionResource, 'queued-3', { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued, pauseQueue: true });
++		const resent1 = await testService.sendRequest({ sessionResource: target.sessionResource, message: 'queued-1', options: { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued, pauseQueue: true } });
++		const resent2 = await testService.sendRequest({ sessionResource: target.sessionResource, message: 'queued-2', options: { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued, pauseQueue: true } });
++		const resent3 = await testService.sendRequest({ sessionResource: target.sessionResource, message: 'queued-3', options: { agentId: 'slowAgent', queue: ChatRequestQueueKind.Queued, pauseQueue: true } });
+ 		assert.ok(ChatSendResult.isQueued(resent1));
+ 		assert.ok(ChatSendResult.isQueued(resent2));
+ 		assert.ok(ChatSendResult.isQueued(resent3));
+@@ -928,7 +932,7 @@ suite('ChatService', () => {
+ 		testDisposables.add(untitledRef);
+ 
+ 		// Send a request - this triggers the untitled → real session conversion
+-		const response = await testService.sendRequest(untitledResource, 'hello', { agentId: remoteScheme });
++		const response = await testService.sendRequest({ sessionResource: untitledResource, message: 'hello', options: { agentId: remoteScheme } });
+ 		ChatSendResult.assertSent(response);
+ 		await response.data.responseCompletePromise;
+ 
+diff --git a/src/vs/workbench/contrib/chat/test/common/chatService/mockChatService.ts b/src/vs/workbench/contrib/chat/test/common/chatService/mockChatService.ts
+index 07e106b2c43..13836f4265f 100644
+--- a/src/vs/workbench/contrib/chat/test/common/chatService/mockChatService.ts
++++ b/src/vs/workbench/contrib/chat/test/common/chatService/mockChatService.ts
+@@ -8,7 +8,7 @@ import { Emitter, Event } from '../../../../../../base/common/event.js';
+ import { ResourceMap } from '../../../../../../base/common/map.js';
+ import { ISettableObservable, observableValue } from '../../../../../../base/common/observable.js';
+ import { URI } from '../../../../../../base/common/uri.js';
+-import { ChatRequestQueueKind, ChatSendResult, IChatDetail, IChatModelReference, IChatProgress, IChatSendRequestOptions, IChatService, IChatSessionContext, IChatSessionStartOptions, IChatUserActionEvent } from '../../../common/chatService/chatService.js';
++import { ChatRequestQueueKind, ChatSendResult, IChatDetail, IChatModelReference, IChatProgress, IChatSendRequest, IChatSendRequestOptions, IChatService, IChatSessionContext, IChatSessionStartOptions, IChatUserActionEvent } from '../../../common/chatService/chatService.js';
+ import { ChatAgentLocation } from '../../../common/constants.js';
+ import { IChatModel, IChatRequestModel, IExportableChatData, ISerializableChatData } from '../../../common/model/chatModel.js';
+ 
+@@ -112,7 +112,7 @@ export class MockChatService implements IChatService {
+ 
+ 	appendProgress(_request: IChatRequestModel, _progress: IChatProgress): void { }
+ 
+-	sendRequest(_sessionResource: URI, _message: string): Promise<ChatSendResult> {
++	sendRequest(request: IChatSendRequest): Promise<ChatSendResult> {
+ 		throw new Error('Method not implemented.');
+ 	}
+ 

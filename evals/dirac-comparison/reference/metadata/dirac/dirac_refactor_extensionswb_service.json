@@ -1,0 +1,38 @@
+{
+  "agent": "dirac",
+  "task": "extensionswb_service",
+  "name": "dirac_refactor_extensionswb_service",
+  "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_extensionswb_service",
+  "changed_files": [
+    {
+      "old_path": "src/vs/workbench/contrib/extensions/browser/extension.ts",
+      "new_path": "src/vs/workbench/contrib/extensions/browser/extension.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/extensions/browser/extensions.ts",
+      "new_path": "src/vs/workbench/contrib/extensions/browser/extensions.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/extensions/browser/extensionsWorkbenchService.ts",
+      "new_path": "src/vs/workbench/contrib/extensions/browser/extensionsWorkbenchService.ts"
+    }
+  ],
+  "file_count": 3,
+  "indexes": [
+    {
+      "old_blob": "00000000000",
+      "new_blob": "2957c78ea8d"
+    },
+    {
+      "old_blob": "00000000000",
+      "new_blob": "fdb1d32a527"
+    },
+    {
+      "old_blob": "de710641876",
+      "new_blob": "8503bb7e613"
+    }
+  ],
+  "added_lines": 928,
+  "removed_lines": 887,
+  "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_extensionswb_service"
+}

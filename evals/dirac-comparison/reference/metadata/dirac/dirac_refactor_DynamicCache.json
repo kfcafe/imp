@@ -1,0 +1,86 @@
+{
+  "agent": "dirac",
+  "task": "DynamicCache",
+  "name": "dirac_refactor_DynamicCache",
+  "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_DynamicCache",
+  "changed_files": [
+    {
+      "old_path": "src/transformers/cache_utils.py",
+      "new_path": "src/transformers/cache_utils.py"
+    },
+    {
+      "old_path": "src/transformers/models/cohere2/modular_cohere2.py",
+      "new_path": "src/transformers/models/cohere2/modular_cohere2.py"
+    },
+    {
+      "old_path": "src/transformers/models/deepseek_v3/modular_deepseek_v3.py",
+      "new_path": "src/transformers/models/deepseek_v3/modular_deepseek_v3.py"
+    },
+    {
+      "old_path": "src/transformers/models/gemma4/modular_gemma4.py",
+      "new_path": "src/transformers/models/gemma4/modular_gemma4.py"
+    },
+    {
+      "old_path": "src/transformers/models/llama4/modeling_llama4.py",
+      "new_path": "src/transformers/models/llama4/modeling_llama4.py"
+    },
+    {
+      "old_path": "src/transformers/models/ministral3/modular_ministral3.py",
+      "new_path": "src/transformers/models/ministral3/modular_ministral3.py"
+    },
+    {
+      "old_path": "src/transformers/models/mistral4/modular_mistral4.py",
+      "new_path": "src/transformers/models/mistral4/modular_mistral4.py"
+    },
+    {
+      "old_path": "src/transformers/models/olmo3/modular_olmo3.py",
+      "new_path": "src/transformers/models/olmo3/modular_olmo3.py"
+    },
+    {
+      "old_path": "src/transformers/models/qwen3/modular_qwen3.py",
+      "new_path": "src/transformers/models/qwen3/modular_qwen3.py"
+    }
+  ],
+  "file_count": 9,
+  "indexes": [
+    {
+      "old_blob": "ac324ebb62",
+      "new_blob": "ccb2aa867b"
+    },
+    {
+      "old_blob": "d19055a1b7",
+      "new_blob": "3dcbd601aa"
+    },
+    {
+      "old_blob": "3c62a564a3",
+      "new_blob": "f8e75494fd"
+    },
+    {
+      "old_blob": "a972738022",
+      "new_blob": "3a56e62c7e"
+    },
+    {
+      "old_blob": "08d50bd63f",
+      "new_blob": "79635922bd"
+    },
+    {
+      "old_blob": "0a925f5d40",
+      "new_blob": "543097c89d"
+    },
+    {
+      "old_blob": "acd9f1f601",
+      "new_blob": "8d91a99b1a"
+    },
+    {
+      "old_blob": "81325db7cc",
+      "new_blob": "d6f6c583a6"
+    },
+    {
+      "old_blob": "73cde6d89a",
+      "new_blob": "3591440224"
+    }
+  ],
+  "added_lines": 76,
+  "removed_lines": 12,
+  "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_DynamicCache"
+}

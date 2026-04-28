@@ -1,0 +1,753 @@
+diff --git a/src/transformers/pipelines/any_to_any.py b/src/transformers/pipelines/any_to_any.py
+index 4ae91d5a17..a822dc3384 100644
+--- a/src/transformers/pipelines/any_to_any.py
++++ b/src/transformers/pipelines/any_to_any.py
+@@ -14,6 +14,7 @@
+ 
+ import enum
+ import re
++import time
+ from typing import Any, Union, overload
+ 
+ import numpy as np
+@@ -422,7 +423,12 @@ class AnyToAnyPipeline(Pipeline):
+         if "generation_config" not in generate_kwargs:
+             generate_kwargs["generation_config"] = self.generation_config
+ 
++        start_time = time.perf_counter()
+         generated_sequence = self.model.generate(**model_inputs, **generate_kwargs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+         return {"generated_sequence": generated_sequence, "prompt_text": prompt_text, "input_ids": input_ids}
+ 
+     def postprocess(
+diff --git a/src/transformers/pipelines/audio_classification.py b/src/transformers/pipelines/audio_classification.py
+index 6e173111aa..f06ea1a352 100644
+--- a/src/transformers/pipelines/audio_classification.py
++++ b/src/transformers/pipelines/audio_classification.py
+@@ -12,6 +12,7 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ import subprocess
++import time
+ from typing import Any
+ 
+ import httpx
+@@ -240,7 +241,12 @@ class AudioClassificationPipeline(Pipeline):
+         return processed
+ 
+     def _forward(self, model_inputs):
++        start_time = time.perf_counter()
+         model_outputs = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+         return model_outputs
+ 
+     def postprocess(self, model_outputs, top_k=5, function_to_apply="softmax"):
+diff --git a/src/transformers/pipelines/automatic_speech_recognition.py b/src/transformers/pipelines/automatic_speech_recognition.py
+index 58349d0b10..d8f177cd26 100644
+--- a/src/transformers/pipelines/automatic_speech_recognition.py
++++ b/src/transformers/pipelines/automatic_speech_recognition.py
+@@ -11,6 +11,7 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++import time
+ from collections import defaultdict
+ from typing import TYPE_CHECKING, Any, Union
+ 
+@@ -485,6 +486,7 @@ class AutomaticSpeechRecognitionPipeline(ChunkPipeline):
+         if stride is not None and num_frames is not None:
+             raise ValueError("num_frames must be used only when stride is None")
+ 
++        start_time = time.perf_counter()
+         if self.type in {"seq2seq", "seq2seq_whisper"}:
+             # Consume values so we can let extra information flow freely through
+             # the pipeline (important for `partial` in microphone)
+@@ -555,6 +557,11 @@ class AutomaticSpeechRecognitionPipeline(ChunkPipeline):
+                     out["stride"] = rescale_stride([stride], ratio)[0]
+                 else:
+                     out["stride"] = rescale_stride(stride, ratio)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
++
+         # Leftover
+         extra = model_inputs
+         return {"is_last": is_last, **out, **extra}
+diff --git a/src/transformers/pipelines/base.py b/src/transformers/pipelines/base.py
+index 916576c4c6..867440eb08 100644
+--- a/src/transformers/pipelines/base.py
++++ b/src/transformers/pipelines/base.py
+@@ -776,6 +776,7 @@ class Pipeline(_ScikitCompat, PushToHubMixin):
+         task: str = "",
+         device: int | torch.device | None = None,
+         binary_output: bool = False,
++        record_latency: bool = False,
+         **kwargs,
+     ):
+         # We need to pop them for _sanitize_parameters call later
+@@ -844,6 +845,7 @@ class Pipeline(_ScikitCompat, PushToHubMixin):
+         logger.debug(f"Device set to use {self.device}")
+ 
+         self.binary_output = binary_output
++        self._record_latency = record_latency
+ 
+         # We shouldn't call `model.to()` for models loaded with accelerate as well as the case that model is already on device
+         if (
+diff --git a/src/transformers/pipelines/depth_estimation.py b/src/transformers/pipelines/depth_estimation.py
+index 03ee70673d..8c9f984906 100644
+--- a/src/transformers/pipelines/depth_estimation.py
++++ b/src/transformers/pipelines/depth_estimation.py
+@@ -1,3 +1,4 @@
++import time
+ from typing import Any, Union, overload
+ 
+ from ..utils import (
+@@ -122,7 +123,12 @@ class DepthEstimationPipeline(Pipeline):
+ 
+     def _forward(self, model_inputs):
+         target_size = model_inputs.pop("target_size")
++        start_time = time.perf_counter()
+         model_outputs = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+         model_outputs["target_size"] = target_size
+         return model_outputs
+ 
+diff --git a/src/transformers/pipelines/document_question_answering.py b/src/transformers/pipelines/document_question_answering.py
+index de976f9d87..76b2c3a5bc 100644
+--- a/src/transformers/pipelines/document_question_answering.py
++++ b/src/transformers/pipelines/document_question_answering.py
+@@ -13,6 +13,7 @@
+ # limitations under the License.
+ 
+ import re
++import time
+ from typing import Any, Union, overload
+ 
+ import numpy as np
+@@ -563,6 +564,8 @@ class DocumentQuestionAnsweringPipeline(ChunkPipeline):
+         words = model_inputs.pop("words", None)
+         is_last = model_inputs.pop("is_last", False)
+ 
++        start_time = time.perf_counter()
++
+         if self.model_type == ModelType.VisionEncoderDecoder:
+             # User-defined `generation_config` passed to the pipeline call take precedence
+             if "generation_config" not in generate_kwargs:
+@@ -572,6 +575,11 @@ class DocumentQuestionAnsweringPipeline(ChunkPipeline):
+         else:
+             model_outputs = self.model(**model_inputs)
+ 
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
++
+         model_outputs = dict(model_outputs.items())
+         model_outputs["p_mask"] = p_mask
+         model_outputs["word_ids"] = word_ids
+diff --git a/src/transformers/pipelines/feature_extraction.py b/src/transformers/pipelines/feature_extraction.py
+index a37f147605..320eb3920f 100644
+--- a/src/transformers/pipelines/feature_extraction.py
++++ b/src/transformers/pipelines/feature_extraction.py
+@@ -1,9 +1,14 @@
++import time
+ from typing import Any
+ 
+-from ..utils import add_end_docstrings
++from ..utils import add_end_docstrings, logging
+ from .base import GenericTensor, Pipeline, build_pipeline_init_args
+ 
+ 
++logger = logging.get_logger(__name__)
++
++
++
+ @add_end_docstrings(
+     build_pipeline_init_args(has_tokenizer=True, supports_binary_output=False),
+     r"""
+@@ -66,7 +71,12 @@ class FeatureExtractionPipeline(Pipeline):
+         return model_inputs
+ 
+     def _forward(self, model_inputs):
++        start_time = time.perf_counter()
+         model_outputs = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+         return model_outputs
+ 
+     def postprocess(self, model_outputs, return_tensors=False):
+diff --git a/src/transformers/pipelines/fill_mask.py b/src/transformers/pipelines/fill_mask.py
+index 1ea7c487be..56e5d486dc 100644
+--- a/src/transformers/pipelines/fill_mask.py
++++ b/src/transformers/pipelines/fill_mask.py
+@@ -1,3 +1,4 @@
++import time
+ from typing import Any, overload
+ 
+ import numpy as np
+@@ -118,7 +119,12 @@ class FillMaskPipeline(Pipeline):
+         return model_inputs
+ 
+     def _forward(self, model_inputs):
++        start_time = time.perf_counter()
+         model_outputs = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+         model_outputs["input_ids"] = model_inputs["input_ids"]
+         return model_outputs
+ 
+diff --git a/src/transformers/pipelines/image_classification.py b/src/transformers/pipelines/image_classification.py
+index 18a570df6e..1ba34c1ff1 100644
+--- a/src/transformers/pipelines/image_classification.py
++++ b/src/transformers/pipelines/image_classification.py
+@@ -11,6 +11,7 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++import time
+ from typing import Any, Union, overload
+ 
+ import numpy as np
+@@ -187,7 +188,12 @@ class ImageClassificationPipeline(Pipeline):
+         return model_inputs
+ 
+     def _forward(self, model_inputs):
++        start_time = time.perf_counter()
+         model_outputs = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+         return model_outputs
+ 
+     def postprocess(self, model_outputs, function_to_apply=None, top_k=5):
+diff --git a/src/transformers/pipelines/image_feature_extraction.py b/src/transformers/pipelines/image_feature_extraction.py
+index d049957a41..6302acf58a 100644
+--- a/src/transformers/pipelines/image_feature_extraction.py
++++ b/src/transformers/pipelines/image_feature_extraction.py
+@@ -1,9 +1,14 @@
++import time
+ from typing import Any, Union
+ 
+-from ..utils import add_end_docstrings, is_vision_available
++from ..utils import add_end_docstrings, is_vision_available, logging
+ from .base import GenericTensor, Pipeline, build_pipeline_init_args
+ 
+ 
++logger = logging.get_logger(__name__)
++
++
++
+ if is_vision_available():
+     from PIL import Image
+ 
+@@ -71,7 +76,12 @@ class ImageFeatureExtractionPipeline(Pipeline):
+         return model_inputs
+ 
+     def _forward(self, model_inputs):
++        start_time = time.perf_counter()
+         model_outputs = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+         return model_outputs
+ 
+     def postprocess(self, model_outputs, pool=None, return_tensors=False):
+diff --git a/src/transformers/pipelines/image_segmentation.py b/src/transformers/pipelines/image_segmentation.py
+index 49854beb5a..4e9a749ec4 100644
+--- a/src/transformers/pipelines/image_segmentation.py
++++ b/src/transformers/pipelines/image_segmentation.py
+@@ -1,3 +1,4 @@
++import time
+ from typing import Any, Union, overload
+ 
+ import numpy as np
+@@ -172,7 +173,12 @@ class ImageSegmentationPipeline(Pipeline):
+ 
+     def _forward(self, model_inputs):
+         target_size = model_inputs.pop("target_size")
++        start_time = time.perf_counter()
+         model_outputs = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+         model_outputs["target_size"] = target_size
+         return model_outputs
+ 
+diff --git a/src/transformers/pipelines/image_text_to_text.py b/src/transformers/pipelines/image_text_to_text.py
+index 7d28b91ab2..1a603383e3 100644
+--- a/src/transformers/pipelines/image_text_to_text.py
++++ b/src/transformers/pipelines/image_text_to_text.py
+@@ -13,6 +13,7 @@
+ # limitations under the License.
+ 
+ import enum
++import time
+ from typing import Any, Union, overload
+ 
+ from ..generation import GenerationConfig
+@@ -391,7 +392,12 @@ class ImageTextToTextPipeline(Pipeline):
+         if "generation_config" not in generate_kwargs:
+             generate_kwargs["generation_config"] = self.generation_config
+ 
++        start_time = time.perf_counter()
+         generated_sequence = self.model.generate(**model_inputs, **generate_kwargs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+ 
+         return {"generated_sequence": generated_sequence, "prompt_text": prompt_text, "input_ids": input_ids}
+ 
+diff --git a/src/transformers/pipelines/keypoint_matching.py b/src/transformers/pipelines/keypoint_matching.py
+index d75656a7db..2be0d141d2 100644
+--- a/src/transformers/pipelines/keypoint_matching.py
++++ b/src/transformers/pipelines/keypoint_matching.py
+@@ -12,16 +12,21 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++import time
+ from collections.abc import Sequence
+ from typing import Any, TypeAlias, TypedDict, Union
+ 
+ from typing_extensions import overload
+ 
+ from ..image_utils import is_pil_image
+-from ..utils import is_vision_available, requires_backends
++from ..utils import is_vision_available, logging, requires_backends
+ from .base import Pipeline
+ 
+ 
++logger = logging.get_logger(__name__)
++
++
++
+ if is_vision_available():
+     from PIL import Image
+ 
+@@ -152,7 +157,12 @@ class KeypointMatchingPipeline(Pipeline):
+ 
+     def _forward(self, preprocess_outputs):
+         model_inputs = preprocess_outputs["model_inputs"]
++        start_time = time.perf_counter()
+         model_outputs = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+         forward_outputs = {"model_outputs": model_outputs, "target_sizes": [preprocess_outputs["target_sizes"]]}
+         return forward_outputs
+ 
+diff --git a/src/transformers/pipelines/mask_generation.py b/src/transformers/pipelines/mask_generation.py
+index 920ce9d0a3..bb6bcfc12c 100644
+--- a/src/transformers/pipelines/mask_generation.py
++++ b/src/transformers/pipelines/mask_generation.py
+@@ -1,3 +1,4 @@
++import time
+ from collections import defaultdict
+ from typing import TYPE_CHECKING, Any, Union, overload
+ 
+@@ -33,6 +34,7 @@ logger = logging.get_logger(__name__)
+         output_rle_masks (`bool`, *optional*, default to `False`):
+             Whether or not to output the masks in `RLE` format""",
+ )
++
+ class MaskGenerationPipeline(ChunkPipeline):
+     """
+     Automatic mask generation for images using `SamForMaskGeneration`. This pipeline predicts binary masks for an
+@@ -256,7 +258,12 @@ class MaskGenerationPipeline(ChunkPipeline):
+         reshaped_input_sizes = model_inputs.pop("reshaped_input_sizes", None)
+         reshaped_input_sizes = reshaped_input_sizes.tolist() if reshaped_input_sizes is not None else None
+ 
++        start_time = time.perf_counter()
+         model_outputs = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+ 
+         # post processing happens here in order to avoid CPU GPU copies of ALL the masks
+         low_resolution_masks = model_outputs["pred_masks"]
+diff --git a/src/transformers/pipelines/object_detection.py b/src/transformers/pipelines/object_detection.py
+index 0a4fba996d..799f1891bc 100644
+--- a/src/transformers/pipelines/object_detection.py
++++ b/src/transformers/pipelines/object_detection.py
+@@ -1,3 +1,4 @@
++import time
+ from typing import TYPE_CHECKING, Any, Union, overload
+ 
+ from ..utils import add_end_docstrings, is_torch_available, is_vision_available, logging, requires_backends
+@@ -23,6 +24,7 @@ logger = logging.get_logger(__name__)
+ 
+ 
+ @add_end_docstrings(build_pipeline_init_args(has_image_processor=True))
++
+ class ObjectDetectionPipeline(Pipeline):
+     """
+     Object detection pipeline using any `AutoModelForObjectDetection`. This pipeline predicts bounding boxes of objects
+@@ -126,7 +128,12 @@ class ObjectDetectionPipeline(Pipeline):
+ 
+     def _forward(self, model_inputs):
+         target_size = model_inputs.pop("target_size")
++        start_time = time.perf_counter()
+         outputs = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+         model_outputs = outputs.__class__({"target_size": target_size, **outputs})
+         if self.tokenizer is not None:
+             model_outputs["bbox"] = model_inputs["bbox"]
+diff --git a/src/transformers/pipelines/table_question_answering.py b/src/transformers/pipelines/table_question_answering.py
+index 96bcc863cb..d0dd9a8570 100644
+--- a/src/transformers/pipelines/table_question_answering.py
++++ b/src/transformers/pipelines/table_question_answering.py
+@@ -1,4 +1,5 @@
+ import collections
++import time
+ import types
+ 
+ import numpy as np
+@@ -7,11 +8,16 @@ from ..generation import GenerationConfig
+ from ..utils import (
+     add_end_docstrings,
+     is_torch_available,
++    logging,
+     requires_backends,
+ )
+ from .base import ArgumentHandler, Dataset, Pipeline, PipelineException, build_pipeline_init_args
+ 
+ 
++logger = logging.get_logger(__name__)
++
++
++
+ if is_torch_available():
+     import torch
+ 
+@@ -325,6 +331,8 @@ class TableQuestionAnsweringPipeline(Pipeline):
+     def _forward(self, model_inputs, sequential=False, **generate_kwargs):
+         table = model_inputs.pop("table")
+ 
++        start_time = time.perf_counter()
++
+         if self.type == "tapas":
+             if sequential:
+                 outputs = self.sequential_inference(**model_inputs)
+@@ -336,6 +344,11 @@ class TableQuestionAnsweringPipeline(Pipeline):
+                 generate_kwargs["generation_config"] = self.generation_config
+ 
+             outputs = self.model.generate(**model_inputs, **generate_kwargs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
++
+         model_outputs = {"model_inputs": model_inputs, "table": table, "outputs": outputs}
+         return model_outputs
+ 
+diff --git a/src/transformers/pipelines/text_classification.py b/src/transformers/pipelines/text_classification.py
+index ab9a5d8efb..9d5cd7ac2a 100644
+--- a/src/transformers/pipelines/text_classification.py
++++ b/src/transformers/pipelines/text_classification.py
+@@ -1,12 +1,17 @@
+ import inspect
++import time
+ from typing import Any
+ 
+ import numpy as np
+ 
+-from ..utils import ExplicitEnum, add_end_docstrings, is_torch_available
++from ..utils import ExplicitEnum, add_end_docstrings, is_torch_available, logging
+ from .base import GenericTensor, Pipeline, build_pipeline_init_args
+ 
+ 
++logger = logging.get_logger(__name__)
++
++
++
+ if is_torch_available():
+     from ..models.auto.modeling_auto import MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES
+ 
+@@ -173,7 +178,13 @@ class TextClassificationPipeline(Pipeline):
+         model_forward = self.model.forward
+         if "use_cache" in inspect.signature(model_forward).parameters:
+             model_inputs["use_cache"] = False
+-        return self.model(**model_inputs)
++        start_time = time.perf_counter()
++        model_outputs = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
++        return model_outputs
+ 
+     def postprocess(self, model_outputs, function_to_apply=None, top_k=1, _legacy=True):
+         # `_legacy` is used to determine if we're running the naked pipeline and in backward
+diff --git a/src/transformers/pipelines/text_generation.py b/src/transformers/pipelines/text_generation.py
+index 6a0b2966d0..4c1c3e74d1 100644
+--- a/src/transformers/pipelines/text_generation.py
++++ b/src/transformers/pipelines/text_generation.py
+@@ -1,12 +1,17 @@
+ import enum
++import time
+ from typing import Any, overload
+ 
+ from ..generation import GenerationConfig
+-from ..utils import ModelOutput, add_end_docstrings, is_torch_available
++from ..utils import ModelOutput, add_end_docstrings, is_torch_available, logging
+ from ..utils.chat_template_utils import Chat, ChatType
+ from .base import Pipeline, build_pipeline_init_args
+ 
+ 
++logger = logging.get_logger(__name__)
++
++
++
+ if is_torch_available():
+     import torch
+ 
+@@ -400,7 +405,12 @@ class TextGenerationPipeline(Pipeline):
+         if "generation_config" not in generate_kwargs:
+             generate_kwargs["generation_config"] = self.generation_config
+ 
++        start_time = time.perf_counter()
+         output = self.model.generate(input_ids=input_ids, attention_mask=attention_mask, **generate_kwargs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+ 
+         if isinstance(output, ModelOutput):
+             generated_sequence = output.sequences
+diff --git a/src/transformers/pipelines/text_to_audio.py b/src/transformers/pipelines/text_to_audio.py
+index 81c6e34f95..0dd6e78e5e 100644
+--- a/src/transformers/pipelines/text_to_audio.py
++++ b/src/transformers/pipelines/text_to_audio.py
+@@ -10,17 +10,21 @@
+ # distributed under the License is distributed on an "AS IS" BASIS,
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+-# limitations under the License.from typing import List, Union
+-
++# limitations under the License.
++import time
+ from typing import Any, TypedDict, overload
+ 
+ from ..audio_utils import AudioInput
+ from ..generation import GenerationConfig
+-from ..utils import is_torch_available
++from ..utils import is_torch_available, logging
+ from ..utils.chat_template_utils import Chat, ChatType
+ from .base import Pipeline
+ 
+ 
++logger = logging.get_logger(__name__)
++
++
++
+ if is_torch_available():
+     import torch
+ 
+@@ -191,6 +195,8 @@ class TextToAudioPipeline(Pipeline):
+         forward_params = kwargs["forward_params"]
+         generate_kwargs = kwargs["generate_kwargs"]
+ 
++        start_time = time.perf_counter()
++
+         if self.model.can_generate():
+             # we expect some kwargs to be additional tensors which need to be on the right device
+             generate_kwargs = self._ensure_tensor_on_device(generate_kwargs, device=self.device)
+@@ -221,6 +227,11 @@ class TextToAudioPipeline(Pipeline):
+                 )
+             output = self.model(**model_inputs, **forward_params)[0]
+ 
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
++
+         if self.vocoder is not None:
+             # in that case, the output is a spectrogram that needs to be converted into a waveform
+             output = self.vocoder(output)
+diff --git a/src/transformers/pipelines/token_classification.py b/src/transformers/pipelines/token_classification.py
+index 7deca9dc90..8fa75f5bb2 100644
+--- a/src/transformers/pipelines/token_classification.py
++++ b/src/transformers/pipelines/token_classification.py
+@@ -1,3 +1,4 @@
++import time
+ import types
+ import warnings
+ from typing import Any, overload
+@@ -9,10 +10,15 @@ from ..utils import (
+     ExplicitEnum,
+     add_end_docstrings,
+     is_torch_available,
++    logging,
+ )
+ from .base import ArgumentHandler, ChunkPipeline, Dataset, build_pipeline_init_args
+ 
+ 
++logger = logging.get_logger(__name__)
++
++
++
+ if is_torch_available():
+     import torch
+ 
+@@ -308,7 +314,12 @@ class TokenClassificationPipeline(ChunkPipeline):
+         word_ids = model_inputs.pop("word_ids", None)
+         word_to_chars_map = model_inputs.pop("word_to_chars_map", None)
+ 
++        start_time = time.perf_counter()
+         output = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+         logits = output["logits"] if isinstance(output, dict) else output[0]
+ 
+         return {
+diff --git a/src/transformers/pipelines/video_classification.py b/src/transformers/pipelines/video_classification.py
+index 4e2ff77cbe..ec987348e1 100644
+--- a/src/transformers/pipelines/video_classification.py
++++ b/src/transformers/pipelines/video_classification.py
+@@ -11,6 +11,7 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++import time
+ from io import BytesIO
+ from typing import Any, overload
+ 
+@@ -38,6 +39,8 @@ logger = logging.get_logger(__name__)
+ 
+ 
+ @add_end_docstrings(build_pipeline_init_args(has_image_processor=True))
++
++
+ class VideoClassificationPipeline(Pipeline):
+     """
+     Video classification pipeline using any `AutoModelForVideoClassification`. This pipeline predicts the class of a
+@@ -150,7 +153,12 @@ class VideoClassificationPipeline(Pipeline):
+         return model_inputs
+ 
+     def _forward(self, model_inputs):
++        start_time = time.perf_counter()
+         model_outputs = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+         return model_outputs
+ 
+     def postprocess(self, model_outputs, top_k=5, function_to_apply="softmax"):
+diff --git a/src/transformers/pipelines/zero_shot_audio_classification.py b/src/transformers/pipelines/zero_shot_audio_classification.py
+index 03c1a8d1c1..ffee3362d6 100644
+--- a/src/transformers/pipelines/zero_shot_audio_classification.py
++++ b/src/transformers/pipelines/zero_shot_audio_classification.py
+@@ -11,6 +11,7 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++import time
+ from collections import UserDict
+ from typing import Any
+ 
+@@ -138,7 +139,12 @@ class ZeroShotAudioClassificationPipeline(Pipeline):
+             # Batching case.
+             text_inputs = text_inputs[0][0]
+ 
++        start_time = time.perf_counter()
+         outputs = self.model(**text_inputs, **model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+ 
+         model_outputs = {
+             "candidate_labels": candidate_labels,
+diff --git a/src/transformers/pipelines/zero_shot_classification.py b/src/transformers/pipelines/zero_shot_classification.py
+index d88772310d..f8ad014644 100644
+--- a/src/transformers/pipelines/zero_shot_classification.py
++++ b/src/transformers/pipelines/zero_shot_classification.py
+@@ -1,4 +1,5 @@
+ import inspect
++import time
+ 
+ import numpy as np
+ 
+@@ -222,7 +223,12 @@ class ZeroShotClassificationPipeline(ChunkPipeline):
+         model_forward = self.model.forward
+         if "use_cache" in inspect.signature(model_forward).parameters:
+             model_inputs["use_cache"] = False
++        start_time = time.perf_counter()
+         outputs = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+ 
+         model_outputs = {
+             "candidate_label": candidate_label,
+diff --git a/src/transformers/pipelines/zero_shot_image_classification.py b/src/transformers/pipelines/zero_shot_image_classification.py
+index d129c58365..5781f8fd30 100644
+--- a/src/transformers/pipelines/zero_shot_image_classification.py
++++ b/src/transformers/pipelines/zero_shot_image_classification.py
+@@ -1,3 +1,4 @@
++import time
+ from collections import UserDict
+ from typing import Any, Union, overload
+ 
+@@ -166,7 +167,12 @@ class ZeroShotImageClassificationPipeline(Pipeline):
+             # Batching case.
+             text_inputs = text_inputs[0][0]
+ 
++        start_time = time.perf_counter()
+         outputs = self.model(**text_inputs, **model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+ 
+         model_outputs = {
+             "candidate_labels": candidate_labels,
+diff --git a/src/transformers/pipelines/zero_shot_object_detection.py b/src/transformers/pipelines/zero_shot_object_detection.py
+index 7f353afd74..c71b9a7bda 100644
+--- a/src/transformers/pipelines/zero_shot_object_detection.py
++++ b/src/transformers/pipelines/zero_shot_object_detection.py
+@@ -1,3 +1,4 @@
++import time
+ from typing import Any, Union, overload
+ 
+ from ..utils import add_end_docstrings, is_torch_available, is_vision_available, logging, requires_backends
+@@ -195,7 +196,12 @@ class ZeroShotObjectDetectionPipeline(ChunkPipeline):
+         candidate_label = model_inputs.pop("candidate_label")
+         is_last = model_inputs.pop("is_last")
+ 
++        start_time = time.perf_counter()
+         outputs = self.model(**model_inputs)
++        end_time = time.perf_counter()
++        if self._record_latency:
++            latency = (end_time - start_time) * 1000
++            logger.info(f"[{self.__class__.__name__}] Inference latency: {latency} ms")
+ 
+         model_outputs = {"target_size": target_size, "candidate_label": candidate_label, "is_last": is_last, **outputs}
+         return model_outputs

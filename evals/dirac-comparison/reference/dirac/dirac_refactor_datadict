@@ -1,0 +1,637 @@
+diff --git a/django/contrib/admin/widgets.py b/django/contrib/admin/widgets.py
+index 7a0ccf42de..73218cd921 100644
+--- a/django/contrib/admin/widgets.py
++++ b/django/contrib/admin/widgets.py
+@@ -55,9 +55,9 @@ class FilteredSelectMultiple(forms.SelectMultiple):
+ class DateTimeWidgetContextMixin:
+     def get_context(self, name, value, attrs):
+         context = super().get_context(name, value, attrs)
+-        context["widget"]["attrs"][
+-            "aria-describedby"
+-        ] = f"id_{name}_timezone_warning_helptext"
++        context["widget"]["attrs"]["aria-describedby"] = (
++            f"id_{name}_timezone_warning_helptext"
++        )
+         return context
+ 
+ 
+@@ -252,7 +252,7 @@ class ManyToManyRawIdWidget(ForeignKeyRawIdWidget):
+     def label_and_url_for_value(self, value):
+         return "", ""
+ 
+-    def value_from_datadict(self, data, files, name):
++    def extract_value_from_request(self, data, files, name):
+         value = data.get(name)
+         if value:
+             return value.split(",")
+@@ -381,8 +381,8 @@ class RelatedFieldWidgetWrapper(forms.Widget):
+             )
+         return context
+ 
+-    def value_from_datadict(self, data, files, name):
+-        return self.widget.value_from_datadict(data, files, name)
++    def extract_value_from_request(self, data, files, name):
++        return self.widget.extract_value_from_request(data, files, name)
+ 
+     def value_omitted_from_data(self, data, files, name):
+         return self.widget.value_omitted_from_data(data, files, name)
+diff --git a/django/contrib/postgres/forms/array.py b/django/contrib/postgres/forms/array.py
+index ae0c0c462b..3282c07738 100644
+--- a/django/contrib/postgres/forms/array.py
++++ b/django/contrib/postgres/forms/array.py
+@@ -124,9 +124,9 @@ class SplitArrayWidget(forms.Widget):
+     def is_hidden(self):
+         return self.widget.is_hidden
+ 
+-    def value_from_datadict(self, data, files, name):
++    def extract_value_from_request(self, data, files, name):
+         return [
+-            self.widget.value_from_datadict(data, files, "%s_%s" % (name, index))
++            self.widget.extract_value_from_request(data, files, "%s_%s" % (name, index))
+             for index in range(self.size)
+         ]
+ 
+diff --git a/django/forms/forms.py b/django/forms/forms.py
+index ce64f6286e..3e497f86d5 100644
+--- a/django/forms/forms.py
++++ b/django/forms/forms.py
+@@ -219,10 +219,10 @@ class BaseForm(RenderableFormMixin):
+         return "initial-%s" % self.add_prefix(field_name)
+ 
+     def _widget_data_value(self, widget, html_name):
+-        # value_from_datadict() gets the data from the data dictionaries.
++        # extract_value_from_request() gets the data from the data dictionaries.
+         # Each widget type knows how to retrieve its own data, because some
+         # widgets split data over several HTML fields.
+-        return widget.value_from_datadict(self.data, self.files, html_name)
++        return widget.extract_value_from_request(self.data, self.files, html_name)
+ 
+     @property
+     def template_name(self):
+diff --git a/django/forms/widgets.py b/django/forms/widgets.py
+index 1bcfeba288..07866ae989 100644
+--- a/django/forms/widgets.py
++++ b/django/forms/widgets.py
+@@ -339,7 +339,7 @@ class Widget(metaclass=MediaDefiningClass):
+         """Build an attribute dictionary."""
+         return {**base_attrs, **(extra_attrs or {})}
+ 
+-    def value_from_datadict(self, data, files, name):
++    def extract_value_from_request(self, data, files, name):
+         """
+         Given a dictionary of data and this widget's name, return the value
+         of this widget or None if it's not provided.
+@@ -466,7 +466,7 @@ class MultipleHiddenInput(HiddenInput):
+         context["widget"]["subwidgets"] = subwidgets
+         return context
+ 
+-    def value_from_datadict(self, data, files, name):
++    def extract_value_from_request(self, data, files, name):
+         try:
+             getter = data.getlist
+         except AttributeError:
+@@ -504,7 +504,7 @@ class FileInput(Input):
+         """File input never renders a value."""
+         return
+ 
+-    def value_from_datadict(self, data, files, name):
++    def extract_value_from_request(self, data, files, name):
+         "File widgets take data from FILES, not POST"
+         getter = files.get
+         if self.allow_multiple_selected:
+@@ -576,10 +576,10 @@ class ClearableFileInput(FileInput):
+         context["widget"]["attrs"]["checked"] = self.checked
+         return context
+ 
+-    def value_from_datadict(self, data, files, name):
+-        upload = super().value_from_datadict(data, files, name)
++    def extract_value_from_request(self, data, files, name):
++        upload = super().extract_value_from_request(data, files, name)
+         self.checked = self.clear_checkbox_name(name) in data
+-        if not self.is_required and CheckboxInput().value_from_datadict(
++        if not self.is_required and CheckboxInput().extract_value_from_request(
+             data, files, self.clear_checkbox_name(name)
+         ):
+             if upload:
+@@ -665,7 +665,7 @@ class CheckboxInput(Input):
+             attrs = {**(attrs or {}), "checked": True}
+         return super().get_context(name, value, attrs)
+ 
+-    def value_from_datadict(self, data, files, name):
++    def extract_value_from_request(self, data, files, name):
+         if name not in data:
+             # A missing value means False because HTML form submission does not
+             # send results for unselected checkboxes.
+@@ -795,7 +795,7 @@ class ChoiceWidget(Widget):
+             id_ = "%s_%s" % (id_, index)
+         return id_
+ 
+-    def value_from_datadict(self, data, files, name):
++    def extract_value_from_request(self, data, files, name):
+         getter = data.get
+         if self.allow_multiple_selected:
+             try:
+@@ -886,7 +886,7 @@ class NullBooleanSelect(Select):
+         except KeyError:
+             return "unknown"
+ 
+-    def value_from_datadict(self, data, files, name):
++    def extract_value_from_request(self, data, files, name):
+         value = data.get(name)
+         return {
+             True: True,
+@@ -904,7 +904,7 @@ class NullBooleanSelect(Select):
+ class SelectMultiple(Select):
+     allow_multiple_selected = True
+ 
+-    def value_from_datadict(self, data, files, name):
++    def extract_value_from_request(self, data, files, name):
+         try:
+             getter = data.getlist
+         except AttributeError:
+@@ -1016,9 +1016,9 @@ class MultiWidget(Widget):
+     def id_for_label(self, id_):
+         return ""
+ 
+-    def value_from_datadict(self, data, files, name):
++    def extract_value_from_request(self, data, files, name):
+         return [
+-            widget.value_from_datadict(data, files, name + widget_name)
++            widget.extract_value_from_request(data, files, name + widget_name)
+             for widget_name, widget in zip(self.widgets_names, self.widgets)
+         ]
+ 
+@@ -1118,7 +1118,7 @@ class SelectDateWidget(Widget):
+     A widget that splits date input into three <select> boxes.
+ 
+     This also serves as an example of a Widget that has more than one HTML
+-    element and hence implements value_from_datadict.
++    element and hence implements extract_value_from_request.
+     """
+ 
+     none_value = ("", "---")
+@@ -1252,7 +1252,7 @@ class SelectDateWidget(Widget):
+             return "%s_%s" % (id_, first_select)
+         return "%s_month" % id_
+ 
+-    def value_from_datadict(self, data, files, name):
++    def extract_value_from_request(self, data, files, name):
+         y = data.get(self.year_field % name)
+         m = data.get(self.month_field % name)
+         d = data.get(self.day_field % name)
+diff --git a/docs/ref/forms/api.txt b/docs/ref/forms/api.txt
+index 58494f6067..f2e2ca23de 100644
+--- a/docs/ref/forms/api.txt
++++ b/docs/ref/forms/api.txt
+@@ -1199,7 +1199,7 @@ Attributes of ``BoundField``
+ .. attribute:: BoundField.data
+ 
+     This property returns the data for this :class:`~django.forms.BoundField`
+-    extracted by the widget's :meth:`~django.forms.Widget.value_from_datadict`
++    extracted by the widget's :meth:`~django.forms.Widget.extract_value_from_request`
+     method, or ``None`` if it wasn't given:
+ 
+     .. code-block:: pycon
+diff --git a/docs/ref/forms/widgets.txt b/docs/ref/forms/widgets.txt
+index 80047aabc5..999bf4007b 100644
+--- a/docs/ref/forms/widgets.txt
++++ b/docs/ref/forms/widgets.txt
+@@ -305,12 +305,12 @@ foundation for custom widgets.
+         ``None``, the renderer from the :setting:`FORM_RENDERER` setting is
+         used.
+ 
+-    .. method:: value_from_datadict(data, files, name)
++    .. method:: extract_value_from_request(data, files, name)
+ 
+         Given a dictionary of data and this widget's name, returns the value
+         of this widget. ``files`` may contain data coming from
+         :attr:`request.FILES <django.http.HttpRequest.FILES>`. Returns ``None``
+-        if a value wasn't provided. Note also that ``value_from_datadict`` may
++        if a value wasn't provided. Note also that ``extract_value_from_request`` may
+         be called more than once during handling of form data, so if you
+         customize it and add expensive processing, you should implement some
+         caching mechanism yourself.
+@@ -453,7 +453,7 @@ foundation for custom widgets.
+     a date with the day, month, and year in different select boxes. This widget
+     is intended to be used with a :class:`~django.forms.DateField` rather than
+     a :class:`~django.forms.MultiValueField`, thus we have implemented
+-    :meth:`~Widget.value_from_datadict`::
++    :meth:`~Widget.extract_value_from_request`::
+ 
+         from datetime import date
+         from django import forms
+@@ -479,8 +479,8 @@ foundation for custom widgets.
+                     return [day, month, year]
+                 return [None, None, None]
+ 
+-            def value_from_datadict(self, data, files, name):
+-                day, month, year = super().value_from_datadict(data, files, name)
++            def extract_value_from_request(self, data, files, name):
++                day, month, year = super().extract_value_from_request(data, files, name)
+                 # DateField expects a single string that it can parse into a date.
+                 return "{}-{}-{}".format(year, month, day)
+ 
+@@ -495,7 +495,7 @@ foundation for custom widgets.
+     ``value`` is ``None``, meaning we don't have any defaults for our
+     subwidgets.
+ 
+-    The default implementation of :meth:`~Widget.value_from_datadict` returns a
++    The default implementation of :meth:`~Widget.extract_value_from_request` returns a
+     list of values corresponding to each ``Widget``. This is appropriate when
+     using a ``MultiWidget`` with a :class:`~django.forms.MultiValueField`. But
+     since we want to use this widget with a :class:`~django.forms.DateField`,
+diff --git a/tests/forms_tests/field_tests/test_booleanfield.py b/tests/forms_tests/field_tests/test_booleanfield.py
+index f1c06c3c01..f924b93f30 100644
+--- a/tests/forms_tests/field_tests/test_booleanfield.py
++++ b/tests/forms_tests/field_tests/test_booleanfield.py
+@@ -54,7 +54,7 @@ class BooleanFieldTest(SimpleTestCase):
+         # (#19537)
+         self.assertTrue(f.has_changed("False", "on"))
+         # HiddenInput widget sends string values for boolean but doesn't clean
+-        # them in value_from_datadict.
++        # them in extract_value_from_request.
+         self.assertFalse(f.has_changed(False, "False"))
+         self.assertFalse(f.has_changed(True, "True"))
+         self.assertTrue(f.has_changed(False, "True"))
+diff --git a/tests/forms_tests/field_tests/test_datefield.py b/tests/forms_tests/field_tests/test_datefield.py
+index a8f39aa8e8..b3af849065 100644
+--- a/tests/forms_tests/field_tests/test_datefield.py
++++ b/tests/forms_tests/field_tests/test_datefield.py
+@@ -17,7 +17,7 @@ class DateFieldTest(SimpleTestCase):
+         self.assertTrue(a.is_valid())
+         self.assertEqual(a.cleaned_data["mydate"], date(2008, 4, 1))
+ 
+-        # As with any widget that implements get_value_from_datadict(), we must
++        # As with any widget that implements extract_value_from_request(), we must
+         # accept the input from the "as_hidden" rendering as well.
+         self.assertHTMLEqual(
+             a["mydate"].as_hidden(),
+diff --git a/tests/forms_tests/field_tests/test_nullbooleanfield.py b/tests/forms_tests/field_tests/test_nullbooleanfield.py
+index c1e120c0bb..f8975893ae 100644
+--- a/tests/forms_tests/field_tests/test_nullbooleanfield.py
++++ b/tests/forms_tests/field_tests/test_nullbooleanfield.py
+@@ -72,7 +72,7 @@ class NullBooleanFieldTest(FormFieldAssertionsMixin, SimpleTestCase):
+         self.assertTrue(f.has_changed(True, None))
+         self.assertTrue(f.has_changed(True, False))
+         # HiddenInput widget sends string values for boolean but doesn't clean
+-        # them in value_from_datadict.
++        # them in extract_value_from_request.
+         self.assertFalse(f.has_changed(False, "False"))
+         self.assertFalse(f.has_changed(True, "True"))
+         self.assertFalse(f.has_changed(None, ""))
+diff --git a/tests/forms_tests/widget_tests/test_checkboxinput.py b/tests/forms_tests/widget_tests/test_checkboxinput.py
+index 386ae00840..a1311283f0 100644
+--- a/tests/forms_tests/widget_tests/test_checkboxinput.py
++++ b/tests/forms_tests/widget_tests/test_checkboxinput.py
+@@ -102,16 +102,16 @@ class CheckboxInputTest(WidgetTest):
+         with self.assertRaises(AttributeError):
+             widget.render("greeting", True)
+ 
+-    def test_value_from_datadict(self):
++    def test_extract_value_from_request(self):
+         """
+         The CheckboxInput widget will return False if the key is not found in
+         the data dictionary (because HTML form submission doesn't send any
+         result for unchecked checkboxes).
+         """
+-        self.assertFalse(self.widget.value_from_datadict({}, {}, "testing"))
++        self.assertFalse(self.widget.extract_value_from_request({}, {}, "testing"))
+ 
+-    def test_value_from_datadict_string_int(self):
+-        value = self.widget.value_from_datadict({"testing": "0"}, {}, "testing")
++    def test_extract_value_from_request_string_int(self):
++        value = self.widget.extract_value_from_request({"testing": "0"}, {}, "testing")
+         self.assertIs(value, True)
+ 
+     def test_value_omitted_from_data(self):
+diff --git a/tests/forms_tests/widget_tests/test_clearablefileinput.py b/tests/forms_tests/widget_tests/test_clearablefileinput.py
+index 31ff1af624..5560de028d 100644
+--- a/tests/forms_tests/widget_tests/test_clearablefileinput.py
++++ b/tests/forms_tests/widget_tests/test_clearablefileinput.py
+@@ -29,12 +29,14 @@ class ClearableFileInputTest(WidgetTest):
+             self.widget,
+             "myfile",
+             FakeFieldFile(),
+-            html=("""
++            html=(
++                """
+             Currently: <a href="something">something</a>
+             <input type="checkbox" name="myfile-clear" id="myfile-clear_id">
+             <label for="myfile-clear_id">Clear</label><br>
+             Change: <input type="file" name="myfile">
+-            """),
++            """
++            ),
+         )
+ 
+     def test_html_escaped(self):
+@@ -53,7 +55,8 @@ class ClearableFileInputTest(WidgetTest):
+             ClearableFileInput(),
+             "my<div>file",
+             StrangeFieldFile(),
+-            html=("""
++            html=(
++                """
+                 Currently:
+                 <a href="something?chapter=1&amp;sect=2&amp;copy=3&amp;lang=en">
+                 something&lt;div onclick=&quot;alert(&#x27;oops&#x27;)&quot;&gt;.jpg</a>
+@@ -61,7 +64,8 @@ class ClearableFileInputTest(WidgetTest):
+                     id="my&lt;div&gt;file-clear_id">
+                 <label for="my&lt;div&gt;file-clear_id">Clear</label><br>
+                 Change: <input type="file" name="my&lt;div&gt;file">
+-                """),
++                """
++            ),
+         )
+ 
+     def test_clear_input_renders_only_if_not_required(self):
+@@ -75,10 +79,12 @@ class ClearableFileInputTest(WidgetTest):
+             widget,
+             "myfile",
+             FakeFieldFile(),
+-            html=("""
++            html=(
++                """
+             Currently: <a href="something">something</a> <br>
+             Change: <input type="file" name="myfile">
+-            """),
++            """
++            ),
+         )
+ 
+     def test_clear_input_renders_only_if_initial(self):
+@@ -137,20 +143,22 @@ class ClearableFileInputTest(WidgetTest):
+             widget,
+             "myfile",
+             [FakeFieldFile()],
+-            html=("""
++            html=(
++                """
+             Currently: <a href="something">something</a>
+             <input type="checkbox" name="myfile_0-clear" id="myfile_0-clear_id">
+             <label for="myfile_0-clear_id">Clear</label><br>
+             Change: <input type="file" name="myfile_0">
+-            """),
++            """
++            ),
+         )
+ 
+     def test_clear_input_checked_returns_false(self):
+         """
+-        ClearableFileInput.value_from_datadict returns False if the clear
++        ClearableFileInput.extract_value_from_request returns False if the clear
+         checkbox is checked, if not required.
+         """
+-        value = self.widget.value_from_datadict(
++        value = self.widget.extract_value_from_request(
+             data={"myfile-clear": True},
+             files={},
+             name="myfile",
+@@ -160,14 +168,14 @@ class ClearableFileInputTest(WidgetTest):
+ 
+     def test_clear_input_checked_returns_false_only_if_not_required(self):
+         """
+-        ClearableFileInput.value_from_datadict never returns False if the field
++        ClearableFileInput.extract_value_from_request never returns False if the field
+         is required.
+         """
+         widget = ClearableFileInput()
+         widget.is_required = True
+         field = SimpleUploadedFile("something.txt", b"content")
+ 
+-        value = widget.value_from_datadict(
++        value = widget.extract_value_from_request(
+             data={"myfile-clear": True},
+             files={"myfile": field},
+             name="myfile",
+diff --git a/tests/forms_tests/widget_tests/test_fileinput.py b/tests/forms_tests/widget_tests/test_fileinput.py
+index a49f481728..306a7b5abe 100644
+--- a/tests/forms_tests/widget_tests/test_fileinput.py
++++ b/tests/forms_tests/widget_tests/test_fileinput.py
+@@ -56,7 +56,7 @@ class FileInputTest(WidgetTest):
+         with self.assertRaisesMessage(ValueError, msg):
+             FileInput(attrs={"multiple": True})
+ 
+-    def test_value_from_datadict_multiple(self):
++    def test_extract_value_from_request_multiple(self):
+         class MultipleFileInput(FileInput):
+             allow_multiple_selected = True
+ 
+@@ -64,7 +64,7 @@ class FileInputTest(WidgetTest):
+         file_2 = SimpleUploadedFile("something2.txt", b"content 2")
+         # Uploading multiple files is allowed.
+         widget = MultipleFileInput(attrs={"multiple": True})
+-        value = widget.value_from_datadict(
++        value = widget.extract_value_from_request(
+             data={"name": "Test name"},
+             files=MultiValueDict({"myfile": [file_1, file_2]}),
+             name="myfile",
+@@ -72,7 +72,7 @@ class FileInputTest(WidgetTest):
+         self.assertEqual(value, [file_1, file_2])
+         # Uploading multiple files is not allowed.
+         widget = FileInput()
+-        value = widget.value_from_datadict(
++        value = widget.extract_value_from_request(
+             data={"name": "Test name"},
+             files=MultiValueDict({"myfile": [file_1, file_2]}),
+             name="myfile",
+diff --git a/tests/forms_tests/widget_tests/test_multiwidget.py b/tests/forms_tests/widget_tests/test_multiwidget.py
+index 5e360e3e92..f5462af356 100644
+--- a/tests/forms_tests/widget_tests/test_multiwidget.py
++++ b/tests/forms_tests/widget_tests/test_multiwidget.py
+@@ -220,7 +220,7 @@ class MultiWidgetTest(WidgetTest):
+             False,
+         )
+ 
+-    def test_value_from_datadict_subwidgets_name(self):
++    def test_extract_value_from_request_subwidgets_name(self):
+         widget = MultiWidget(widgets={"x": TextInput(), "": TextInput()})
+         tests = [
+             ({}, [None, None]),
+@@ -231,7 +231,7 @@ class MultiWidgetTest(WidgetTest):
+         for data, expected in tests:
+             with self.subTest(data):
+                 self.assertEqual(
+-                    widget.value_from_datadict(data, {}, "field"),
++                    widget.extract_value_from_request(data, {}, "field"),
+                     expected,
+                 )
+ 
+@@ -273,7 +273,8 @@ class MultiWidgetTest(WidgetTest):
+             widget,
+             "name",
+             "some text,JP,2007-04-25 06:24:00",
+-            html=("""
++            html=(
++                """
+             <input type="text" name="name_0" value="some text">
+             <select multiple name="name_1">
+                 <option value="J" selected>John</option>
+@@ -283,7 +284,8 @@ class MultiWidgetTest(WidgetTest):
+             </select>
+             <input type="text" name="name_2_0" value="2007-04-25">
+             <input type="text" name="name_2_1" value="06:24:00">
+-            """),
++            """
++            ),
+         )
+ 
+     def test_no_whitespace_between_widgets(self):
+diff --git a/tests/forms_tests/widget_tests/test_selectdatewidget.py b/tests/forms_tests/widget_tests/test_selectdatewidget.py
+index 0a2dc3fc48..a94de59394 100644
+--- a/tests/forms_tests/widget_tests/test_selectdatewidget.py
++++ b/tests/forms_tests/widget_tests/test_selectdatewidget.py
+@@ -32,7 +32,8 @@ class SelectDateWidgetTest(WidgetTest):
+             self.widget,
+             "mydate",
+             "",
+-            html=("""
++            html=(
++                """
+             <select name="mydate_month" id="id_mydate_month">
+                 <option selected value="">---</option>
+                 <option value="1">January</option>
+@@ -97,7 +98,8 @@ class SelectDateWidgetTest(WidgetTest):
+                 <option value="2015">2015</option>
+                 <option value="2016">2016</option>
+             </select>
+-            """),
++            """
++            ),
+         )
+ 
+     def test_render_none(self):
+@@ -114,7 +116,8 @@ class SelectDateWidgetTest(WidgetTest):
+             self.widget,
+             "mydate",
+             "2010-04-15",
+-            html=("""
++            html=(
++                """
+             <select name="mydate_month" id="id_mydate_month">
+                 <option value="">---</option>
+                 <option value="1">January</option>
+@@ -179,7 +182,8 @@ class SelectDateWidgetTest(WidgetTest):
+                 <option value="2015">2015</option>
+                 <option value="2016">2016</option>
+             </select>
+-            """),
++            """
++            ),
+         )
+ 
+     def test_render_datetime(self):
+@@ -196,7 +200,8 @@ class SelectDateWidgetTest(WidgetTest):
+             self.widget,
+             "mydate",
+             "2010-02-31",
+-            html=("""
++            html=(
++                """
+             <select name="mydate_month" id="id_mydate_month">
+                 <option value="">---</option>
+                 <option value="1">January</option>
+@@ -261,7 +266,8 @@ class SelectDateWidgetTest(WidgetTest):
+                 <option value="2015">2015</option>
+                 <option value="2016">2016</option>
+             </select>
+-            """),
++            """
++            ),
+         )
+ 
+     def test_custom_months(self):
+@@ -270,7 +276,8 @@ class SelectDateWidgetTest(WidgetTest):
+             widget,
+             "mydate",
+             "",
+-            html=("""
++            html=(
++                """
+             <select name="mydate_month" id="id_mydate_month">
+                 <option selected value="">---</option>
+                 <option value="1">Jan.</option>
+@@ -326,7 +333,8 @@ class SelectDateWidgetTest(WidgetTest):
+                 <option selected value="">---</option>
+                 <option value="2013">2013</option>
+             </select>
+-            """),
++            """
++            ),
+         )
+ 
+     def test_selectdate_required(self):
+@@ -437,7 +445,7 @@ class SelectDateWidgetTest(WidgetTest):
+             )
+         )
+         self.assertEqual(
+-            w.value_from_datadict(
++            w.extract_value_from_request(
+                 {"date_year": "2010", "date_month": "8", "date_day": "13"}, {}, "date"
+             ),
+             "13-08-2010",
+@@ -520,7 +528,7 @@ class SelectDateWidgetTest(WidgetTest):
+         # Years before 1900 should work.
+         w = SelectDateWidget(years=("1899",))
+         self.assertEqual(
+-            w.value_from_datadict(
++            w.extract_value_from_request(
+                 {"date_year": "1899", "date_month": "8", "date_day": "13"}, {}, "date"
+             ),
+             "13-08-1899",
+@@ -529,7 +537,7 @@ class SelectDateWidgetTest(WidgetTest):
+         # sanitize_strftime_format).
+         w = SelectDateWidget(years=("0001",))
+         self.assertEqual(
+-            w.value_from_datadict(
++            w.extract_value_from_request(
+                 {"date_year": "0001", "date_month": "8", "date_day": "13"}, {}, "date"
+             ),
+             "13-08-0001",
+@@ -550,7 +558,7 @@ class SelectDateWidgetTest(WidgetTest):
+                         for field, value in zip(("year", "month", "day"), values)
+                     }
+                     self.assertEqual(
+-                        w.value_from_datadict(data, {}, "field"), expected_value
++                        w.extract_value_from_request(data, {}, "field"), expected_value
+                     )
+                     expected_dict = {
+                         field: int(value)
+@@ -594,7 +602,7 @@ class SelectDateWidgetTest(WidgetTest):
+                     {"day": None, "month": None, "year": None},
+                 )
+ 
+-    def test_value_from_datadict(self):
++    def test_extract_value_from_request(self):
+         tests = [
+             (("2000", "12", "1"), "2000-12-01"),
+             (("", "12", "1"), "0-12-1"),
+@@ -617,7 +625,7 @@ class SelectDateWidgetTest(WidgetTest):
+                     if value is not None:
+                         data["field_%s" % field_name] = value
+                 self.assertEqual(
+-                    self.widget.value_from_datadict(data, {}, "field"), expected
++                    self.widget.extract_value_from_request(data, {}, "field"), expected
+                 )
+ 
+     def test_value_omitted_from_data(self):
+@@ -643,7 +651,8 @@ class SelectDateWidgetTest(WidgetTest):
+             widget,
+             "mydate",
+             "",
+-            html=("""
++            html=(
++                """
+             <select name="mydate_month" id="id_mydate_month">
+                 <option selected value="">---</option>
+                 <option value="1">January</option>
+@@ -697,7 +706,8 @@ class SelectDateWidgetTest(WidgetTest):
+                 <option selected value="">---</option>
+                 <option value="2007">2007</option>
+             </select>
+-            """),
++            """
++            ),
+         )
+ 
+     def test_fieldset(self):

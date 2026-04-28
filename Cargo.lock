@@ -2270,7 +2270,6 @@ dependencies = [
  "libc",
  "mana-core",
  "mana-pool",
- "mana-review",
  "project-detect",
  "regex",
  "serde",
@@ -2310,19 +2309,6 @@ dependencies = [
  "mana-core",
  "sysinfo",
  "tempfile",
-]
-
-[[package]]
-name = "mana-review"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "mana-core",
- "serde",
- "serde_json",
- "serde_yml",
- "thiserror 2.0.18",
 ]
 
 [[package]]

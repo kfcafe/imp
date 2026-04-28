@@ -1,8 +1,8 @@
 # imp
 
-`imp` is a Rust-native coding agent runtime for local software work. It gives a model native tools for reading, editing, searching, running commands, using git, reading the web, and coordinating durable work through mana.
+`imp` is a coding agent for local software work. It runs in your terminal, uses native development tools, keeps durable sessions, and can coordinate longer tasks with an included mana work graph.
 
-`mana` is the durable work graph. `imp` is the live runtime that executes work against it.
+imp is actively developed. The core coding-agent workflow is usable today; some extension and embedding surfaces are still evolving.
 
 ```bash
 brew tap kfcafe/tap && brew install imp
@@ -11,27 +11,18 @@ brew tap kfcafe/tap && brew install imp
 ## Table of Contents
 
 - [Quick Start](#quick-start)
-- [Providers & Models](#providers--models)
-- [Interactive Mode](#interactive-mode)
-  - [Editor](#editor)
-  - [Commands](#commands)
-  - [Keyboard Shortcuts](#keyboard-shortcuts)
-- [Sessions](#sessions)
-  - [Branching](#branching)
-  - [Compaction](#compaction)
-- [Mana](#mana)
+- [What imp can do](#what-imp-can-do)
+- [Interactive Workflow](#interactive-workflow)
+- [Sessions and Context](#sessions-and-context)
 - [Tools](#tools)
-- [Modes](#modes)
+- [Mana](#mana)
+- [Providers and Models](#providers-and-models)
+- [Modes and Policy](#modes-and-policy)
 - [Settings](#settings)
-- [Context](#context)
 - [Customization](#customization)
-  - [Lua Extensions](#lua-extensions)
-  - [TypeScript Extensions](#typescript-extensions)
-  - [Hooks](#hooks)
 - [Programmatic Usage](#programmatic-usage)
 - [Architecture](#architecture)
 - [Development](#development)
-- [Philosophy](#philosophy)
 - [CLI Reference](#cli-reference)
 
 ---
@@ -59,39 +50,37 @@ imp login openai   # OpenAI / ChatGPT OAuth
 imp login kimi     # guided Kimi setup
 ```
 
-Then talk to imp. The default interactive entrypoint opens the terminal UI:
+Common entrypoints:
 
 ```bash
-imp
-```
-
-Other common entrypoints:
-
-```bash
+imp                              # terminal UI
 imp chat                         # CLI chat shell
 imp -p "Summarize this repo"      # one-shot prompt
 imp @src/main.rs "Explain this"   # prompt with file context
 imp -c                            # continue recent session
-imp run 12.1                      # execute a mana unit directly
+imp run 12.1                      # execute a mana task directly
 ```
 
-Platform/source notes:
+Source install:
 
 ```bash
-# Linux x86_64
+git clone https://github.com/kfcafe/imp.git
+cd imp
+uu install --default
+```
+
+Linux release archives:
+
+```bash
+# x86_64
 curl -LO https://github.com/kfcafe/imp/releases/latest/download/imp-0.1.0-x86_64-unknown-linux-gnu.tar.gz
 tar xzf imp-0.1.0-x86_64-unknown-linux-gnu.tar.gz
 sudo mv imp-0.1.0-x86_64-unknown-linux-gnu/imp /usr/local/bin/
 
-# Linux aarch64
+# aarch64
 curl -LO https://github.com/kfcafe/imp/releases/latest/download/imp-0.1.0-aarch64-unknown-linux-gnu.tar.gz
 tar xzf imp-0.1.0-aarch64-unknown-linux-gnu.tar.gz
 sudo mv imp-0.1.0-aarch64-unknown-linux-gnu/imp /usr/local/bin/
-
-# source install
-git clone https://github.com/kfcafe/imp.git
-cd imp
-uu install --default
 ```
 
 If a locally installed macOS binary is killed immediately after install:
@@ -102,7 +91,182 @@ bash tools/imp-fix-signature.sh ~/.local/imp-current/bin/imp
 
 ---
 
-## Providers & Models
+## What imp can do
+
+| Area | Features |
+|------|----------|
+| Interactive coding | terminal UI, CLI chat shell, one-shot prompts, file attachments |
+| Native tools | read, write, edit, shell, git, structural code scan, web, ask, memory, mana |
+| Sessions | persistent JSONL sessions, continuation, branch history, compaction |
+| Context | attached files, project instructions, memory, prior sessions, mana task state |
+| Providers | Anthropic, OpenAI, Google, OpenAI-compatible providers, OAuth/API-key auth |
+| Secrets | OS credential-store integration; metadata only in `~/.imp/auth.json` |
+| Modes | full, worker, orchestrator, planner, reviewer, auditor |
+| Extensions | Lua tools/commands/hooks; limited TypeScript compatibility layer |
+| Task coordination | included mana work graph for tasks, dependencies, notes, decisions, verify gates |
+
+Typical use:
+
+```bash
+imp
+# ask: "fix the failing auth test"
+# ask: "review this branch"
+# ask: "work on 12.1"
+# ask: "show me the next task and work on it"
+```
+
+---
+
+## Interactive Workflow
+
+Run:
+
+```bash
+imp
+```
+
+The terminal UI provides:
+
+- streaming assistant output and tool activity
+- prompt editor with command palette
+- file attachment via `@`
+- model and thinking controls
+- session tree and branch navigation
+- sidebar inspection for tool calls and outputs
+- settings, personality, and secrets screens
+
+Common controls:
+
+| Input | Action |
+|-------|--------|
+| `/` | command palette |
+| `@` | file finder / attach context |
+| `Ctrl+L` | model selector |
+| `Shift+Tab` | cycle thinking level |
+| `/compact` | compact older branch history |
+| `/settings` | edit UI/runtime settings |
+| `/personality` | edit identity and behavior profile |
+
+CLI chat shell:
+
+```bash
+imp chat
+```
+
+| Input | Purpose |
+|-------|---------|
+| `:help` | show available shell commands |
+| `@file` | attach a file |
+
+---
+
+## Sessions and Context
+
+Sessions are stored as append-only JSONL records. Entries include:
+
+- user and assistant messages
+- tool calls and tool results
+- usage records
+- branch metadata
+- compaction entries
+- checkpoint records
+
+Session commands:
+
+```bash
+imp -c      # continue most recent session
+imp chat    # CLI shell with persistent sessions
+imp         # terminal UI session interface
+```
+
+Long-session support:
+
+- `/compact` summarizes older branch history while preserving recent working turns
+- old tool outputs can be masked when context is tight
+- raw session history remains on disk for replay/export/debugging
+- mana tasks can carry durable task state outside the chat transcript
+
+Project context can come from:
+
+- attached files: `imp @README.md "Improve this"`
+- project instructions such as `AGENTS.md`
+- local memory and previous sessions
+- active mana task state
+
+---
+
+## Tools
+
+imp exposes native tools to the agent. Native tools are preferred over shell commands when available.
+
+| Tool | Purpose |
+|------|---------|
+| `read` | read text files and images with offset/limit support |
+| `write` | create or overwrite files |
+| `edit` | exact find/replace edits |
+| `multi_edit` | multiple coordinated edits to one file |
+| `bash` | shell execution with timeout/cancellation |
+| `git` | status, diff, log, stage, commit, restore, worktrees |
+| `scan` | tree-sitter structural code extraction |
+| `web` | web search, page read, YouTube metadata/caption extraction |
+| `ask` | ask the user for input or choices |
+| `mana` | inspect/update/create/close/claim/release/run mana units |
+| `memory` | persistent memory across sessions |
+| `session_search` | search local conversation history |
+
+Readonly tools can run in parallel. Tools are filtered by mode before they are shown to the model and checked again during execution.
+
+---
+
+## Mana
+
+Mana is included task coordination for longer-running agent work.
+
+If you have never used mana: think of it as a local work graph for agents. A mana task can store what needs to happen, why it matters, what depends on it, what was tried, and what command proves it is done.
+
+Mana records can include:
+
+- tasks and epics
+- acceptance criteria
+- verify gates
+- dependencies
+- notes and attempts
+- decisions and facts
+- worker/run state
+
+Most users can work with mana from inside imp:
+
+```bash
+imp
+# ask: "work on 12.1"
+# ask: "show me the next task and work on it"
+```
+
+Direct CLI execution is also available:
+
+```bash
+imp run 12.1
+```
+
+Example mana-shaped task:
+
+```text
+Title: Add validation for empty API tokens
+Acceptance: Empty or whitespace-only tokens are rejected with a user-facing error.
+Verify: cargo test -p imp-llm auth::token_validation
+```
+
+A good verify gate is targeted and decisive:
+
+```bash
+cargo test -p imp-llm auth::token_validation
+```
+
+`imp mana <unit-id>` is also supported as an explicit mana subcommand, but `imp run <unit-id>` is the clearer direct-execution command.
+
+---
+
+## Providers and Models
 
 imp includes native Anthropic, OpenAI, and Google integrations, plus OpenAI-compatible providers.
 
@@ -154,196 +318,11 @@ imp web-login exa
 imp secrets exa
 ```
 
-Provider selection order:
-
-1. explicit tool parameter
-2. `IMP_WEB_PROVIDER`
-3. first available saved/env credential
-4. default fallback
-
 YouTube reading supports public metadata and captions/transcripts for watch, shorts, embed, and `youtu.be` URLs. It does not require `yt-dlp`, media download, or a web-search API key. Transcript extraction is best effort.
 
 ---
 
-## Interactive Mode
-
-Run:
-
-```bash
-imp
-```
-
-The terminal UI provides:
-
-- message stream with assistant output and tool activity
-- editor for prompts and steering
-- command palette
-- model and thinking controls
-- file attachment via `@`
-- session tree and branch navigation
-- sidebar inspection for tool calls and outputs
-- settings, personality, and secrets screens
-
-### Editor
-
-| Feature | How |
-|---------|-----|
-| File reference | type `@` to fuzzy-search project files |
-| Command palette | type `/` |
-| Model selector | `Ctrl+L` |
-| Thinking level | `Shift+Tab` |
-| Settings | `/settings` |
-| Personality | `/personality` |
-| Context compaction | `/compact` |
-
-### Commands
-
-Common built-in commands:
-
-| Command | Purpose |
-|---------|---------|
-| `/settings` | edit display/runtime preferences |
-| `/personality` | edit identity and behavior profile |
-| `/compact` | summarize older branch history |
-| `/secrets` | manage provider/service credentials |
-| `/memory` | inspect or use persistent memory surfaces |
-| `/recall` | search previous sessions |
-| `/plan` | create or update mana-backed planning state |
-
-The CLI chat shell has shell-style commands. Start it with:
-
-```bash
-imp chat
-```
-
-Useful shell inputs:
-
-| Input | Purpose |
-|-------|---------|
-| `:help` | show available shell commands |
-| `@file` | attach a file |
-
-### Keyboard Shortcuts
-
-| Key | Action |
-|-----|--------|
-| `Ctrl+L` | open model selector |
-| `Shift+Tab` | cycle thinking level |
-| `/` | command palette |
-| `@` | attach file context |
-| `Esc` | cancel/escape current UI state where supported |
-
----
-
-## Sessions
-
-Sessions are stored as append-only JSONL records. Entries include messages, tool calls, tool results, usage records, branch metadata, compaction entries, and checkpoint records.
-
-```bash
-imp -c      # continue most recent session
-imp chat    # interactive CLI shell with persistent session support
-imp         # TUI session interface
-```
-
-### Branching
-
-imp preserves branch metadata so you can continue from prior points without destroying the original history. The raw session file remains available for replay, export, or debugging.
-
-### Compaction
-
-Long sessions can exhaust context windows. `/compact` summarizes older branch history while preserving recent working turns. The full raw history remains in the session file; compaction affects what is sent forward as model context.
-
-Context controls include:
-
-- masking old tool outputs when context is tight
-- branch-local compaction boundaries
-- mana units carrying durable task context outside the chat transcript
-
----
-
-## Mana
-
-Mana is a local-first work coordination system for coding agents. It turns work into durable records with explicit scope, dependencies, verification gates, attempts, notes, decisions, and facts.
-
-imp is the runtime that executes those records.
-
-```bash
-mana init
-mana create "Fix CSV export" --verify "cargo test csv::export"
-imp
-# ask: "work on 12.1"
-```
-
-### Why mana
-
-Agent work is fragile when plans, failures, and completion criteria live only in chat. Mana gives work a durable shape:
-
-- **units** describe the work
-- **verify gates** define completion
-- **dependencies** encode order
-- **attempts and notes** preserve execution history
-- **facts and decisions** capture verified project memory
-
-### Running mana work with imp
-
-For most use, open imp and ask it to work from mana:
-
-```bash
-imp
-# "work on 12.1"
-# "show me the next task and work on it"
-```
-
-For direct CLI execution:
-
-```bash
-mana show 12.1
-imp run 12.1
-mana show 12.1
-```
-
-When executing a mana unit, imp reads the title, description, acceptance criteria, verify command, dependencies, notes, decisions, and project context. It performs the work, runs the verify gate, and records the result.
-
-A good verify gate is targeted and decisive:
-
-```bash
-cargo test -p imp-llm auth::token_validation
-```
-
-A weak verify gate is broad or ambiguous:
-
-```bash
-cargo test
-```
-
-`imp mana <unit-id>` is also supported as an explicit mana subcommand, but `imp run <unit-id>` is the clearer direct-execution command.
-
----
-
-## Tools
-
-imp exposes native tools to the agent. Native tools are preferred over shell commands when available.
-
-| Tool | Purpose |
-|------|---------|
-| `read` | read text files and images with offset/limit support |
-| `write` | create or overwrite files |
-| `edit` | exact find/replace edits |
-| `multi_edit` | multiple coordinated edits to one file |
-| `bash` | shell execution with timeout/cancellation |
-| `git` | status, diff, log, stage, commit, restore, worktrees |
-| `scan` | tree-sitter structural code extraction |
-| `web` | web search, page read, YouTube metadata/caption extraction |
-| `ask` | ask the user for input or choices |
-| `mana` | inspect/update/create/close/claim/release/run mana units |
-| `memory` | persistent memory across sessions |
-| `session_search` | search local conversation history |
-
-Readonly tools can run in parallel. Tools are filtered by mode before they are shown to the model and checked again during execution.
-
----
-
-## Modes
+## Modes and Policy
 
 Modes control tool visibility and execution policy.
 
@@ -401,32 +380,6 @@ TUI settings surfaces:
 - `/settings` — display and runtime preferences
 - `/personality` — identity, behavior sliders, global/project scope, profiles
 - `/secrets` — provider/service credential setup
-
----
-
-## Context
-
-imp assembles context from the active session, attached files, project instructions, tool results, memory, and mana task state.
-
-Project instruction files:
-
-- `AGENTS.md`
-- local `AGENTS.md` files closer to the code being changed
-- future/project-local `.imp` resources where configured
-
-File context:
-
-```bash
-imp @README.md "Improve this document"
-imp @crates/imp-core/src/agent.rs "Explain the turn loop"
-```
-
-Long-session context:
-
-- `/compact` summarizes older branch history
-- recent working turns stay available
-- raw session history remains on disk
-- mana units keep durable task state outside the transcript
 
 ---
 
@@ -554,9 +507,19 @@ Host-facing types include `ImpSession`, `SessionOptions`, `SessionChoice`, `Agen
 
 See `crates/imp-core/examples/sdk_session.rs` for a working example.
 
-### RPC / process integration
+### Status
 
-imp has CLI/RPC-oriented surfaces in active development. Prefer the Rust SDK for embedded Rust hosts, `imp` / `imp chat` for human-operated local workflows, and `imp run <unit-id>` for direct mana unit execution.
+| Area | Status |
+|------|--------|
+| Terminal UI and CLI chat | active surface |
+| Sessions, branching, compaction | active surface |
+| Native tools | active surface |
+| Provider auth and secure secrets | active surface |
+| Lua extensions | stable shipped extension path |
+| Mana task execution | active surface |
+| TypeScript/Pi extension compatibility | limited compatibility layer |
+| Rust SDK | preview |
+| Broader orchestration/RPC boundaries | active development |
 
 ---
 
@@ -581,7 +544,7 @@ Boundary summary:
 | `imp-core` | agent loop, tools, session persistence, context, hooks, mana integration |
 | `imp-llm` | providers, streaming parsers, model metadata, auth |
 | `imp-lua` | Lua extension loading, sandboxing, bridge APIs |
-| `mana` | durable work graph, facts, decisions, dependencies, verification, orchestration state |
+| `mana` | durable task graph, facts, decisions, dependencies, verification, orchestration state |
 
 Design docs:
 
@@ -616,25 +579,17 @@ See `tools/README.md` for requirements and caveats.
 
 ---
 
-## Philosophy
-
-imp keeps the runtime local, inspectable, and tool-native. The core should provide reliable execution, sessions, context, policy, and mana integration; project-specific workflow belongs in mana units, instructions, skills, hooks, and extensions.
-
-Influences include Unix-style local tools, ReAct-style tool-use loops, issue trackers with explicit verification gates, terminal-native developer workflows, and durable task graphs for handoff.
-
----
-
 ## CLI Reference
 
 Common commands:
 
 ```bash
-imp                         # open TUI
+imp                         # open terminal UI
 imp chat                    # open CLI chat shell
 imp -p "prompt"              # one-shot prompt
 imp @file "prompt"           # prompt with file context
 imp -c                       # continue most recent session
-imp run <unit-id>            # execute mana unit directly
+imp run <unit-id>            # execute mana task directly
 imp mana <unit-id>           # explicit mana subcommand, also supported
 
 imp login [provider]         # OAuth / guided auth

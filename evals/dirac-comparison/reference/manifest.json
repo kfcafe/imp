@@ -1,0 +1,914 @@
+[
+  {
+    "agent": "dirac",
+    "task": "DynamicCache",
+    "name": "dirac_refactor_DynamicCache",
+    "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_DynamicCache",
+    "changed_files": [
+      {
+        "old_path": "src/transformers/cache_utils.py",
+        "new_path": "src/transformers/cache_utils.py"
+      },
+      {
+        "old_path": "src/transformers/models/cohere2/modular_cohere2.py",
+        "new_path": "src/transformers/models/cohere2/modular_cohere2.py"
+      },
+      {
+        "old_path": "src/transformers/models/deepseek_v3/modular_deepseek_v3.py",
+        "new_path": "src/transformers/models/deepseek_v3/modular_deepseek_v3.py"
+      },
+      {
+        "old_path": "src/transformers/models/gemma4/modular_gemma4.py",
+        "new_path": "src/transformers/models/gemma4/modular_gemma4.py"
+      },
+      {
+        "old_path": "src/transformers/models/llama4/modeling_llama4.py",
+        "new_path": "src/transformers/models/llama4/modeling_llama4.py"
+      },
+      {
+        "old_path": "src/transformers/models/ministral3/modular_ministral3.py",
+        "new_path": "src/transformers/models/ministral3/modular_ministral3.py"
+      },
+      {
+        "old_path": "src/transformers/models/mistral4/modular_mistral4.py",
+        "new_path": "src/transformers/models/mistral4/modular_mistral4.py"
+      },
+      {
+        "old_path": "src/transformers/models/olmo3/modular_olmo3.py",
+        "new_path": "src/transformers/models/olmo3/modular_olmo3.py"
+      },
+      {
+        "old_path": "src/transformers/models/qwen3/modular_qwen3.py",
+        "new_path": "src/transformers/models/qwen3/modular_qwen3.py"
+      }
+    ],
+    "file_count": 9,
+    "indexes": [
+      {
+        "old_blob": "ac324ebb62",
+        "new_blob": "ccb2aa867b"
+      },
+      {
+        "old_blob": "d19055a1b7",
+        "new_blob": "3dcbd601aa"
+      },
+      {
+        "old_blob": "3c62a564a3",
+        "new_blob": "f8e75494fd"
+      },
+      {
+        "old_blob": "a972738022",
+        "new_blob": "3a56e62c7e"
+      },
+      {
+        "old_blob": "08d50bd63f",
+        "new_blob": "79635922bd"
+      },
+      {
+        "old_blob": "0a925f5d40",
+        "new_blob": "543097c89d"
+      },
+      {
+        "old_blob": "acd9f1f601",
+        "new_blob": "8d91a99b1a"
+      },
+      {
+        "old_blob": "81325db7cc",
+        "new_blob": "d6f6c583a6"
+      },
+      {
+        "old_blob": "73cde6d89a",
+        "new_blob": "3591440224"
+      }
+    ],
+    "added_lines": 76,
+    "removed_lines": 12,
+    "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_DynamicCache"
+  },
+  {
+    "agent": "dirac",
+    "task": "IOverlayWidget",
+    "name": "dirac_refactor_IOverlayWidget",
+    "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_IOverlayWidget",
+    "changed_files": [
+      {
+        "old_path": "src/vs/editor/browser/editorBrowser.ts",
+        "new_path": "src/vs/editor/browser/editorBrowser.ts"
+      },
+      {
+        "old_path": "src/vs/editor/browser/observableCodeEditor.ts",
+        "new_path": "src/vs/editor/browser/observableCodeEditor.ts"
+      },
+      {
+        "old_path": "src/vs/editor/browser/widget/diffEditor/utils.ts",
+        "new_path": "src/vs/editor/browser/widget/diffEditor/utils.ts"
+      },
+      {
+        "old_path": "src/vs/editor/contrib/find/browser/findOptionsWidget.ts",
+        "new_path": "src/vs/editor/contrib/find/browser/findOptionsWidget.ts"
+      },
+      {
+        "old_path": "src/vs/editor/contrib/find/browser/findWidget.ts",
+        "new_path": "src/vs/editor/contrib/find/browser/findWidget.ts"
+      },
+      {
+        "old_path": "src/vs/editor/contrib/hover/browser/glyphHoverWidget.ts",
+        "new_path": "src/vs/editor/contrib/hover/browser/glyphHoverWidget.ts"
+      },
+      {
+        "old_path": "src/vs/editor/contrib/stickyScroll/browser/stickyScrollWidget.ts",
+        "new_path": "src/vs/editor/contrib/stickyScroll/browser/stickyScrollWidget.ts"
+      },
+      {
+        "old_path": "src/vs/editor/contrib/suggest/browser/suggestWidgetDetails.ts",
+        "new_path": "src/vs/editor/contrib/suggest/browser/suggestWidgetDetails.ts"
+      },
+      {
+        "old_path": "src/vs/editor/contrib/zoneWidget/browser/zoneWidget.ts",
+        "new_path": "src/vs/editor/contrib/zoneWidget/browser/zoneWidget.ts"
+      },
+      {
+        "old_path": "src/vs/editor/standalone/browser/iPadShowKeyboard/iPadShowKeyboard.ts",
+        "new_path": "src/vs/editor/standalone/browser/iPadShowKeyboard/iPadShowKeyboard.ts"
+      },
+      {
+        "old_path": "src/vs/editor/standalone/browser/quickInput/standaloneQuickInputService.ts",
+        "new_path": "src/vs/editor/standalone/browser/quickInput/standaloneQuickInputService.ts"
+      },
+      {
+        "old_path": "src/vs/monaco.d.ts",
+        "new_path": "src/vs/monaco.d.ts"
+      },
+      {
+        "old_path": "src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorInputContribution.ts",
+        "new_path": "src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorInputContribution.ts"
+      },
+      {
+        "old_path": "src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorWidgetContribution.ts",
+        "new_path": "src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorWidgetContribution.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/browser/codeeditor.ts",
+        "new_path": "src/vs/workbench/browser/codeeditor.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts",
+        "new_path": "src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingExplanationWidget.ts",
+        "new_path": "src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingExplanationWidget.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/browser/promptSyntax/promptCodingAgentActionOverlay.ts",
+        "new_path": "src/vs/workbench/contrib/chat/browser/promptSyntax/promptCodingAgentActionOverlay.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/mergeEditor/browser/view/fixedZoneWidget.ts",
+        "new_path": "src/vs/workbench/contrib/mergeEditor/browser/view/fixedZoneWidget.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/preferences/browser/keybindingWidgets.ts",
+        "new_path": "src/vs/workbench/contrib/preferences/browser/keybindingWidgets.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/testing/browser/codeCoverageDecorations.ts",
+        "new_path": "src/vs/workbench/contrib/testing/browser/codeCoverageDecorations.ts"
+      }
+    ],
+    "file_count": 21,
+    "indexes": [
+      {
+        "old_blob": "0c018c2a75b",
+        "new_blob": "fcd7f47256b"
+      },
+      {
+        "old_blob": "4c415ec53dd",
+        "new_blob": "1385057136c"
+      },
+      {
+        "old_blob": "a9601480ad5",
+        "new_blob": "f9c051b3bd3"
+      },
+      {
+        "old_blob": "dab491acd42",
+        "new_blob": "843203ca990"
+      },
+      {
+        "old_blob": "03e698c3e87",
+        "new_blob": "52879a91bf3"
+      },
+      {
+        "old_blob": "1c741fc3b8b",
+        "new_blob": "7d55873f781"
+      },
+      {
+        "old_blob": "2a7c1cf5b1b",
+        "new_blob": "50ef2b67f0f"
+      },
+      {
+        "old_blob": "9d42306730d",
+        "new_blob": "b312b02efac"
+      },
+      {
+        "old_blob": "96820f1eafd",
+        "new_blob": "5934d959995"
+      },
+      {
+        "old_blob": "3c3ce892ce9",
+        "new_blob": "2c592a962d5"
+      },
+      {
+        "old_blob": "4aa28793eff",
+        "new_blob": "c8f330a4239"
+      },
+      {
+        "old_blob": "5b0047e74a3",
+        "new_blob": "99961b4420d"
+      },
+      {
+        "old_blob": "ed6ccc8912f",
+        "new_blob": "bc1248b00fd"
+      },
+      {
+        "old_blob": "7c4c463f391",
+        "new_blob": "b6b8d02b5ef"
+      },
+      {
+        "old_blob": "81f18b872bc",
+        "new_blob": "16e7c60ed79"
+      },
+      {
+        "old_blob": "2e43b458f3d",
+        "new_blob": "b2f0301993e"
+      },
+      {
+        "old_blob": "0623aea19ca",
+        "new_blob": "c2c3015ac45"
+      },
+      {
+        "old_blob": "b3de9d98131",
+        "new_blob": "725679efbe7"
+      },
+      {
+        "old_blob": "6d36ed7ac14",
+        "new_blob": "b7a7eb855c8"
+      },
+      {
+        "old_blob": "b6a6170b071",
+        "new_blob": "a31dbe85c97"
+      },
+      {
+        "old_blob": "37fac8335cb",
+        "new_blob": "079eec70d18"
+      }
+    ],
+    "added_lines": 79,
+    "removed_lines": 0,
+    "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_IOverlayWidget"
+  },
+  {
+    "agent": "dirac",
+    "task": "addLogging",
+    "name": "dirac_refactor_addLogging",
+    "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_addLogging",
+    "changed_files": [
+      {
+        "old_path": "extensions/vscode-colorize-perf-tests/src/colorizer.test.ts",
+        "new_path": "extensions/vscode-colorize-perf-tests/src/colorizer.test.ts"
+      },
+      {
+        "old_path": "src/vs/editor/browser/coreCommands.ts",
+        "new_path": "src/vs/editor/browser/coreCommands.ts"
+      },
+      {
+        "old_path": "src/vs/editor/browser/editorExtensions.ts",
+        "new_path": "src/vs/editor/browser/editorExtensions.ts"
+      },
+      {
+        "old_path": "src/vs/editor/contrib/linkedEditing/browser/linkedEditing.ts",
+        "new_path": "src/vs/editor/contrib/linkedEditing/browser/linkedEditing.ts"
+      },
+      {
+        "old_path": "src/vs/editor/contrib/rename/browser/rename.ts",
+        "new_path": "src/vs/editor/contrib/rename/browser/rename.ts"
+      },
+      {
+        "old_path": "src/vs/editor/test/browser/testCodeEditor.ts",
+        "new_path": "src/vs/editor/test/browser/testCodeEditor.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/test/browser/actions/chatExecuteActions.test.ts",
+        "new_path": "src/vs/workbench/contrib/chat/test/browser/actions/chatExecuteActions.test.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/test/browser/plugins/pluginInstallService.test.ts",
+        "new_path": "src/vs/workbench/contrib/chat/test/browser/plugins/pluginInstallService.test.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/terminal/browser/terminalInstance.ts",
+        "new_path": "src/vs/workbench/contrib/terminal/browser/terminalInstance.ts"
+      },
+      {
+        "old_path": "test/automation/src/quickaccess.ts",
+        "new_path": "test/automation/src/quickaccess.ts"
+      },
+      {
+        "old_path": "test/automation/src/terminal.ts",
+        "new_path": "test/automation/src/terminal.ts"
+      },
+      {
+        "old_path": "test/sanity/src/uiTest.ts",
+        "new_path": "test/sanity/src/uiTest.ts"
+      }
+    ],
+    "file_count": 12,
+    "indexes": [
+      {
+        "old_blob": "2076a96d6b3",
+        "new_blob": "73c94126e98"
+      },
+      {
+        "old_blob": "9331eea48ff",
+        "new_blob": "353f63b1e2d"
+      },
+      {
+        "old_blob": "d5961dd4f1e",
+        "new_blob": "4b47db11de8"
+      },
+      {
+        "old_blob": "09f9257f2d7",
+        "new_blob": "54bb7cfe53d"
+      },
+      {
+        "old_blob": "cf675f54cf4",
+        "new_blob": "4f17ede4134"
+      },
+      {
+        "old_blob": "adede234180",
+        "new_blob": "4baf3fba5a4"
+      },
+      {
+        "old_blob": "3465f33300b",
+        "new_blob": "0bdf3f0567c"
+      },
+      {
+        "old_blob": "db448e31734",
+        "new_blob": "8c3964adb28"
+      },
+      {
+        "old_blob": "75894ea61eb",
+        "new_blob": "9a69662eab7"
+      },
+      {
+        "old_blob": "f28ec436636",
+        "new_blob": "efd89c0bed5"
+      },
+      {
+        "old_blob": "70d807a6e4a",
+        "new_blob": "2649efb7055"
+      },
+      {
+        "old_blob": "96733481e96",
+        "new_blob": "45246e52a2f"
+      }
+    ],
+    "added_lines": 247,
+    "removed_lines": 182,
+    "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_addLogging"
+  },
+  {
+    "agent": "dirac",
+    "task": "datadict",
+    "name": "dirac_refactor_datadict",
+    "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_datadict",
+    "changed_files": [
+      {
+        "old_path": "django/contrib/admin/widgets.py",
+        "new_path": "django/contrib/admin/widgets.py"
+      },
+      {
+        "old_path": "django/contrib/postgres/forms/array.py",
+        "new_path": "django/contrib/postgres/forms/array.py"
+      },
+      {
+        "old_path": "django/forms/forms.py",
+        "new_path": "django/forms/forms.py"
+      },
+      {
+        "old_path": "django/forms/widgets.py",
+        "new_path": "django/forms/widgets.py"
+      },
+      {
+        "old_path": "docs/ref/forms/api.txt",
+        "new_path": "docs/ref/forms/api.txt"
+      },
+      {
+        "old_path": "docs/ref/forms/widgets.txt",
+        "new_path": "docs/ref/forms/widgets.txt"
+      },
+      {
+        "old_path": "tests/forms_tests/field_tests/test_booleanfield.py",
+        "new_path": "tests/forms_tests/field_tests/test_booleanfield.py"
+      },
+      {
+        "old_path": "tests/forms_tests/field_tests/test_datefield.py",
+        "new_path": "tests/forms_tests/field_tests/test_datefield.py"
+      },
+      {
+        "old_path": "tests/forms_tests/field_tests/test_nullbooleanfield.py",
+        "new_path": "tests/forms_tests/field_tests/test_nullbooleanfield.py"
+      },
+      {
+        "old_path": "tests/forms_tests/widget_tests/test_checkboxinput.py",
+        "new_path": "tests/forms_tests/widget_tests/test_checkboxinput.py"
+      },
+      {
+        "old_path": "tests/forms_tests/widget_tests/test_clearablefileinput.py",
+        "new_path": "tests/forms_tests/widget_tests/test_clearablefileinput.py"
+      },
+      {
+        "old_path": "tests/forms_tests/widget_tests/test_fileinput.py",
+        "new_path": "tests/forms_tests/widget_tests/test_fileinput.py"
+      },
+      {
+        "old_path": "tests/forms_tests/widget_tests/test_multiwidget.py",
+        "new_path": "tests/forms_tests/widget_tests/test_multiwidget.py"
+      },
+      {
+        "old_path": "tests/forms_tests/widget_tests/test_selectdatewidget.py",
+        "new_path": "tests/forms_tests/widget_tests/test_selectdatewidget.py"
+      }
+    ],
+    "file_count": 14,
+    "indexes": [
+      {
+        "old_blob": "7a0ccf42de",
+        "new_blob": "73218cd921"
+      },
+      {
+        "old_blob": "ae0c0c462b",
+        "new_blob": "3282c07738"
+      },
+      {
+        "old_blob": "ce64f6286e",
+        "new_blob": "3e497f86d5"
+      },
+      {
+        "old_blob": "1bcfeba288",
+        "new_blob": "07866ae989"
+      },
+      {
+        "old_blob": "58494f6067",
+        "new_blob": "f2e2ca23de"
+      },
+      {
+        "old_blob": "80047aabc5",
+        "new_blob": "999bf4007b"
+      },
+      {
+        "old_blob": "f1c06c3c01",
+        "new_blob": "f924b93f30"
+      },
+      {
+        "old_blob": "a8f39aa8e8",
+        "new_blob": "b3af849065"
+      },
+      {
+        "old_blob": "c1e120c0bb",
+        "new_blob": "f8975893ae"
+      },
+      {
+        "old_blob": "386ae00840",
+        "new_blob": "a1311283f0"
+      },
+      {
+        "old_blob": "31ff1af624",
+        "new_blob": "5560de028d"
+      },
+      {
+        "old_blob": "a49f481728",
+        "new_blob": "306a7b5abe"
+      },
+      {
+        "old_blob": "5e360e3e92",
+        "new_blob": "f5462af356"
+      },
+      {
+        "old_blob": "0a2dc3fc48",
+        "new_blob": "a94de59394"
+      }
+    ],
+    "added_lines": 93,
+    "removed_lines": 73,
+    "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_datadict"
+  },
+  {
+    "agent": "dirac",
+    "task": "extensionswb_service",
+    "name": "dirac_refactor_extensionswb_service",
+    "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_extensionswb_service",
+    "changed_files": [
+      {
+        "old_path": "src/vs/workbench/contrib/extensions/browser/extension.ts",
+        "new_path": "src/vs/workbench/contrib/extensions/browser/extension.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/extensions/browser/extensions.ts",
+        "new_path": "src/vs/workbench/contrib/extensions/browser/extensions.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/extensions/browser/extensionsWorkbenchService.ts",
+        "new_path": "src/vs/workbench/contrib/extensions/browser/extensionsWorkbenchService.ts"
+      }
+    ],
+    "file_count": 3,
+    "indexes": [
+      {
+        "old_blob": "00000000000",
+        "new_blob": "2957c78ea8d"
+      },
+      {
+        "old_blob": "00000000000",
+        "new_blob": "fdb1d32a527"
+      },
+      {
+        "old_blob": "de710641876",
+        "new_blob": "8503bb7e613"
+      }
+    ],
+    "added_lines": 928,
+    "removed_lines": 887,
+    "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_extensionswb_service"
+  },
+  {
+    "agent": "dirac",
+    "task": "latency",
+    "name": "dirac_refactor_latency",
+    "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_latency",
+    "changed_files": [
+      {
+        "old_path": "src/transformers/pipelines/any_to_any.py",
+        "new_path": "src/transformers/pipelines/any_to_any.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/audio_classification.py",
+        "new_path": "src/transformers/pipelines/audio_classification.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/automatic_speech_recognition.py",
+        "new_path": "src/transformers/pipelines/automatic_speech_recognition.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/base.py",
+        "new_path": "src/transformers/pipelines/base.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/depth_estimation.py",
+        "new_path": "src/transformers/pipelines/depth_estimation.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/document_question_answering.py",
+        "new_path": "src/transformers/pipelines/document_question_answering.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/feature_extraction.py",
+        "new_path": "src/transformers/pipelines/feature_extraction.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/fill_mask.py",
+        "new_path": "src/transformers/pipelines/fill_mask.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/image_classification.py",
+        "new_path": "src/transformers/pipelines/image_classification.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/image_feature_extraction.py",
+        "new_path": "src/transformers/pipelines/image_feature_extraction.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/image_segmentation.py",
+        "new_path": "src/transformers/pipelines/image_segmentation.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/image_text_to_text.py",
+        "new_path": "src/transformers/pipelines/image_text_to_text.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/keypoint_matching.py",
+        "new_path": "src/transformers/pipelines/keypoint_matching.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/mask_generation.py",
+        "new_path": "src/transformers/pipelines/mask_generation.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/object_detection.py",
+        "new_path": "src/transformers/pipelines/object_detection.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/table_question_answering.py",
+        "new_path": "src/transformers/pipelines/table_question_answering.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/text_classification.py",
+        "new_path": "src/transformers/pipelines/text_classification.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/text_generation.py",
+        "new_path": "src/transformers/pipelines/text_generation.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/text_to_audio.py",
+        "new_path": "src/transformers/pipelines/text_to_audio.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/token_classification.py",
+        "new_path": "src/transformers/pipelines/token_classification.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/video_classification.py",
+        "new_path": "src/transformers/pipelines/video_classification.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/zero_shot_audio_classification.py",
+        "new_path": "src/transformers/pipelines/zero_shot_audio_classification.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/zero_shot_classification.py",
+        "new_path": "src/transformers/pipelines/zero_shot_classification.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/zero_shot_image_classification.py",
+        "new_path": "src/transformers/pipelines/zero_shot_image_classification.py"
+      },
+      {
+        "old_path": "src/transformers/pipelines/zero_shot_object_detection.py",
+        "new_path": "src/transformers/pipelines/zero_shot_object_detection.py"
+      }
+    ],
+    "file_count": 25,
+    "indexes": [
+      {
+        "old_blob": "4ae91d5a17",
+        "new_blob": "a822dc3384"
+      },
+      {
+        "old_blob": "6e173111aa",
+        "new_blob": "f06ea1a352"
+      },
+      {
+        "old_blob": "58349d0b10",
+        "new_blob": "d8f177cd26"
+      },
+      {
+        "old_blob": "916576c4c6",
+        "new_blob": "867440eb08"
+      },
+      {
+        "old_blob": "03ee70673d",
+        "new_blob": "8c9f984906"
+      },
+      {
+        "old_blob": "de976f9d87",
+        "new_blob": "76b2c3a5bc"
+      },
+      {
+        "old_blob": "a37f147605",
+        "new_blob": "320eb3920f"
+      },
+      {
+        "old_blob": "1ea7c487be",
+        "new_blob": "56e5d486dc"
+      },
+      {
+        "old_blob": "18a570df6e",
+        "new_blob": "1ba34c1ff1"
+      },
+      {
+        "old_blob": "d049957a41",
+        "new_blob": "6302acf58a"
+      },
+      {
+        "old_blob": "49854beb5a",
+        "new_blob": "4e9a749ec4"
+      },
+      {
+        "old_blob": "7d28b91ab2",
+        "new_blob": "1a603383e3"
+      },
+      {
+        "old_blob": "d75656a7db",
+        "new_blob": "2be0d141d2"
+      },
+      {
+        "old_blob": "920ce9d0a3",
+        "new_blob": "bb6bcfc12c"
+      },
+      {
+        "old_blob": "0a4fba996d",
+        "new_blob": "799f1891bc"
+      },
+      {
+        "old_blob": "96bcc863cb",
+        "new_blob": "d0dd9a8570"
+      },
+      {
+        "old_blob": "ab9a5d8efb",
+        "new_blob": "9d5cd7ac2a"
+      },
+      {
+        "old_blob": "6a0b2966d0",
+        "new_blob": "4c1c3e74d1"
+      },
+      {
+        "old_blob": "81c6e34f95",
+        "new_blob": "0dd6e78e5e"
+      },
+      {
+        "old_blob": "7deca9dc90",
+        "new_blob": "8fa75f5bb2"
+      },
+      {
+        "old_blob": "4e2ff77cbe",
+        "new_blob": "ec987348e1"
+      },
+      {
+        "old_blob": "03c1a8d1c1",
+        "new_blob": "ffee3362d6"
+      },
+      {
+        "old_blob": "d88772310d",
+        "new_blob": "f8ad014644"
+      },
+      {
+        "old_blob": "d129c58365",
+        "new_blob": "5781f8fd30"
+      },
+      {
+        "old_blob": "7f353afd74",
+        "new_blob": "c71b9a7bda"
+      }
+    ],
+    "added_lines": 200,
+    "removed_lines": 9,
+    "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_latency"
+  },
+  {
+    "agent": "dirac",
+    "task": "sendRequest",
+    "name": "dirac_refactor_sendRequest",
+    "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_sendRequest",
+    "changed_files": [
+      {
+        "old_path": "src/vs/sessions/contrib/copilotChatSessions/browser/copilotChatSessionsProvider.ts",
+        "new_path": "src/vs/sessions/contrib/copilotChatSessions/browser/copilotChatSessionsProvider.ts"
+      },
+      {
+        "old_path": "src/vs/sessions/contrib/remoteAgentHost/browser/remoteAgentHostSessionsProvider.ts",
+        "new_path": "src/vs/sessions/contrib/remoteAgentHost/browser/remoteAgentHostSessionsProvider.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/browser/actions/chatContinueInAction.ts",
+        "new_path": "src/vs/workbench/contrib/chat/browser/actions/chatContinueInAction.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/browser/aiCustomization/customizationCreatorService.ts",
+        "new_path": "src/vs/workbench/contrib/chat/browser/aiCustomization/customizationCreatorService.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/browser/chatSessions/chatSessions.contribution.ts",
+        "new_path": "src/vs/workbench/contrib/chat/browser/chatSessions/chatSessions.contribution.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatConfirmationContentPart.ts",
+        "new_path": "src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatConfirmationContentPart.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatErrorConfirmationPart.ts",
+        "new_path": "src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatErrorConfirmationPart.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatMarkdownDecorationsRenderer.ts",
+        "new_path": "src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatMarkdownDecorationsRenderer.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/browser/widget/chatWidget.ts",
+        "new_path": "src/vs/workbench/contrib/chat/browser/widget/chatWidget.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/common/chatService/chatService.ts",
+        "new_path": "src/vs/workbench/contrib/chat/common/chatService/chatService.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/common/chatService/chatServiceImpl.ts",
+        "new_path": "src/vs/workbench/contrib/chat/common/chatService/chatServiceImpl.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/test/common/chatService/chatService.test.ts",
+        "new_path": "src/vs/workbench/contrib/chat/test/common/chatService/chatService.test.ts"
+      },
+      {
+        "old_path": "src/vs/workbench/contrib/chat/test/common/chatService/mockChatService.ts",
+        "new_path": "src/vs/workbench/contrib/chat/test/common/chatService/mockChatService.ts"
+      }
+    ],
+    "file_count": 13,
+    "indexes": [
+      {
+        "old_blob": "9990b803d50",
+        "new_blob": "e0ad9d0b785"
+      },
+      {
+        "old_blob": "226abe28731",
+        "new_blob": "f172ae46a0a"
+      },
+      {
+        "old_blob": "1f5732b9cd6",
+        "new_blob": "e564f9bf35c"
+      },
+      {
+        "old_blob": "cec5c423ff0",
+        "new_blob": "fd42bf2e11f"
+      },
+      {
+        "old_blob": "edb32b33b3d",
+        "new_blob": "78281beae50"
+      },
+      {
+        "old_blob": "e7e7ba79921",
+        "new_blob": "f8de8b4d7b1"
+      },
+      {
+        "old_blob": "fe4903eff3b",
+        "new_blob": "4b21c91f1e1"
+      },
+      {
+        "old_blob": "560e9ecf849",
+        "new_blob": "9b72f673d56"
+      },
+      {
+        "old_blob": "7689707940f",
+        "new_blob": "73c3dfe298a"
+      },
+      {
+        "old_blob": "2fd59394973",
+        "new_blob": "995494b8700"
+      },
+      {
+        "old_blob": "387af583779",
+        "new_blob": "fb217b5b4b0"
+      },
+      {
+        "old_blob": "afa76442175",
+        "new_blob": "398f86feb1e"
+      },
+      {
+        "old_blob": "07e106b2c43",
+        "new_blob": "13836f4265f"
+      }
+    ],
+    "added_lines": 105,
+    "removed_lines": 71,
+    "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_sendRequest"
+  },
+  {
+    "agent": "dirac",
+    "task": "stoppingcriteria",
+    "name": "dirac_refactor_stoppingcriteria",
+    "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_stoppingcriteria",
+    "changed_files": [
+      {
+        "old_path": "src/transformers/generation/configuration_utils.py",
+        "new_path": "src/transformers/generation/configuration_utils.py"
+      },
+      {
+        "old_path": "src/transformers/generation/stopping_criteria.py",
+        "new_path": "src/transformers/generation/stopping_criteria.py"
+      },
+      {
+        "old_path": "src/transformers/generation/utils.py",
+        "new_path": "src/transformers/generation/utils.py"
+      }
+    ],
+    "file_count": 3,
+    "indexes": [
+      {
+        "old_blob": "f8702dde29",
+        "new_blob": "9c268f6693"
+      },
+      {
+        "old_blob": "b57136f534",
+        "new_blob": "79203c4c8f"
+      },
+      {
+        "old_blob": "ffb7266a5b",
+        "new_blob": "def46827ff"
+      }
+    ],
+    "added_lines": 63,
+    "removed_lines": 0,
+    "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_stoppingcriteria"
+  }
+]

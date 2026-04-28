@@ -1,0 +1,118 @@
+{
+  "agent": "dirac",
+  "task": "sendRequest",
+  "name": "dirac_refactor_sendRequest",
+  "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_sendRequest",
+  "changed_files": [
+    {
+      "old_path": "src/vs/sessions/contrib/copilotChatSessions/browser/copilotChatSessionsProvider.ts",
+      "new_path": "src/vs/sessions/contrib/copilotChatSessions/browser/copilotChatSessionsProvider.ts"
+    },
+    {
+      "old_path": "src/vs/sessions/contrib/remoteAgentHost/browser/remoteAgentHostSessionsProvider.ts",
+      "new_path": "src/vs/sessions/contrib/remoteAgentHost/browser/remoteAgentHostSessionsProvider.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/browser/actions/chatContinueInAction.ts",
+      "new_path": "src/vs/workbench/contrib/chat/browser/actions/chatContinueInAction.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/browser/aiCustomization/customizationCreatorService.ts",
+      "new_path": "src/vs/workbench/contrib/chat/browser/aiCustomization/customizationCreatorService.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/browser/chatSessions/chatSessions.contribution.ts",
+      "new_path": "src/vs/workbench/contrib/chat/browser/chatSessions/chatSessions.contribution.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatConfirmationContentPart.ts",
+      "new_path": "src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatConfirmationContentPart.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatErrorConfirmationPart.ts",
+      "new_path": "src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatErrorConfirmationPart.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatMarkdownDecorationsRenderer.ts",
+      "new_path": "src/vs/workbench/contrib/chat/browser/widget/chatContentParts/chatMarkdownDecorationsRenderer.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/browser/widget/chatWidget.ts",
+      "new_path": "src/vs/workbench/contrib/chat/browser/widget/chatWidget.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/common/chatService/chatService.ts",
+      "new_path": "src/vs/workbench/contrib/chat/common/chatService/chatService.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/common/chatService/chatServiceImpl.ts",
+      "new_path": "src/vs/workbench/contrib/chat/common/chatService/chatServiceImpl.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/test/common/chatService/chatService.test.ts",
+      "new_path": "src/vs/workbench/contrib/chat/test/common/chatService/chatService.test.ts"
+    },
+    {
+      "old_path": "src/vs/workbench/contrib/chat/test/common/chatService/mockChatService.ts",
+      "new_path": "src/vs/workbench/contrib/chat/test/common/chatService/mockChatService.ts"
+    }
+  ],
+  "file_count": 13,
+  "indexes": [
+    {
+      "old_blob": "9990b803d50",
+      "new_blob": "e0ad9d0b785"
+    },
+    {
+      "old_blob": "226abe28731",
+      "new_blob": "f172ae46a0a"
+    },
+    {
+      "old_blob": "1f5732b9cd6",
+      "new_blob": "e564f9bf35c"
+    },
+    {
+      "old_blob": "cec5c423ff0",
+      "new_blob": "fd42bf2e11f"
+    },
+    {
+      "old_blob": "edb32b33b3d",
+      "new_blob": "78281beae50"
+    },
+    {
+      "old_blob": "e7e7ba79921",
+      "new_blob": "f8de8b4d7b1"
+    },
+    {
+      "old_blob": "fe4903eff3b",
+      "new_blob": "4b21c91f1e1"
+    },
+    {
+      "old_blob": "560e9ecf849",
+      "new_blob": "9b72f673d56"
+    },
+    {
+      "old_blob": "7689707940f",
+      "new_blob": "73c3dfe298a"
+    },
+    {
+      "old_blob": "2fd59394973",
+      "new_blob": "995494b8700"
+    },
+    {
+      "old_blob": "387af583779",
+      "new_blob": "fb217b5b4b0"
+    },
+    {
+      "old_blob": "afa76442175",
+      "new_blob": "398f86feb1e"
+    },
+    {
+      "old_blob": "07e106b2c43",
+      "new_blob": "13836f4265f"
+    }
+  ],
+  "added_lines": 105,
+  "removed_lines": 71,
+  "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_sendRequest"
+}

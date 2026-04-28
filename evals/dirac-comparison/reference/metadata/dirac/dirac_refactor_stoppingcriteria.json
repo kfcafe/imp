@@ -1,0 +1,38 @@
+{
+  "agent": "dirac",
+  "task": "stoppingcriteria",
+  "name": "dirac_refactor_stoppingcriteria",
+  "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_stoppingcriteria",
+  "changed_files": [
+    {
+      "old_path": "src/transformers/generation/configuration_utils.py",
+      "new_path": "src/transformers/generation/configuration_utils.py"
+    },
+    {
+      "old_path": "src/transformers/generation/stopping_criteria.py",
+      "new_path": "src/transformers/generation/stopping_criteria.py"
+    },
+    {
+      "old_path": "src/transformers/generation/utils.py",
+      "new_path": "src/transformers/generation/utils.py"
+    }
+  ],
+  "file_count": 3,
+  "indexes": [
+    {
+      "old_blob": "f8702dde29",
+      "new_blob": "9c268f6693"
+    },
+    {
+      "old_blob": "b57136f534",
+      "new_blob": "79203c4c8f"
+    },
+    {
+      "old_blob": "ffb7266a5b",
+      "new_blob": "def46827ff"
+    }
+  ],
+  "added_lines": 63,
+  "removed_lines": 0,
+  "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_stoppingcriteria"
+}

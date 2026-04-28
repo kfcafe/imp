@@ -1,0 +1,317 @@
+diff --git a/src/vs/editor/browser/editorBrowser.ts b/src/vs/editor/browser/editorBrowser.ts
+index 0c018c2a75b..fcd7f47256b 100644
+--- a/src/vs/editor/browser/editorBrowser.ts
++++ b/src/vs/editor/browser/editorBrowser.ts
+@@ -300,6 +300,10 @@ export interface IOverlayWidget {
+ 	 * Get a unique identifier of the overlay widget.
+ 	 */
+ 	getId(): string;
++	/**
++	 * Get a human readable name of the overlay widget.
++	 */
++	getName(): string;
+ 	/**
+ 	 * Get the dom node of the overlay widget.
+ 	 */
+diff --git a/src/vs/editor/browser/observableCodeEditor.ts b/src/vs/editor/browser/observableCodeEditor.ts
+index 4c415ec53dd..1385057136c 100644
+--- a/src/vs/editor/browser/observableCodeEditor.ts
++++ b/src/vs/editor/browser/observableCodeEditor.ts
+@@ -328,6 +328,7 @@ export class ObservableCodeEditor extends Disposable {
+ 			getDomNode: () => widget.domNode,
+ 			getPosition: () => widget.position.get(),
+ 			getId: () => overlayWidgetId,
++			getName: () => overlayWidgetId,
+ 			allowEditorOverflow: widget.allowEditorOverflow,
+ 			getMinContentWidthInPx: () => widget.minContentWidthInPx.get(),
+ 		};
+diff --git a/src/vs/editor/browser/widget/diffEditor/utils.ts b/src/vs/editor/browser/widget/diffEditor/utils.ts
+index a9601480ad5..f9c051b3bd3 100644
+--- a/src/vs/editor/browser/widget/diffEditor/utils.ts
++++ b/src/vs/editor/browser/widget/diffEditor/utils.ts
+@@ -269,6 +269,7 @@ export class ManagedOverlayWidget implements IDisposable {
+ 
+ 	private readonly _overlayWidget: IOverlayWidget = {
+ 		getId: () => this._overlayWidgetId,
++		getName: () => this._overlayWidgetId,
+ 		getDomNode: () => this._domElement,
+ 		getPosition: () => null
+ 	};
+diff --git a/src/vs/editor/contrib/find/browser/findOptionsWidget.ts b/src/vs/editor/contrib/find/browser/findOptionsWidget.ts
+index dab491acd42..843203ca990 100644
+--- a/src/vs/editor/contrib/find/browser/findOptionsWidget.ts
++++ b/src/vs/editor/contrib/find/browser/findOptionsWidget.ts
+@@ -134,6 +134,10 @@ export class FindOptionsWidget extends Widget implements IOverlayWidget {
+ 		return FindOptionsWidget.ID;
+ 	}
+ 
++	getName(): string {
++		return FindOptionsWidget.ID;
++	}
++
+ 	public getDomNode(): HTMLElement {
+ 		return this._domNode;
+ 	}
+diff --git a/src/vs/editor/contrib/find/browser/findWidget.ts b/src/vs/editor/contrib/find/browser/findWidget.ts
+index 03e698c3e87..52879a91bf3 100644
+--- a/src/vs/editor/contrib/find/browser/findWidget.ts
++++ b/src/vs/editor/contrib/find/browser/findWidget.ts
+@@ -312,6 +312,10 @@ export class FindWidget extends Widget implements IOverlayWidget, IVerticalSashL
+ 		return FindWidget.ID;
+ 	}
+ 
++	getName(): string {
++		return FindWidget.ID;
++	}
++
+ 	public getDomNode(): HTMLElement {
+ 		return this._domNode;
+ 	}
+diff --git a/src/vs/editor/contrib/hover/browser/glyphHoverWidget.ts b/src/vs/editor/contrib/hover/browser/glyphHoverWidget.ts
+index 1c741fc3b8b..7d55873f781 100644
+--- a/src/vs/editor/contrib/hover/browser/glyphHoverWidget.ts
++++ b/src/vs/editor/contrib/hover/browser/glyphHoverWidget.ts
+@@ -70,6 +70,10 @@ export class GlyphHoverWidget extends Disposable implements IOverlayWidget, IHov
+ 		return GlyphHoverWidget.ID;
+ 	}
+ 
++	getName(): string {
++		return GlyphHoverWidget.ID;
++	}
++
+ 	public getDomNode(): HTMLElement {
+ 		return this._hover.containerDomNode;
+ 	}
+diff --git a/src/vs/editor/contrib/stickyScroll/browser/stickyScrollWidget.ts b/src/vs/editor/contrib/stickyScroll/browser/stickyScrollWidget.ts
+index 2a7c1cf5b1b..50ef2b67f0f 100644
+--- a/src/vs/editor/contrib/stickyScroll/browser/stickyScrollWidget.ts
++++ b/src/vs/editor/contrib/stickyScroll/browser/stickyScrollWidget.ts
+@@ -328,6 +328,10 @@ export class StickyScrollWidget extends Disposable implements IOverlayWidget {
+ 		return 'editor.contrib.stickyScrollWidget';
+ 	}
+ 
++	getName(): string {
++		return 'StickyScrollWidget';
++	}
++
+ 	getDomNode(): HTMLElement {
+ 		return this._rootDomNode;
+ 	}
+diff --git a/src/vs/editor/contrib/suggest/browser/suggestWidgetDetails.ts b/src/vs/editor/contrib/suggest/browser/suggestWidgetDetails.ts
+index 9d42306730d..b312b02efac 100644
+--- a/src/vs/editor/contrib/suggest/browser/suggestWidgetDetails.ts
++++ b/src/vs/editor/contrib/suggest/browser/suggestWidgetDetails.ts
+@@ -342,6 +342,10 @@ export class SuggestDetailsOverlay implements IOverlayWidget {
+ 		return 'suggest.details';
+ 	}
+ 
++	getName(): string {
++		return 'SuggestDetailsOverlay';
++	}
++
+ 	getDomNode(): HTMLElement {
+ 		return this._resizable.domNode;
+ 	}
+diff --git a/src/vs/editor/contrib/zoneWidget/browser/zoneWidget.ts b/src/vs/editor/contrib/zoneWidget/browser/zoneWidget.ts
+index 96820f1eafd..5934d959995 100644
+--- a/src/vs/editor/contrib/zoneWidget/browser/zoneWidget.ts
++++ b/src/vs/editor/contrib/zoneWidget/browser/zoneWidget.ts
+@@ -103,6 +103,10 @@ export class OverlayWidgetDelegate implements IOverlayWidget {
+ 		return this._id;
+ 	}
+ 
++	getName(): string {
++		return 'OverlayWidgetDelegate';
++	}
++
+ 	getDomNode(): HTMLElement {
+ 		return this._domNode;
+ 	}
+diff --git a/src/vs/editor/standalone/browser/iPadShowKeyboard/iPadShowKeyboard.ts b/src/vs/editor/standalone/browser/iPadShowKeyboard/iPadShowKeyboard.ts
+index 3c3ce892ce9..2c592a962d5 100644
+--- a/src/vs/editor/standalone/browser/iPadShowKeyboard/iPadShowKeyboard.ts
++++ b/src/vs/editor/standalone/browser/iPadShowKeyboard/iPadShowKeyboard.ts
+@@ -88,6 +88,10 @@ class ShowKeyboardWidget extends Disposable implements IOverlayWidget {
+ 		return ShowKeyboardWidget.ID;
+ 	}
+ 
++	getName(): string {
++		return ShowKeyboardWidget.ID;
++	}
++
+ 	public getDomNode(): HTMLElement {
+ 		return this._domNode;
+ 	}
+diff --git a/src/vs/editor/standalone/browser/quickInput/standaloneQuickInputService.ts b/src/vs/editor/standalone/browser/quickInput/standaloneQuickInputService.ts
+index 4aa28793eff..c8f330a4239 100644
+--- a/src/vs/editor/standalone/browser/quickInput/standaloneQuickInputService.ts
++++ b/src/vs/editor/standalone/browser/quickInput/standaloneQuickInputService.ts
+@@ -206,6 +206,10 @@ export class QuickInputEditorWidget implements IOverlayWidget {
+ 		return QuickInputEditorWidget.ID;
+ 	}
+ 
++	getName(): string {
++		return QuickInputEditorWidget.ID;
++	}
++
+ 	getDomNode(): HTMLElement {
+ 		return this.domNode;
+ 	}
+diff --git a/src/vs/monaco.d.ts b/src/vs/monaco.d.ts
+index 5b0047e74a3..99961b4420d 100644
+--- a/src/vs/monaco.d.ts
++++ b/src/vs/monaco.d.ts
+@@ -5726,6 +5726,10 @@ declare namespace monaco.editor {
+ 		 * Get a unique identifier of the overlay widget.
+ 		 */
+ 		getId(): string;
++		/**
++		 * Get a human readable name of the overlay widget.
++		 */
++		getName(): string;
+ 		/**
+ 		 * Get the dom node of the overlay widget.
+ 		 */
+diff --git a/src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorInputContribution.ts b/src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorInputContribution.ts
+index ed6ccc8912f..bc1248b00fd 100644
+--- a/src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorInputContribution.ts
++++ b/src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorInputContribution.ts
+@@ -117,6 +117,10 @@ class AgentFeedbackInputWidget implements IOverlayWidget {
+ 		return AgentFeedbackInputWidget._ID;
+ 	}
+ 
++	getName(): string {
++		return AgentFeedbackInputWidget._ID;
++	}
++
+ 	getDomNode(): HTMLElement {
+ 		return this._domNode;
+ 	}
+diff --git a/src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorWidgetContribution.ts b/src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorWidgetContribution.ts
+index 7c4c463f391..b6b8d02b5ef 100644
+--- a/src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorWidgetContribution.ts
++++ b/src/vs/sessions/contrib/agentFeedback/browser/agentFeedbackEditorWidgetContribution.ts
+@@ -586,6 +586,10 @@ export class AgentFeedbackEditorWidget extends Disposable implements IOverlayWid
+ 		return this._id;
+ 	}
+ 
++	getName(): string {
++		return this._id;
++	}
++
+ 	getDomNode(): HTMLElement {
+ 		return this._domNode;
+ 	}
+diff --git a/src/vs/workbench/browser/codeeditor.ts b/src/vs/workbench/browser/codeeditor.ts
+index 81f18b872bc..16e7c60ed79 100644
+--- a/src/vs/workbench/browser/codeeditor.ts
++++ b/src/vs/workbench/browser/codeeditor.ts
+@@ -146,6 +146,10 @@ export class FloatingEditorClickWidget extends FloatingClickWidget implements IO
+ 		return 'editor.overlayWidget.floatingClickWidget';
+ 	}
+ 
++	getName(): string {
++		return 'FloatingEditorClickWidget';
++	}
++
+ 	getPosition(): IOverlayWidgetPosition {
+ 		return {
+ 			preference: OverlayWidgetPositionPreference.BOTTOM_RIGHT_CORNER
+diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
+index 2e43b458f3d..b2f0301993e 100644
+--- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
++++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingCodeEditorIntegration.ts
+@@ -806,6 +806,10 @@ class DiffHunkWidget implements IOverlayWidget, IModifiedFileEntryChangeHunk {
+ 		return this._id;
+ 	}
+ 
++	getName(): string {
++		return this._id;
++	}
++
+ 	layout(startLineNumber: number): void {
+ 
+ 		const lineHeight = this._editor.getOption(EditorOption.lineHeight);
+@@ -886,6 +890,10 @@ class AccessibleDiffViewContainer implements IOverlayWidget {
+ 		return 'chatEdits.accessibleDiffView';
+ 	}
+ 
++	getName(): string {
++		return 'AccessibleDiffViewContainer';
++	}
++
+ 	getDomNode(): HTMLElement {
+ 		return this._domNode;
+ 	}
+diff --git a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingExplanationWidget.ts b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingExplanationWidget.ts
+index 0623aea19ca..c2c3015ac45 100644
+--- a/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingExplanationWidget.ts
++++ b/src/vs/workbench/contrib/chat/browser/chatEditing/chatEditingExplanationWidget.ts
+@@ -516,6 +516,10 @@ export class ChatEditingExplanationWidget extends Disposable implements IOverlay
+ 		return this._id;
+ 	}
+ 
++	getName(): string {
++		return this._id;
++	}
++
+ 	getDomNode(): HTMLElement {
+ 		return this._domNode;
+ 	}
+diff --git a/src/vs/workbench/contrib/chat/browser/promptSyntax/promptCodingAgentActionOverlay.ts b/src/vs/workbench/contrib/chat/browser/promptSyntax/promptCodingAgentActionOverlay.ts
+index b3de9d98131..725679efbe7 100644
+--- a/src/vs/workbench/contrib/chat/browser/promptSyntax/promptCodingAgentActionOverlay.ts
++++ b/src/vs/workbench/contrib/chat/browser/promptSyntax/promptCodingAgentActionOverlay.ts
+@@ -67,6 +67,10 @@ export class PromptCodingAgentActionOverlayWidget extends Disposable implements
+ 		return PromptCodingAgentActionOverlayWidget.ID;
+ 	}
+ 
++	getName(): string {
++		return PromptCodingAgentActionOverlayWidget.ID;
++	}
++
+ 	getDomNode(): HTMLElement {
+ 		return this._domNode;
+ 	}
+diff --git a/src/vs/workbench/contrib/mergeEditor/browser/view/fixedZoneWidget.ts b/src/vs/workbench/contrib/mergeEditor/browser/view/fixedZoneWidget.ts
+index 6d36ed7ac14..b7a7eb855c8 100644
+--- a/src/vs/workbench/contrib/mergeEditor/browser/view/fixedZoneWidget.ts
++++ b/src/vs/workbench/contrib/mergeEditor/browser/view/fixedZoneWidget.ts
+@@ -16,6 +16,7 @@ export abstract class FixedZoneWidget extends Disposable {
+ 	protected readonly widgetDomNode = h('div.fixed-zone-widget').root;
+ 	private readonly overlayWidget: IOverlayWidget = {
+ 		getId: () => this.overlayWidgetId,
++		getName: () => this.overlayWidgetId,
+ 		getDomNode: () => this.widgetDomNode,
+ 		getPosition: () => null
+ 	};
+diff --git a/src/vs/workbench/contrib/preferences/browser/keybindingWidgets.ts b/src/vs/workbench/contrib/preferences/browser/keybindingWidgets.ts
+index b6a6170b071..a31dbe85c97 100644
+--- a/src/vs/workbench/contrib/preferences/browser/keybindingWidgets.ts
++++ b/src/vs/workbench/contrib/preferences/browser/keybindingWidgets.ts
+@@ -310,6 +310,10 @@ export class DefineKeybindingOverlayWidget extends Disposable implements IOverla
+ 		return DefineKeybindingOverlayWidget.ID;
+ 	}
+ 
++	getName(): string {
++		return DefineKeybindingOverlayWidget.ID;
++	}
++
+ 	getDomNode(): HTMLElement {
+ 		return this._widget.domNode;
+ 	}
+diff --git a/src/vs/workbench/contrib/testing/browser/codeCoverageDecorations.ts b/src/vs/workbench/contrib/testing/browser/codeCoverageDecorations.ts
+index 37fac8335cb..079eec70d18 100644
+--- a/src/vs/workbench/contrib/testing/browser/codeCoverageDecorations.ts
++++ b/src/vs/workbench/contrib/testing/browser/codeCoverageDecorations.ts
+@@ -670,6 +670,10 @@ class CoverageToolbarWidget extends Disposable implements IOverlayWidget {
+ 		return 'coverage-summary-widget';
+ 	}
+ 
++	getName(): string {
++		return 'CoverageToolbarWidget';
++	}
++
+ 	/** @inheritdoc */
+ 	public getDomNode(): HTMLElement {
+ 		return this._domNode.root;

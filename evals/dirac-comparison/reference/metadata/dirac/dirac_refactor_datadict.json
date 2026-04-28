@@ -1,0 +1,126 @@
+{
+  "agent": "dirac",
+  "task": "datadict",
+  "name": "dirac_refactor_datadict",
+  "source_url": "https://raw.githubusercontent.com/dirac-run/dirac/master/evals/dirac/dirac_refactor_datadict",
+  "changed_files": [
+    {
+      "old_path": "django/contrib/admin/widgets.py",
+      "new_path": "django/contrib/admin/widgets.py"
+    },
+    {
+      "old_path": "django/contrib/postgres/forms/array.py",
+      "new_path": "django/contrib/postgres/forms/array.py"
+    },
+    {
+      "old_path": "django/forms/forms.py",
+      "new_path": "django/forms/forms.py"
+    },
+    {
+      "old_path": "django/forms/widgets.py",
+      "new_path": "django/forms/widgets.py"
+    },
+    {
+      "old_path": "docs/ref/forms/api.txt",
+      "new_path": "docs/ref/forms/api.txt"
+    },
+    {
+      "old_path": "docs/ref/forms/widgets.txt",
+      "new_path": "docs/ref/forms/widgets.txt"
+    },
+    {
+      "old_path": "tests/forms_tests/field_tests/test_booleanfield.py",
+      "new_path": "tests/forms_tests/field_tests/test_booleanfield.py"
+    },
+    {
+      "old_path": "tests/forms_tests/field_tests/test_datefield.py",
+      "new_path": "tests/forms_tests/field_tests/test_datefield.py"
+    },
+    {
+      "old_path": "tests/forms_tests/field_tests/test_nullbooleanfield.py",
+      "new_path": "tests/forms_tests/field_tests/test_nullbooleanfield.py"
+    },
+    {
+      "old_path": "tests/forms_tests/widget_tests/test_checkboxinput.py",
+      "new_path": "tests/forms_tests/widget_tests/test_checkboxinput.py"
+    },
+    {
+      "old_path": "tests/forms_tests/widget_tests/test_clearablefileinput.py",
+      "new_path": "tests/forms_tests/widget_tests/test_clearablefileinput.py"
+    },
+    {
+      "old_path": "tests/forms_tests/widget_tests/test_fileinput.py",
+      "new_path": "tests/forms_tests/widget_tests/test_fileinput.py"
+    },
+    {
+      "old_path": "tests/forms_tests/widget_tests/test_multiwidget.py",
+      "new_path": "tests/forms_tests/widget_tests/test_multiwidget.py"
+    },
+    {
+      "old_path": "tests/forms_tests/widget_tests/test_selectdatewidget.py",
+      "new_path": "tests/forms_tests/widget_tests/test_selectdatewidget.py"
+    }
+  ],
+  "file_count": 14,
+  "indexes": [
+    {
+      "old_blob": "7a0ccf42de",
+      "new_blob": "73218cd921"
+    },
+    {
+      "old_blob": "ae0c0c462b",
+      "new_blob": "3282c07738"
+    },
+    {
+      "old_blob": "ce64f6286e",
+      "new_blob": "3e497f86d5"
+    },
+    {
+      "old_blob": "1bcfeba288",
+      "new_blob": "07866ae989"
+    },
+    {
+      "old_blob": "58494f6067",
+      "new_blob": "f2e2ca23de"
+    },
+    {
+      "old_blob": "80047aabc5",
+      "new_blob": "999bf4007b"
+    },
+    {
+      "old_blob": "f1c06c3c01",
+      "new_blob": "f924b93f30"
+    },
+    {
+      "old_blob": "a8f39aa8e8",
+      "new_blob": "b3af849065"
+    },
+    {
+      "old_blob": "c1e120c0bb",
+      "new_blob": "f8975893ae"
+    },
+    {
+      "old_blob": "386ae00840",
+      "new_blob": "a1311283f0"
+    },
+    {
+      "old_blob": "31ff1af624",
+      "new_blob": "5560de028d"
+    },
+    {
+      "old_blob": "a49f481728",
+      "new_blob": "306a7b5abe"
+    },
+    {
+      "old_blob": "5e360e3e92",
+      "new_blob": "f5462af356"
+    },
+    {
+      "old_blob": "0a2dc3fc48",
+      "new_blob": "a94de59394"
+    }
+  ],
+  "added_lines": 93,
+  "removed_lines": 73,
+  "patch_path": "evals/dirac-comparison/reference/dirac/dirac_refactor_datadict"
+}
