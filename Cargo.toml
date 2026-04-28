@@ -32,7 +32,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/kfcafe/imp"
@@ -70,8 +70,8 @@ readability-rust = "0.1"
 project-detect = "0.1"
 mana-core = { version = "0.3.1", path = "../mana/crates/mana-core" }
 
-imp-llm = { version = "0.1.0", path = "crates/imp-llm" }
-imp-core = { version = "0.1.0", path = "crates/imp-core" }
-imp-lua = { version = "0.1.0", path = "crates/imp-lua" }
-imp-tui = { version = "0.1.0", path = "crates/imp-tui" }
-imp-cli = { version = "0.1.0", path = "crates/imp-cli" }
+imp-llm = { version = "0.1.1", path = "crates/imp-llm" }
+imp-core = { version = "0.1.1", path = "crates/imp-core" }
+imp-lua = { version = "0.1.1", path = "crates/imp-lua" }
+imp-tui = { version = "0.1.1", path = "crates/imp-tui" }
+imp-cli = { version = "0.1.1", path = "crates/imp-cli" }
