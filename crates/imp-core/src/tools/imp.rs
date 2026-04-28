@@ -78,7 +78,7 @@ impl Tool for ImpTool {
                     "description": "Optional caller-supplied dedupe key"
                 }
             },
-            "required": ["action", "mode"]
+            "required": []
         })
     }
 
@@ -98,30 +98,46 @@ impl Tool for ImpTool {
             ));
         }
 
-        let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        if !matches!(action, "spawn" | "delegate") {
+        let Some(request) = resolve_spawn_request(&params) else {
             return Ok(ToolOutput::error(
-                "Unsupported spawn action. Expected action='spawn' (preferred) or action='delegate' (compatibility alias).",
+                "Invalid spawn request. Use mode='unit' with unit_id, or mode='ad_hoc' with prompt. The action field is optional and defaults to 'spawn'.",
             ));
-        }
+        };
 
-        let mode = params.get("mode").and_then(|v| v.as_str()).unwrap_or("");
-        match mode {
-            "unit" => execute_unit_spawn(params, ctx).await,
-            "ad_hoc" => execute_ad_hoc_spawn(params, ctx).await,
-            _ => Ok(ToolOutput::error(
-                "Unsupported imp mode. Expected mode='unit' or mode='ad_hoc'.",
-            )),
+        match request.mode {
+            SpawnMode::Unit => execute_unit_spawn(params, ctx).await,
+            SpawnMode::AdHoc => execute_ad_hoc_spawn(params, ctx).await,
         }
     }
 }
 
-struct AdHocSpawnOutcome {
-    status: &'static str,
-    summary: String,
-    content: String,
-    success: bool,
-    final_text: Option<String>,
+struct SpawnRequest {
+    mode: SpawnMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpawnMode {
+    Unit,
+    AdHoc,
+}
+
+fn resolve_spawn_request(params: &serde_json::Value) -> Option<SpawnRequest> {
+    let action = optional_non_empty_string(params, "action").unwrap_or_else(|| "spawn".to_string());
+    if !matches!(action.as_str(), "spawn" | "delegate") {
+        return None;
+    }
+
+    let explicit_mode = optional_non_empty_string(params, "mode");
+    let mode = match explicit_mode.as_deref() {
+        Some("unit") => SpawnMode::Unit,
+        Some("ad_hoc") | Some("adhoc") | Some("ad-hoc") => SpawnMode::AdHoc,
+        Some(_) => return None,
+        None if optional_non_empty_string(params, "unit_id").is_some() => SpawnMode::Unit,
+        None if optional_non_empty_string(params, "prompt").is_some() => SpawnMode::AdHoc,
+        None => return None,
+    };
+
+    Some(SpawnRequest { mode })
 }
 
 fn build_spawn_details(
@@ -149,6 +165,14 @@ fn build_spawn_details(
         "idempotency_key": idempotency_key,
         "mode_details": mode_details,
     })
+}
+
+struct AdHocSpawnOutcome {
+    status: &'static str,
+    summary: String,
+    content: String,
+    success: bool,
+    final_text: Option<String>,
 }
 
 fn build_ad_hoc_spawn_outcome(final_text: Option<String>) -> AdHocSpawnOutcome {
@@ -534,6 +558,13 @@ mod tests {
         assert_eq!(schema.get("type").and_then(|v| v.as_str()), Some("object"));
         assert!(schema.get("allOf").is_none());
         assert_eq!(
+            schema
+                .get("required")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
             schema["properties"]["prompt"]["type"].as_str(),
             Some("string")
         );
@@ -541,6 +572,35 @@ mod tests {
             schema["properties"]["timeout_secs"]["type"].as_str(),
             Some("number")
         );
+    }
+
+    #[test]
+    fn spawn_defaults_action_and_infers_mode_from_payload_harden_spawn() {
+        assert_eq!(
+            resolve_spawn_request(&json!({"unit_id": "299"})).map(|request| request.mode),
+            Some(SpawnMode::Unit)
+        );
+        assert_eq!(
+            resolve_spawn_request(&json!({"prompt": "inspect this"})).map(|request| request.mode),
+            Some(SpawnMode::AdHoc)
+        );
+        assert_eq!(
+            resolve_spawn_request(
+                &json!({"action": "delegate", "mode": "ad-hoc", "prompt": "inspect this"})
+            )
+            .map(|request| request.mode),
+            Some(SpawnMode::AdHoc)
+        );
+        assert!(
+            resolve_spawn_request(&json!({"action": "run", "prompt": "inspect this"})).is_none()
+        );
+    }
+
+    #[test]
+    fn spawn_rejects_ambiguous_empty_payload_harden_spawn() {
+        assert!(resolve_spawn_request(&json!({})).is_none());
+        assert!(resolve_spawn_request(&json!({"prompt": "   "})).is_none());
+        assert!(resolve_spawn_request(&json!({"mode": "review", "prompt": "x"})).is_none());
     }
 
     #[test]
@@ -613,6 +673,36 @@ mod tests {
             optional_non_empty_string(&json!({"value": " hello "}), "value"),
             Some("hello".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn spawn_infers_unit_mode_when_mode_omitted_harden_spawn() {
+        let tool = ImpTool;
+        let result = tool
+            .execute(
+                "call-1",
+                json!({"unit_id": "missing-unit-for-validation"}),
+                test_ctx(AgentMode::Orchestrator),
+            )
+            .await;
+        match result {
+            Ok(_) => panic!("expected inferred unit mode to reach unit_id loading and fail there"),
+            Err(err) => assert!(!err.to_string().contains("Invalid spawn request")),
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_returns_non_panicking_help_for_invalid_payload_harden_spawn() {
+        let tool = ImpTool;
+        let out = tool
+            .execute("call-1", json!({}), test_ctx(AgentMode::Orchestrator))
+            .await
+            .unwrap();
+
+        assert!(out.is_error);
+        let text = out.text_content().unwrap_or_default();
+        assert!(text.contains("mode='unit'"));
+        assert!(text.contains("mode='ad_hoc'"));
     }
 
     #[tokio::test]

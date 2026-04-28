@@ -15,6 +15,7 @@ USAGE
 TASK=""
 PROVIDER=""
 MODEL=""
+API_KEY=""
 DRY_RUN=0
 PREPARE_ONLY=0
 
@@ -23,6 +24,10 @@ while [[ $# -gt 0 ]]; do
     --task) TASK="${2:-}"; shift 2 ;;
     --provider) PROVIDER="${2:-}"; shift 2 ;;
     --model) MODEL="${2:-}"; shift 2 ;;
+    --api-key)
+      API_KEY="${2:-}"
+      shift 2
+      ;;
     --dry-run) DRY_RUN=1; shift ;;
     --prepare-only) PREPARE_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -140,7 +145,7 @@ if [[ -z "$COMMIT" ]]; then
 fi
 
 if [[ ! -d "$CHECKOUT/.git" ]]; then
-  git clone "$REPO" "$CHECKOUT" |& tee -a "$OUT/transcript.txt"
+  git clone "$REPO" "$CHECKOUT" 2>&1 | tee -a "$OUT/transcript.txt"
 fi
 
 (
@@ -149,7 +154,7 @@ fi
   git checkout "$COMMIT"
   git reset --hard
   git clean -fd
-) |& tee -a "$OUT/transcript.txt"
+) 2>&1 | tee -a "$OUT/transcript.txt"
 
 if [[ "$PREPARE_ONLY" -eq 1 ]]; then
   write_result prepared "" null null
@@ -172,8 +177,8 @@ fi
 set +e
 (
   cd "$CHECKOUT"
-  PROVIDER="$PROVIDER" MODEL="$MODEL" bash -lc "$IMP_COMMAND_TEMPLATE"
-) < "$OUT/prompt.md" |& tee -a "$OUT/transcript.txt"
+  PROVIDER="$PROVIDER" MODEL="$MODEL" IMP_API_KEY_ARG="${API_KEY:+--api-key $API_KEY}" bash -lc "$IMP_COMMAND_TEMPLATE"
+) < "$OUT/prompt.md" 2>&1 | tee -a "$OUT/transcript.txt"
 AGENT_EXIT=${PIPESTATUS[0]}
 set -e
 

@@ -4,7 +4,7 @@
   "repo": "https://github.com/microsoft/vscode.git",
   "commit": null,
   "prompt": "Find the IOverlayWidget interface in the codebase. Add a new mandatory method to it: getName(): string. You can simply return a human-readable version of the class name or a stringified version of what getId() returns. Make sure to all implementations are updated and no missing property errors",
-  "imp_command": "imp --provider $PROVIDER --model $MODEL --print < prompt.md",
+  "imp_command": "/Users/asher/imp/target/debug/imp --provider google --model $MODEL $IMP_API_KEY_ARG --mode json --max-turns 80 --print @prompt.md",
   "verifier": "repo-specific type/lint command TBD after pinning commit",
   "dirac_reference": {
     "patch": "evals/dirac-comparison/reference/dirac/dirac_refactor_IOverlayWidget",

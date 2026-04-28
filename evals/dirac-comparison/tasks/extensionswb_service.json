@@ -4,7 +4,7 @@
   "repo": "https://github.com/microsoft/vscode.git",
   "commit": null,
   "prompt": "simple refactoring task: src/vs/workbench/contrib/extensions/browser/extensionsWorkbenchService.ts is the central coordinator for all extension-related UI operations it has gotten too large, we want to refactor it without breaking any dependencies. the goal is to divide it in smaller more manageable modules you must produce clean code with no linter errors. Your changes should be limited to the aforementioned file and creating any new file as needed\n\ncreate two new files, extension.ts and extensions.ts and move the relevant functionality to them",
-  "imp_command": "imp --provider $PROVIDER --model $MODEL --print < prompt.md",
+  "imp_command": "/Users/asher/imp/target/debug/imp --provider google --model $MODEL $IMP_API_KEY_ARG --mode json --max-turns 80 --print @prompt.md",
   "verifier": "repo-specific lint/build command TBD after pinning commit",
   "dirac_reference": {
     "patch": "evals/dirac-comparison/reference/dirac/dirac_refactor_extensionswb_service",
