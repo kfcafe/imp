@@ -128,6 +128,7 @@ enum NextAction {
 enum ContinueReason {
     ExternalizationNeeded,
     HighConfidenceVisibleNextStep,
+    ExecutionDebt,
 }
 
 impl ContinueReason {
@@ -135,6 +136,7 @@ impl ContinueReason {
         match self {
             Self::ExternalizationNeeded => "externalization_needed",
             Self::HighConfidenceVisibleNextStep => "high_confidence_visible_next_step",
+            Self::ExecutionDebt => "execution_debt",
         }
     }
 }
@@ -169,7 +171,9 @@ struct RuntimeEvidence {
     repeated_action: bool,
     execution_stop_reason: Option<NextActionStopReason>,
     work_completed: bool,
-    no_progress: bool,
+    execution_debt: bool,
+    execution_evidence: bool,
+    planning_only_progress: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,7 +207,9 @@ pub struct NextActionRuntimeEvidence {
     pub repeated_action: bool,
     pub execution_stop_reason: Option<String>,
     pub work_completed: bool,
-    pub no_progress: bool,
+    pub execution_debt: bool,
+    pub execution_evidence: bool,
+    pub planning_only_progress: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,12 +265,6 @@ impl PostTurnAssessment {
             return NextAction::Stop { reason };
         }
 
-        if self.runtime.no_progress {
-            return NextAction::Stop {
-                reason: NextActionStopReason::NoProgress,
-            };
-        }
-
         if let Some(reason) = self.text_fallback.planner_stop_reason {
             return NextAction::Stop { reason };
         }
@@ -277,6 +277,12 @@ impl PostTurnAssessment {
             return NextAction::Continue {
                 prompt: continue_recommendation.prompt,
                 reason: continue_recommendation.reason,
+            };
+        }
+
+        if self.runtime.planning_only_progress {
+            return NextAction::Stop {
+                reason: NextActionStopReason::NoProgress,
             };
         }
 
@@ -304,7 +310,9 @@ impl PostTurnAssessment {
                     .execution_stop_reason
                     .map(|reason| reason.as_str().to_string()),
                 work_completed: self.runtime.work_completed,
-                no_progress: self.runtime.no_progress,
+                execution_debt: self.runtime.execution_debt,
+                execution_evidence: self.runtime.execution_evidence,
+                planning_only_progress: self.runtime.planning_only_progress,
             },
             mana: NextActionManaEvidence {
                 stop_reason: self
@@ -388,6 +396,8 @@ pub struct Agent {
     pub continue_policy: ContinuePolicy,
     /// Prevent repeated confidence-based auto-continue nudges in a single run.
     queued_confidence_continue_nudge: bool,
+    /// Prevent repeated execution-debt stop-gate follow-ups in a single run.
+    queued_execution_debt_follow_up: bool,
     /// Runtime-side turn-scoped between-turn mana review accumulator.
     turn_mana_review: Arc<std::sync::Mutex<TurnManaReviewAccumulator>>,
     /// Resolved runtime config for tool-specific policy checks.
@@ -476,6 +486,7 @@ impl Agent {
             queued_mana_externalization_nudge: false,
             continue_policy: ContinuePolicy::Disabled,
             queued_confidence_continue_nudge: false,
+            queued_execution_debt_follow_up: false,
             turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
             config: Arc::new(Config::default()),
             lua_tool_loader: None,
@@ -515,6 +526,8 @@ impl Agent {
         let mut cancelled = false;
         let mut queued_follow_ups: std::collections::VecDeque<String> =
             std::collections::VecDeque::new();
+        let mut queued_pre_turn_follow_ups: std::collections::VecDeque<String> =
+            std::collections::VecDeque::new();
 
         if let Some(nudge) = mana_skill_follow_up_hint(
             &prompt,
@@ -524,7 +537,7 @@ impl Agent {
             self.has_mana_basics_skill,
             self.has_mana_delegation_skill,
         ) {
-            queued_follow_ups.push_back(nudge.to_string());
+            queued_pre_turn_follow_ups.push_back(nudge.to_string());
         }
 
         loop {
@@ -540,6 +553,12 @@ impl Agent {
                 })
                 .await;
                 return Err(crate::error::Error::MaxTurns(self.max_turns));
+            }
+
+            if turn > 0 {
+                if let Some(follow_up) = queued_pre_turn_follow_ups.pop_front() {
+                    self.messages.push(Message::user(&follow_up));
+                }
             }
 
             // Check for commands between turns (non-blocking)
@@ -935,15 +954,17 @@ impl Agent {
         &self,
         message: &AssistantMessage,
         tool_results: &[imp_llm::ToolResultMessage],
-        used_tools: bool,
+        _used_tools: bool,
         mana_review: &TurnManaReview,
     ) -> PostTurnAssessment {
         let repeated_action = tool_results_indicate_repeated_action(tool_results);
         let runtime_execution_stop_reason =
             tool_results_indicate_execution_blocker(tool_results, self.mode);
         let work_completed = tool_results_indicate_work_completed(tool_results, self.mode);
+        let execution_debt = tool_results_indicate_execution_debt(tool_results, self.mode);
+        let execution_evidence = tool_results_indicate_execution_evidence(tool_results, self.mode);
+        let planning_only_progress = execution_debt && !execution_evidence;
         let mana_stop_reason = mana_review_stop_reason(mana_review, self.mode);
-        let no_progress = !used_tools && assistant_message_text(message).trim().is_empty();
         let planner_text_stop_reason = planner_stop_reason(message, self.mode);
         let execution_text_stop_reason = execution_stop_reason(message, self.mode);
 
@@ -956,6 +977,18 @@ impl Agent {
             Some(ContinueRecommendation {
                 prompt: mana_externalization_follow_up_text().to_string(),
                 reason: ContinueReason::ExternalizationNeeded,
+            })
+        } else if !matches!(self.mode, AgentMode::Planner)
+            && should_queue_execution_debt_follow_up(
+                execution_debt,
+                execution_evidence,
+                self.queued_execution_debt_follow_up,
+                !assistant_message_text(message).trim().is_empty(),
+            )
+        {
+            Some(ContinueRecommendation {
+                prompt: execution_debt_follow_up_text().to_string(),
+                reason: ContinueReason::ExecutionDebt,
             })
         } else if should_queue_confidence_continue_follow_up(
             message,
@@ -976,7 +1009,9 @@ impl Agent {
                 repeated_action,
                 execution_stop_reason: runtime_execution_stop_reason,
                 work_completed,
-                no_progress,
+                execution_debt,
+                execution_evidence,
+                planning_only_progress,
             },
             mana: ManaEvidence {
                 stop_reason: mana_stop_reason,
@@ -1002,6 +1037,9 @@ impl Agent {
                     }
                     ContinueReason::HighConfidenceVisibleNextStep => {
                         self.queued_confidence_continue_nudge = true;
+                    }
+                    ContinueReason::ExecutionDebt => {
+                        self.queued_execution_debt_follow_up = true;
                     }
                 }
                 queued_follow_ups.push_back(prompt);
@@ -1408,6 +1446,15 @@ fn assistant_message_contains_mana_tool_call(message: &AssistantMessage) -> bool
     })
 }
 
+fn should_queue_execution_debt_follow_up(
+    execution_debt: bool,
+    execution_evidence: bool,
+    already_queued: bool,
+    assistant_finalized: bool,
+) -> bool {
+    execution_debt && !execution_evidence && !already_queued && assistant_finalized
+}
+
 fn should_queue_mana_externalization_follow_up(
     message: &AssistantMessage,
     mode: AgentMode,
@@ -1533,6 +1580,10 @@ fn confidence_continue_follow_up_text() -> &'static str {
     "Confidence is high and the mana delta is already visible. Continue to the next small, well-bounded step now using native mana-backed workflow, unless a consequential decision or blocker appears. Do not re-summarize the same visible mana change in chat unless new context needs to be called out."
 }
 
+fn execution_debt_follow_up_text() -> &'static str {
+    "You have recorded or planned work, but the requested outcome is not satisfied yet. Continue working until the user's requested outcome is satisfied, or until concrete evidence shows it cannot be completed. Do not stop merely because you recorded a plan, updated mana, or completed one intermediate step."
+}
+
 fn tool_results_indicate_repeated_action(tool_results: &[imp_llm::ToolResultMessage]) -> bool {
     tool_results.iter().any(|result| {
         result.is_error
@@ -1605,6 +1656,55 @@ fn tool_results_indicate_execution_blocker(
     }
 
     None
+}
+
+fn tool_results_indicate_execution_debt(
+    tool_results: &[imp_llm::ToolResultMessage],
+    mode: AgentMode,
+) -> bool {
+    if !matches!(
+        mode,
+        AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker
+    ) {
+        return false;
+    }
+
+    tool_results.iter().any(|result| {
+        !result.is_error
+            && result.tool_name == "mana"
+            && matches!(
+                result.details.get("action").and_then(|v| v.as_str()),
+                Some("create" | "update" | "notes_append" | "decision_add" | "dep_add" | "claim")
+            )
+    })
+}
+
+fn tool_results_indicate_execution_evidence(
+    tool_results: &[imp_llm::ToolResultMessage],
+    mode: AgentMode,
+) -> bool {
+    if !matches!(
+        mode,
+        AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker
+    ) {
+        return false;
+    }
+
+    tool_results.iter().any(|result| {
+        if result.is_error {
+            return false;
+        }
+
+        match result.tool_name.as_str() {
+            "write" | "edit" | "multi_edit" | "openrouter_secret_run" => true,
+            "bash" | "shell" => true,
+            "mana" => matches!(
+                result.details.get("action").and_then(|v| v.as_str()),
+                Some("run" | "verify" | "close" | "fail")
+            ),
+            _ => false,
+        }
+    })
 }
 
 fn tool_results_indicate_work_completed(
@@ -2404,9 +2504,8 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(user_texts.len(), 2);
+        assert_eq!(user_texts.len(), 1);
         assert_eq!(user_texts[0], "Please split this into units for workers");
-        assert!(user_texts[1].contains("load `mana`"));
     }
 
     #[tokio::test]
@@ -2493,7 +2592,9 @@ mod tests {
                 repeated_action: false,
                 execution_stop_reason: None,
                 work_completed: false,
-                no_progress: false,
+                execution_debt: false,
+                execution_evidence: false,
+                planning_only_progress: false,
             },
             mana: ManaEvidence { stop_reason: None },
             text_fallback: TextFallbackEvidence {
@@ -2534,6 +2635,7 @@ mod tests {
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.mode = AgentMode::Full;
         agent.tools.register(Arc::new(crate::tools::bash::BashTool));
+        agent.tools.register_alias("bash", "shell");
 
         let events_task = tokio::spawn(collect_events(handle));
         agent.run("Run the check".to_string()).await.unwrap();
@@ -2637,7 +2739,9 @@ mod tests {
                 repeated_action: false,
                 execution_stop_reason: Some(NextActionStopReason::ExecutionBlocked),
                 work_completed: true,
-                no_progress: false,
+                execution_debt: false,
+                execution_evidence: false,
+                planning_only_progress: false,
             },
             mana: ManaEvidence {
                 stop_reason: Some(NextActionStopReason::DecompositionCompleted),
@@ -2667,7 +2771,9 @@ mod tests {
                 repeated_action: false,
                 execution_stop_reason: None,
                 work_completed: false,
-                no_progress: false,
+                execution_debt: false,
+                execution_evidence: false,
+                planning_only_progress: false,
             },
             mana: ManaEvidence { stop_reason: None },
             text_fallback: TextFallbackEvidence {
@@ -2687,6 +2793,85 @@ mod tests {
                 reason: ContinueReason::HighConfidenceVisibleNextStep,
             }
         );
+    }
+
+    #[test]
+    fn execution_debt_follow_up_is_preferred_before_stopping_for_planning_only_progress() {
+        let assessment = PostTurnAssessment {
+            runtime: RuntimeEvidence {
+                repeated_action: false,
+                execution_stop_reason: None,
+                work_completed: false,
+                execution_debt: true,
+                execution_evidence: false,
+                planning_only_progress: false,
+            },
+            mana: ManaEvidence { stop_reason: None },
+            text_fallback: TextFallbackEvidence {
+                planner_stop_reason: None,
+                execution_stop_reason: None,
+            },
+            continue_recommendation: Some(ContinueRecommendation {
+                prompt: execution_debt_follow_up_text().to_string(),
+                reason: ContinueReason::ExecutionDebt,
+            }),
+        };
+
+        assert_eq!(
+            assessment.into_next_action(),
+            NextAction::Continue {
+                prompt: execution_debt_follow_up_text().to_string(),
+                reason: ContinueReason::ExecutionDebt,
+            }
+        );
+    }
+
+    #[test]
+    fn mana_planning_without_execution_creates_execution_debt_follow_up() {
+        let result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_mana".to_string(),
+            tool_name: "mana".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "Created task".to_string(),
+            }],
+            is_error: false,
+            details: serde_json::json!({ "action": "create" }),
+            timestamp: 0,
+        };
+
+        assert!(tool_results_indicate_execution_debt(
+            std::slice::from_ref(&result),
+            AgentMode::Full
+        ));
+        assert!(!tool_results_indicate_execution_evidence(
+            std::slice::from_ref(&result),
+            AgentMode::Full
+        ));
+        assert!(should_queue_execution_debt_follow_up(
+            true, false, false, true
+        ));
+    }
+
+    #[test]
+    fn mutating_tool_call_satisfies_execution_evidence() {
+        let result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_edit".to_string(),
+            tool_name: "edit".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "diff".to_string(),
+            }],
+            is_error: false,
+            details: serde_json::json!({ "path": "src/lib.rs" }),
+            timestamp: 0,
+        };
+
+        assert!(tool_results_indicate_execution_evidence(
+            &[result],
+            AgentMode::Full
+        ));
+        assert!(!should_queue_execution_debt_follow_up(
+            true, true, false, true
+        ));
     }
 
     #[test]
@@ -3110,9 +3295,8 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(user_texts.len(), 2);
+        assert_eq!(user_texts.len(), 1);
         assert_eq!(user_texts[0], "Check mana status and logs for my unit");
-        assert!(user_texts[1].contains("load `mana-basics`"));
     }
 
     #[tokio::test]
@@ -3928,6 +4112,7 @@ mod tests {
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.tools.register(Arc::new(crate::tools::bash::BashTool));
+        agent.tools.register_alias("bash", "shell");
 
         agent.run("Run a shell command".to_string()).await.unwrap();
 
@@ -4806,6 +4991,7 @@ mod integration {
         agent.tools.register(Arc::new(ReadTool));
         agent.tools.register(Arc::new(EditTool));
         agent.tools.register(Arc::new(BashTool));
+        agent.tools.register_alias("bash", "shell");
         (agent, handle)
     }
 

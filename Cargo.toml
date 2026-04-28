@@ -35,6 +35,11 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/kfcafe/imp"
+homepage = "https://github.com/kfcafe/imp"
+readme = "README.md"
+keywords = ["agent", "coding", "llm", "terminal", "developer-tools"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -63,10 +68,10 @@ tree-sitter-python = "0.23"
 tree-sitter-go = "0.23"
 readability-rust = "0.1"
 project-detect = "0.1"
-mana-core = { path = "../mana/crates/mana-core" }
+mana-core = { version = "0.3.0", path = "../mana/crates/mana-core" }
 
-imp-llm = { path = "crates/imp-llm" }
-imp-core = { path = "crates/imp-core" }
-imp-lua = { path = "crates/imp-lua" }
-imp-tui = { path = "crates/imp-tui" }
-imp-cli = { path = "crates/imp-cli" }
+imp-llm = { version = "0.1.0", path = "crates/imp-llm" }
+imp-core = { version = "0.1.0", path = "crates/imp-core" }
+imp-lua = { version = "0.1.0", path = "crates/imp-lua" }
+imp-tui = { version = "0.1.0", path = "crates/imp-tui" }
+imp-cli = { version = "0.1.0", path = "crates/imp-cli" }

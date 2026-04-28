@@ -1325,7 +1325,10 @@ mod tests {
             .unwrap();
 
         let fields = store.resolve_secret_fields("render").unwrap();
-        assert_eq!(fields.get("api_key").map(String::as_str), Some("render-secret"));
+        assert_eq!(
+            fields.get("api_key").map(String::as_str),
+            Some("render-secret")
+        );
     }
 
     #[test]

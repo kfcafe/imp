@@ -2,9 +2,9 @@
   "id": "sendRequest",
   "source": "github.com/dirac-run/dirac evals/README.md master",
   "repo": "https://github.com/microsoft/vscode.git",
-  "commit": null,
+  "commit": "fb4e4303186e940ee0b9f011661c5b86e6712907",
   "prompt": "chat service's sendRequest currently takes multiple parameters. refactor it to take a single param object. make sure to update all call sites",
-  "imp_command": "/Users/asher/imp/target/debug/imp --provider google --model $MODEL $IMP_API_KEY_ARG --mode json --max-turns 80 --print @prompt.md",
+  "imp_command": "/Users/asher/imp/target/debug/imp --provider $PROVIDER --model $MODEL --mode json --max-turns 80 --print @prompt.md",
   "verifier": "repo-specific type/lint command TBD after pinning commit",
   "dirac_reference": {
     "patch": "evals/dirac-comparison/reference/dirac/dirac_refactor_sendRequest",

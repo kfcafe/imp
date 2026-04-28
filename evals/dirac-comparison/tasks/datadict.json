@@ -4,7 +4,7 @@
   "repo": "https://github.com/django/django.git",
   "commit": "253f552c5809fa096116b601bd842ca4f3504860",
   "prompt": "We want to rename the value_from_datadict method to extract_value_from_request in django.forms.Widget and all its subclasses, and update all calls to this method across the codebase. only update the code, no docs or txt files. make sure to run ruff using .venv locally (only run on the files you modify). do NOT run any tests",
-  "imp_command": "/Users/asher/imp/target/debug/imp --provider google --model $MODEL $IMP_API_KEY_ARG --mode json --max-turns 80 --print @prompt.md",
+  "imp_command": "/Users/asher/imp/target/debug/imp --provider $PROVIDER --model $MODEL --mode json --max-turns 80 --print @prompt.md",
   "verifier": ".venv/bin/ruff check <modified-files>",
   "dirac_reference": {
     "patch": "evals/dirac-comparison/reference/dirac/dirac_refactor_datadict",

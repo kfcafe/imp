@@ -2,14 +2,19 @@
 name = "imp-core"
 version.workspace = true
 edition.workspace = true
-license = "Apache-2.0"
-description = "Agent engine — loop, tools, sessions, hooks, context"
+license.workspace = true
+description = "Agent engine for imp: loop, tools, sessions, hooks, context, and SDK"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 imp-llm.workspace = true
 mana-core.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
-mana = { path = "../../../mana/crates/mana-cli", package = "mana-cli" }
+mana = { version = "0.3.0", path = "../../../mana/crates/mana-cli", package = "mana-cli" }
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true

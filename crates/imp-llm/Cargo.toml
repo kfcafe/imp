@@ -1,9 +1,14 @@
 [package]
 name = "imp-llm"
-license = "Apache-2.0"
+license.workspace = true
 version.workspace = true
 edition.workspace = true
 description = "Standalone multi-provider LLM streaming client"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde.workspace = true

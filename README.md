@@ -1,6 +1,6 @@
 # imp
 
-`imp` is a coding agent for local software work. It runs in your terminal, uses native development tools, keeps durable sessions, and can coordinate longer tasks with an included mana work graph.
+`imp` is an extensible coding agent built for efficiency and performance. It runs in your terminal, uses native development tools, keeps durable sessions, and can coordinate longer tasks with an included mana work graph.
 
 imp is actively developed. The core coding-agent workflow is usable today; some extension and embedding surfaces are still evolving.
 

@@ -135,6 +135,14 @@ pub fn builtin_providers() -> Vec<ProviderMeta> {
             api_style: ApiStyle::OpenAiCompat,
         },
         ProviderMeta {
+            id: "openrouter",
+            name: "OpenRouter",
+            env_vars: &["OPENROUTER_API_KEY"],
+            api_base_url: Some("https://openrouter.ai/api"),
+            docs_url: "openrouter.ai/keys",
+            api_style: ApiStyle::OpenAiCompat,
+        },
+        ProviderMeta {
             id: "groq",
             name: "Groq",
             env_vars: &["GROQ_API_KEY"],
@@ -554,6 +562,32 @@ fn builtin_models() -> Vec<ModelMeta> {
             },
         },
         // -- Groq --
+        ModelMeta {
+            id: "google/gemini-3.1-flash-lite-preview".into(),
+            provider: "openrouter".into(),
+            name: "Google Gemini 3.1 Flash Lite Preview".into(),
+            context_window: 1_048_576,
+            max_output_tokens: 65_536,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "google/gemini-3-flash-preview".into(),
+            provider: "openrouter".into(),
+            name: "Google Gemini 3 Flash Preview".into(),
+            context_window: 1_048_576,
+            max_output_tokens: 65_536,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
+                tool_use: true,
+            },
+        },
         ModelMeta {
             id: "llama-3.3-70b-versatile".into(),
             provider: "groq".into(),

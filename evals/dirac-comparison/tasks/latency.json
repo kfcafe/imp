@@ -2,9 +2,9 @@
   "id": "latency",
   "source": "github.com/dirac-run/dirac evals/README.md master",
   "repo": "https://github.com/huggingface/transformers.git",
-  "commit": null,
+  "commit": "5135e5efa7203cd23aac0866de12dfeef038422d",
   "prompt": "We want to introduce built-in latency telemetry across the entire Hugging Face Pipelines architecture for debugging purposes. Update the base class to accept a new keyword argument record_latency: bool = False, and save it as an instance attribute. You must update every pipeline class in src/transformers/pipelines/  that implements _forward method. Modify each method so that if self._record_latency is True, it records the exact time taken by the underlying model inference call using time.perf_counter and stores it on the pipeline instance for later inspection.\n\nVerification: Ensure ruff check passes across the entire pipelines directory. Do not run any other checks\n\nfor ruff commands, use the local .venv",
-  "imp_command": "/Users/asher/imp/target/debug/imp --provider google --model $MODEL $IMP_API_KEY_ARG --mode json --max-turns 80 --print @prompt.md",
+  "imp_command": "/Users/asher/imp/target/debug/imp --provider $PROVIDER --model $MODEL --mode json --max-turns 80 --print @prompt.md",
   "verifier": ".venv/bin/ruff check src/transformers/pipelines/",
   "dirac_reference": {
     "patch": "evals/dirac-comparison/reference/dirac/dirac_refactor_latency",

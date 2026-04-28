@@ -2,8 +2,13 @@
 name = "imp-cli"
 version.workspace = true
 edition.workspace = true
-license = "Apache-2.0"
-description = "Binary entry point for imp"
+license.workspace = true
+description = "Command-line interface for the imp coding agent"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "imp"
