@@ -1,443 +1,326 @@
 # imp
 
-An opinionated Rust-native coding agent with strong built-in tools, explicit workflow support, and deep mana integration when you want it.
+Rust-native coding agent runtime and terminal interface, built for tool use, durable sessions, and mana-coordinated software work.
 
-```
+```bash
 brew tap kfcafe/tap && brew install imp
+```
+
+## Contents
+
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Mana](#mana)
+- [Architecture](#architecture)
+- [Tools](#tools)
+- [Sessions and context](#sessions-and-context)
+- [Modes](#modes)
+- [Providers and secrets](#providers-and-secrets)
+- [Web](#web)
+- [Extensions](#extensions)
+- [Configuration](#configuration)
+- [Rust SDK](#rust-sdk)
+- [Diagnostics](#diagnostics)
+- [Influences](#influences)
+
+## Install
+
+### Homebrew
+
+```bash
+brew tap kfcafe/tap && brew install imp
+```
+
+### Linux release archive
+
+```bash
+# x86_64
+curl -LO https://github.com/kfcafe/imp/releases/latest/download/imp-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+tar xzf imp-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+sudo mv imp-0.1.0-x86_64-unknown-linux-gnu/imp /usr/local/bin/
+
+# aarch64
+curl -LO https://github.com/kfcafe/imp/releases/latest/download/imp-0.1.0-aarch64-unknown-linux-gnu.tar.gz
+tar xzf imp-0.1.0-aarch64-unknown-linux-gnu.tar.gz
+sudo mv imp-0.1.0-aarch64-unknown-linux-gnu/imp /usr/local/bin/
+```
+
+### From source
+
+```bash
+git clone https://github.com/kfcafe/imp.git
+cd imp
+uu install --default
+imp
+```
+
+Raw Cargo install:
+
+```bash
+cargo install --path .
+~/.cargo/bin/imp install-local
+imp
+```
+
+For source upgrades, prefer:
+
+```bash
+uu install --default
+```
+
+On macOS, if a locally installed binary is killed immediately after install, re-sign it ad hoc:
+
+```bash
+bash tools/imp-fix-signature.sh ~/.local/imp-current/bin/imp
 ```
 
 ## Quick start
 
 ```bash
-# Open the fullscreen cockpit
+# Fullscreen terminal UI
 imp
 
-# Start the CLI-first interactive chat shell explicitly
+# CLI chat shell
 imp chat
 
-# Open the fullscreen cockpit explicitly
-imp tui
-
-# Viewer/inspector surface (planned)
-imp view logs
-
-# Ask a one-shot question
+# One-shot prompt
 imp -p "What does this project do?"
 
-# Include files as context
+# Attach files as context
 imp @src/main.rs "Explain this code"
 
-# Run a mana unit headlessly
-imp mana 5.1
-# `imp run 5.1` still works as a compatibility alias during migration
-
-# Continue your last session
+# Continue the most recent session
 imp -c
+
+# Execute a mana unit
+imp mana 5.1
 ```
 
-Type `/` in the cockpit editor to open the command palette. Arrow keys, Tab, or Ctrl+N/P to navigate. Enter to select.
+TUI shortcuts:
 
-In the CLI shell, use `:help` for commands and `@file` to attach context.
+| Input | Action |
+|-------|--------|
+| `/` | command palette |
+| `@` | file finder / attach context |
+| `Ctrl+L` | model selector |
+| `Shift+Tab` | cycle thinking level |
+| `/compact` | compact older branch history |
+| `/settings` | edit UI/runtime settings |
+| `/personality` | edit identity and behavior profile |
 
-Notable slash commands:
-- `/new` — start a fresh in-memory session
-- `/compact` — summarize older branch history into a structured handoff while preserving recent turns verbatim for future model context
-- `/personality` — edit identity/behavior/profile settings
-- `/ask` — clarify the request, constraints, or missing inputs
-- `/plan` — shape approach, decomposition, and verify path before larger work
-- `/work` — focus on execution when the path is clear
-- `/improve` — review, refine, harden, and verify the result after the first pass
+CLI shell shortcuts:
 
-## What it does
+| Input | Action |
+|-------|--------|
+| `:help` | show shell commands |
+| `@file` | attach a file |
 
-imp is an agent product and engine — not a wrapper around an LLM API. It runs a full ReAct loop (think → act → observe → repeat), manages context intelligently, and gives the model real tools to work with.
+## Mana
 
-imp is the flagship Rust-native agent product and the native agent runtime experience designed to use mana well. In the happy path, mana is the cross-agent durable substrate, imp reads mana-shaped work directly, executes it live, and writes a rich durable result back so future workers can inherit selectively from mana instead of reconstructing everything from transcripts.
+imp is the live agent runtime for mana-shaped work.
 
-imp should increasingly be understood through an explicit software-work loop:
-- `/ask` — clarify goals, scope, and constraints
-- `/plan` — shape the approach, task boundaries, and verification path
-- `/work` — execute the task with tools, edits, and delegation when needed
-- `/improve` — review, verify, harden, and refine the first result
+**mana** is the durable coordination layer: tasks, epics, facts, decisions, dependencies, workers, logs, and verification gates.
 
-**Tools** — File I/O, shell execution, code search (grep, find, AST scan), web search, diff preview/apply, user prompts, mana unit management, persistent memory, session search across past conversations, and built-in multi-edit for coordinated file changes. Readonly tools run in parallel. Prefer native tools over shell wrappers when available; for mana operations, use the built-in `mana` tool instead of `bash` for equivalent actions.
+**imp** is the execution layer: model loop, tools, terminal UI, provider access, local sessions, context assembly, and runtime policy.
 
-**Context management** — As conversations grow, imp first masks old tool outputs and can now compact older history behind an explicit branch-local compaction boundary. `/compact` preserves recent working turns verbatim, summarizes older work into a structured handoff, and makes future turns use the compacted active history rather than the full raw transcript. Raw session entries remain on disk for replay/fork/export. This complements the mana happy path: keep durable handoff rich when cheap to capture, but reveal context selectively rather than flooding future workers with unnecessary raw history.
-
-**Modes** — Control what the agent can do. `full` for interactive use, `worker` for scoped tasks, `orchestrator` for planning and worker spawning, `reviewer` for read-only analysis. Enforced at both tool registration and execution time — disallowed tools never appear in the prompt. When spawning workers, imp should use mana child jobs as the worker substrate rather than inventing a separate subtask model. In worker mode especially, imp should behave like a native runtime for mana-shaped work rather than a generic chat assistant.
-
-**Sessions** — Every message, tool call, and result is persisted to append-only JSONL. Resume any session, fork from any point, navigate between branches.
-
-## Future-facing direction
-
-This README still describes the current shipped `imp` behavior.
-
-For future-facing platform work, the naming direction is now:
-- `mana` = platform
-- `imp` = flagship Rust-native agent product + default human-facing environment on mana
-- `runtime` = live execution layer
-- `graph` = durable layer
-- `extension` = packaged extensibility
-- `action` = preferred system behavior term
-- `task` = preferred work term
-
-That means future architecture work should increasingly treat:
-- `mana` as the owner of the lower platform/runtime substrate
-- `imp` as the flagship agent product, agent runtime experience, and default human-facing environment on top of mana
-
-This direction does **not** require an immediate deep refactor that hollows out `imp` or reduces it to a thin client.
-
-Current shipped reality to keep in mind:
-- `imp` still ships today as the agent engine and native worker/runtime experience
-- Lua extensions are the current shipped extension path
-- TypeScript extensions are the preferred future direction, not current released behavior
-
-See:
-- `vNext.md`
-- `imp_ontology.md`
-- `../docs/architecture/mana-platform-target-architecture.md`
-
-## TypeScript extensions
-
-imp can import Pi TypeScript extensions into the project-local extension root:
+Preferred command:
 
 ```bash
-imp import --from pi
-# imports Pi extensions into .imp/extensions/pi/<name>/
+imp mana <unit-id>
 ```
 
-TypeScript extension execution is currently a sprint-1 compatibility layer, not full Pi API parity. It requires `bun` on `PATH` and loads extensions from `.imp/extensions/`.
+When running a mana unit, imp loads:
 
-Supported now:
-- Bun-backed `.ts` entrypoints
-- Pi-style `registerTool(...)`
-- TypeBox-style schemas for common object/string/number/boolean/array/union/literal shapes
-- text/details tool results
-- `session_start` lifecycle hooks enough for dynamic tool registration
+- title and description
+- acceptance criteria
+- verify command
+- dependencies and status
+- notes and decisions
+- relevant project context
 
-Stubbed or recorded:
-- `registerCommand(...)`
-- `ctx.ui.notify(...)`
-- `ctx.ui.setStatus(...)`
-- `sessionManager.getBranch()` / `getEntries()`
+Then it executes the work, runs the verify gate, and records the outcome back into mana.
 
-Needs dependencies:
-- missing installable npm/Bun dependencies; imp notifies before any install
+`imp run <unit-id>` remains available as a compatibility alias during migration.
 
-Unsupported or fallback-only:
-- `ctx.ui.custom(...)`
-- rich viewer renderers (`renderCall` / `renderResult`) beyond metadata detection
-- built-in tool overrides
-- unrestricted filesystem/network/process/env/secrets/native tool access
+## Architecture
 
-Missing dependencies are treated as installable setup work, not unsupported extensions. imp should notify and ask before running Bun install commands; it must not install dependencies silently during import.
+```text
+imp/
+├── crates/
+│   ├── imp-cli     CLI entry point, TUI launch, chat/headless/RPC modes
+│   ├── imp-core    Agent loop, tools, sessions, hooks, context, SDK
+│   ├── imp-llm     Streaming LLM client, providers, model registry, auth
+│   ├── imp-lua     Lua extension runtime
+│   └── imp-tui     Fullscreen terminal UI
+```
 
-Lua remains the current stable shipped extension path; TypeScript support is the forward compatibility path and should be treated as limited until this boundary is expanded.
+Runtime boundary:
 
-## TUI
+| Layer | Responsibility |
+|-------|----------------|
+| `imp-cli` | command parsing, login/setup flows, headless execution, RPC/chat entrypoints |
+| `imp-tui` | cockpit UI, editor, views, rendering, interaction state |
+| `imp-core` | agent loop, tool registry, session persistence, context, hooks, mana runtime integration |
+| `imp-llm` | provider abstraction, streaming parsers, auth, model metadata |
+| `imp-lua` | Lua extension loading, sandboxing, bridge APIs |
+| `mana` | durable work graph, facts, decisions, verification, orchestration state |
 
-`imp` opens the fullscreen cockpit by default.
-Use `imp chat` for the CLI-first interactive shell, or `imp tui` if you want to spell the fullscreen path explicitly.
+Useful design docs:
 
-The interactive terminal UI gives you:
-
-- Streaming responses with thinking indicators
-- Optional terminal bell when an agent fully finishes a run
-- Command palette (`/`) with fuzzy search
-- Personality editor (`/personality`) for identity, behavior, scope, and profiles
-- Model selector (Ctrl+L) with quick cycling
-- Thinking level control (Shift+Tab: off → minimal → low → medium → high → xhigh)
-- Session tree view for branching conversations
-- Manual `/compact` command for structured context compaction of long sessions
-- Sidebar for tool output inspection
-- Input history, multi-line editing, file finder (`@`)
-- Mouse support for scrolling and clicking tool calls
+- `ARCHITECTURE.md`
+- `AGENTS.md`
+- `imp_ontology.md`
+- `vNext.md`
+- `../docs/architecture/mana-platform-target-architecture.md`
 
 ## Tools
 
-| Tool | What it does |
-|------|-------------|
-| `read` | Read files (text + images), with offset/limit for large files |
-| `write` | Create or overwrite files, auto-creates directories |
-| `edit` | Find-and-replace with exact text matching |
-| `multi_edit` | Multiple edits to one file in a single call |
-| `bash` | Shell execution in the workspace; prefer more specific native tools when available |
-| `grep` | Regex search across files, respects .gitignore |
-| `find` | Glob-based file search |
-| `ls` | Directory listing |
-| `diff` | Unified diff preview and patch application |
-| `scan` | Tree-sitter AST extraction — types, functions, imports |
-| `web` | Web search (Tavily/Exa) and page content extraction |
-| `ask` | Prompt the user for input or multiple-choice |
-| `mana` | Native mana work coordination — status, list/show, create/update/close/claim/release, logs/agents, next/tree, and legacy run compatibility during migration |
-| `memory` | Persistent memory across sessions |
-| `session_search` | Search past conversations from the local session index |
+imp exposes native tools to the agent. Native tools are preferred over shell commands where available.
 
-You can also define shell tools via TOML config, or register tools from Lua extensions.
+| Tool | Purpose |
+|------|---------|
+| `read` | read text files and images with offset/limit support |
+| `write` | create or overwrite files |
+| `edit` | exact find/replace edits |
+| `multi_edit` | multiple coordinated edits to one file |
+| `bash` | shell execution with timeout/cancellation |
+| `git` | status, diff, log, stage, commit, restore, worktrees |
+| `scan` | tree-sitter structural code extraction |
+| `web` | web search, page read, YouTube metadata/caption extraction |
+| `ask` | ask the user for input or choices |
+| `mana` | inspect/update/create/close/claim/release/run mana units |
+| `memory` | persistent memory across sessions |
+| `session_search` | search local conversation history |
 
-## Rust SDK preview
+Readonly tools can run in parallel. Tools are filtered by mode before they are shown to the model and checked again at execution time.
 
-`imp-core` already exposes the seed of an embeddable Rust SDK.
-The new curated entry point is `imp_core::sdk`, which re-exports the main host-facing pieces:
+## Sessions and context
 
-- `ImpSession` — create a session, prompt, steer, follow up, cancel, and wait
-- `SessionOptions` / `SessionChoice` — configure persistence, model hints, mode, UI, and task context
-- `AgentEvent` — consume the runtime event stream
-- `UserInterface` — bridge host UI interactions like confirm/input/select/status/widget/custom
-- `ThinkingLevel`, `Model`, and the core `Result` / `Error` types
+Sessions are append-only JSONL records containing:
 
-Example:
+- user and assistant messages
+- tool calls and tool results
+- usage records
+- branch metadata
+- compaction entries
+- checkpoint records
 
-```rust,no_run
-use imp_core::sdk::{AgentEvent, ImpSession, Result, SessionOptions};
+Supported session operations:
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let mut session = ImpSession::create(SessionOptions {
-        cwd: std::env::current_dir()?,
-        ..Default::default()
-    })
-    .await?;
+- continue recent work with `imp -c`
+- fork/navigate branch history
+- persist and reopen sessions
+- compact older branch history with `/compact`
+- preserve raw entries for replay/export/debugging
 
-    session.prompt("Summarize this repository.").await?;
+Context controls:
 
-    while let Some(event) = session.recv_event().await {
-        match event {
-            AgentEvent::AgentEnd { .. } => break,
-            _ => {}
-        }
-    }
-
-    session.wait().await
-}
-```
-
-See `crates/imp-core/examples/sdk_session.rs` for a small working example.
-This first SDK slice intentionally stays close to the existing `ImpSession` runtime rather than inventing a second parallel abstraction. A higher-level host runtime wrapper may come later.
-
-## Providers
-
-imp works with 12 LLM providers out of the box. Native integrations for Anthropic, OpenAI, and Google, plus any provider that speaks the OpenAI Chat Completions protocol.
-
-| Provider | Models | Auth |
-|----------|--------|------|
-| Anthropic | Claude Sonnet 4.6, Haiku 4.5, Opus 4.6 | `ANTHROPIC_API_KEY` or OAuth |
-| OpenAI | GPT-5.4, GPT-5.4 mini, GPT-5.4 nano, GPT-5.3 ChatGPT, GPT-5.3 Codex, plus custom model strings for preview/legacy models | `OPENAI_API_KEY` |
-| Google | Gemini 2.5 Pro, Flash | `GOOGLE_API_KEY` |
-| DeepSeek | DeepSeek V3, R1 | `DEEPSEEK_API_KEY` |
-| Moonshot / Kimi | Kimi K2.6, K2.5, K2 Thinking, plus custom `kimi-*` / `moonshot-*` model strings | `MOONSHOT_API_KEY` or `KIMI_API_KEY` |
-| Groq | Llama 3.3 70B | `GROQ_API_KEY` |
-| Cerebras | Llama 3.3 70B | `CEREBRAS_API_KEY` |
-| xAI | Grok 3, Grok 3 Mini | `XAI_API_KEY` |
-| Mistral | Mistral Large, Codestral | `MISTRAL_API_KEY` |
-| Together | Llama 3.3 70B Turbo, Qwen 2.5 72B | `TOGETHER_API_KEY` |
-| OpenRouter | Any model via OpenRouter | `OPENROUTER_API_KEY` |
-| Fireworks | Llama 3.3 70B | `FIREWORKS_API_KEY` |
-
-Set an env var and it's auto-detected — no login step needed. Prompt caching is automatic on Anthropic (system prompt, tools, recent turns).
-
-imp also uses provider-tuned default output caps when `max_tokens` is not set explicitly. That helps avoid accidentally requesting each model's absolute maximum completion size on every turn, which improves latency and reduces output-token spend while preserving explicit user overrides.
-
-You can set a default output cap in config:
-
-```toml
-# ~/.config/imp/config.toml or <project>/.imp/config.toml
-max_tokens = 2048
-```
-
-Or override per run:
-
-```bash
-imp --max-tokens 2048
-```
-
-### Web search provider keys
-
-The `web` tool supports Tavily, Exa, Linkup, and Perplexity.
-
-You can configure Tavily and Exa in either of three ways:
-
-```bash
-# Option 1: environment variables
-export TAVILY_API_KEY=tvly-...
-export EXA_API_KEY=exa-...
-
-# Option 2: save them in imp's auth store from the CLI
-imp web-login tavily
-imp web-login exa
-imp secrets list
-imp secrets show exa
-imp secrets exa
-imp secrets my-service
-imp secrets rm my-service
-
-# Option 3: inside the TUI app
-# /secrets → choose a provider/service
-# or /settings → Tavily API key / Exa API key fields
-```
-
-Saved keys now live in **imp's secure auth storage**: secret values go to your OS secret store, while `~/.imp/auth.json` keeps only metadata. On macOS imp uses Keychain, on Linux it uses Secret Service (for example GNOME Keyring or KWallet), and on Windows it uses the native credential store. `imp secrets doctor` verifies that saved metadata still points at readable secure-storage values. Once saved, the `web` tool will auto-detect keys even if you have not exported env vars in your shell.
-
-The `web` tool can also read YouTube watch, shorts, embed, and `youtu.be` URLs natively. It fetches public video metadata and captions/transcripts over HTTP without `yt-dlp`, media downloads, or a web-search API key. YouTube extraction is best-effort because YouTube's internal client profiles change; when captions are unavailable, imp returns metadata-only context with diagnostics instead of pretending a transcript exists.
-
-The first-run setup flow now also includes an optional web-search step where you can choose Tavily, Exa, or skip for now.
-
-Provider selection order for the `web` tool:
-1. explicit tool param (`provider = "exa"`)
-2. `IMP_WEB_PROVIDER`
-3. first available saved/env credential among Tavily, Exa, Linkup, Perplexity
-4. default fallback (`tavily`)
-
-```bash
-# OAuth login
-imp login              # Anthropic OAuth
-imp login openai       # OpenAI / ChatGPT OAuth
-imp login kimi         # Guided Kimi API-key setup into imp's secure auth store
-
-# API/service secrets
-imp secrets moonshot     # Prompts for api_key
-imp secrets deepseek     # Prompts for api_key
-imp secrets exa          # Prompts for api_key
-imp secrets my-service   # Prompts for field names, then values
-imp secrets list         # List configured secret providers
-imp secrets show exa     # Inspect saved secret metadata (not values)
-imp secrets rm my-service # Remove saved credentials
-```
-
-For Kimi API, imp uses the native secret store or env vars. Save a key with `imp login kimi` or `imp secrets moonshot`, or set `MOONSHOT_API_KEY` (or `KIMI_API_KEY`).
-
-For arbitrary services, `imp secrets <provider>` stores named secret fields in imp's secure auth store. The flow is generic: you enter field names first (default `api_key`), then imp prompts for each value. Lua extensions can then read them with `imp.secret("provider", "field")` or `imp.secret_fields("provider")` without relying on `.env` files.
-
-# Or just set the env var
-export MOONSHOT_API_KEY=sk-...
-export DEEPSEEK_API_KEY=sk-...
-
-# Switch models
-imp -m deepseek        # CLI flag
-imp -m grok            # Aliases work
-# or Ctrl+L in the TUI
-```
-
-## Configuration
-
-1. Built-in defaults
-2. `~/.config/imp/config.toml` — personal
-3. `<project>/.imp/config.toml` — per-repo
-4. Environment variables (`IMP_MODEL`, `IMP_MODE`, `IMP_THINKING`)
-5. CLI flags
-
-```toml
-# ~/.config/imp/config.toml
-model = "sonnet"
-thinking = "medium"
-max_turns = 100
-
-[context]
-observation_mask_threshold = 0.6
-mask_window = 10
-
-[personality.profile.identity]
-name = "imp"
-work_style = "practical"
-voice = "concise"
-focus = "coding"
-role = "agent"
-
-[personality.profile.sliders]
-autonomy = "high"
-verbosity = "low"
-caution = "high"
-warmth = "medium"
-planning_depth = "medium"
-
-[personality.profiles]
-active = "builder"
-
-[personality.profiles.saved.builder.identity]
-name = "imp"
-work_style = "practical"
-voice = "concise"
-focus = "coding"
-role = "agent"
-
-[personality.profiles.saved.builder.sliders]
-autonomy = "high"
-verbosity = "low"
-caution = "high"
-warmth = "medium"
-planning_depth = "medium"
-
-
-[web]
-search_provider = "exa"
-
-[ui]
-notify_on_agent_complete = true
-```
-
-Personality is layered through the same config stack as everything else:
-- global personality in `~/.config/imp/config.toml`
-- project personality in `<project>/.imp/config.toml`
-- project values override global values for that repository
-
-Use `/personality` in the TUI to edit:
-- the identity sentence (`You are imp, a practical, concise, coding agent.`)
-- 5-band behavior sliders
-- global vs project scope
-- named personality profiles
-
-The built-in picker lists are structured rather than freeform:
-- work style: practical, careful, disciplined, methodical, focused, thorough, precise, deliberate, skeptical, patient
-- voice: concise, clear, direct, calm, thoughtful, collaborative, structured, friendly, terse, warm
-- focus: coding, engineering, software, debugging, research, writing, planning, operations, analysis, general
-- role: agent, assistant, worker, collaborator, partner, reviewer, planner
-
-Slider bands use five stable labels:
-- very low
-- low
-- balanced
-- high
-- very high
-
-
-Use `/settings` in the TUI to edit display and behavior preferences too, including the completion bell (`Bell on done`).
-
-```bash
-export IMP_WEB_PROVIDER=exa
-```
+- old tool outputs can be masked when context is tight
+- compaction preserves recent turns verbatim and summarizes older work
+- mana units carry durable task context outside the chat transcript
 
 ## Modes
 
-| Mode | Allowed tools | Purpose |
-|------|--------------|---------|
-| `full` | everything | Interactive use |
-| `worker` | read, write, bash, ask | Execute a scoped task |
-| `orchestrator` | read, mana, ask | Plan and spawn workers |
-| `planner` | read, mana (create), ask | Decompose work |
-| `reviewer` | read, ask | Read-only analysis |
-| `auditor` | read, mana (read-only) | Inspect and report |
+| Mode | Purpose |
+|------|---------|
+| `full` | normal interactive use |
+| `worker` | execute a scoped task |
+| `orchestrator` | plan/decompose and coordinate workers |
+| `planner` | read, ask, and create structured work |
+| `reviewer` | read-only code/design review |
+| `auditor` | read-only inspection with mana visibility |
+
+Set mode with config, env, or CLI where supported:
 
 ```bash
 IMP_MODE=worker imp mana 5.1
 ```
 
-## Spawning workers with mana child jobs
+Mode enforcement happens during tool registration and tool execution.
 
-When `imp` spawns workers for durable work, it should create **mana child jobs** under the parent job instead of inventing a second todo or planning system.
+## Providers and secrets
 
-Use a concise child-job description with:
-- goal plus current-state framing
-- clear scope boundaries, including out-of-scope notes
-- one expected deliverable
-- explicit patch or no-patch guidance
-- important files or subsystem focus when known
-- a concrete done condition and verify expectation
+imp includes native Anthropic, OpenAI, and Google integrations, plus OpenAI-compatible providers.
 
-The full child-job contract and reusable template live in `ARCHITECTURE.md`.
+| Provider | Auth |
+|----------|------|
+| Anthropic | `ANTHROPIC_API_KEY` or OAuth |
+| OpenAI / ChatGPT / Codex | `OPENAI_API_KEY` or OAuth where supported |
+| Google | `GOOGLE_API_KEY` |
+| Moonshot / Kimi | `MOONSHOT_API_KEY`, `KIMI_API_KEY`, or stored secret |
+| DeepSeek | `DEEPSEEK_API_KEY` |
+| Groq | `GROQ_API_KEY` |
+| Cerebras | `CEREBRAS_API_KEY` |
+| xAI | `XAI_API_KEY` |
+| Mistral | `MISTRAL_API_KEY` |
+| Together | `TOGETHER_API_KEY` |
+| OpenRouter | `OPENROUTER_API_KEY` |
+| Fireworks | `FIREWORKS_API_KEY` |
 
-## Lua extensions
+Common auth commands:
 
-Drop scripts in `~/.config/imp/lua/` or `<project>/.imp/lua/`:
+```bash
+imp login               # Anthropic OAuth
+imp login openai        # OpenAI / ChatGPT OAuth
+imp login kimi          # guided Kimi API-key setup
+
+imp secrets moonshot    # store an API key securely
+imp secrets list        # list configured providers
+imp secrets show exa    # show metadata, not secret values
+imp secrets doctor      # verify secure-storage references
+```
+
+Secret storage:
+
+| Platform | Store |
+|----------|-------|
+| macOS | Keychain |
+| Linux | Secret Service, e.g. GNOME Keyring or KWallet |
+| Windows | native credential store |
+
+`~/.imp/auth.json` stores metadata only. Secret values are stored in the OS credential store.
+
+## Web
+
+The `web` tool supports Tavily, Exa, Linkup, and Perplexity.
+
+Provider selection order:
+
+1. explicit tool parameter
+2. `IMP_WEB_PROVIDER`
+3. first available saved/env credential
+4. default fallback
+
+```bash
+export TAVILY_API_KEY=tvly-...
+export EXA_API_KEY=exa-...
+export IMP_WEB_PROVIDER=exa
+
+imp web-login tavily
+imp web-login exa
+imp secrets exa
+```
+
+YouTube support:
+
+- watch, shorts, embed, and `youtu.be` URLs
+- public metadata extraction
+- public captions/transcripts when available
+- no `yt-dlp`, media download, or web-search API key required
+- best-effort extraction; unavailable captions return metadata and diagnostics
+
+## Extensions
+
+### Lua
+
+Lua is the current stable extension path.
+
+Load paths:
+
+- `~/.config/imp/lua/`
+- `<project>/.imp/lua/`
+
+Example:
 
 ```lua
 imp.register_tool({
@@ -461,151 +344,168 @@ imp.on("after_file_write", function(event)
 end)
 ```
 
+Lua extensions can register tools, commands, and hooks. Capability policy controls extension access to shell, filesystem, HTTP, secrets, and native imp tools.
+
+### TypeScript
+
+TypeScript extension support is a compatibility and forward-direction layer, not full Pi API parity.
+
+```bash
+imp import --from pi
+```
+
+Current support:
+
+- Bun-backed `.ts` entrypoints
+- Pi-style `registerTool(...)`
+- common TypeBox-style schemas
+- text/details tool results
+- limited `session_start` lifecycle hooks for dynamic tool registration
+
+Limited/stubbed:
+
+- `registerCommand(...)`
+- `ctx.ui.notify(...)` / `ctx.ui.setStatus(...)`
+- `sessionManager.getBranch()` / `getEntries()`
+- rich custom UI renderers
+- built-in tool overrides
+- unrestricted filesystem/network/process/env/secrets/native access
+
+imp should notify and ask before running Bun install commands; it must not install dependencies silently during import.
+
 ## Hooks
 
-Shell hook commands support placeholder interpolation. If a placeholder may contain shell-sensitive text, quote the placeholder itself in the template — for example `'{command}'` or `"{command}"` — so imp can escape it as one shell argument before executing `sh -c`.
+Shell hook commands support placeholder interpolation. Quote placeholders that may contain shell-sensitive text, for example `'{command}'` or `"{command}"`, so imp can escape the value as one shell argument before executing `sh -c`.
 
 | Event | When |
 |-------|------|
-| `before_tool_call` | Before tool executes — can block |
-| `after_tool_call` | After tool completes — can modify result |
-| `after_file_write` | After write/edit modifies a file |
-| `before_llm_call` | Before each LLM request |
-| `on_context_threshold` | Context usage crosses a configured ratio |
-| `on_session_start/shutdown` | Session lifecycle |
-| `on_agent_start/end` | Agent loop lifecycle |
-| `on_turn_end` | Each agent turn completes |
+| `before_tool_call` | before a tool executes; can block |
+| `after_tool_call` | after a tool completes; can modify result |
+| `after_file_write` | after write/edit modifies a file |
+| `before_llm_call` | before each model request |
+| `on_context_threshold` | context usage crosses a configured ratio |
+| `on_session_start` / `on_session_shutdown` | session lifecycle |
+| `on_agent_start` / `on_agent_end` | agent loop lifecycle |
+| `on_turn_end` | each agent turn completes |
 
-## Architecture
+## Configuration
 
+Configuration precedence, lowest to highest:
+
+1. built-in defaults
+2. `~/.config/imp/config.toml`
+3. `<project>/.imp/config.toml`
+4. environment variables such as `IMP_MODEL`, `IMP_MODE`, `IMP_THINKING`
+5. CLI flags
+
+Example:
+
+```toml
+model = "sonnet"
+thinking = "medium"
+max_turns = 100
+max_tokens = 2048
+
+[context]
+observation_mask_threshold = 0.6
+mask_window = 10
+
+[web]
+search_provider = "exa"
+
+[ui]
+notify_on_agent_complete = true
+
+[personality.profile.identity]
+name = "imp"
+work_style = "practical"
+voice = "concise"
+focus = "coding"
+role = "agent"
+
+[personality.profile.sliders]
+autonomy = "high"
+verbosity = "low"
+caution = "high"
+warmth = "medium"
+planning_depth = "medium"
 ```
-imp/
-├── crates/
-│   ├── imp-llm     Streaming LLM client, model registry, OAuth
-│   ├── imp-core    Agent engine, tools, sessions, hooks, context
-│   ├── imp-tui     Terminal UI
-│   ├── imp-lua     Lua scripting runtime
-│   └── imp-cli     Binary entry point
+
+TUI configuration surfaces:
+
+- `/settings` — display and runtime preferences
+- `/personality` — identity, behavior sliders, global/project scope, profiles
+- `/secrets` — provider/service credential setup
+
+## Rust SDK
+
+`imp-core` exposes an early SDK through `imp_core::sdk`.
+
+Re-exported host-facing types:
+
+- `ImpSession`
+- `SessionOptions`
+- `SessionChoice`
+- `AgentEvent`
+- `UserInterface`
+- `ThinkingLevel`
+- `Model`
+- `Result` / `Error`
+
+Example:
+
+```rust,no_run
+use imp_core::sdk::{AgentEvent, ImpSession, Result, SessionOptions};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut session = ImpSession::create(SessionOptions {
+        cwd: std::env::current_dir()?,
+        ..Default::default()
+    })
+    .await?;
+
+    session.prompt("Summarize this repository.").await?;
+
+    while let Some(event) = session.recv_event().await {
+        if let AgentEvent::AgentEnd { .. } = event {
+            break;
+        }
+    }
+
+    session.wait().await
+}
 ```
 
-**imp-llm** is standalone — you can use it as a Rust library for streaming LLM access without the agent engine.
+See `crates/imp-core/examples/sdk_session.rs` for a working example.
 
-See `ARCHITECTURE.md` for design notes, including the mana child-job contract for planner/orchestrator-authored work.
+## Diagnostics
 
-## Benchmarks
-
-`imp-core` includes focused benchmarks for grep/search and other hot paths:
+Benchmarks:
 
 ```bash
-cargo bench -p imp-core --bench grep_vs_probe
 cargo bench -p imp-core --bench core_hot_paths
+bash tools/run-benchmarks.sh
 ```
 
-Convenience wrapper:
+Local diagnostics:
 
 ```bash
-cd imp && bash tools/run-benchmarks.sh
+bash tools/run-leaks.sh
+bash tools/run-miri.sh
+bash tools/run-asan.sh
+bash tools/run-tsan.sh
+bash tools/run-stress.sh
 ```
 
-## Memory / leak checks
+See `tools/README.md` for requirements and caveats.
 
-For local diagnostics on macOS:
+## Influences
 
-```bash
-cd imp && bash tools/run-leaks.sh
-cd imp && bash tools/run-miri.sh
-cd imp && bash tools/run-asan.sh
-cd imp && bash tools/run-tsan.sh
-cd imp && bash tools/run-stress.sh
-```
+imp's design draws from:
 
-See `imp/tools/README.md` for caveats and requirements.
-
-## Integration with mana
-
-imp is the native worker/runtime and orchestrator for [mana](https://github.com/kfcafe/mana), a coordination substrate for AI coding agents.
-
-Preferred execution framing:
-
-```bash
-imp mana <unit-id>
-```
-
-`imp run <unit-id>` still works as a compatibility alias during migration.
-
-In that model, imp reads the unit's title, description, verify command, and relevant mana state, works through the task, and reports back. The verify gate must pass for the unit to close.
-
-The current repo still contains `mana run`-style compatibility behavior, but that is legacy boundary language on the path to disappearing rather than the intended long-term architecture.
-
-## Install
-
-**Homebrew** (macOS + Linux):
-```bash
-brew tap kfcafe/tap && brew install imp
-```
-
-**Direct download** (Linux):
-```bash
-# x86_64
-curl -LO https://github.com/kfcafe/imp/releases/latest/download/imp-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-tar xzf imp-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-sudo mv imp-0.1.0-x86_64-unknown-linux-gnu/imp /usr/local/bin/
-
-# aarch64
-curl -LO https://github.com/kfcafe/imp/releases/latest/download/imp-0.1.0-aarch64-unknown-linux-gnu.tar.gz
-tar xzf imp-0.1.0-aarch64-unknown-linux-gnu.tar.gz
-sudo mv imp-0.1.0-aarch64-unknown-linux-gnu/imp /usr/local/bin/
-```
-
-**From source:**
-```bash
-git clone https://github.com/kfcafe/imp.git
-cd imp
-uu install --default
-imp
-```
-
-`uu install --default` runs the repo's post-install hook, so local source installs repair the active shell `imp` path automatically (for example when `~/bin/imp` shadows `~/.cargo/bin/imp`).
-
-If you prefer raw Cargo, this also works:
-
-```bash
-cargo install --path .
-~/.cargo/bin/imp install-local
-imp
-```
-
-`uu install` now works from the repo root too because it resolves to the same root install target, and `uu install --default` additionally runs the repo post-install hook when present.
-
-For local source upgrades, prefer:
-
-```bash
-uu install --default
-```
-
-If you are bypassing `uu`, the manual equivalent is:
-
-```bash
-cargo install --path .
-~/.cargo/bin/imp install-local
-```
-
-## macOS local install note
-
-If a locally installed `imp` binary at a replaced path is killed immediately after install, re-sign it ad hoc:
-
-```bash
-bash tools/imp-fix-signature.sh ~/.local/imp-current/bin/imp
-```
-
-or directly:
-
-```bash
-codesign --force --sign - ~/.local/imp-current/bin/imp
-```
-
-The repo root source-install target is now intentionally installable so root-level `cargo install --path .` and `uu install` no longer hit the virtual-workspace-manifest error.
-
-## License
-
-Apache-2.0
+- Unix-style local tools and inspectable text workflows
+- ReAct-style tool-using agents
+- issue trackers and build systems with explicit verification gates
+- terminal-native developer tools
+- durable task graphs rather than transcript-only handoff

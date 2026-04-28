@@ -170,7 +170,7 @@ impl KimiCodeOAuth {
         let interval = Duration::from_secs(auth.interval);
         let max_duration = auth
             .expires_in
-            .map(|s| Duration::from_secs(s))
+            .map(Duration::from_secs)
             .unwrap_or_else(|| Duration::from_secs(600));
         let start = std::time::Instant::now();
         let mut printed_wait = false;
@@ -178,7 +178,7 @@ impl KimiCodeOAuth {
         while start.elapsed() < max_duration {
             let (status, data) = self.request_device_token(&auth.device_code).await?;
 
-            if status == 200 && data.get("access_token").is_some() {
+            if status == 200 && data.contains_key("access_token") {
                 let token: TokenResponse = serde_json::from_value(
                     serde_json::to_value(&data).map_err(|e| Error::Auth(e.to_string()))?,
                 )?;
