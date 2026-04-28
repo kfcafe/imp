@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use imp_llm::ThinkingLevel;
 use imp_llm::{AssistantMessage, ContentBlock};
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::{Tool, ToolContext, ToolOutput};
@@ -14,6 +15,8 @@ pub struct ImpTool;
 
 const DEFAULT_AD_HOC_SPAWN_TIMEOUT_SECS: u64 = 300;
 const AD_HOC_SPAWN_CANCEL_GRACE_SECS: u64 = 5;
+const DEFAULT_UNIT_WORKER_SYSTEM_PROMPT: &str =
+    "You are a mana unit worker. Execute the assigned unit exactly, use tools if available, update mana with evidence, and stop.";
 
 #[async_trait]
 impl Tool for ImpTool {
@@ -176,6 +179,46 @@ fn unit_worker_status_is_error(status: mana_worker::WorkerStatus) -> bool {
     )
 }
 
+fn optional_non_empty_string(params: &serde_json::Value, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn normalize_mana_dir_override(cwd: &Path, raw: &str) -> PathBuf {
+    let resolved = super::resolve_path(cwd, raw);
+    if resolved.file_name().and_then(|name| name.to_str()) == Some(".mana") {
+        resolved
+    } else {
+        let child = resolved.join(".mana");
+        if child.is_dir() {
+            child
+        } else {
+            resolved
+        }
+    }
+}
+
+fn unit_spawn_system_prompt(params: &serde_json::Value) -> String {
+    optional_non_empty_string(params, "system_prompt")
+        .unwrap_or_else(|| DEFAULT_UNIT_WORKER_SYSTEM_PROMPT.to_string())
+}
+
+fn ad_hoc_spawn_mode(params: &serde_json::Value) -> AgentMode {
+    if params
+        .get("no_tools")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        AgentMode::Reviewer
+    } else {
+        AgentMode::Worker
+    }
+}
+
 async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Result<ToolOutput> {
     let unit_id = params
         .get("unit_id")
@@ -187,7 +230,7 @@ async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Resu
     let mana_dir_override = params
         .get("mana_dir")
         .and_then(|v| v.as_str())
-        .map(|raw| super::resolve_path(&ctx.cwd, raw));
+        .map(|raw| normalize_mana_dir_override(&ctx.cwd, raw));
 
     let assignment =
         mana_worker::load_assignment_with_mana_dir(&ctx.cwd, unit_id, mana_dir_override.as_deref())
@@ -215,10 +258,7 @@ async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Resu
             .get("max_tokens")
             .and_then(|v| v.as_u64())
             .map(|v| v as u32),
-        system_prompt: params
-            .get("system_prompt")
-            .and_then(|v| v.as_str())
-            .map(ToOwned::to_owned),
+        system_prompt: Some(unit_spawn_system_prompt(&params)),
         no_tools: params
             .get("no_tools")
             .and_then(|v| v.as_bool())
@@ -345,7 +385,7 @@ async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Re
             .map(ToOwned::to_owned),
         api_key: None,
         thinking: parse_optional_thinking(&params)?,
-        mode: Some(AgentMode::Reviewer),
+        mode: Some(ad_hoc_spawn_mode(&params)),
         max_turns: params
             .get("max_turns")
             .and_then(|v| v.as_u64())
@@ -354,11 +394,11 @@ async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Re
             .get("max_tokens")
             .and_then(|v| v.as_u64())
             .map(|v| v as u32),
-        system_prompt: params
-            .get("system_prompt")
-            .and_then(|v| v.as_str())
-            .map(ToOwned::to_owned),
-        no_tools: false,
+        system_prompt: optional_non_empty_string(&params, "system_prompt"),
+        no_tools: params
+            .get("no_tools")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         session: SessionChoice::InMemory,
         task: None,
         facts: Vec::new(),
@@ -513,6 +553,65 @@ mod tests {
             DEFAULT_AD_HOC_SPAWN_TIMEOUT_SECS
         );
         assert_eq!(ad_hoc_spawn_timeout_secs(&json!({"timeout_secs": 12})), 12);
+    }
+
+    #[test]
+    fn normalize_mana_dir_override_accepts_project_root_or_mana_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        let mana_dir = project_root.join(".mana");
+        std::fs::create_dir_all(&mana_dir).unwrap();
+
+        assert_eq!(
+            normalize_mana_dir_override(temp.path(), project_root.to_str().unwrap()),
+            mana_dir
+        );
+        assert_eq!(
+            normalize_mana_dir_override(temp.path(), mana_dir.to_str().unwrap()),
+            mana_dir
+        );
+    }
+
+    #[test]
+    fn unit_spawn_system_prompt_defaults_when_missing_or_blank() {
+        assert_eq!(
+            unit_spawn_system_prompt(&json!({})),
+            DEFAULT_UNIT_WORKER_SYSTEM_PROMPT
+        );
+        assert_eq!(
+            unit_spawn_system_prompt(&json!({"system_prompt": "   "})),
+            DEFAULT_UNIT_WORKER_SYSTEM_PROMPT
+        );
+        assert_eq!(
+            unit_spawn_system_prompt(&json!({"system_prompt": " custom worker "})),
+            "custom worker"
+        );
+    }
+
+    #[test]
+    fn ad_hoc_spawn_uses_worker_mode_unless_no_tools_requested() {
+        assert_eq!(ad_hoc_spawn_mode(&json!({})), AgentMode::Worker);
+        assert_eq!(
+            ad_hoc_spawn_mode(&json!({"no_tools": false})),
+            AgentMode::Worker
+        );
+        assert_eq!(
+            ad_hoc_spawn_mode(&json!({"no_tools": true})),
+            AgentMode::Reviewer
+        );
+    }
+
+    #[test]
+    fn optional_non_empty_string_trims_and_filters_blank_values() {
+        assert_eq!(optional_non_empty_string(&json!({}), "value"), None);
+        assert_eq!(
+            optional_non_empty_string(&json!({"value": "   "}), "value"),
+            None
+        );
+        assert_eq!(
+            optional_non_empty_string(&json!({"value": " hello "}), "value"),
+            Some("hello".to_string())
+        );
     }
 
     #[tokio::test]

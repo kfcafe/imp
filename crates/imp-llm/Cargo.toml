@@ -14,7 +14,7 @@ tokio.workspace = true
 futures-core.workspace = true
 futures.workspace = true
 reqwest.workspace = true
-keyring = "3.6"
+keyring = { version = "3.6", features = ["apple-native"] }
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"

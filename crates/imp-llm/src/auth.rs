@@ -116,7 +116,17 @@ impl SecretBackend for KeyringBackend {
         let entry = Self::entry(KEYRING_SERVICE, provider, field)?;
         entry
             .set_password(value)
-            .map_err(|error| Self::map_error("write", provider, field, error))
+            .map_err(|error| Self::map_error("write", provider, field, error))?;
+
+        match Self::read_entry(KEYRING_SERVICE, provider, field)? {
+            Some(stored) if stored == value => Ok(()),
+            Some(_) => Err(crate::error::Error::Auth(format!(
+                "Secure storage write verification failed for {provider}.{field}: readback did not match"
+            ))),
+            None => Err(crate::error::Error::Auth(format!(
+                "Secure storage write verification failed for {provider}.{field}: value was not readable after write"
+            ))),
+        }
     }
 
     fn delete(&self, provider: &str, field: &str) -> Result<()> {
