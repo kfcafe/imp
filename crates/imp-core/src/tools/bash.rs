@@ -250,12 +250,43 @@ fn sanitize_output_text(text: &str) -> String {
 
 fn looks_like_search_command(command: &str) -> bool {
     let trimmed = command.trim_start();
-    trimmed.starts_with("grep ")
+    trimmed.starts_with("rg ")
+        || trimmed == "rg"
+        || trimmed.starts_with("grep ")
         || trimmed.starts_with("grep\n")
+        || trimmed.starts_with("fd ")
+        || trimmed == "fd"
         || trimmed.starts_with("find ")
         || trimmed == "find"
         || trimmed.starts_with("ls ")
         || trimmed == "ls"
+}
+
+fn no_match_exit_is_success(command: &str, exit_code: i32, output: &str) -> bool {
+    if exit_code != 1 || !output.trim().is_empty() {
+        return false;
+    }
+
+    let trimmed = command.trim_start();
+    trimmed.starts_with("rg ")
+        || trimmed == "rg"
+        || trimmed.starts_with("grep ")
+        || trimmed.starts_with("grep\n")
+}
+
+fn command_failure_hint(command: &str, exit_code: i32, output: &str) -> Option<String> {
+    if no_match_exit_is_success(command, exit_code, output) {
+        return Some("No matches found.".to_string());
+    }
+
+    if exit_code == 127 {
+        return Some(
+            "Command not found. Check the executable name or use an installed alternative."
+                .to_string(),
+        );
+    }
+
+    None
 }
 
 #[cfg(feature = "rush-backend")]
@@ -455,6 +486,12 @@ async fn run_command(
             }
 
             let mut result_text = redacted;
+            if let Some(hint) = command_failure_hint(command, exit_code, &result_text) {
+                if !result_text.is_empty() {
+                    result_text.push('\n');
+                }
+                result_text.push_str(&format!("[{hint}]"));
+            }
             if timed_out {
                 result_text.push_str(&format!("\n[Command timed out after {timeout_secs}s]"));
             }
@@ -469,7 +506,9 @@ async fn run_command(
                     "backend": "rush",
                     "injected_secrets": secret_binding_details(&resolved_secret_env),
                 }),
-                is_error: exit_code != 0,
+                is_error: timed_out
+                    || (exit_code != 0
+                        && !no_match_exit_is_success(command, exit_code, &transformed)),
             });
         }
         // rush failed — fall through to sh.
@@ -619,6 +658,13 @@ async fn run_command(
         result_text.push_str(&format!("\n[Command timed out after {timeout_secs}s]"));
     }
 
+    if let Some(hint) = command_failure_hint(command, exit_code, &output) {
+        if !result_text.is_empty() {
+            result_text.push('\n');
+        }
+        result_text.push_str(&format!("[{hint}]"));
+    }
+
     let cancelled = ctx.is_cancelled();
     let details = json!({
         "exit_code": exit_code,
@@ -632,7 +678,9 @@ async fn run_command(
     Ok(ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text: result_text }],
         details,
-        is_error: cancelled || exit_code != 0,
+        is_error: cancelled
+            || timed_out
+            || (exit_code != 0 && !no_match_exit_is_success(command, exit_code, &output)),
     })
 }
 
@@ -1065,6 +1113,45 @@ mod tests {
             _ => panic!("expected text"),
         };
         assert!(text.contains("workdir not found"));
+    }
+
+    #[tokio::test]
+    async fn bash_treats_rg_no_matches_as_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("afile.txt"), "haystack\n").unwrap();
+        let (ctx, _rx) = test_ctx(tmp.path());
+
+        let result = run_command(
+            "rg definitely_not_present .",
+            DEFAULT_TIMEOUT_SECS,
+            &ctx,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(result.details["exit_code"], 1);
+        assert!(result.text_content().unwrap().contains("No matches found"));
+    }
+
+    #[tokio::test]
+    async fn bash_command_not_found_returns_actionable_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = test_ctx(tmp.path());
+
+        let result = run_command(
+            "definitely_not_a_real_command_98765",
+            DEFAULT_TIMEOUT_SECS,
+            &ctx,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_error);
+        assert_eq!(result.details["exit_code"], 127);
+        assert!(result.text_content().unwrap().contains("Command not found"));
     }
 
     // ── rush backend tests ──────────────────────────────────────────

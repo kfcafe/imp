@@ -100,6 +100,7 @@ mod tests {
             file_tracker: Arc::new(std::sync::Mutex::new(
                 imp_core::tools::FileTracker::default(),
             )),
+            anchor_store: Arc::new(imp_core::tools::AnchorStore::new()),
             mode: imp_core::config::AgentMode::Full,
             read_max_lines: 0,
             turn_mana_review: Arc::new(std::sync::Mutex::new(
