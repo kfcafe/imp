@@ -745,6 +745,24 @@ mod tests {
         }
     }
 
+    struct FailingSetBackend;
+
+    impl SecretBackend for FailingSetBackend {
+        fn get(&self, _provider: &str, _field: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn set(&self, provider: &str, field: &str, _value: &str) -> Result<()> {
+            Err(crate::error::Error::Auth(format!(
+                "test secure storage write failed for {provider}.{field}"
+            )))
+        }
+
+        fn delete(&self, _provider: &str, _field: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
     fn test_store(path: std::path::PathBuf) -> AuthStore {
         AuthStore::new_with_backend(path, Arc::new(MockSecretBackend::default()))
     }
@@ -841,6 +859,22 @@ mod tests {
                 .unwrap(),
             "test-secret"
         );
+    }
+
+    #[test]
+    fn store_secret_fields_does_not_save_metadata_when_secure_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = test_store_with_backend(path.clone(), Arc::new(FailingSetBackend));
+
+        let result = store.store_secret_fields(
+            "google",
+            HashMap::from([("api_key".to_string(), "test-api".to_string())]),
+        );
+
+        assert!(result.is_err());
+        assert!(!store.stored.contains_key("google"));
+        assert!(!path.exists());
     }
 
     #[test]

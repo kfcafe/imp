@@ -276,7 +276,7 @@ imp secrets rm my-service
 # or /settings → Tavily API key / Exa API key fields
 ```
 
-Saved keys now live in **imp's secure auth storage**: secret values go to your OS keychain when available, while `~/.config/imp/auth.json` keeps only metadata. Once saved, the `web` tool will auto-detect them even if you have not exported the env vars in your shell.
+Saved keys now live in **imp's secure auth storage**: secret values go to your OS secret store, while `~/.imp/auth.json` keeps only metadata. On macOS imp uses Keychain, on Linux it uses Secret Service (for example GNOME Keyring or KWallet), and on Windows it uses the native credential store. `imp secrets doctor` verifies that saved metadata still points at readable secure-storage values. Once saved, the `web` tool will auto-detect keys even if you have not exported env vars in your shell.
 
 The `web` tool can also read YouTube watch, shorts, embed, and `youtu.be` URLs natively. It fetches public video metadata and captions/transcripts over HTTP without `yt-dlp`, media downloads, or a web-search API key. YouTube extraction is best-effort because YouTube's internal client profiles change; when captions are unavailable, imp returns metadata-only context with diagnostics instead of pretending a transcript exists.
 
