@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
@@ -117,6 +117,28 @@ fn project_agents_candidates(project_dir: &Path) -> [PathBuf; 3] {
     ]
 }
 
+fn push_agents_md_if_unique(
+    results: &mut Vec<AgentsMd>,
+    seen_paths: &mut HashSet<PathBuf>,
+    seen_content: &mut HashSet<String>,
+    path: PathBuf,
+) {
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+    if !seen_paths.insert(canonical_path) {
+        return;
+    }
+
+    if !seen_content.insert(content.clone()) {
+        return;
+    }
+
+    results.push(AgentsMd { path, content });
+}
+
 /// Discover instruction documents by walking up from cwd.
 ///
 /// Canonical imp-native files are `.imp/agents.md` at global and project scope.
@@ -124,19 +146,17 @@ fn project_agents_candidates(project_dir: &Path) -> [PathBuf; 3] {
 /// canonical file at each scope level.
 pub fn discover_agents_md(cwd: &Path, user_config_dir: &Path) -> Vec<AgentsMd> {
     let mut results = Vec::new();
+    let mut seen_paths = HashSet::new();
+    let mut seen_content = HashSet::new();
 
     for path in global_agents_candidates(user_config_dir) {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            results.push(AgentsMd { path, content });
-        }
+        push_agents_md_if_unique(&mut results, &mut seen_paths, &mut seen_content, path);
     }
 
     let mut dir = Some(cwd);
     while let Some(d) = dir {
         for path in project_agents_candidates(d) {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                results.push(AgentsMd { path, content });
-            }
+            push_agents_md_if_unique(&mut results, &mut seen_paths, &mut seen_content, path);
         }
         dir = d.parent();
     }
@@ -417,6 +437,61 @@ mod tests {
             .position(|a| a.content == "project-legacy")
             .unwrap();
         assert!(canonical_idx < legacy_idx);
+    }
+
+    #[test]
+    fn resource_discover_agents_md_dedupes_legacy_global_copy() {
+        let dir = TempDir::new().unwrap();
+        let user_dir = dir.path().join("config");
+        fs::create_dir_all(&user_dir).unwrap();
+        fs::write(user_dir.join("agents.md"), "same global rules").unwrap();
+        fs::write(user_dir.join("AGENTS.md"), "same global rules").unwrap();
+
+        let cwd = dir.path().join("project");
+        fs::create_dir_all(&cwd).unwrap();
+
+        let results = discover_agents_md(&cwd, &user_dir);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|a| a.content == "same global rules")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn resource_discover_agents_md_dedupes_global_when_home_is_ancestor() {
+        let dir = TempDir::new().unwrap();
+        let user_dir = dir.path().join(".imp");
+        let project = dir.path().join("project");
+        fs::create_dir_all(&user_dir).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(user_dir.join("agents.md"), "global rules").unwrap();
+
+        let results = discover_agents_md(&project, &user_dir);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|a| a.content == "global rules")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn resource_discover_agents_md_keeps_distinct_global_and_project_rules() {
+        let dir = TempDir::new().unwrap();
+        let user_dir = dir.path().join("config");
+        let project = dir.path().join("project");
+        fs::create_dir_all(&user_dir).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(user_dir.join("agents.md"), "global rules").unwrap();
+        fs::write(project.join("AGENTS.md"), "project rules").unwrap();
+
+        let results = discover_agents_md(&project, &user_dir);
+        assert!(results.iter().any(|a| a.content == "global rules"));
+        assert!(results.iter().any(|a| a.content == "project rules"));
     }
 
     #[test]
