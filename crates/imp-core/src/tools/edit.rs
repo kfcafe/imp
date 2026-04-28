@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use async_trait::async_trait;
 use imp_llm::truncate_chars_with_suffix;
 use serde_json::json;
@@ -17,15 +19,15 @@ impl Tool for EditTool {
         "Edit File"
     }
     fn description(&self) -> &str {
-        "Edit a file with exact find/replace or sequential edits."
+        "Canonical edit tool. Edit a file with exact find/replace, anchored range replacement, or a validated multi-edit transaction via edits[]."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string" },
-                "oldText": { "type": "string" },
-                "newText": { "type": "string" },
+                "path": { "type": "string", "description": "Path for single-file exact/anchored edits, or default path for transaction edits. Per-edit path may override this inside edits[]." },
+                "oldText": { "type": "string", "description": "Text to replace for exact/fuzzy single-edit mode" },
+                "newText": { "type": "string", "description": "Replacement text for exact/fuzzy single-edit mode" },
                 "dryRun": {
                     "type": "boolean",
                     "description": "Return the diff and metadata without writing the file"
@@ -38,9 +40,33 @@ impl Tool for EditTool {
                     "type": "boolean",
                     "description": "Replace all exact oldText matches instead of only the first match"
                 },
-                "edits": { "type": "array", "items": { "type": "object", "properties": { "oldText": { "type": "string" }, "newText": { "type": "string" } }, "required": ["oldText", "newText"] } }
+                "anchorStart": {
+                    "type": "string",
+                    "description": "Start anchor emitted by read with anchors=true for anchored range replacement"
+                },
+                "anchorEnd": {
+                    "type": "string",
+                    "description": "Optional end anchor emitted by read with anchors=true. Defaults to anchorStart."
+                },
+                "replacement": {
+                    "type": "string",
+                    "description": "Replacement text for anchored edit mode"
+                },
+                "edits": {
+                    "type": "array",
+                    "description": "Validated transaction edits handled by the canonical edit tool. Each edit supports oldText, newText, and optional path for multi-file transactions.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string", "description": "Optional per-edit path for multi-file transactions" },
+                            "oldText": { "type": "string" },
+                            "newText": { "type": "string" }
+                        },
+                        "required": ["oldText", "newText"]
+                    }
+                }
             },
-            "required": ["path"]
+            "required": []
         })
     }
     fn is_readonly(&self) -> bool {
@@ -73,11 +99,16 @@ impl Tool for EditTool {
         if raw_path.is_empty() {
             return Ok(ToolOutput::error("Missing required parameter: path"));
         }
+
+        let path = super::resolve_path(&ctx.cwd, raw_path);
+
+        if params.get("anchorStart").and_then(|v| v.as_str()).is_some() {
+            return execute_anchor_edit(&path, raw_path, &params, ctx).await;
+        }
+
         if old_text.is_empty() {
             return Ok(ToolOutput::error("Missing required parameter: oldText"));
         }
-
-        let path = super::resolve_path(&ctx.cwd, raw_path);
 
         if !path.exists() {
             let suggestions = suggest_similar_files(&ctx.cwd, raw_path);
@@ -192,6 +223,137 @@ impl Tool for EditTool {
     }
 }
 
+async fn execute_anchor_edit(
+    path: &Path,
+    raw_path: &str,
+    params: &serde_json::Value,
+    ctx: ToolContext,
+) -> Result<ToolOutput> {
+    let Some(anchor_start_id) = params["anchorStart"].as_str() else {
+        return Ok(ToolOutput::error("Missing required parameter: anchorStart"));
+    };
+    let anchor_end_id = params["anchorEnd"].as_str().unwrap_or(anchor_start_id);
+    let Some(replacement) = params["replacement"].as_str() else {
+        return Ok(ToolOutput::error(
+            "Missing required parameter: replacement for anchored edit mode",
+        ));
+    };
+    let dry_run = params["dryRun"].as_bool().unwrap_or(false);
+
+    if !path.exists() {
+        let suggestions = suggest_similar_files(&ctx.cwd, raw_path);
+        let mut msg = format!("File not found: {}", path.display());
+        if !suggestions.is_empty() {
+            msg.push_str("\n\nDid you mean:");
+            for s in &suggestions {
+                msg.push_str(&format!("\n  {s}"));
+            }
+        }
+        return Ok(ToolOutput::error(msg));
+    }
+
+    let Some(start_anchor) = ctx.anchor_store.get(path, anchor_start_id) else {
+        return Ok(ToolOutput::error(format!(
+            "Anchor not found or expired for {raw_path}: {anchor_start_id}. Re-read with anchors=true before editing."
+        )));
+    };
+    let Some(end_anchor) = ctx.anchor_store.get(path, anchor_end_id) else {
+        return Ok(ToolOutput::error(format!(
+            "Anchor not found or expired for {raw_path}: {anchor_end_id}. Re-read with anchors=true before editing."
+        )));
+    };
+    if start_anchor.line > end_anchor.line {
+        return Ok(ToolOutput::error(
+            "anchorStart must refer to a line before or equal to anchorEnd",
+        ));
+    }
+
+    let raw_content = tokio::fs::read_to_string(path).await?;
+    let content = raw_content.replace("\r\n", "\n");
+    let has_crlf = raw_content.contains("\r\n");
+    let lines = content.lines().collect::<Vec<_>>();
+    let start_idx = start_anchor.line.saturating_sub(1);
+    let end_idx = end_anchor.line.saturating_sub(1);
+    if start_idx >= lines.len() || end_idx >= lines.len() {
+        return Ok(ToolOutput::error(
+            "Anchor line is outside the current file. Re-read with anchors=true before editing.",
+        ));
+    }
+    if super::stable_hash(lines[start_idx]) != start_anchor.content_hash {
+        return Ok(ToolOutput::error(format!(
+            "Stale anchor at line {} in {raw_path}. Re-read with anchors=true before editing.",
+            start_anchor.line
+        )));
+    }
+    if super::stable_hash(lines[end_idx]) != end_anchor.content_hash {
+        return Ok(ToolOutput::error(format!(
+            "Stale anchor at line {} in {raw_path}. Re-read with anchors=true before editing.",
+            end_anchor.line
+        )));
+    }
+
+    let mut replacement_normalized = replacement.replace("\r\n", "\n");
+    let had_trailing_newline = content.ends_with('\n');
+    let mut new_lines = Vec::with_capacity(lines.len() + replacement_normalized.lines().count());
+    new_lines.extend_from_slice(&lines[..start_idx]);
+    if replacement_normalized.ends_with('\n') {
+        replacement_normalized.pop();
+    }
+    if !replacement_normalized.is_empty() {
+        new_lines.extend(replacement_normalized.lines());
+    }
+    new_lines.extend_from_slice(&lines[end_idx + 1..]);
+    let mut new_content = new_lines.join("\n");
+    if had_trailing_newline {
+        new_content.push('\n');
+    }
+
+    let diff = generate_diff(raw_path, &content, &new_content);
+    let final_content = if has_crlf {
+        new_content.replace('\n', "\r\n")
+    } else {
+        new_content.clone()
+    };
+
+    if !dry_run {
+        ctx.checkpoint_state.snapshot_paths(
+            std::slice::from_ref(&path.to_path_buf()),
+            Some(format!("anchored edit {}", path.display())),
+        )?;
+        tokio::fs::write(path, &final_content).await?;
+        if let Ok(mut tracker) = ctx.file_tracker.lock() {
+            tracker.record_read(path);
+        }
+    }
+
+    let refreshed_lines = new_content.lines().collect::<Vec<_>>();
+    let refreshed =
+        ctx.anchor_store
+            .record_lines(path, super::stable_hash(&new_content), 1, &refreshed_lines);
+    let mut msg = diff;
+    if dry_run {
+        msg.push_str("\n(dry run: no changes written)");
+    }
+    msg.push_str("\n(anchored edit: anchors validated before replacement)");
+
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text: msg }],
+        details: json!({
+            "path": path.display().to_string(),
+            "dry_run": dry_run,
+            "anchored": true,
+            "start_line": start_anchor.line,
+            "end_line": end_anchor.line,
+            "refreshed_anchors": refreshed.iter().map(|anchor| json!({
+                "line": anchor.line,
+                "anchor": anchor.id,
+                "content_hash": format!("{:016x}", anchor.content_hash),
+            })).collect::<Vec<_>>(),
+        }),
+        is_error: false,
+    })
+}
+
 fn count_occurrences(content: &str, needle: &str) -> usize {
     if needle.is_empty() {
         return 0;
@@ -251,6 +413,7 @@ mod tests {
             file_cache: Arc::new(crate::tools::FileCache::new()),
             checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
+            anchor_store: Arc::new(crate::tools::AnchorStore::new()),
             lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
@@ -665,6 +828,142 @@ mod tests {
             text.contains("Warning"),
             "expected unread-file warning in output, got: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn anchored_edit_replaces_validated_range_and_checkpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("anchored.txt");
+        std::fs::write(&file, "alpha\nbeta\ngamma\n").unwrap();
+        let ctx = test_ctx(dir.path());
+        let lines = ["beta"];
+        let anchors = ctx.anchor_store.record_lines(
+            &file,
+            super::super::stable_hash("alpha\nbeta\ngamma\n"),
+            2,
+            &lines,
+        );
+
+        let result = EditTool
+            .execute(
+                "c-anchor",
+                json!({
+                    "path": "anchored.txt",
+                    "anchorStart": anchors[0].id,
+                    "replacement": "BETA",
+                }),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "alpha\nBETA\ngamma\n"
+        );
+        assert_eq!(
+            ctx.checkpoint_state.original(&file).as_deref(),
+            Some("alpha\nbeta\ngamma\n")
+        );
+        assert_eq!(result.details["anchored"], true);
+    }
+
+    #[tokio::test]
+    async fn anchored_edit_rejects_stale_anchor_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("stale.txt");
+        std::fs::write(&file, "alpha\nbeta\ngamma\n").unwrap();
+        let ctx = test_ctx(dir.path());
+        let lines = ["beta"];
+        let anchors = ctx.anchor_store.record_lines(
+            &file,
+            super::super::stable_hash("alpha\nbeta\ngamma\n"),
+            2,
+            &lines,
+        );
+        std::fs::write(&file, "alpha\nchanged\ngamma\n").unwrap();
+
+        let result = EditTool
+            .execute(
+                "c-anchor-stale",
+                json!({
+                    "path": "stale.txt",
+                    "anchorStart": anchors[0].id,
+                    "replacement": "BETA",
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.text_content().unwrap().contains("Stale anchor"));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "alpha\nchanged\ngamma\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn anchored_edit_dry_run_does_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("dry-anchor.txt");
+        std::fs::write(&file, "alpha\nbeta\n").unwrap();
+        let ctx = test_ctx(dir.path());
+        let lines = ["beta"];
+        let anchors = ctx.anchor_store.record_lines(
+            &file,
+            super::super::stable_hash("alpha\nbeta\n"),
+            2,
+            &lines,
+        );
+
+        let result = EditTool
+            .execute(
+                "c-anchor-dry",
+                json!({
+                    "path": "dry-anchor.txt",
+                    "anchorStart": anchors[0].id,
+                    "replacement": "BETA",
+                    "dryRun": true,
+                }),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "alpha\nbeta\n");
+        assert!(ctx.checkpoint_state.checkpoints().is_empty());
+        assert!(result.text_content().unwrap().contains("dry run"));
+    }
+
+    #[tokio::test]
+    async fn edit_with_edits_uses_transaction_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("transaction.txt");
+        std::fs::write(&file, "alpha\nbeta\n").unwrap();
+
+        let result = EditTool
+            .execute(
+                "c-transaction",
+                json!({
+                    "path": "transaction.txt",
+                    "edits": [
+                        {"oldText": "alpha", "newText": "ALPHA"},
+                        {"oldText": "beta", "newText": "BETA"}
+                    ]
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "ALPHA\nBETA\n");
+        assert_eq!(result.details["transaction"], true);
+        assert_eq!(result.details["edit_count"], 2);
     }
 
     #[tokio::test]

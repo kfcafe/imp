@@ -29,7 +29,11 @@ impl Tool for ReadTool {
             "properties": {
                 "path": { "type": "string" },
                 "offset": { "type": "number" },
-                "limit": { "type": "number" }
+                "limit": { "type": "number" },
+                "anchors": {
+                    "type": "boolean",
+                    "description": "When true, include opaque per-line anchors for stale-safe anchored edits. Anchors are session-local integrity markers, not security tokens."
+                }
             },
             "required": ["path"]
         })
@@ -89,8 +93,10 @@ impl Tool for ReadTool {
         // Apply offset/limit
         let offset = params["offset"].as_u64().map(|v| v as usize);
         let limit = params["limit"].as_u64().map(|v| v as usize);
+        let include_anchors = params["anchors"].as_bool().unwrap_or(false);
 
         let sliced = apply_offset_limit(&content, offset, limit);
+        let start_line = offset.unwrap_or(1);
 
         // Apply truncation
         let max_lines = ctx.read_max_lines;
@@ -109,6 +115,30 @@ impl Tool for ReadTool {
         };
 
         let mut output = result.content.clone();
+        let mut anchors_json = serde_json::Value::Null;
+        if include_anchors {
+            let visible_lines = result.content.lines().collect::<Vec<_>>();
+            let anchors = ctx.anchor_store.record_lines(
+                &path,
+                super::stable_hash(&content),
+                start_line,
+                &visible_lines,
+            );
+            anchors_json = json!(anchors
+                .iter()
+                .map(|anchor| json!({
+                    "line": anchor.line,
+                    "anchor": anchor.id,
+                    "content_hash": format!("{:016x}", anchor.content_hash),
+                }))
+                .collect::<Vec<_>>());
+            if !anchors.is_empty() {
+                output.push_str("\n\nAnchors:");
+                for anchor in &anchors {
+                    output.push_str(&format!("\n{:>6} {}", anchor.line, anchor.id));
+                }
+            }
+        }
         if result.truncated {
             let note = format!(
                 "\n[…truncated: showing {}/{} lines, {}/{} bytes",
@@ -133,6 +163,7 @@ impl Tool for ReadTool {
                 "truncated": result.truncated,
                 "lines": result.output_lines,
                 "total_lines": result.total_lines,
+                "anchors": anchors_json,
             }),
             is_error: false,
         })
@@ -281,6 +312,7 @@ mod tests {
             file_cache: Arc::new(crate::tools::FileCache::new()),
             checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
+            anchor_store: Arc::new(crate::tools::AnchorStore::new()),
             lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
@@ -493,6 +525,33 @@ mod tests {
         if let Ok(output) = result {
             assert!(output.is_error)
         }
+    }
+
+    #[tokio::test]
+    async fn read_can_emit_line_anchors() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("anchored.txt"), "alpha\nbeta\ngamma\n").unwrap();
+
+        let tool = ReadTool;
+        let ctx = test_ctx(dir.path());
+        let result = tool
+            .execute(
+                "c-anchors",
+                json!({"path": "anchored.txt", "offset": 2, "limit": 1, "anchors": true}),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let text = extract_text(&result);
+        assert!(text.contains("Anchors:"));
+        let anchors = result.details["anchors"].as_array().unwrap();
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0]["line"], 2);
+        let anchor = anchors[0]["anchor"].as_str().unwrap();
+        let path = dir.path().join("anchored.txt");
+        assert!(ctx.anchor_store.get(&path, anchor).is_some());
     }
 
     fn extract_text(output: &ToolOutput) -> String {

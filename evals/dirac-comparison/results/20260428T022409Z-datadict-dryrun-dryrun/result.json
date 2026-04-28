@@ -1,0 +1,28 @@
+{
+  "task": "datadict",
+  "source": {
+    "repo": "https://github.com/django/django.git",
+    "commit": null
+  },
+  "agent": {
+    "command": null,
+    "provider": null,
+    "model": null
+  },
+  "verifier": {
+    "command": ".venv/bin/ruff check <modified-files>",
+    "exit_code": null,
+    "passed": null
+  },
+  "usage": {
+    "input_tokens": null,
+    "output_tokens": null,
+    "cost_usd": null
+  },
+  "artifacts": {
+    "diff": "diff.patch",
+    "transcript": "transcript.txt",
+    "verifier": "verifier.txt"
+  },
+  "dry_run": true
+}

@@ -229,7 +229,12 @@ fn detect_shell(config: &crate::config::ShellConfig) -> String {
         return shell;
     }
 
-    if let Some(shell) = config.command.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(shell) = config
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         return shell.to_string();
     }
 
@@ -707,6 +712,7 @@ mod tests {
             file_cache: Arc::new(crate::tools::FileCache::new()),
             checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
+            anchor_store: Arc::new(crate::tools::AnchorStore::new()),
             lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,

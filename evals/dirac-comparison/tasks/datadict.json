@@ -1,0 +1,9 @@
+{
+  "id": "datadict",
+  "source": "dirac evals/README.md task 8",
+  "repo": "https://github.com/django/django.git",
+  "commit": null,
+  "prompt": "We want to rename the value_from_datadict method to extract_value_from_request in django.forms.Widget and all its subclasses, and update all calls to this method across the codebase. only update the code, no docs or txt files. make sure to run ruff using .venv locally (only run on the files you modify). do NOT run any tests",
+  "imp_command": "imp --provider $PROVIDER --model $MODEL --print < prompt.md",
+  "verifier": ".venv/bin/ruff check <modified-files>"
+}

@@ -374,6 +374,8 @@ pub struct Agent {
     pub checkpoint_state: Arc<crate::tools::CheckpointState>,
     /// Tracks which files have been read; used for staleness and unread-edit warnings.
     pub file_tracker: Arc<std::sync::Mutex<crate::tools::FileTracker>>,
+    /// Session-local anchors emitted by read and consumed by anchored edit mode.
+    pub anchor_store: Arc<crate::tools::AnchorStore>,
     /// Max lines the read tool may return before truncating. 0 means unlimited.
     pub read_max_lines: usize,
     /// Cache options for LLM requests.
@@ -460,6 +462,7 @@ impl Agent {
             file_cache: Arc::new(crate::tools::FileCache::new()),
             checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
+            anchor_store: Arc::new(crate::tools::AnchorStore::new()),
             read_max_lines: 500,
             auth_store: None,
             cache_options: imp_llm::CacheOptions {
@@ -1241,6 +1244,7 @@ impl Agent {
                     file_cache: self.file_cache.clone(),
                     checkpoint_state: self.checkpoint_state.clone(),
                     file_tracker: self.file_tracker.clone(),
+                    anchor_store: self.anchor_store.clone(),
                     lua_tool_loader: self.lua_tool_loader.clone(),
                     mode: self.mode,
                     read_max_lines: self.read_max_lines,

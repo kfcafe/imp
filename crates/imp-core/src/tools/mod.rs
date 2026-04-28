@@ -16,7 +16,9 @@ pub mod shell;
 pub mod web;
 pub mod write;
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -124,10 +126,77 @@ impl FileTracker {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineAnchor {
+    pub id: String,
+    pub line: usize,
+    pub content_hash: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct AnchorStore {
+    files: std::sync::Mutex<HashMap<PathBuf, HashMap<String, LineAnchor>>>,
+}
+
+impl AnchorStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record_lines(
+        &self,
+        path: &Path,
+        file_hash: u64,
+        start_line: usize,
+        lines: &[&str],
+    ) -> Vec<LineAnchor> {
+        let anchors = lines
+            .iter()
+            .enumerate()
+            .map(|(idx, line)| {
+                let line_number = start_line + idx;
+                let content_hash = stable_hash(line);
+                LineAnchor {
+                    id: format!(
+                        "a{:016x}{:08x}{:016x}",
+                        file_hash, line_number, content_hash
+                    ),
+                    line: line_number,
+                    content_hash,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if let Ok(mut files) = self.files.lock() {
+            let entry = files.entry(path.to_path_buf()).or_default();
+            for anchor in &anchors {
+                entry.insert(anchor.id.clone(), anchor.clone());
+            }
+        }
+
+        anchors
+    }
+
+    pub fn get(&self, path: &Path, id: &str) -> Option<LineAnchor> {
+        self.files
+            .lock()
+            .ok()?
+            .get(path)
+            .and_then(|anchors| anchors.get(id).cloned())
+    }
+}
+
+pub fn stable_hash<T: Hash>(value: T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Cloneable runtime hook for loading Lua extension tools into a registry.
 pub type LuaToolLoader = Arc<dyn Fn(&LuaCapabilityPolicy, &mut ToolRegistry) + Send + Sync>;
 
 /// Context provided to tools during execution.
+#[derive(Clone)]
 pub struct ToolContext {
     pub cwd: PathBuf,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -139,6 +208,8 @@ pub struct ToolContext {
     pub checkpoint_state: Arc<CheckpointState>,
     /// Tracks file reads for staleness detection and unread-edit warnings.
     pub file_tracker: Arc<std::sync::Mutex<FileTracker>>,
+    /// Session-local anchors emitted by read and consumed by anchored edit mode.
+    pub anchor_store: Arc<AnchorStore>,
     /// Cloneable Lua extension loader inherited from the parent runtime.
     pub lua_tool_loader: Option<LuaToolLoader>,
     /// Active agent mode — determines which actions are permitted.
@@ -480,7 +551,9 @@ impl ToolRegistry {
         map
     }
 
-    /// Get all tool definitions (for LLM context).
+    /// Get all canonical tool definitions (for LLM context).
+    /// Compatibility aliases such as legacy `multi_edit` are intentionally hidden
+    /// so models learn one canonical edit surface.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let mut defs: Vec<_> = self
             .tools

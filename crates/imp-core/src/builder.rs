@@ -321,7 +321,7 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     tools.register_alias("bash", "shell");
     tools.register_alias("sh", "shell");
     tools.register_alias("imp", "spawn");
-    tools.register_alias("multi_edit", "edit");
+    tools.register_alias("multi_edit", "edit"); // legacy compatibility; edit is canonical for transaction edits
     tools.register_alias("session_search", "recall");
 }
 

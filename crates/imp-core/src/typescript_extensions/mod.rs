@@ -558,6 +558,7 @@ export default function dynamicToolsExtension(pi: ExtensionAPI) {
             file_cache: Arc::new(FileCache::new()),
             checkpoint_state: Arc::new(CheckpointState::default()),
             file_tracker: Arc::new(std::sync::Mutex::new(FileTracker::new())),
+            anchor_store: Arc::new(crate::tools::AnchorStore::new()),
             lua_tool_loader: None,
             mode: AgentMode::Full,
             read_max_lines: 0,

@@ -517,6 +517,7 @@ mod tests {
             file_cache: Arc::new(super::super::FileCache::new()),
             checkpoint_state: Arc::new(super::super::CheckpointState::new()),
             file_tracker: Arc::new(std::sync::Mutex::new(super::super::FileTracker::new())),
+            anchor_store: Arc::new(crate::tools::AnchorStore::new()),
             lua_tool_loader: None,
             mode,
             read_max_lines: 0,
