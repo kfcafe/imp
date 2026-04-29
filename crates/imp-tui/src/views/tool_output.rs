@@ -17,6 +17,15 @@ pub fn styled_tool_output_lines(
         "read" => styled_read_output(tc, highlighter, theme, with_line_numbers),
         "write" => styled_write_output(tc, highlighter, theme),
         "edit" | "multi_edit" => styled_diff_output(tc, theme),
+        "bash" | "shell" => styled_terminal_output(tc, theme),
+        "git" => styled_git_output(tc, theme),
+        "scan" => styled_scan_output(tc, theme),
+        "mana" => styled_mana_output(tc, theme),
+        "web" => styled_web_output(tc, theme),
+        "ask" | "spawn" | "recall" | "extend" | "audit_scan" | "openrouter_secret_run" => {
+            styled_status_output(tc, theme)
+        }
+        "color_palette" => styled_palette_output(tc, theme),
         _ => styled_plain_output(tc, theme),
     }
 }
@@ -190,7 +199,43 @@ fn styled_diff_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>>
     }
 }
 
+fn styled_terminal_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
+    styled_plain_output_with(tc, theme, terminal_line_style)
+}
+
+fn styled_git_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
+    styled_plain_output_with(tc, theme, git_line_style)
+}
+
+fn styled_scan_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
+    styled_plain_output_with(tc, theme, scan_line_style)
+}
+
+fn styled_mana_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
+    styled_plain_output_with(tc, theme, mana_line_style)
+}
+
+fn styled_web_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
+    styled_plain_output_with(tc, theme, web_line_style)
+}
+
+fn styled_palette_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
+    styled_plain_output_with(tc, theme, palette_line_style)
+}
+
+fn styled_status_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
+    styled_plain_output_with(tc, theme, status_line_style)
+}
+
 fn styled_plain_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
+    styled_plain_output_with(tc, theme, plain_line_style)
+}
+
+fn styled_plain_output_with(
+    tc: &DisplayToolCall,
+    theme: &Theme,
+    style_for_line: fn(&str, &Theme, bool) -> Style,
+) -> Vec<Line<'static>> {
     let Some(output) = tc.output.as_deref().or_else(|| {
         if tc.streaming_output.is_empty() {
             None
@@ -201,21 +246,175 @@ fn styled_plain_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>
         return vec![Line::from(Span::styled("Running…", theme.muted_style()))];
     };
 
-    let style = if tc.is_error {
-        theme.error_style()
-    } else {
-        theme.muted_style()
-    };
-
     let rendered: Vec<Line<'static>> = output
         .lines()
-        .map(|line| Line::from(Span::styled(line.to_string(), style)))
+        .map(|line| {
+            Line::from(Span::styled(
+                line.to_string(),
+                style_for_line(line, theme, tc.is_error),
+            ))
+        })
         .collect();
 
     if rendered.is_empty() {
         vec![Line::from(Span::styled("(no output)", theme.muted_style()))]
     } else {
         rendered
+    }
+}
+
+fn plain_line_style(_line: &str, theme: &Theme, is_error: bool) -> Style {
+    if is_error {
+        theme.error_style()
+    } else {
+        Style::default().fg(theme.fg)
+    }
+}
+
+fn terminal_line_style(line: &str, theme: &Theme, is_error: bool) -> Style {
+    if is_error {
+        return theme.error_style();
+    }
+
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("error") || trimmed.starts_with("Error") || trimmed.starts_with("FAIL") {
+        theme.error_style()
+    } else if trimmed.starts_with("warning")
+        || trimmed.starts_with("Warning")
+        || trimmed.starts_with("WARN")
+    {
+        theme.warning_style()
+    } else if trimmed.starts_with("ok")
+        || trimmed.starts_with("PASS")
+        || trimmed.contains(" finished ")
+        || trimmed.contains(" passed")
+    {
+        theme.success_style()
+    } else if trimmed.starts_with('$') || trimmed.starts_with('>') {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg)
+    }
+}
+
+fn git_line_style(line: &str, theme: &Theme, is_error: bool) -> Style {
+    if is_error {
+        return theme.error_style();
+    }
+
+    if line.starts_with('+') && !line.starts_with("+++") {
+        theme.success_style()
+    } else if line.starts_with('-') && !line.starts_with("---") {
+        theme.error_style()
+    } else if line.starts_with("@@")
+        || line.starts_with("diff --git")
+        || line.starts_with("commit ")
+        || line.starts_with("On branch ")
+    {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else if line.starts_with("modified:")
+        || line.starts_with("new file:")
+        || line.starts_with("deleted:")
+        || line.contains("Changes")
+    {
+        theme.warning_style()
+    } else {
+        Style::default().fg(theme.fg)
+    }
+}
+
+fn scan_line_style(line: &str, theme: &Theme, is_error: bool) -> Style {
+    if is_error {
+        return theme.error_style();
+    }
+
+    if line.ends_with(":") || line.starts_with("Action:") || line.starts_with("Task:") {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else if line.trim_start().starts_with('-')
+        || line.contains("Functions")
+        || line.contains("Types")
+    {
+        Style::default().fg(theme.tool_name)
+    } else {
+        Style::default().fg(theme.fg)
+    }
+}
+
+fn mana_line_style(line: &str, theme: &Theme, is_error: bool) -> Style {
+    if is_error || line.contains("failed") || line.contains("blocked") {
+        return theme.error_style();
+    }
+
+    let trimmed = line.trim_start();
+    if line.starts_with("mana delta") || trimmed.starts_with('✓') || trimmed.starts_with("done") {
+        theme.success_style()
+    } else if trimmed.starts_with('▶') || trimmed.starts_with("running") {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else if trimmed.starts_with('!') || line.contains("awaiting") || line.contains("skipped") {
+        theme.warning_style()
+    } else if line.ends_with(':') || matches!(line, "summary" | "units") {
+        Style::default()
+            .fg(theme.tool_name)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg)
+    }
+}
+
+fn web_line_style(line: &str, theme: &Theme, is_error: bool) -> Style {
+    if is_error {
+        return theme.error_style();
+    }
+
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") || line.contains("://") {
+        Style::default().fg(theme.accent)
+    } else if line.starts_with('#') || line.ends_with(':') {
+        Style::default()
+            .fg(theme.tool_name)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg)
+    }
+}
+
+fn palette_line_style(line: &str, theme: &Theme, is_error: bool) -> Style {
+    if is_error {
+        return theme.error_style();
+    }
+
+    if line.contains('#') || line.contains("oklch") || line.contains("rgb") {
+        Style::default().fg(theme.accent)
+    } else if line.ends_with(':') {
+        Style::default()
+            .fg(theme.tool_name)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg)
+    }
+}
+
+fn status_line_style(line: &str, theme: &Theme, is_error: bool) -> Style {
+    if is_error || line.contains("error") || line.contains("failed") {
+        theme.error_style()
+    } else if line.contains("success") || line.contains("completed") || line.contains("created") {
+        theme.success_style()
+    } else if line.contains("warning") || line.contains("skipped") {
+        theme.warning_style()
+    } else if line.ends_with(':') {
+        Style::default()
+            .fg(theme.tool_name)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg)
     }
 }
 
