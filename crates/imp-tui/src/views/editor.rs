@@ -810,36 +810,7 @@ pub fn wrapped_lines_for_width(text: &str, inner_width: u16) -> Vec<String> {
             continue;
         }
 
-        let mut current = String::new();
-        let mut current_width = 0usize;
-
-        for ch in logical.chars() {
-            let ch_width = char_display_width(ch);
-
-            if !current.is_empty() && current_width + ch_width > width {
-                out.push(current);
-                current = String::new();
-                current_width = 0;
-            }
-
-            if current.is_empty() && ch_width > width {
-                out.push(ch.to_string());
-                continue;
-            }
-
-            current.push(ch);
-            current_width += ch_width;
-
-            if current_width == width {
-                out.push(current);
-                current = String::new();
-                current_width = 0;
-            }
-        }
-
-        if !current.is_empty() {
-            out.push(current);
-        }
+        wrap_logical_line(logical, width, &mut out);
     }
 
     if out.is_empty() {
@@ -849,50 +820,92 @@ pub fn wrapped_lines_for_width(text: &str, inner_width: u16) -> Vec<String> {
     out
 }
 
+fn wrap_logical_line(logical: &str, width: usize, out: &mut Vec<String>) {
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    let mut last_whitespace_byte = None;
+
+    for ch in logical.chars() {
+        let ch_width = char_display_width(ch);
+
+        if !current.is_empty() && current_width + ch_width > width {
+            if let Some(split_byte) = last_whitespace_byte {
+                let next = current[split_byte..].trim_start().to_string();
+                let line = current[..split_byte].trim_end().to_string();
+
+                if !line.is_empty() {
+                    out.push(line);
+                }
+
+                current = next;
+                current_width = display_width(&current);
+                last_whitespace_byte = last_whitespace_byte_in(&current);
+            } else {
+                out.push(current);
+                current = String::new();
+                current_width = 0;
+                last_whitespace_byte = None;
+            }
+        }
+
+        if current.is_empty() && ch_width > width {
+            out.push(ch.to_string());
+            continue;
+        }
+
+        current.push(ch);
+        current_width += ch_width;
+
+        if ch.is_whitespace() {
+            last_whitespace_byte = Some(current.len());
+        }
+
+        if current_width == width {
+            if let Some(split_byte) = last_whitespace_byte {
+                let next = current[split_byte..].trim_start().to_string();
+                let line = current[..split_byte].trim_end().to_string();
+
+                if !line.is_empty() {
+                    out.push(line);
+                }
+
+                current = next;
+                current_width = display_width(&current);
+                last_whitespace_byte = last_whitespace_byte_in(&current);
+            } else {
+                out.push(current);
+                current = String::new();
+                current_width = 0;
+                last_whitespace_byte = None;
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        out.push(current);
+    }
+}
+
+fn display_width(text: &str) -> usize {
+    text.chars().map(char_display_width).sum()
+}
+
+fn last_whitespace_byte_in(text: &str) -> Option<usize> {
+    text.char_indices()
+        .filter_map(|(idx, ch)| ch.is_whitespace().then_some(idx + ch.len_utf8()))
+        .last()
+}
+
 pub fn cursor_visual_position_for_text(
     text: &str,
     cursor: usize,
     inner_width: u16,
 ) -> (usize, usize) {
-    let width = inner_width.max(1) as usize;
-    let mut row = 0usize;
-    let mut col = 0usize;
-    let mut byte = 0usize;
-
-    for ch in text.chars() {
-        if byte >= cursor {
-            break;
-        }
-
-        if ch == '\n' {
-            row += 1;
-            col = 0;
-            byte += ch.len_utf8();
-            continue;
-        }
-
-        let ch_width = char_display_width(ch);
-
-        if col > 0 && col + ch_width > width {
-            row += 1;
-            col = 0;
-        }
-
-        if col == 0 && ch_width > width {
-            row += 1;
-            col = 0;
-            byte += ch.len_utf8();
-            continue;
-        }
-
-        col += ch_width;
-        byte += ch.len_utf8();
-
-        if col == width {
-            row += 1;
-            col = 0;
-        }
-    }
+    let cursor = clamp_cursor_to_boundary(text, cursor);
+    let before_cursor = &text[..cursor];
+    let lines = wrapped_lines_for_width(before_cursor, inner_width);
+    let row = lines.len().saturating_sub(1);
+    let col = lines.last().map(|line| display_width(line)).unwrap_or(0);
 
     (row, col)
 }
@@ -926,6 +939,35 @@ mod tests {
         assert_eq!(format_compact_tokens(9_500), "9.50k");
         assert_eq!(format_compact_tokens(12_300), "12.3k");
         assert_eq!(format_compact_tokens(234_000), "234k");
+    }
+
+    #[test]
+    fn wrapped_lines_prefer_word_boundaries() {
+        assert_eq!(
+            wrapped_lines_for_width("hello world", 8),
+            vec!["hello".to_string(), "world".to_string()]
+        );
+    }
+
+    #[test]
+    fn wrapped_lines_split_words_that_exceed_width() {
+        assert_eq!(
+            wrapped_lines_for_width("superlongword", 5),
+            vec!["super".to_string(), "longw".to_string(), "ord".to_string()]
+        );
+    }
+
+    #[test]
+    fn cursor_position_tracks_word_boundary_wraps() {
+        assert_eq!(
+            cursor_visual_position_for_text("hello world", 11, 8),
+            (1, 5)
+        );
+    }
+
+    #[test]
+    fn cursor_position_tracks_partially_wrapped_word() {
+        assert_eq!(cursor_visual_position_for_text("hello world", 9, 8), (1, 3));
     }
 
     #[test]
