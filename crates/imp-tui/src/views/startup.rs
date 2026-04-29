@@ -43,7 +43,10 @@ impl Widget for StartupPanelView<'_> {
         }
 
         let outer = Block::default()
-            .title(Line::from(Span::styled(" imp ", self.theme.accent_style())))
+            .title(Line::from(Span::styled(
+                format!(" imp · {} ", env!("CARGO_PKG_VERSION")),
+                self.theme.accent_style(),
+            )))
             .borders(Borders::ALL)
             .border_style(self.theme.border_style());
         let inner = outer.inner(area);
