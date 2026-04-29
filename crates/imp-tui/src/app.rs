@@ -6164,8 +6164,12 @@ mod session_lifecycle {
     #[test]
     fn tui_integration_slash_memory_add_and_show() {
         let tmp = TempDir::new().unwrap();
-        // Point config dir to temp so we don't touch real memory
-        std::env::set_var("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
+        // Point global config dir to temp so we don't touch real memory.
+        // Config::user_config_dir uses HOME/.imp, not XDG_CONFIG_HOME.
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", tmp.path());
+        std::env::remove_var("USERPROFILE");
 
         let mut app = make_app();
 
@@ -6177,8 +6181,17 @@ mod session_lifecycle {
         let content = &app.messages.last().unwrap().content;
         assert!(content.contains("Test entry from slash command"));
 
-        // Clean up env var
-        std::env::remove_var("XDG_CONFIG_HOME");
+        // Clean up env vars
+        if let Some(previous_home) = previous_home {
+            std::env::set_var("HOME", previous_home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(previous_userprofile) = previous_userprofile {
+            std::env::set_var("USERPROFILE", previous_userprofile);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
     }
 
     #[test]

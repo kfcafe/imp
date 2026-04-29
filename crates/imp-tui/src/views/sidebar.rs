@@ -1,6 +1,7 @@
 use imp_core::config::{AnimationLevel, SidebarStyle, ToolOutputDisplay, UiConfig};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use serde_json::Value;
@@ -368,6 +369,14 @@ pub fn build_stream_lines(
         let focused = selected == Some(idx);
         let header = tc.header_line_animated_focused(theme, tick, focused, animation_level);
         all_lines.push(header);
+        if focused && width > 0 {
+            all_lines.push(Line::from(Span::styled(
+                "▸ inspector".to_string(),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
 
         let output_lines = styled_output_lines(tc, ui_config, highlighter, theme, width);
         for line in output_lines {
@@ -470,6 +479,16 @@ fn render_list(
         let row = area.y + i as u16;
         let header = tc.header_line_animated_focused(theme, tick, focused, animation_level);
         buf.set_line(area.x, row, &header, area.width);
+        if focused && area.width > 0 {
+            buf.set_string(
+                area.x,
+                row,
+                "▸",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
     }
 
     if total > visible && visible > 0 {

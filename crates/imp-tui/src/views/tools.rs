@@ -426,7 +426,7 @@ fn summarize_json_object(args: &Value) -> String {
     let mut fields = Vec::new();
     for (key, value) in obj {
         if let Some(short) = value_to_short_string(value) {
-            fields.push(format!("{key}={short}"));
+            fields.push(format!("{key} {short}"));
         }
     }
 
@@ -440,7 +440,7 @@ fn summarize_json_object(args: &Value) -> String {
 fn push_field(fields: &mut Vec<String>, key: &str, value: Option<String>) {
     if let Some(value) = value {
         if !value.is_empty() {
-            fields.push(format!("{key}={value}"));
+            fields.push(format!("{key} {value}"));
         }
     }
 }
@@ -651,10 +651,10 @@ mod tests {
         );
 
         assert!(summary.starts_with("create  "));
-        assert!(summary.contains("title=Fix hotkeys"));
-        assert!(summary.contains("priority=1"));
-        assert!(summary.contains("verify=cargo check -p imp-tui"));
-        assert!(summary.contains("deps=1.2,1.3"));
+        assert!(summary.contains("title Fix hotkeys"));
+        assert!(summary.contains("priority 1"));
+        assert!(summary.contains("verify cargo check -p imp-tui"));
+        assert!(summary.contains("deps 1.2,1.3"));
     }
 
     #[test]

@@ -823,7 +823,7 @@ fn push_tool_call_chat_lines(
     }
 
     let is_running = tc.output.is_none() && !tc.is_error;
-    let rail = vec![Span::styled("  │".to_string(), theme.muted_style())];
+    let rail = vec![Span::styled("  ".to_string(), theme.muted_style())];
     let header = tc.header_line_animated_focused(theme, tick, focused, animation_level);
     let header_lines = wrap_line_with_prefix(&header, &rail, &rail, width, word_wrap);
     let header_start = all_lines.len();
@@ -839,16 +839,24 @@ fn push_tool_call_chat_lines(
     if is_running && !tc.streaming_lines.is_empty() {
         for line in &tc.streaming_lines {
             let content = Line::from(Span::styled(format!("    {line}"), theme.muted_style()));
-            all_lines.extend(wrap_line_with_prefix(
-                &content, &rail, &rail, width, word_wrap,
-            ));
+            let line_start = all_lines.len();
+            let wrapped = wrap_line_with_prefix(&content, &rail, &rail, width, word_wrap);
+            for offset in 0..wrapped.len() {
+                tool_line_indices.push((line_start + offset, tc.id.clone()));
+            }
+            all_lines.extend(wrapped);
         }
     }
 
     if tc.expanded {
         let output_lines = styled_tool_output_lines(tc, highlighter, theme, tc.name == "read");
         for line in output_lines.into_iter().take(50) {
-            all_lines.extend(wrap_line_with_prefix(&line, &rail, &rail, width, word_wrap));
+            let line_start = all_lines.len();
+            let wrapped = wrap_line_with_prefix(&line, &rail, &rail, width, word_wrap);
+            for offset in 0..wrapped.len() {
+                tool_line_indices.push((line_start + offset, tc.id.clone()));
+            }
+            all_lines.extend(wrapped);
         }
     }
 }
