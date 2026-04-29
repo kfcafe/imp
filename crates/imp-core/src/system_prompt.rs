@@ -36,8 +36,11 @@ pub struct Dependency {
 pub struct TaskContext {
     pub title: String,
     pub description: String,
+    pub design: Option<String>,
     pub acceptance: Option<String>,
     pub verify: Option<String>,
+    pub verify_timeout_secs: Option<u64>,
+    pub fail_first: bool,
     pub notes: Option<String>,
     pub attempts: Vec<Attempt>,
     pub dependencies: Vec<Dependency>,
@@ -498,6 +501,13 @@ fn task_layer(task: &TaskContext) -> String {
     let mut s = String::from("## Task\n");
     s.push_str(&format!("Title: {}\n", task.title));
     s.push_str(&format!("Description: {}\n", task.description));
+    if let Some(ref design) = task.design {
+        if !design.trim().is_empty() {
+            s.push_str("Design:\n");
+            s.push_str(design);
+            s.push('\n');
+        }
+    }
     if let Some(ref notes) = task.notes {
         if !notes.trim().is_empty() {
             s.push_str("Notes:\n");
@@ -512,6 +522,12 @@ fn task_layer(task: &TaskContext) -> String {
     }
     if let Some(ref verify) = task.verify {
         s.push_str(&format!("Verify: {}\n", verify));
+        if let Some(timeout_secs) = task.verify_timeout_secs {
+            s.push_str(&format!("Verify timeout: {}s\n", timeout_secs));
+        }
+        if task.fail_first {
+            s.push_str("Fail-first: verify was expected to fail before implementation; preserve that contract.\n");
+        }
         s.push_str("Treat the verify command as the primary completion check for this task.\n");
     }
 
@@ -1296,8 +1312,11 @@ mod tests {
         let task = TaskContext {
             title: "Fix the failing auth test".into(),
             description: "The JWT validation test panics on expired tokens".into(),
+            design: None,
             acceptance: None,
             verify: Some("cargo test auth::jwt_test".into()),
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: None,
             attempts: vec![],
             dependencies: vec![],
@@ -1323,8 +1342,11 @@ mod tests {
         let task = TaskContext {
             title: "Fix bug".into(),
             description: "Something is broken".into(),
+            design: None,
             acceptance: None,
             verify: None,
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: None,
             attempts: vec![
                 Attempt {
@@ -1362,8 +1384,11 @@ mod tests {
         let task = TaskContext {
             title: "Implement feature".into(),
             description: "New feature".into(),
+            design: None,
             acceptance: None,
             verify: None,
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: None,
             attempts: vec![],
             dependencies: vec![Dependency {
@@ -1391,8 +1416,11 @@ mod tests {
         let task = TaskContext {
             title: "Fix auth".into(),
             description: "Tighten token validation".into(),
+            design: Some("Keep validation logic in the existing auth module; avoid a broader auth rewrite.".into()),
             acceptance: None,
             verify: Some("cargo test auth".into()),
+            verify_timeout_secs: Some(30),
+            fail_first: true,
             notes: Some("Prefer touching only auth paths unless necessary".into()),
             attempts: vec![],
             dependencies: vec![],
@@ -1403,6 +1431,12 @@ mod tests {
             ],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
+        assert!(result.text.contains("Design:"));
+        assert!(result
+            .text
+            .contains("Keep validation logic in the existing auth module"));
+        assert!(result.text.contains("Verify timeout: 30s"));
+        assert!(result.text.contains("Fail-first: verify was expected to fail before implementation"));
         assert!(result.text.contains("Notes:"));
         assert!(result
             .text
@@ -1429,8 +1463,11 @@ mod tests {
         let task = TaskContext {
             title: "Do something".into(),
             description: "Details here".into(),
+            design: None,
             acceptance: None,
             verify: None,
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: None,
             attempts: vec![],
             dependencies: vec![],
@@ -1551,8 +1588,11 @@ mod tests {
         let task = TaskContext {
             title: "Add caching".into(),
             description: "Add Redis caching layer".into(),
+            design: None,
             acceptance: None,
             verify: Some("cargo test cache".into()),
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: None,
             attempts: vec![Attempt {
                 number: 1,
@@ -1683,8 +1723,11 @@ mod tests {
         let task = TaskContext {
             title: "Fix bug".into(),
             description: "Broken".into(),
+            design: None,
             acceptance: None,
             verify: None,
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: None,
             attempts: vec![],
             dependencies: vec![],

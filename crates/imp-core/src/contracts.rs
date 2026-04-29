@@ -27,10 +27,16 @@ pub struct WorkerAssignment {
     pub title: String,
     /// Combined description (frontmatter + body).
     pub description: String,
+    /// Supplemental design guidance, if any.
+    pub design: Option<String>,
     /// Acceptance criteria, if any.
     pub acceptance: Option<String>,
     /// Verify command, if any.
     pub verify: Option<String>,
+    /// Effective verify timeout in seconds, if any.
+    pub verify_timeout_secs: Option<u64>,
+    /// Whether the verify gate was proven failing before work started.
+    pub fail_first: bool,
     /// Unit notes (progress, diagnosis, etc.).
     pub notes: Option<String>,
     /// Unresolved decisions.

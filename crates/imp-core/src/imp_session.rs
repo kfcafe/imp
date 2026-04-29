@@ -1277,8 +1277,11 @@ mod tests {
             task: Some(TaskContext {
                 title: "Test task".into(),
                 description: "Verify headless prompt assembly".into(),
+                design: None,
                 acceptance: Some("Prompt includes task guidance".into()),
                 verify: None,
+                verify_timeout_secs: None,
+                fail_first: false,
                 notes: None,
                 attempts: vec![],
                 dependencies: vec![],

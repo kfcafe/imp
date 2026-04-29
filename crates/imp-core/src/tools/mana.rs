@@ -29,6 +29,8 @@ fn resolve_mana_dir(
     cwd: &Path,
     params: &serde_json::Value,
 ) -> std::result::Result<std::path::PathBuf, String> {
+    // Transitional compatibility: runtime still accepts legacy alias fields even though
+    // the model-facing schema advertises only canonical `scope` and `path`.
     let scope = params
         .get("scope")
         .and_then(|v| v.as_str())
@@ -857,10 +859,13 @@ fn parse_unit_kind(value: &serde_json::Value) -> Result<Option<UnitType>> {
 
     match raw {
         "epic" => Ok(Some(UnitType::Epic)),
-        "task" | "job" => Ok(Some(UnitType::Task)),
+        "task" => Ok(Some(UnitType::Task)),
+        // Transitional compatibility: accept legacy `job` at runtime, but keep it out
+        // of the model-facing schema so new calls converge on `task`.
+        "job" => Ok(Some(UnitType::Task)),
         "fact" => Ok(Some(UnitType::Fact)),
         other => Err(crate::error::Error::Tool(format!(
-            "type must be one of: epic, task, fact (legacy alias: job; got {other})"
+            "kind must be one of: epic, task, fact (legacy runtime alias: job; got {other})"
         ))),
     }
 }
@@ -1252,19 +1257,11 @@ impl Tool for ManaTool {
         properties.insert("id".into(), json!({ "type": "string" }));
         properties.insert(
             "scope".into(),
-            json!({ "type": "string", "enum": ["auto", "project", "root"], "description": "Mana scope selection for this action" }),
-        );
-        properties.insert(
-            "mana_scope".into(),
-            json!({ "type": "string", "enum": ["auto", "project", "root"], "description": "Alias for scope" }),
+            json!({ "type": "string", "enum": ["auto", "project", "root"], "description": "Mana scope" }),
         );
         properties.insert(
             "path".into(),
-            json!({ "type": "string", "description": "Explicit project directory or .mana directory to target for this action" }),
-        );
-        properties.insert(
-            "mana_dir".into(),
-            json!({ "type": "string", "description": "Alias for path; explicit .mana or project directory to target" }),
+            json!({ "type": "string", "description": "Project or .mana directory" }),
         );
         properties.insert(
             "from_id".into(),
@@ -1311,7 +1308,7 @@ impl Tool for ManaTool {
         requires["description"] = json!("Artifacts this unit requires");
         properties.insert("requires".into(), requires);
         let mut paths = string_or_array();
-        paths["description"] = json!("Relevant file paths for context/relevance");
+        paths["description"] = json!("Relevant file paths");
         properties.insert("paths".into(), paths);
         let mut decisions = string_or_array();
         decisions["description"] = json!("Blocking decisions to record on the unit");
@@ -1326,16 +1323,8 @@ impl Tool for ManaTool {
         labels["description"] = json!("Labels as a comma-separated string or array");
         properties.insert("labels".into(), labels);
         properties.insert(
-            "add_label".into(),
-            json!({ "type": "string", "description": "Single label to add during update" }),
-        );
-        properties.insert(
-            "remove_label".into(),
-            json!({ "type": "string", "description": "Single label to remove during update" }),
-        );
-        properties.insert(
             "kind".into(),
-            json!({ "type": "string", "enum": ["epic", "task", "fact", "job"], "description": "Explicit mana unit type (`job` is a legacy alias for `task`)" }),
+            json!({ "type": "string", "enum": ["epic", "task", "fact"], "description": "Mana unit type" }),
         );
         properties.insert(
             "feature".into(),
@@ -1351,15 +1340,7 @@ impl Tool for ManaTool {
         );
         properties.insert(
             "on_fail".into(),
-            json!({ "description": "On-fail policy as a string like retry:3 / escalate:P1 or an object" }),
-        );
-        properties.insert(
-            "fact_title".into(),
-            json!({ "type": "string", "description": "Title for fact_create; falls back to title" }),
-        );
-        properties.insert(
-            "paths_csv".into(),
-            json!({ "type": "string", "description": "Comma-separated paths for fact_create convenience" }),
+            json!({ "description": "On-fail policy like retry:3 or escalate:P1" }),
         );
         properties.insert(
             "ttl_days".into(),
@@ -1907,12 +1888,14 @@ impl Tool for ManaTool {
                 }
             }
             "fact_create" => {
-                let title = parse_optional_string(&params["fact_title"])
-                    .or_else(|| parse_optional_string(&params["title"]))
-                    .ok_or_else(|| crate::error::Error::Tool("fact_create requires 'fact_title' or 'title'".into()))?;
+                let title = parse_optional_string(&params["title"])
+                    .or_else(|| parse_optional_string(&params["fact_title"]))
+                    .ok_or_else(|| crate::error::Error::Tool("fact_create requires 'title'".into()))?;
                 let verify = parse_optional_string(&params["verify"])
                     .ok_or_else(|| crate::error::Error::Tool("fact_create requires 'verify'".into()))?;
-                let paths_csv = parse_optional_string(&params["paths_csv"])
+                // Transitional compatibility: runtime still accepts legacy `paths_csv`, but
+                // the model-facing schema advertises only canonical `paths`.
+                let fact_paths = parse_optional_string(&params["paths_csv"])
                     .or_else(|| {
                         let paths = parse_csv_strings(&params["paths"], "paths").ok()?;
                         if paths.is_empty() { None } else { Some(paths.join(",")) }
@@ -1921,7 +1904,7 @@ impl Tool for ManaTool {
                     title,
                     verify,
                     description: parse_optional_string(&params["description"]),
-                    paths: paths_csv,
+                    paths: fact_paths,
                     ttl_days: params["ttl_days"].as_i64(),
                     pass_ok: params["pass_ok"].as_bool().unwrap_or(true),
                 };
@@ -2654,6 +2637,39 @@ mod tests {
         assert_eq!(unit["verify_timeout"], 12);
     }
 
+    #[test]
+    fn mana_schema_uses_canonical_fields_only() {
+        let schema = ManaTool::default().parameters();
+        let properties = schema["properties"].as_object().unwrap();
+
+        assert!(properties.contains_key("action"));
+        assert!(properties.contains_key("id"));
+        assert!(properties.contains_key("run_id"));
+        assert!(properties.contains_key("title"));
+        assert!(properties.contains_key("description"));
+        assert!(properties.contains_key("acceptance"));
+        assert!(properties.contains_key("verify"));
+        assert!(properties.contains_key("notes"));
+        assert!(properties.contains_key("decisions"));
+        assert!(properties.contains_key("paths"));
+        assert!(properties.contains_key("deps"));
+        assert!(properties.contains_key("labels"));
+        assert!(properties.contains_key("targets"));
+        assert!(properties.contains_key("scope"));
+        assert!(properties.contains_key("path"));
+
+        assert!(!properties.contains_key("mana_scope"));
+        assert!(!properties.contains_key("mana_dir"));
+        assert!(!properties.contains_key("paths_csv"));
+        assert!(!properties.contains_key("fact_title"));
+        assert!(!properties.contains_key("add_label"));
+        assert!(!properties.contains_key("remove_label"));
+
+        let kind_enum = properties["kind"]["enum"].as_array().unwrap();
+        assert!(kind_enum.iter().any(|value| value == "task"));
+        assert!(!kind_enum.iter().any(|value| value == "job"));
+    }
+
     #[tokio::test]
     async fn update_supports_acceptance_labels_and_decisions() {
         let dir = tempfile::tempdir().unwrap();
@@ -2681,7 +2697,7 @@ mod tests {
                     "action": "update",
                     "id": "1",
                     "acceptance": "must pass auth flow",
-                    "add_label": "backend",
+                    "labels": ["backend"],
                     "decisions": ["Choose retry limit"],
                     "resolve_decisions": []
                 }),
@@ -2812,7 +2828,7 @@ mod tests {
             )),
             config: Arc::new(crate::config::Config::default()),
         };
-        let fact = tool.execute("call_fact", json!({ "action": "fact_create", "fact_title": "Auth fact", "verify": "test -d .mana", "description": "fact body", "ttl_days": 7 }), ctx3).await.unwrap();
+        let fact = tool.execute("call_fact", json!({ "action": "fact_create", "title": "Auth fact", "verify": "test -d .mana", "description": "fact body", "ttl_days": 7 }), ctx3).await.unwrap();
         assert_eq!(fact.details["unit"]["unit_type"], "fact");
     }
 

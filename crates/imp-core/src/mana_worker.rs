@@ -125,8 +125,15 @@ pub fn load_assignment_with_mana_dir(
         id: unit.id.clone(),
         title: unit.title.clone(),
         description: full_description,
+        design: unit.design.clone(),
         acceptance: unit.acceptance.clone(),
         verify: unit.verify.clone(),
+        verify_timeout_secs: unit.effective_verify_timeout(
+            mana_core::config::Config::load_with_extends(&mana_dir)
+                .ok()
+                .and_then(|config| config.verify_timeout),
+        ),
+        fail_first: unit.fail_first,
         notes: unit.notes.clone(),
         decisions: unit.decisions.clone(),
         dependencies: unit.dependencies.clone(),
@@ -167,6 +174,13 @@ fn derive_task_constraints(assignment: &WorkerAssignment) -> Vec<String> {
     if !assignment.dependencies.is_empty() {
         constraints.push(
             "Respect dependency context and avoid reworking already-completed dependency work unless required."
+                .to_string(),
+        );
+    }
+
+    if assignment.fail_first {
+        constraints.push(
+            "Preserve the fail-first contract: do not weaken the verify gate or skip proving the intended behavior."
                 .to_string(),
         );
     }
@@ -235,8 +249,11 @@ pub fn build_task_context(assignment: &WorkerAssignment) -> TaskContext {
     TaskContext {
         title: assignment.title.clone(),
         description,
+        design: assignment.design.clone(),
         acceptance: assignment.acceptance.clone(),
         verify: assignment.verify.clone(),
+        verify_timeout_secs: assignment.verify_timeout_secs,
+        fail_first: assignment.fail_first,
         notes,
         attempts: assignment
             .attempts
@@ -718,6 +735,16 @@ pub fn build_task_prompt(assignment: &WorkerAssignment) -> String {
         prompt.push_str(assignment.description.trim());
     }
 
+    if let Some(design) = assignment
+        .design
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
+        prompt.push_str("\n\nDesign:\n");
+        prompt.push_str(design);
+    }
+
     if let Some(notes) = assignment
         .notes
         .as_deref()
@@ -728,11 +755,45 @@ pub fn build_task_prompt(assignment: &WorkerAssignment) -> String {
         prompt.push_str(notes);
     }
 
+    if let Some(acceptance) = assignment
+        .acceptance
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
+        prompt.push_str("\n\nAcceptance:\n");
+        prompt.push_str(acceptance);
+    }
+
     if !assignment.files.is_empty() || !assignment.paths.is_empty() {
         prompt.push_str("\n\nReferenced files:\n");
         for path in assignment.paths.iter().chain(assignment.files.iter()) {
             prompt.push_str("- ");
             prompt.push_str(path);
+            prompt.push('\n');
+        }
+        while prompt.ends_with('\n') {
+            prompt.pop();
+        }
+    }
+
+    if !assignment.dependencies.is_empty() {
+        prompt.push_str("\n\nDependencies:\n");
+        for dep in &assignment.dependencies {
+            prompt.push_str("- ");
+            prompt.push_str(dep);
+            prompt.push('\n');
+        }
+        while prompt.ends_with('\n') {
+            prompt.pop();
+        }
+    }
+
+    if !assignment.decisions.is_empty() {
+        prompt.push_str("\n\nUnresolved decisions:\n");
+        for decision in &assignment.decisions {
+            prompt.push_str("- ");
+            prompt.push_str(decision);
             prompt.push('\n');
         }
         while prompt.ends_with('\n') {
@@ -761,6 +822,12 @@ pub fn build_task_prompt(assignment: &WorkerAssignment) -> String {
     {
         prompt.push_str("\n\nVerify command: ");
         prompt.push_str(verify);
+        if let Some(timeout_secs) = assignment.verify_timeout_secs {
+            prompt.push_str(&format!("\nVerify timeout: {}s", timeout_secs));
+        }
+        if assignment.fail_first {
+            prompt.push_str("\nFail-first: verify was expected to fail before implementation; preserve that contract.");
+        }
     }
 
     prompt
@@ -869,8 +936,11 @@ mod tests {
             id: "1".to_string(),
             title: "Fix the bug".to_string(),
             description: "There is a null pointer in foo.rs".to_string(),
+            design: None,
             acceptance: None,
             verify: Some("cargo test".to_string()),
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: None,
             decisions: Vec::new(),
             dependencies: Vec::new(),
@@ -892,8 +962,11 @@ mod tests {
             id: "2".to_string(),
             title: "Add test".to_string(),
             description: "Add a test for auth".to_string(),
-            acceptance: None,
+            design: Some("Follow the existing auth fixture setup instead of introducing a new harness".to_string()),
+            acceptance: Some("Auth regression test covers the fixture path failure mode".to_string()),
             verify: None,
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: Some("Check the fixtures module".to_string()),
             decisions: Vec::new(),
             dependencies: Vec::new(),
@@ -908,6 +981,10 @@ mod tests {
             model: None,
         };
         let prompt = build_task_prompt(&assignment);
+        assert!(prompt.contains("Design:"));
+        assert!(prompt.contains("Follow the existing auth fixture setup"));
+        assert!(prompt.contains("Acceptance:"));
+        assert!(prompt.contains("Auth regression test covers the fixture path failure mode"));
         assert!(prompt.contains("Notes:"));
         assert!(prompt.contains("Check the fixtures module"));
         assert!(prompt.contains("Previous attempts:"));
@@ -923,8 +1000,11 @@ mod tests {
             id: "3".to_string(),
             title: "Refactor module".to_string(),
             description: "Split into submodules".to_string(),
+            design: Some("Keep parser extraction local to the current module boundary".to_string()),
             acceptance: Some("All tests pass".to_string()),
             verify: Some("cargo test".to_string()),
+            verify_timeout_secs: Some(45),
+            fail_first: true,
             notes: Some("Prefer touching parser and module wiring first".to_string()),
             decisions: vec!["Use mod.rs or inline?".to_string()],
             dependencies: Vec::new(),
@@ -936,7 +1016,9 @@ mod tests {
         };
         let ctx = build_task_context(&assignment);
         assert_eq!(ctx.title, "Refactor module");
-        assert_eq!(ctx.acceptance.as_deref(), Some("All tests pass"));
+        assert_eq!(ctx.design.as_deref(), Some("Keep parser extraction local to the current module boundary"));
+        assert_eq!(ctx.verify_timeout_secs, Some(45));
+        assert!(ctx.fail_first);
         assert_eq!(ctx.verify.as_deref(), Some("cargo test"));
         assert_eq!(
             ctx.notes.as_deref(),
@@ -945,7 +1027,7 @@ mod tests {
         assert_eq!(ctx.decisions, vec!["Use mod.rs or inline?"]);
         assert_eq!(ctx.context_paths, vec!["src/lib.rs", "src/parser.rs"]);
         assert!(ctx.constraints.iter().any(|c| c.contains("Scope changes")));
-        assert!(ctx.constraints.iter().any(|c| c.contains("verify command")));
+        assert!(ctx.constraints.iter().any(|c| c.contains("fail-first contract")));
     }
 
     #[test]
