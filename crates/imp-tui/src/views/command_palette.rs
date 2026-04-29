@@ -39,6 +39,30 @@ pub fn merge_extension_commands(
     by_name.into_values().collect()
 }
 
+/// Merge skill commands into the slash menu without overriding real commands.
+pub fn merge_skill_commands(
+    mut commands: Vec<SlashCommand>,
+    skills: impl IntoIterator<Item = (String, String)>,
+) -> Vec<SlashCommand> {
+    let mut by_name: BTreeMap<String, SlashCommand> = commands
+        .drain(..)
+        .map(|command| (command.name.clone(), command))
+        .collect();
+
+    for (name, description) in skills {
+        by_name.entry(name.clone()).or_insert_with(|| SlashCommand {
+            name,
+            description: if description.trim().is_empty() {
+                "Skill".into()
+            } else {
+                format!("Skill: {description}")
+            },
+        });
+    }
+
+    by_name.into_values().collect()
+}
+
 pub fn builtin_commands() -> Vec<SlashCommand> {
     vec![
         SlashCommand {

@@ -459,11 +459,15 @@ imp should notify and ask before running Bun install commands; it must not insta
 
 ## Slash-command Skills
 
-A skill can be paired with a Lua extension to provide a user-facing slash command:
+Discovered skills are directly invocable from the slash menu. A skill at `.imp/skills/deploy/SKILL.md` or `~/.config/imp/skills/deploy/SKILL.md` creates `/deploy` unless a built-in or Lua command already uses that name. Use `/skill:deploy` to explicitly invoke the skill when a name is ambiguous.
+
+Invoking a skill inserts its `SKILL.md` instructions into the prompt for the next agent turn. YAML frontmatter is stripped. `$ARGUMENTS` is replaced with everything after the command name; if arguments are provided and `$ARGUMENTS` is absent, imp appends `ARGUMENTS: ...`.
+
+Lua extensions remain the path for executable slash behavior with deterministic host-side effects:
 
 ```
 .imp/skills/deploy/SKILL.md   # agent instructions and usage notes
-.imp/lua/deploy.lua           # registers /deploy
+.imp/lua/deploy.lua           # optional executable /deploy behavior
 ```
 
 ```lua
@@ -475,7 +479,7 @@ imp.register_command("deploy", {
 })
 ```
 
-Lua-registered commands are shown in the TUI slash command menu with their descriptions and can be run as `/deploy ...`. Keep the matching `SKILL.md` focused on when to use the command, expected arguments, safety checks, and verification steps.
+Lua-registered commands are shown in the TUI slash command menu with their descriptions and can be run as `/deploy ...`.
 
 ### Hooks
 

@@ -52,6 +52,22 @@ Examples are the most useful part of a skill.
 - Max 64 characters
 - Examples: `rust`, `deploy-k8s`, `pr-review`, `docker-workflows`
 
+## Slash Invocation
+
+Every discovered skill is also available in the slash menu. A skill named `pr-review` can be invoked as:
+
+```text
+/pr-review src/auth.ts
+```
+
+When invoked, imp strips the YAML frontmatter and inserts the skill body into the prompt with a small header. If the skill body contains `$ARGUMENTS`, imp replaces it with the text after the command name. If arguments are present but `$ARGUMENTS` is absent, imp appends:
+
+```text
+ARGUMENTS: <text after command name>
+```
+
+Built-in and Lua slash commands take precedence over bare `/name`. Use `/skill:name` to force skill invocation when a name is ambiguous.
+
 ## The Description is Critical
 
 The description in frontmatter is the **only thing** the agent sees before deciding to load the skill. Write it to answer: "When should I read this file?"

@@ -48,7 +48,8 @@ use crate::views::chat::{
     clamped_scroll_offset_for_total_lines, DisplayMessage, MessageRole, RenderedChatView,
 };
 use crate::views::command_palette::{
-    builtin_commands, merge_extension_commands, CommandPaletteState, CommandPaletteView,
+    builtin_commands, merge_extension_commands, merge_skill_commands, CommandPaletteState,
+    CommandPaletteView,
 };
 use crate::views::editor::{EditorState, EditorView};
 use crate::views::file_finder::{collect_project_files, FileFinderState, FileFinderView};
@@ -2985,14 +2986,19 @@ impl App {
         // Check for slash commands
         if let Some(cmd_text) = text.strip_prefix('/') {
             let typed = cmd_text.trim();
-            // Resolve prefix: exact match first, then unique prefix match
+            // Resolve prefix: exact match first, then unique prefix match.
+            // Keep the original text for /skill:<name> so arguments survive.
             let commands = self.slash_commands();
-            let cmd = commands
-                .iter()
-                .find(|c| c.name == typed)
-                .or_else(|| commands.iter().find(|c| c.name.starts_with(typed)))
-                .map(|c| c.name.clone())
-                .unwrap_or_else(|| typed.to_string());
+            let cmd = if typed.starts_with("skill:") {
+                typed.to_string()
+            } else {
+                commands
+                    .iter()
+                    .find(|c| c.name == typed)
+                    .or_else(|| commands.iter().find(|c| c.name.starts_with(typed)))
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| typed.to_string())
+            };
             self.execute_command(&cmd);
             self.editor.push_history();
             self.editor.clear();
@@ -3330,7 +3336,7 @@ impl App {
             }
             _ => {
                 // Try Lua extension commands before reporting unknown
-                if !self.try_lua_command(cmd) {
+                if !self.try_lua_command(cmd) && !self.try_skill_command(cmd) {
                     self.messages.push(DisplayMessage {
                         role: MessageRole::Error,
                         content: format!("Unknown command: /{cmd}"),
@@ -3552,7 +3558,53 @@ impl App {
             .as_ref()
             .and_then(|runtime| runtime.lock().ok().map(|guard| guard.command_summaries()))
             .unwrap_or_default();
-        merge_extension_commands(builtin_commands(), extension_commands)
+        let commands = merge_extension_commands(builtin_commands(), extension_commands);
+        merge_skill_commands(commands, self.skill_summaries())
+    }
+
+    fn skill_summaries(&self) -> Vec<(String, String)> {
+        let user_config_dir = Config::user_config_dir();
+        imp_core::resources::discover_skills(&self.cwd, &user_config_dir)
+            .into_iter()
+            .map(|skill| (skill.name, skill.description))
+            .collect()
+    }
+
+    fn try_skill_command(&mut self, cmd: &str) -> bool {
+        let (skill_name, args) = if let Some(rest) = cmd.strip_prefix("skill:") {
+            let skill_name = rest.split_whitespace().next().unwrap_or("");
+            let args = rest.strip_prefix(skill_name).unwrap_or("").trim();
+            (skill_name, args)
+        } else {
+            let skill_name = cmd.split_whitespace().next().unwrap_or("");
+            let args = cmd.strip_prefix(skill_name).unwrap_or("").trim();
+            (skill_name, args)
+        };
+
+        if skill_name.is_empty() {
+            return false;
+        }
+
+        let user_config_dir = Config::user_config_dir();
+        let Some(skill) = imp_core::resources::discover_skills(&self.cwd, &user_config_dir)
+            .into_iter()
+            .find(|skill| skill.name == skill_name)
+        else {
+            return false;
+        };
+
+        let content = match std::fs::read_to_string(&skill.path) {
+            Ok(content) => content,
+            Err(error) => {
+                self.push_error_msg(&format!("Failed to load skill `{skill_name}`: {error}"));
+                return true;
+            }
+        };
+
+        let prompt = imp_core::resources::render_skill_invocation(skill_name, &content, args);
+        self.editor.set_content(&prompt);
+        self.send_message();
+        true
     }
 
     /// Reload Lua extensions: re-scan directories, re-create runtime, and update
@@ -5656,6 +5708,65 @@ mod session_lifecycle {
             other => panic!("expected user message, got {other:?}"),
         };
         assert_eq!(stored_text, pasted);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn skill_command_injects_skill_prompt() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let skill_dir = cwd.join(".imp").join("skills").join("explain-code");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: explain-code\ndescription: Explain code clearly\n---\n\nExplain $ARGUMENTS with an analogy.",
+        )
+        .unwrap();
+        let session_dir = tmp.path().join("sessions");
+        let session = SessionManager::new(&cwd, &session_dir).unwrap();
+        let mut app = make_app_with_session(session, cwd);
+
+        assert!(app.try_skill_command("skill:explain-code src/main.rs"));
+
+        assert!(app.messages.len() >= 2);
+        assert_eq!(app.messages[0].role, MessageRole::User);
+        assert_eq!(
+            app.messages[0].content,
+            "Use the `explain-code` skill.\n\nExplain src/main.rs with an analogy."
+        );
+    }
+
+    #[test]
+    fn command_palette_includes_skill_commands() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let skill_dir = cwd.join(".imp").join("skills").join("explain-code");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: explain-code\ndescription: Explain code clearly\n---\n\nExplain code.",
+        )
+        .unwrap();
+        let app = make_app_with_session(SessionManager::in_memory(), cwd);
+
+        let commands = app.slash_commands();
+
+        assert!(commands
+            .iter()
+            .any(|cmd| cmd.name == "explain-code" && cmd.description.contains("Skill:")));
+    }
+
+    #[test]
+    fn render_skill_invocation_strips_frontmatter_and_appends_arguments() {
+        let rendered = imp_core::resources::render_skill_invocation(
+            "review",
+            "---\nname: review\ndescription: Review things\n---\n\nReview carefully.",
+            "src/lib.rs",
+        );
+
+        assert_eq!(
+            rendered,
+            "Use the `review` skill.\n\nReview carefully.\n\nARGUMENTS: src/lib.rs"
+        );
     }
 
     #[test]
