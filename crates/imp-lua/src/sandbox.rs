@@ -353,6 +353,16 @@ impl LuaRuntime {
             .collect()
     }
 
+    /// Get command names with descriptions for menus and discovery.
+    pub fn command_summaries(&self) -> Vec<(String, String)> {
+        self.commands
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| (c.name.clone(), c.description.clone()))
+            .collect()
+    }
+
     /// Check if a command with the given name exists.
     pub fn has_command(&self, name: &str) -> bool {
         self.commands.lock().unwrap().iter().any(|c| c.name == name)

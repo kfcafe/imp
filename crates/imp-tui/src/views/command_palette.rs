@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -13,7 +15,30 @@ pub struct SlashCommand {
     pub description: String,
 }
 
-/// Built-in slash commands.
+/// Merge built-in and extension-provided slash commands for discovery menus.
+pub fn merge_extension_commands(
+    mut commands: Vec<SlashCommand>,
+    extension_commands: impl IntoIterator<Item = (String, String)>,
+) -> Vec<SlashCommand> {
+    let mut by_name: BTreeMap<String, SlashCommand> = commands
+        .drain(..)
+        .map(|command| (command.name.clone(), command))
+        .collect();
+
+    for (name, description) in extension_commands {
+        by_name.entry(name.clone()).or_insert_with(|| SlashCommand {
+            name,
+            description: if description.trim().is_empty() {
+                "Extension command".into()
+            } else {
+                description
+            },
+        });
+    }
+
+    by_name.into_values().collect()
+}
+
 pub fn builtin_commands() -> Vec<SlashCommand> {
     vec![
         SlashCommand {

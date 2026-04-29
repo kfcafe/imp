@@ -457,6 +457,26 @@ Limited/stubbed:
 
 imp should notify and ask before running Bun install commands; it must not install dependencies silently during import.
 
+## Slash-command Skills
+
+A skill can be paired with a Lua extension to provide a user-facing slash command:
+
+```
+.imp/skills/deploy/SKILL.md   # agent instructions and usage notes
+.imp/lua/deploy.lua           # registers /deploy
+```
+
+```lua
+imp.register_command("deploy", {
+    description = "Deploy the current project",
+    handler = function(args)
+        return imp.exec("./scripts/deploy " .. (args or "")).stdout
+    end
+})
+```
+
+Lua-registered commands are shown in the TUI slash command menu with their descriptions and can be run as `/deploy ...`. Keep the matching `SKILL.md` focused on when to use the command, expected arguments, safety checks, and verification steps.
+
 ### Hooks
 
 Shell hook commands support placeholder interpolation. Quote placeholders that may contain shell-sensitive text, for example `'{command}'` or `"{command}"`, so imp can escape the value as one shell argument before executing `sh -c`.

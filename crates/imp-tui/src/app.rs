@@ -47,7 +47,9 @@ use crate::views::chat::{
     build_chat_render_data, build_click_map, build_text_surface_from_lines,
     clamped_scroll_offset_for_total_lines, DisplayMessage, MessageRole, RenderedChatView,
 };
-use crate::views::command_palette::{builtin_commands, CommandPaletteState, CommandPaletteView};
+use crate::views::command_palette::{
+    builtin_commands, merge_extension_commands, CommandPaletteState, CommandPaletteView,
+};
 use crate::views::editor::{EditorState, EditorView};
 use crate::views::file_finder::{collect_project_files, FileFinderState, FileFinderView};
 use crate::views::login_picker::{login_providers, LoginPickerState, LoginPickerView};
@@ -2023,7 +2025,7 @@ impl App {
             }
             Some(Action::InsertChar('/')) if self.editor.is_empty() && !self.is_streaming => {
                 self.editor.insert_char('/');
-                self.mode = UiMode::CommandPalette(CommandPaletteState::new(builtin_commands()));
+                self.mode = UiMode::CommandPalette(CommandPaletteState::new(self.slash_commands()));
             }
             Some(Action::InsertChar(c)) => {
                 self.editor.insert_char(c);
@@ -2984,7 +2986,7 @@ impl App {
         if let Some(cmd_text) = text.strip_prefix('/') {
             let typed = cmd_text.trim();
             // Resolve prefix: exact match first, then unique prefix match
-            let commands = builtin_commands();
+            let commands = self.slash_commands();
             let cmd = commands
                 .iter()
                 .find(|c| c.name == typed)
@@ -3542,6 +3544,15 @@ impl App {
                 ));
             }
         }
+    }
+
+    fn slash_commands(&self) -> Vec<crate::views::command_palette::SlashCommand> {
+        let extension_commands = self
+            .lua_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.lock().ok().map(|guard| guard.command_summaries()))
+            .unwrap_or_default();
+        merge_extension_commands(builtin_commands(), extension_commands)
     }
 
     /// Reload Lua extensions: re-scan directories, re-create runtime, and update
@@ -5849,6 +5860,55 @@ mod session_lifecycle {
         let commands = builtin_commands();
         assert!(commands.iter().any(|cmd| cmd.name == "checkpoints"));
         assert!(commands.iter().any(|cmd| cmd.name == "restore-checkpoint"));
+    }
+
+    #[test]
+    fn command_palette_merges_lua_extension_commands() {
+        let mut app = make_app();
+        let runtime = LuaRuntime::new().unwrap();
+        imp_lua::setup_host_api(&runtime).unwrap();
+        runtime
+            .exec(
+                r#"
+                imp.register_command("greet", {
+                    description = "Say hello from Lua",
+                    handler = function(args) return "Hello " .. args end
+                })
+                "#,
+            )
+            .unwrap();
+        app.lua_runtime = Some(Arc::new(Mutex::new(runtime)));
+
+        let commands = app.slash_commands();
+
+        assert!(commands.iter().any(|cmd| cmd.name == "new"));
+        assert!(commands
+            .iter()
+            .any(|cmd| cmd.name == "greet" && cmd.description == "Say hello from Lua"));
+    }
+
+    #[test]
+    fn lua_extension_command_can_be_selected_from_palette() {
+        let mut app = make_app();
+        let runtime = LuaRuntime::new().unwrap();
+        imp_lua::setup_host_api(&runtime).unwrap();
+        runtime
+            .exec(
+                r#"
+                imp.register_command("greet", {
+                    description = "Say hello from Lua",
+                    handler = function(args) return "Hello " .. args end
+                })
+                "#,
+            )
+            .unwrap();
+        app.lua_runtime = Some(Arc::new(Mutex::new(runtime)));
+
+        app.execute_command("greet world");
+
+        let last = app.messages.last().expect("Lua command output");
+        assert_eq!(last.role, MessageRole::System);
+        assert_eq!(last.content, "Hello world");
     }
 
     #[test]
