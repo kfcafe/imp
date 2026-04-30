@@ -207,11 +207,12 @@ impl DisplayToolCall {
                 let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
                 match action {
                     "extract" => args
-                        .get("files")
+                        .get("targets")
+                        .or_else(|| args.get("files"))
                         .and_then(|v| v.as_array())
                         .map(|items| abbreviate_path_list(items))
                         .unwrap_or_else(|| "extract".to_string()),
-                    "scan" => args
+                    "directory" | "scan" => args
                         .get("directory")
                         .and_then(|v| v.as_str())
                         .map(abbreviate_home_path)

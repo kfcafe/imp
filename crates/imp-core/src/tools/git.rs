@@ -40,7 +40,7 @@ impl Tool for GitTool {
     }
 
     fn description(&self) -> &str {
-        "Local git operations for status, diff, log, commit, restore, and worktrees."
+        "Local git operations for status, diff, log, commit, and restore."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -54,12 +54,9 @@ impl Tool for GitTool {
                         "diff",
                         "log",
                         "merge_base",
-                        "worktree_info",
                         "stage",
                         "commit",
-                        "restore",
-                        "worktree_add",
-                        "worktree_remove"
+                        "restore"
                     ],
                     "description": "Git operation to perform"
                 },
@@ -72,7 +69,7 @@ impl Tool for GitTool {
                     "items": { "type": "string" },
                     "description": "Optional file paths for diff/log/stage/restore"
                 },
-                "all": {
+                "all_changes": {
                     "type": "boolean",
                     "description": "For stage: stage all changes with git add -A"
                 },
@@ -97,40 +94,22 @@ impl Tool for GitTool {
                     "description": "For merge_base: second ref"
                 },
                 "limit": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
                     "description": "For log: maximum number of entries to show (default 10)"
                 },
                 "message": {
                     "type": "string",
                     "description": "For commit: commit message"
                 },
-                "allowEmpty": {
+                "allow_empty": {
                     "type": "boolean",
                     "description": "For commit: allow an empty commit"
                 },
                 "source": {
                     "type": "string",
                     "description": "For restore: optional source ref (defaults to index/HEAD behavior)"
-                },
-                "worktreePath": {
-                    "type": "string",
-                    "description": "For worktree_add/remove: path to add or remove"
-                },
-                "branch": {
-                    "type": "string",
-                    "description": "For worktree_add: branch name to create; for worktree_remove with deleteBranch=true, explicit branch to delete"
-                },
-                "startPoint": {
-                    "type": "string",
-                    "description": "For worktree_add: optional starting ref (defaults to HEAD)"
-                },
-                "force": {
-                    "type": "boolean",
-                    "description": "For worktree_remove: force removal; for deleteBranch=true, force branch deletion"
-                },
-                "deleteBranch": {
-                    "type": "boolean",
-                    "description": "For worktree_remove: also delete the associated branch after removal"
                 }
             },
             "required": ["action"]
@@ -328,6 +307,7 @@ async fn status_action(cwd: &Path, repo_root: &Path) -> Result<ToolOutput> {
     Ok(ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text }],
         details: json!({
+            "action": "status",
             "repo_root": repo_root.display().to_string(),
             "branch": branch_summary,
             "head": head,
@@ -352,7 +332,17 @@ fn non_empty_param<'a>(params: &'a serde_json::Value, field_name: &str) -> Optio
     params
         .get(field_name)?
         .as_str()
-        .filter(|s| !s.trim().is_empty())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn validate_ref(value: &str, field_name: &str) -> std::result::Result<(), crate::error::Error> {
+    if value.starts_with('-') || value.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(crate::error::Error::Tool(format!(
+            "{field_name} must be a safe git ref"
+        )));
+    }
+    Ok(())
 }
 
 async fn diff_action(
@@ -367,6 +357,10 @@ async fn diff_action(
 
     let mut args = vec!["diff".to_string()];
     if let Some(base) = base {
+        validate_ref(base, "base")?;
+        if let Some(head) = head {
+            validate_ref(head, "head")?;
+        }
         let range = match head {
             Some(head) => format!("{base}..{head}"),
             None => format!("{base}..HEAD"),
@@ -399,6 +393,7 @@ async fn diff_action(
     Ok(ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text }],
         details: json!({
+            "action": "diff",
             "repo_root": repo_root.display().to_string(),
             "cached": cached,
             "base": base,
@@ -421,7 +416,7 @@ async fn log_action(
     let limit = params["limit"]
         .as_u64()
         .unwrap_or(DEFAULT_LOG_LIMIT as u64)
-        .max(1);
+        .clamp(1, 100);
 
     let mut args = vec![
         "log".to_string(),
@@ -450,6 +445,7 @@ async fn log_action(
     Ok(ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text }],
         details: json!({
+            "action": "log",
             "repo_root": repo_root.display().to_string(),
             "limit": limit,
             "files": files,
@@ -463,12 +459,14 @@ async fn merge_base_action(
     repo_root: &Path,
     params: &serde_json::Value,
 ) -> Result<ToolOutput> {
-    let Some(ref1) = params["ref1"].as_str() else {
+    let Some(ref1) = non_empty_param(params, "ref1") else {
         return Ok(ToolOutput::error("Missing required parameter: ref1"));
     };
-    let Some(ref2) = params["ref2"].as_str() else {
+    validate_ref(ref1, "ref1")?;
+    let Some(ref2) = non_empty_param(params, "ref2") else {
         return Ok(ToolOutput::error("Missing required parameter: ref2"));
     };
+    validate_ref(ref2, "ref2")?;
 
     let output = run_git_owned(
         cwd,
@@ -486,6 +484,7 @@ async fn merge_base_action(
             text: merge_base.clone(),
         }],
         details: json!({
+            "action": "merge_base",
             "repo_root": repo_root.display().to_string(),
             "ref1": ref1,
             "ref2": ref2,
@@ -547,6 +546,7 @@ async fn worktree_info_action(cwd: &Path, repo_root: &Path) -> Result<ToolOutput
     Ok(ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text }],
         details: json!({
+            "action": "worktree_info",
             "repo_root": repo_root.display().to_string(),
             "current_secondary_worktree": current_secondary.as_ref().map(|info| json!({
                 "main_path": info.main_path.display().to_string(),
@@ -570,7 +570,11 @@ async fn stage_action(
     params: &serde_json::Value,
 ) -> Result<ToolOutput> {
     let files = parse_string_array(params, "files")?;
-    let all = params["all"].as_bool().unwrap_or(false);
+    let all = params
+        .get("all_changes")
+        .or_else(|| params.get("all"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
 
     let args = if all {
         vec!["add".to_string(), "-A".to_string()]
@@ -601,9 +605,15 @@ async fn stage_action(
             text: summary.clone(),
         }],
         details: json!({
+            "action": "stage",
             "repo_root": repo_root.display().to_string(),
-            "all": all,
+            "all_changes": all,
             "files": files,
+            "recovery": {
+                "undo": if all { "git reset" } else { "git reset -- <files>" },
+                "files": files,
+                "all_changes": all,
+            },
             "summary": summary,
         }),
         is_error: false,
@@ -622,7 +632,11 @@ async fn commit_action(
         return Ok(ToolOutput::error("Commit message cannot be empty"));
     }
 
-    let allow_empty = params["allowEmpty"].as_bool().unwrap_or(false);
+    let allow_empty = params
+        .get("allow_empty")
+        .or_else(|| params.get("allowEmpty"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
     let mut args = vec!["commit".to_string(), "-m".to_string(), message.to_string()];
     if allow_empty {
         args.push("--allow-empty".to_string());
@@ -636,6 +650,7 @@ async fn commit_action(
     let head = head_sha_short(cwd)
         .await
         .unwrap_or_else(|| "unknown".to_string());
+    let parent = head_parent_sha_short(cwd).await;
     let stdout = stdout_trimmed(&output);
     let text = if stdout.is_empty() {
         format!("Committed {head}: {message}")
@@ -646,10 +661,16 @@ async fn commit_action(
     Ok(ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text: text.clone() }],
         details: json!({
+            "action": "commit",
             "repo_root": repo_root.display().to_string(),
             "message": message,
             "allow_empty": allow_empty,
             "head": head,
+            "parent": parent,
+            "recovery": {
+                "commit": head,
+                "parent": parent,
+            },
             "summary": text,
         }),
         is_error: false,
@@ -674,10 +695,9 @@ async fn restore_action(
     )?;
 
     let mut args = vec!["restore".to_string()];
-    if let Some(source) = params["source"].as_str() {
-        if !source.trim().is_empty() {
-            args.push(format!("--source={source}"));
-        }
+    if let Some(source) = non_empty_param(params, "source") {
+        validate_ref(source, "source")?;
+        args.push(format!("--source={source}"));
     }
     args.push("--".to_string());
     args.extend(files.iter().cloned());
@@ -693,10 +713,15 @@ async fn restore_action(
             text: summary.clone(),
         }],
         details: json!({
+            "action": "restore",
             "repo_root": repo_root.display().to_string(),
             "files": files,
             "checkpoint_id": checkpoint.as_ref().map(|c| c.id.clone()),
             "checkpoint_label": checkpoint.as_ref().and_then(|c| c.label.clone()),
+            "recovery": {
+                "checkpoint_id": checkpoint.as_ref().map(|c| c.id.clone()),
+                "checkpoint_label": checkpoint.as_ref().and_then(|c| c.label.clone()),
+            },
             "summary": summary,
         }),
         is_error: false,
@@ -873,14 +898,32 @@ fn parse_string_array(
 
     let mut result = Vec::with_capacity(items.len());
     for item in items {
-        let Some(s) = item.as_str() else {
+        let Some(s) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
             return Err(crate::error::Error::Tool(format!(
-                "{field_name} must contain only strings"
+                "{field_name} must contain only non-empty strings"
             )));
         };
+        if s.chars().any(|c| c == '\0' || c.is_control()) {
+            return Err(crate::error::Error::Tool(format!(
+                "{field_name} must contain safe path strings"
+            )));
+        }
         result.push(s.to_string());
     }
     Ok(result)
+}
+
+async fn head_parent_sha_short(cwd: &Path) -> Option<String> {
+    let output = run_git(cwd, ["rev-parse", "--short", "HEAD^"]).await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let parent = stdout_trimmed(&output);
+    if parent.is_empty() {
+        None
+    } else {
+        Some(parent)
+    }
 }
 
 async fn head_sha_short(cwd: &Path) -> Option<String> {
@@ -949,7 +992,16 @@ fn git_failure(prefix: &str, output: &std::process::Output) -> ToolOutput {
         (true, false) => format!("{prefix}: {stderr}"),
         (false, false) => format!("{prefix}: {stdout}\n{stderr}"),
     };
-    ToolOutput::error(combined)
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text: combined }],
+        details: json!({
+            "success": false,
+            "exit_code": output.status.code(),
+            "stdout": stdout,
+            "stderr": stderr,
+        }),
+        is_error: true,
+    }
 }
 
 fn display_or_unknown(s: &str) -> &str {
@@ -1108,6 +1160,24 @@ mod tests {
         result.text_content().unwrap_or_default().to_string()
     }
 
+    #[test]
+    fn schema_hides_worktree_actions_and_uses_snake_case_fields() {
+        let schema = GitTool.parameters();
+        let properties = schema["properties"].as_object().unwrap();
+        let actions = properties["action"]["enum"].as_array().unwrap();
+
+        assert!(!actions.iter().any(|value| value == "worktree_info"));
+        assert!(!actions.iter().any(|value| value == "worktree_add"));
+        assert!(!actions.iter().any(|value| value == "worktree_remove"));
+        assert!(properties.contains_key("all_changes"));
+        assert!(!properties.contains_key("all"));
+        assert!(properties.contains_key("allow_empty"));
+        assert!(!properties.contains_key("allowEmpty"));
+        assert!(!properties.contains_key("worktreePath"));
+        assert_eq!(properties["limit"]["type"], json!("integer"));
+        assert_eq!(properties["limit"]["maximum"], json!(100));
+    }
+
     #[tokio::test]
     async fn git_status_reports_clean_repo() {
         let dir = setup_repo();
@@ -1184,6 +1254,44 @@ mod tests {
             .unwrap();
         assert!(!status.is_error);
         assert_eq!(status.details["clean"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn git_stage_accepts_all_changes() {
+        let dir = setup_repo();
+        fs::write(dir.path().join("new.txt"), "new\n").unwrap();
+        let tool = GitTool;
+
+        let result = tool
+            .execute(
+                "c-stage-all",
+                json!({"action": "stage", "all_changes": true}),
+                test_ctx(dir.path(), AgentMode::Worker),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(result.details["all_changes"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn git_commit_accepts_allow_empty() {
+        let dir = setup_repo();
+        let tool = GitTool;
+
+        let result = tool
+            .execute(
+                "c-empty-commit",
+                json!({"action": "commit", "message": "empty commit", "allow_empty": true}),
+                test_ctx(dir.path(), AgentMode::Worker),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(result.details["allow_empty"], json!(true));
+        assert!(extract_text(&result).contains("empty commit"));
     }
 
     #[tokio::test]
