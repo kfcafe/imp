@@ -864,8 +864,8 @@ mod tests {
                 "c-anchor",
                 json!({
                     "path": "anchored.txt",
-                    "anchorStart": anchors[0].id,
-                    "replacement": "BETA",
+                    "anchor_start": anchors[0].id,
+                    "new_text": "BETA",
                 }),
                 ctx.clone(),
             )
@@ -882,6 +882,11 @@ mod tests {
             Some("alpha\nbeta\ngamma\n")
         );
         assert_eq!(result.details["anchored"], true);
+        assert_eq!(result.details["action"], "edit");
+        assert_eq!(result.details["mode"], "anchored");
+        assert_eq!(result.details["start_line"], 2);
+        assert_eq!(result.details["end_line"], 2);
+        assert!(result.details["refreshed_anchors"].as_array().unwrap().len() >= 3);
     }
 
     #[tokio::test]
@@ -904,8 +909,8 @@ mod tests {
                 "c-anchor-stale",
                 json!({
                     "path": "stale.txt",
-                    "anchorStart": anchors[0].id,
-                    "replacement": "BETA",
+                    "anchor_start": anchors[0].id,
+                    "new_text": "BETA",
                 }),
                 ctx,
             )
@@ -939,9 +944,9 @@ mod tests {
                 "c-anchor-dry",
                 json!({
                     "path": "dry-anchor.txt",
-                    "anchorStart": anchors[0].id,
-                    "replacement": "BETA",
-                    "dryRun": true,
+                    "anchor_start": anchors[0].id,
+                    "new_text": "BETA",
+                    "dry_run": true,
                 }),
                 ctx.clone(),
             )
