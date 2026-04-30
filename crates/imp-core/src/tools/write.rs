@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::{truncate_head, Tool, ToolContext, ToolOutput};
+use crate::config::WriteOverwritePolicy;
 use crate::error::Result;
 
 pub struct WriteTool;
@@ -46,37 +47,37 @@ impl Tool for WriteTool {
 
         let path = super::resolve_path(&ctx.cwd, raw_path);
 
+        if path.is_dir() {
+            return Ok(ToolOutput::error(format!(
+                "Path is a directory, not a file: {}",
+                path.display()
+            )));
+        }
+
         let existed = path.exists();
 
-        // Check for unread or stale file — warn but don't block (only relevant for overwrites).
-        let tracker_warning = if existed {
-            let tracker = ctx.file_tracker.lock().ok();
-            match tracker {
-                Some(t) if !t.was_read(&path) => Some(format!(
-                    "Warning: editing {} without reading it first. Consider reading to verify current content.",
-                    path.display()
-                )),
-                Some(t) if t.is_stale(&path) => Some(format!(
-                    "Warning: {} was modified externally since last read. Re-read to verify current content.",
-                    path.display()
-                )),
-                _ => None,
-            }
+        let overwrite_check = if existed {
+            evaluate_overwrite_policy(&path, &ctx)
         } else {
-            None
+            OverwriteCheck::default()
         };
+        if let Some(error) = overwrite_check.error {
+            return Ok(ToolOutput::error(error));
+        }
 
         // Create parent directories
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        if existed {
+        let checkpoint = if existed {
             ctx.checkpoint_state.snapshot_paths(
                 std::slice::from_ref(&path),
                 Some(format!("write {}", path.display())),
-            )?;
-        }
+            )?
+        } else {
+            None
+        };
 
         // Detect existing line endings to preserve them, default to LF for new files
         let normalized = if existed {
@@ -126,10 +127,8 @@ impl Tool for WriteTool {
             String::new()
         };
 
-        let mut warnings = Vec::new();
-        if let Some(warning) = tracker_warning {
-            warnings.push(warning);
-        }
+        let warnings = overwrite_check.warning_messages;
+        let warning_codes = overwrite_check.warning_codes;
 
         let mut text = summary.clone();
         for warning in &warnings {
@@ -140,17 +139,92 @@ impl Tool for WriteTool {
         Ok(ToolOutput {
             content: vec![imp_llm::ContentBlock::Text { text }],
             details: json!({
+                "action": action,
                 "path": display,
-                "bytes": bytes_written,
+                "bytes_written": bytes_written,
+                "line_ending": if normalized.contains("\r\n") { "crlf" } else { "lf" },
                 "created": !existed,
+                "overwritten": existed,
+                "checkpoint_id": checkpoint.as_ref().map(|c| c.id.clone()),
+                "checkpoint_label": checkpoint.as_ref().and_then(|c| c.label.clone()),
                 "summary": summary,
                 "warnings": warnings,
+                "warning_codes": warning_codes,
+                "overwrite_policy": ctx.config.write.overwrite_policy,
                 "display_content": display_content,
                 "display_note": display_note,
             }),
             is_error: false,
         })
     }
+}
+
+#[derive(Default)]
+struct OverwriteCheck {
+    warning_messages: Vec<String>,
+    warning_codes: Vec<&'static str>,
+    error: Option<String>,
+}
+
+fn evaluate_overwrite_policy(path: &std::path::Path, ctx: &ToolContext) -> OverwriteCheck {
+    let Ok(tracker) = ctx.file_tracker.lock() else {
+        return OverwriteCheck::default();
+    };
+
+    let was_read = tracker.was_read(path);
+    let is_stale = tracker.is_stale(path);
+    let policy = ctx.config.write.overwrite_policy;
+
+    if matches!(policy, WriteOverwritePolicy::Deny) {
+        return OverwriteCheck {
+            error: Some(format!(
+                "Overwriting existing files is disabled by write overwrite policy: {}",
+                path.display()
+            )),
+            ..OverwriteCheck::default()
+        };
+    }
+
+    if matches!(policy, WriteOverwritePolicy::RequireRead) && !was_read {
+        return OverwriteCheck {
+            error: Some(format!(
+                "Write overwrite policy requires reading the file before overwriting: {}",
+                path.display()
+            )),
+            ..OverwriteCheck::default()
+        };
+    }
+
+    if matches!(
+        policy,
+        WriteOverwritePolicy::RequireRead | WriteOverwritePolicy::BlockStale
+    ) && is_stale
+    {
+        return OverwriteCheck {
+            error: Some(format!(
+                "Write overwrite policy blocks overwriting stale files. Re-read before overwriting: {}",
+                path.display()
+            )),
+            ..OverwriteCheck::default()
+        };
+    }
+
+    let mut check = OverwriteCheck::default();
+    if !was_read {
+        check.warning_codes.push("unread_overwrite");
+        check.warning_messages.push(format!(
+            "Warning: overwriting {} without reading it first. Consider reading to verify current content.",
+            path.display()
+        ));
+    } else if is_stale {
+        check.warning_codes.push("stale_overwrite");
+        check.warning_messages.push(format!(
+            "Warning: {} was modified externally since last read. Re-read to verify current content.",
+            path.display()
+        ));
+    }
+
+    check
 }
 
 #[cfg(test)]
@@ -181,6 +255,81 @@ mod tests {
             )),
             config: Arc::new(crate::config::Config::default()),
         }
+    }
+
+    fn test_ctx_with_policy(dir: &Path, overwrite_policy: WriteOverwritePolicy) -> ToolContext {
+        let mut ctx = test_ctx(dir);
+        let mut config = crate::config::Config::default();
+        config.write.overwrite_policy = overwrite_policy;
+        ctx.config = Arc::new(config);
+        ctx
+    }
+
+    #[tokio::test]
+    async fn write_default_policy_warns_on_unread_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("existing.txt");
+        std::fs::write(&file, "original").unwrap();
+
+        let tool = WriteTool;
+        let result = tool
+            .execute(
+                "c-warn",
+                serde_json::json!({"path": "existing.txt", "content": "updated"}),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(result.details["warning_codes"][0], "unread_overwrite");
+        assert_eq!(result.details["overwritten"], true);
+        assert!(result.details["checkpoint_id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn write_require_read_policy_blocks_unread_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("existing.txt");
+        std::fs::write(&file, "original").unwrap();
+
+        let tool = WriteTool;
+        let result = tool
+            .execute(
+                "c-block-unread",
+                serde_json::json!({"path": "existing.txt", "content": "updated"}),
+                test_ctx_with_policy(dir.path(), WriteOverwritePolicy::RequireRead),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "original");
+    }
+
+    #[tokio::test]
+    async fn write_block_stale_policy_blocks_stale_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("existing.txt");
+        std::fs::write(&file, "original").unwrap();
+
+        let ctx = test_ctx_with_policy(dir.path(), WriteOverwritePolicy::BlockStale);
+        ctx.file_tracker.lock().unwrap().record_read(&file);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(&file, "external").unwrap();
+
+        let tool = WriteTool;
+        let result = tool
+            .execute(
+                "c-block-stale",
+                serde_json::json!({"path": "existing.txt", "content": "updated"}),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "external");
     }
 
     #[tokio::test]

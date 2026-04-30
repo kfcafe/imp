@@ -213,6 +213,28 @@ impl AgentMode {
     }
 }
 
+/// Write tool overwrite safety policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteOverwritePolicy {
+    /// Allow overwrites but return warnings for unread/stale files.
+    #[default]
+    Warn,
+    /// Block overwrites unless the file was read in this session and is not stale.
+    RequireRead,
+    /// Block only stale overwrites; unread overwrites still warn.
+    BlockStale,
+    /// Block all overwrites. New file creation is still allowed.
+    Deny,
+}
+
+/// File write tool settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WriteConfig {
+    #[serde(default)]
+    pub overwrite_policy: WriteOverwritePolicy,
+}
+
 /// Shell backend selection for the Bash tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -368,6 +390,10 @@ pub struct Config {
     /// Shell backend settings.
     #[serde(default)]
     pub shell: ShellConfig,
+
+    /// Write tool settings.
+    #[serde(default)]
+    pub write: WriteConfig,
 
     /// Engineering guardrails — profile-aware guidance and post-write checks.
     #[serde(default)]
