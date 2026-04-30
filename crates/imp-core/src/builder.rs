@@ -302,7 +302,7 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
         ask::AskTool, bash::BashTool, edit::EditTool, extend::ExtendTool, git::GitTool,
         imp::ImpTool, mana::ManaTool, read::ReadTool, scan::ScanTool,
-        session_search::SessionSearchTool, web::WebTool, write::WriteTool,
+        session_search::SessionSearchTool, web::WebTool, worktree::WorktreeTool, write::WriteTool,
     };
 
     tools.register(Arc::new(AskTool));
@@ -317,6 +317,7 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     tools.register(Arc::new(ScanTool));
     tools.register(Arc::new(SessionSearchTool));
     tools.register(Arc::new(WebTool));
+    tools.register(Arc::new(WorktreeTool));
 
     tools.register_alias("bash", "shell");
     tools.register_alias("sh", "shell");

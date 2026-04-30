@@ -14,6 +14,7 @@ pub mod scan;
 pub mod session_search;
 pub mod shell;
 pub mod web;
+pub mod worktree;
 pub mod write;
 
 use std::collections::hash_map::DefaultHasher;
