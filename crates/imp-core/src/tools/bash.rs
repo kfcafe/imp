@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use imp_llm::auth::{AuthStore, StoredCredential};
+use imp_llm::auth::AuthStore;
 
 use super::{
     truncate_head, truncate_tail, Tool, ToolContext, ToolOutput, ToolUpdate, TruncationResult,
@@ -21,18 +21,17 @@ const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const SECRET_REDACTION: &str = "[REDACTED_SECRET]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SecretEnvBinding {
-    env: String,
-    provider: String,
-    field: String,
+struct RequestedSecret {
+    name: String,
 }
 
 struct ResolvedSecretEnvBinding {
-    binding: SecretEnvBinding,
+    secret_name: String,
+    env: String,
     value: String,
 }
 
-fn parse_secret_env_bindings(value: Option<&Value>) -> Result<Vec<SecretEnvBinding>> {
+fn parse_with_secrets(value: Option<&Value>) -> Result<Vec<RequestedSecret>> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
@@ -41,86 +40,63 @@ fn parse_secret_env_bindings(value: Option<&Value>) -> Result<Vec<SecretEnvBindi
     }
     let entries = value
         .as_array()
-        .ok_or_else(|| Error::Tool("secret_env must be an array".into()))?;
-    let mut bindings = Vec::with_capacity(entries.len());
-    let mut env_names = std::collections::HashSet::new();
+        .ok_or_else(|| Error::Tool("with_secrets must be an array".into()))?;
+    let mut requested = Vec::with_capacity(entries.len());
+    let mut names = std::collections::HashSet::new();
 
     for entry in entries {
-        let object = entry
-            .as_object()
-            .ok_or_else(|| Error::Tool("secret_env entries must be objects".into()))?;
-        let env = required_secret_binding_string(object, "env")?;
-        let provider = required_secret_binding_string(object, "provider")?;
-        let field = required_secret_binding_string(object, "field")?;
-        if !is_valid_env_name(&env) {
-            return Err(Error::Tool(format!(
-                "secret_env env name '{env}' is invalid; use uppercase letters, digits, and underscores, not starting with a digit"
-            )));
+        let name = entry
+            .as_str()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| Error::Tool("with_secrets entries must be non-empty strings".into()))?;
+        if !names.insert(name.to_string()) {
+            return Err(Error::Tool(format!("duplicate with_secrets entry: {name}")));
         }
-        if !env_names.insert(env.clone()) {
-            return Err(Error::Tool(format!(
-                "duplicate secret_env binding for env var {env}"
-            )));
-        }
-        bindings.push(SecretEnvBinding {
-            env,
-            provider,
-            field,
+        requested.push(RequestedSecret {
+            name: name.to_string(),
         });
     }
 
-    Ok(bindings)
+    Ok(requested)
 }
 
-fn required_secret_binding_string(
-    object: &serde_json::Map<String, Value>,
-    key: &str,
-) -> Result<String> {
-    object
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| Error::Tool(format!("secret_env entries require non-empty {key}")))
-}
-
-fn is_valid_env_name(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_uppercase())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit())
-}
-
-fn binding_descriptor(binding: &SecretEnvBinding) -> String {
-    format!("{}<-{}.{}", binding.env, binding.provider, binding.field)
-}
-
-fn command_secret_binding_allowed(ctx: &ToolContext, binding: &SecretEnvBinding) -> bool {
+fn secret_name_allowed(ctx: &ToolContext, name: &str) -> bool {
     let policy = &ctx.config.secrets.commands;
-    policy.enabled
-        && policy.allowed.iter().any(|allowed| {
-            allowed.env == binding.env
-                && allowed.provider == binding.provider
-                && allowed.field == binding.field
-        })
+    policy.enabled && policy.allowed.iter().any(|allowed| allowed.name == name)
 }
 
-fn resolve_secret_env_bindings(
+fn field_env_name(secret_name: &str, field: &str) -> String {
+    let canonical_field = if field == "secrets_key" {
+        "secret_key"
+    } else {
+        field
+    };
+    format!("{secret_name}_{canonical_field}")
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn resolve_with_secrets(
     ctx: &ToolContext,
-    bindings: Vec<SecretEnvBinding>,
+    requested: Vec<RequestedSecret>,
 ) -> Result<Vec<ResolvedSecretEnvBinding>> {
-    if bindings.is_empty() {
+    if requested.is_empty() {
         return Ok(Vec::new());
     }
 
-    for binding in &bindings {
-        if !command_secret_binding_allowed(ctx, binding) {
+    for secret in &requested {
+        if !secret_name_allowed(ctx, &secret.name) {
             return Err(Error::Tool(format!(
-                "secret_env binding {} is not allowed by config policy",
-                binding_descriptor(binding)
+                "with_secrets entry {} is not allowed by config policy",
+                secret.name
             )));
         }
     }
@@ -128,30 +104,35 @@ fn resolve_secret_env_bindings(
     let auth_path = crate::storage::existing_global_auth_path()
         .unwrap_or_else(crate::storage::global_auth_path);
     let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
+    let mut resolved = Vec::new();
+    let mut env_names = std::collections::HashSet::new();
 
-    bindings
-        .into_iter()
-        .map(|binding| {
-            let descriptor = binding_descriptor(&binding);
-            let has_auth_metadata = matches!(
-                auth_store.stored.get(&binding.provider),
-                Some(StoredCredential::SecretFields { fields })
-                    if fields.iter().any(|field| field == &binding.field)
-            );
-            auth_store
-                .resolve_secret_field(&binding.provider, &binding.field)
-                .map(|value| ResolvedSecretEnvBinding { binding, value })
-                .map_err(|error| {
-                    if has_auth_metadata {
-                        Error::Tool(format!(
-                            "missing keychain value for {descriptor}; auth metadata exists but secure storage read failed: {error}"
-                        ))
-                    } else {
-                        Error::Tool(format!("missing secret for {descriptor}: {error}"))
-                    }
-                })
-        })
-        .collect()
+    for secret in requested {
+        let fields = auth_store
+            .resolve_secret_fields(&secret.name)
+            .map_err(|error| Error::Tool(format!("missing secret for {}: {error}", secret.name)))?;
+        for (field, value) in fields {
+            let env = field_env_name(&secret.name, &field);
+            if !is_valid_env_name(&env) {
+                return Err(Error::Tool(format!(
+                    "derived env name '{env}' for {}.{field} is invalid",
+                    secret.name
+                )));
+            }
+            if !env_names.insert(env.clone()) {
+                return Err(Error::Tool(format!(
+                    "duplicate derived env var {env} from with_secrets"
+                )));
+            }
+            resolved.push(ResolvedSecretEnvBinding {
+                secret_name: secret.name.clone(),
+                env,
+                value,
+            });
+        }
+    }
+
+    Ok(resolved)
 }
 
 fn redact_injected_secrets(text: &str, resolved: &[ResolvedSecretEnvBinding]) -> String {
@@ -164,11 +145,27 @@ fn redact_injected_secrets(text: &str, resolved: &[ResolvedSecretEnvBinding]) ->
     })
 }
 
-fn secret_binding_details(resolved: &[ResolvedSecretEnvBinding]) -> Vec<String> {
-    resolved
-        .iter()
-        .map(|binding| binding_descriptor(&binding.binding))
-        .collect()
+fn injected_secret_names(resolved: &[ResolvedSecretEnvBinding]) -> Vec<String> {
+    let mut names = Vec::new();
+    for binding in resolved {
+        if !names.contains(&binding.secret_name) {
+            names.push(binding.secret_name.clone());
+        }
+    }
+    names
+}
+
+fn injected_env_names(resolved: &[ResolvedSecretEnvBinding]) -> Vec<String> {
+    resolved.iter().map(|binding| binding.env.clone()).collect()
+}
+
+fn is_valid_env_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_uppercase())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit())
 }
 
 /// Check whether the rush backend should be used.
@@ -386,18 +383,10 @@ impl Tool for BashTool {
                 "command": { "type": "string" },
                 "timeout": { "type": "number" },
                 "workdir": { "type": "string" },
-                "secret_env": {
+                "with_secrets": {
                     "type": "array",
-                    "description": "Metadata-only stored secret bindings to inject into the child environment. Raw secret values are resolved internally and redacted from output.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "env": { "type": "string" },
-                            "provider": { "type": "string" },
-                            "field": { "type": "string" }
-                        },
-                        "required": ["env", "provider", "field"]
-                    }
+                    "description": "Imp secret names to expose as deterministic env vars.",
+                    "items": { "type": "string" }
                 }
             },
             "required": ["command"]
@@ -433,9 +422,9 @@ impl Tool for BashTool {
             ctx
         };
 
-        let secret_env = parse_secret_env_bindings(params.get("secret_env"))?;
+        let with_secrets = parse_with_secrets(params.get("with_secrets"))?;
 
-        run_command(command, timeout_secs, &ctx, secret_env).await
+        run_command(command, timeout_secs, &ctx, with_secrets).await
     }
 }
 
@@ -443,7 +432,7 @@ async fn run_command(
     command: &str,
     timeout_secs: u64,
     ctx: &ToolContext,
-    secret_env: Vec<SecretEnvBinding>,
+    with_secrets: Vec<RequestedSecret>,
 ) -> Result<ToolOutput> {
     // Check cancellation before spawning.
     if ctx.is_cancelled() {
@@ -456,7 +445,7 @@ async fn run_command(
         });
     }
 
-    let resolved_secret_env = resolve_secret_env_bindings(ctx, secret_env)?;
+    let resolved_secret_env = resolve_with_secrets(ctx, with_secrets)?;
 
     // Try the rush in-process backend when available.
     #[cfg(feature = "rush-backend")]
@@ -504,7 +493,8 @@ async fn run_command(
                     "cancelled": false,
                     "truncated": truncated,
                     "backend": "rush",
-                    "injected_secrets": secret_binding_details(&resolved_secret_env),
+                    "with_secrets": injected_secret_names(&resolved_secret_env),
+                    "injected_env": injected_env_names(&resolved_secret_env),
                 }),
                 is_error: timed_out
                     || (exit_code != 0
@@ -529,7 +519,7 @@ async fn run_command(
             .stderr(Stdio::piped());
 
         for binding in &resolved_secret_env {
-            cmd.env(&binding.binding.env, &binding.value);
+            cmd.env(&binding.env, &binding.value);
         }
 
         // Create a new process group so we can kill the entire tree.
@@ -672,7 +662,8 @@ async fn run_command(
         "cancelled": cancelled,
         "truncated": truncated,
         "command": command,
-        "injected_secrets": secret_binding_details(&resolved_secret_env),
+        "with_secrets": injected_secret_names(&resolved_secret_env),
+        "injected_env": injected_env_names(&resolved_secret_env),
     });
 
     Ok(ToolOutput {
@@ -737,7 +728,7 @@ async fn kill_process_group(_child: &tokio::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CommandSecretsConfig, Config, SecretEnvBindingPolicy, SecretsConfig};
+    use crate::config::{AllowedCommandSecret, CommandSecretsConfig, Config, SecretsConfig};
     use crate::ui::NullInterface;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
@@ -777,10 +768,8 @@ mod tests {
             secrets: SecretsConfig {
                 commands: CommandSecretsConfig {
                     enabled: true,
-                    allowed: vec![SecretEnvBindingPolicy {
-                        provider: "test-service".to_string(),
-                        field: "api_key".to_string(),
-                        env: "SECRET_TOKEN".to_string(),
+                    allowed: vec![AllowedCommandSecret {
+                        name: "test-service".to_string(),
                     }],
                 },
             },
@@ -789,20 +778,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn secret_env_injects_allowed_secret_and_redacts_output() {
+    async fn with_secrets_injects_allowed_secret_and_redacts_output() {
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("TEST_SERVICE_API_KEY", "native-secret-value");
         let (mut ctx, _rx) = test_ctx(tmp.path());
         allow_test_secret(&mut ctx);
 
         let result = run_command(
-            "printf '%s' \"$SECRET_TOKEN\"",
+            "printf '%s' \"$TEST_SERVICE_API_KEY\"",
             DEFAULT_TIMEOUT_SECS,
             &ctx,
-            vec![SecretEnvBinding {
-                env: "SECRET_TOKEN".to_string(),
-                provider: "test-service".to_string(),
-                field: "api_key".to_string(),
+            vec![RequestedSecret {
+                name: "test-service".to_string(),
             }],
         )
         .await
@@ -813,14 +800,18 @@ mod tests {
         assert!(text.contains(SECRET_REDACTION));
         assert!(!text.contains("native-secret-value"));
         assert_eq!(
-            result.details["injected_secrets"][0].as_str(),
-            Some("SECRET_TOKEN<-test-service.api_key")
+            result.details["with_secrets"][0].as_str(),
+            Some("test-service")
+        );
+        assert_eq!(
+            result.details["injected_env"][0].as_str(),
+            Some("TEST_SERVICE_API_KEY")
         );
         assert!(!result.details.to_string().contains("native-secret-value"));
     }
 
     #[tokio::test]
-    async fn secret_env_denies_unconfigured_binding() {
+    async fn with_secrets_denies_unconfigured_secret() {
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("TEST_SERVICE_API_KEY", "native-secret-value");
         let (ctx, _rx) = test_ctx(tmp.path());
@@ -829,10 +820,8 @@ mod tests {
             "true",
             DEFAULT_TIMEOUT_SECS,
             &ctx,
-            vec![SecretEnvBinding {
-                env: "SECRET_TOKEN".to_string(),
-                provider: "test-service".to_string(),
-                field: "api_key".to_string(),
+            vec![RequestedSecret {
+                name: "test-service".to_string(),
             }],
         )
         .await
@@ -847,26 +836,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn secret_env_rejects_duplicate_env_bindings() {
-        let err = parse_secret_env_bindings(Some(&serde_json::json!([
-            {"env":"SECRET_TOKEN", "provider":"one", "field":"api_key"},
-            {"env":"SECRET_TOKEN", "provider":"two", "field":"api_key"}
-        ])))
-        .unwrap_err();
+    async fn with_secrets_rejects_duplicate_secret_names() {
+        let err = parse_with_secrets(Some(&serde_json::json!(["test-service", "test-service"])))
+            .unwrap_err();
 
-        assert!(err.to_string().contains("duplicate secret_env binding"));
+        assert!(err.to_string().contains("duplicate with_secrets entry"));
     }
 
     #[tokio::test]
-    async fn secret_env_rejects_invalid_env_name() {
-        let err = parse_secret_env_bindings(Some(&serde_json::json!([
-            {"env":"secret-token", "provider":"one", "field":"api_key"}
+    async fn with_secrets_rejects_non_string_entries() {
+        let err = parse_with_secrets(Some(&serde_json::json!([
+            {"provider":"one", "field":"api_key"}
         ])))
         .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("env name 'secret-token' is invalid"));
+        assert!(err.to_string().contains("non-empty strings"));
+    }
+
+    #[test]
+    fn field_env_name_is_deterministic() {
+        assert_eq!(
+            field_env_name("openrouter", "api_key"),
+            "OPENROUTER_API_KEY"
+        );
+        assert_eq!(
+            field_env_name("porkbun", "secrets_key"),
+            "PORKBUN_SECRET_KEY"
+        );
     }
 
     #[tokio::test]

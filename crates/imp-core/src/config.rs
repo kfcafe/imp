@@ -347,14 +347,12 @@ pub struct CommandSecretsConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
-    pub allowed: Vec<SecretEnvBindingPolicy>,
+    pub allowed: Vec<AllowedCommandSecret>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SecretEnvBindingPolicy {
-    pub provider: String,
-    pub field: String,
-    pub env: String,
+pub struct AllowedCommandSecret {
+    pub name: String,
 }
 
 /// Top-level configuration.
