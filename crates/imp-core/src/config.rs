@@ -32,7 +32,7 @@ pub enum AgentMode {
 }
 
 const WORKER_TOOLS: &[&str] = &[
-    "read", "scan", "web", "recall", "write", "edit", "shell", "git", "mana", "ask_user",
+    "read", "scan", "web", "recall", "write", "edit", "bash", "git", "mana", "ask_user",
 ];
 const ORCHESTRATOR_TOOLS: &[&str] = &[
     "read", "scan", "web", "recall", "mana", "git", "ask_user", "spawn",
@@ -1498,7 +1498,7 @@ model = "sonnet"
         let mode = AgentMode::Full;
         assert!(mode.allows_tool("anything"));
         assert!(mode.allows_tool("read"));
-        assert!(mode.allows_tool("shell"));
+        assert!(mode.allows_tool("bash"));
         assert!(mode.allows_tool("nonexistent_future_tool"));
         assert_eq!(mode.allowed_tool_names(), &[] as &[&str]);
     }
@@ -1521,7 +1521,7 @@ model = "sonnet"
         let mode = AgentMode::Orchestrator;
         assert!(!mode.allows_tool("write"));
         assert!(!mode.allows_tool("edit"));
-        assert!(!mode.allows_tool("shell"));
+        assert!(!mode.allows_tool("bash"));
     }
 
     #[test]

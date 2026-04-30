@@ -318,9 +318,6 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     tools.register(Arc::new(SessionSearchTool));
     tools.register(Arc::new(WebTool));
     tools.register(Arc::new(WorktreeTool));
-
-    tools.register_alias("bash", "shell");
-    tools.register_alias("sh", "shell");
     tools.register_alias("imp", "spawn");
     tools.register_alias("session_search", "recall");
 }
@@ -537,9 +534,9 @@ mod tests {
         .build()
         .unwrap();
 
-        assert!(agent.tools.get("shell").is_some());
         assert!(agent.tools.get("bash").is_some());
-        assert!(agent.tools.get("sh").is_some());
+        assert!(agent.tools.get("shell").is_none());
+        assert!(agent.tools.get("sh").is_none());
         assert!(agent.tools.get("spawn").is_some());
         assert!(agent.tools.get("imp").is_some());
         assert!(agent.tools.get("edit").is_some());
@@ -557,11 +554,9 @@ mod tests {
             .collect();
         definition_names.sort();
 
-        assert!(definition_names.contains(&"shell".to_string()));
+        assert!(definition_names.contains(&"bash".to_string()));
         assert!(definition_names.contains(&"spawn".to_string()));
         assert!(definition_names.contains(&"edit".to_string()));
-        assert!(!definition_names.contains(&"bash".to_string()));
-        assert!(!definition_names.contains(&"sh".to_string()));
         assert!(!definition_names.contains(&"imp".to_string()));
         assert!(!definition_names.contains(&"multi_edit".to_string()));
         assert!(definition_names.contains(&"recall".to_string()));

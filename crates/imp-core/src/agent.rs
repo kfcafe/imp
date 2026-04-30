@@ -2635,7 +2635,6 @@ mod tests {
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.mode = AgentMode::Full;
         agent.tools.register(Arc::new(crate::tools::bash::BashTool));
-        agent.tools.register_alias("bash", "shell");
 
         let events_task = tokio::spawn(collect_events(handle));
         agent.run("Run the check".to_string()).await.unwrap();
@@ -4112,7 +4111,6 @@ mod tests {
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.tools.register(Arc::new(crate::tools::bash::BashTool));
-        agent.tools.register_alias("bash", "shell");
 
         agent.run("Run a shell command".to_string()).await.unwrap();
 
@@ -4991,7 +4989,6 @@ mod integration {
         agent.tools.register(Arc::new(ReadTool));
         agent.tools.register(Arc::new(EditTool));
         agent.tools.register(Arc::new(BashTool));
-        agent.tools.register_alias("bash", "shell");
         (agent, handle)
     }
 

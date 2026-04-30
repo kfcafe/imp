@@ -371,7 +371,7 @@ impl BashTool {
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
-        "shell"
+        "bash"
     }
     fn label(&self) -> &str {
         "Shell"
