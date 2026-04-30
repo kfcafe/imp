@@ -80,21 +80,22 @@ impl Tool for ScanTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["extract", "build", "scan"],
-                    "description": "Operation to perform: 'scan' outlines a directory as compact skeletons, 'build' outlines specific files as compact skeletons, and 'extract' returns exact code blocks from file:line, file:start-end, or file#symbol targets."
+                    "enum": ["directory", "files", "extract"],
+                    "description": "Operation: 'directory' outlines a directory, 'files' outlines specific files, and 'extract' returns exact code blocks from targets."
+                },
+                "directory": {
+                    "type": "string",
+                    "description": "Directory to structurally scan. Defaults to the current workspace."
                 },
                 "files": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Files to analyze for action='build', or extraction targets for action='extract'. Extract target forms: file#symbol, file:start-end, file:line. Examples: src/lib.rs#Agent, src/lib.rs:40-80, src/lib.rs:42."
+                    "description": "Files to outline for action='files'."
                 },
-                "directory": {
-                    "type": "string",
-                    "description": "Directory to structurally scan when action='scan'. Defaults to the current workspace."
-                },
-                "task": {
-                    "type": "string",
-                    "description": "Optional natural-language focus for the scan, e.g. 'find auth entrypoints' or 'summarize provider implementations'."
+                "targets": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Extraction targets for action='extract': file#symbol, file:start-end, or file:line. Examples: src/lib.rs#Agent, src/lib.rs:40-80, src/lib.rs:42."
                 }
             },
             "required": ["action"]
@@ -118,36 +119,29 @@ impl Tool for ScanTool {
 
         let mut files = match action {
             "extract" => {
-                let files = match params["files"].as_array() {
-                    Some(f) if !f.is_empty() => f,
-                    _ => {
-                        return Ok(ToolOutput::error(
-                            "'files' array required for extract action",
-                        ))
-                    }
+                let target_values = params
+                    .get("targets")
+                    .or_else(|| params.get("files"))
+                    .and_then(|value| value.as_array());
+                let targets = match parse_string_array(target_values, "targets") {
+                    Ok(targets) if !targets.is_empty() => targets,
+                    Ok(_) => return Ok(ToolOutput::error("scan extract requires targets")),
+                    Err(message) => return Ok(ToolOutput::error(message)),
                 };
-                // extract accepts positional targets like file:line, file:start-end, file#symbol
-                let targets: Vec<String> = files
-                    .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect();
                 return Ok(execute_extract(&targets, &ctx));
             }
-            "build" => {
-                let files = match params["files"].as_array() {
-                    Some(f) if !f.is_empty() => f,
-                    _ => return Ok(ToolOutput::error("'files' array required for build action")),
+            "files" | "build" => {
+                let files = match parse_string_array(params["files"].as_array(), "files") {
+                    Ok(files) if !files.is_empty() => files,
+                    Ok(_) => return Ok(ToolOutput::error("scan files requires files")),
+                    Err(message) => return Ok(ToolOutput::error(message)),
                 };
-                let mut resolved = Vec::with_capacity(files.len());
-                for file in files {
-                    match file.as_str() {
-                        Some(f) => resolved.push(crate::tools::resolve_path(&ctx.cwd, f)),
-                        None => return Ok(ToolOutput::error("'files' must contain strings")),
-                    }
-                }
-                resolved
+                files
+                    .into_iter()
+                    .map(|file| crate::tools::resolve_path(&ctx.cwd, &file))
+                    .collect()
             }
-            "scan" => {
+            "directory" | "scan" => {
                 let dir = params["directory"]
                     .as_str()
                     .map(|d| crate::tools::resolve_path(&ctx.cwd, d))
@@ -165,11 +159,54 @@ impl Tool for ScanTool {
         }
 
         let result = extract_files(&files, &ctx.cwd);
-        let task = params["task"].as_str();
-        let output = format_result(&result, &files, &ctx.cwd, action, task);
+        let action_name = canonical_action(action);
+        let output = format_result(&result, &files, &ctx.cwd, action_name, None);
 
-        Ok(ToolOutput::text(truncate_output(output)))
+        Ok(ToolOutput {
+            content: vec![imp_llm::ContentBlock::Text {
+                text: truncate_output(output),
+            }],
+            details: json!({
+                "action": action_name,
+                "files_analyzed": files.len(),
+                "supported_languages": ["rust", "typescript", "javascript", "python", "go"],
+                "types_count": result.types.len(),
+                "functions_count": result.functions.len(),
+            }),
+            is_error: false,
+        })
     }
+}
+
+// ── parameter helpers ───────────────────────────────────────────────
+
+fn canonical_action(action: &str) -> &str {
+    match action {
+        "scan" => "directory",
+        "build" => "files",
+        other => other,
+    }
+}
+
+fn parse_string_array(
+    values: Option<&Vec<serde_json::Value>>,
+    field: &str,
+) -> std::result::Result<Vec<String>, String> {
+    let Some(values) = values else {
+        return Ok(Vec::new());
+    };
+    let mut strings = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let Some(text) = value
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        else {
+            return Err(format!("{field}[{index}] must be a non-empty string"));
+        };
+        strings.push(text.to_string());
+    }
+    Ok(strings)
 }
 
 // ── extraction dispatch ─────────────────────────────────────────────
@@ -209,6 +246,7 @@ fn extract_files(files: &[PathBuf], cwd: &Path) -> ScanResult {
             "tsx" => typescript::parse(&source, &rel, true, &mut result),
             "py" => python::parse(&source, &rel, &mut result),
             "go" => go::parse(&source, &rel, &mut result),
+            "js" | "jsx" => typescript::parse(&source, &rel, ext == "jsx", &mut result),
             // TODO: add more languages as tree-sitter grammars are added
             _ => {}
         }
@@ -254,7 +292,7 @@ fn collect_source_files(root: &Path) -> Result<Vec<PathBuf>> {
 fn is_supported(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
-        Some("rs" | "ts" | "tsx" | "py" | "go")
+        Some("rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go")
     )
 }
 
@@ -514,9 +552,13 @@ enum Locator {
 
 fn execute_extract(targets: &[String], ctx: &ToolContext) -> ToolOutput {
     let mut blocks = Vec::new();
+    let mut errors = Vec::new();
 
     for target in targets {
         let Some((file, locator)) = parse_extract_target(target) else {
+            errors.push(format!(
+                "Invalid target `{target}`. Use file#symbol, file:start-end, or file:line."
+            ));
             continue;
         };
 
@@ -598,11 +640,37 @@ fn execute_extract(targets: &[String], ctx: &ToolContext) -> ToolOutput {
         }
     }
 
-    if blocks.is_empty() {
+    if blocks.is_empty() && errors.is_empty() {
         return ToolOutput::text("No code blocks found.");
     }
 
-    ToolOutput::text(truncate_output(format_blocks(&blocks)))
+    let mut output = String::new();
+    if !blocks.is_empty() {
+        output.push_str(&format_blocks(&blocks));
+    }
+    if !errors.is_empty() {
+        if !output.is_empty() {
+            output.push_str("\n\n");
+        }
+        output.push_str("Errors:\n");
+        for error in &errors {
+            output.push_str(&format!("- {error}\n"));
+        }
+    }
+
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text {
+            text: truncate_output(output),
+        }],
+        details: json!({
+            "action": "extract",
+            "targets_count": targets.len(),
+            "blocks_count": blocks.len(),
+            "errors": errors,
+            "blocks": blocks.iter().map(block_details).collect::<Vec<_>>(),
+        }),
+        is_error: blocks.is_empty(),
+    }
 }
 
 fn parse_extract_target(target: &str) -> Option<(String, Locator)> {
@@ -621,14 +689,32 @@ fn parse_extract_target(target: &str) -> Option<(String, Locator)> {
             if let Some(dash_pos) = suffix.find('-') {
                 let start = suffix[..dash_pos].parse::<usize>().ok()?;
                 let end = suffix[dash_pos + 1..].parse::<usize>().ok()?;
+                if start == 0 || end == 0 || start > end {
+                    return None;
+                }
                 return Some((file, Locator::Range(start, end)));
             } else if let Ok(line) = suffix.parse::<usize>() {
+                if line == 0 {
+                    return None;
+                }
                 return Some((file, Locator::Line(line)));
             }
         }
     }
 
     None
+}
+
+fn block_details(block: &CodeBlock) -> serde_json::Value {
+    json!({
+        "path": block.file.to_string_lossy(),
+        "symbol": block.symbol,
+        "kind": block.kind,
+        "language": block.language,
+        "start_line": block.start_line,
+        "end_line": block.end_line,
+        "truncated": block.truncated,
+    })
 }
 
 fn read_text_file(path: &Path) -> Option<String> {
@@ -822,15 +908,7 @@ fn format_blocks(blocks: &[CodeBlock]) -> String {
         if let Some(kind) = &block.kind {
             header.push_str(&format!(" ({kind})"));
         }
-        let details = json!({
-            "path": block.file.to_string_lossy(),
-            "symbol": block.symbol,
-            "kind": block.kind,
-            "language": block.language,
-            "start_line": block.start_line,
-            "end_line": block.end_line,
-            "truncated": block.truncated,
-        });
+        let details = block_details(block);
 
         let fence = match block.file.extension().and_then(|e| e.to_str()) {
             Some("rs") => "rust",
@@ -852,6 +930,58 @@ fn format_blocks(blocks: &[CodeBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_uses_directory_files_extract_and_targets() {
+        let schema = ScanTool.parameters();
+        let properties = schema["properties"].as_object().unwrap();
+        let actions = properties["action"]["enum"].as_array().unwrap();
+        assert!(actions.iter().any(|value| value == "directory"));
+        assert!(actions.iter().any(|value| value == "files"));
+        assert!(actions.iter().any(|value| value == "extract"));
+        assert!(properties.contains_key("targets"));
+        assert!(!properties.contains_key("task"));
+    }
+
+    #[test]
+    fn parse_extract_target_rejects_invalid_lines() {
+        assert!(parse_extract_target("src/lib.rs:0").is_none());
+        assert!(parse_extract_target("src/lib.rs:10-2").is_none());
+        assert!(parse_extract_target("src/lib.rs:1-2").is_some());
+    }
+
+    #[test]
+    fn execute_extract_reports_invalid_target_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
+        let ctx = ToolContext {
+            cwd: tmp.path().to_path_buf(),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            command_tx: cmd_tx,
+            ui: std::sync::Arc::new(crate::ui::NullInterface),
+            file_cache: std::sync::Arc::new(crate::tools::FileCache::new()),
+            checkpoint_state: std::sync::Arc::new(crate::tools::CheckpointState::new()),
+            file_tracker: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::tools::FileTracker::new(),
+            )),
+            anchor_store: std::sync::Arc::new(crate::tools::AnchorStore::new()),
+            lua_tool_loader: None,
+            mode: crate::config::AgentMode::Full,
+            read_max_lines: 500,
+            turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
+            config: std::sync::Arc::new(crate::config::Config::default()),
+        };
+
+        let output = execute_extract(&["not-a-target".to_string()], &ctx);
+
+        assert!(output.is_error);
+        assert_eq!(output.details["action"], "extract");
+        assert_eq!(output.details["errors"].as_array().unwrap().len(), 1);
+    }
 
     #[test]
     fn extract_rust_file() {
