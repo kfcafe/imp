@@ -245,6 +245,19 @@ impl SessionManager {
         }
     }
 
+    /// In-memory session seeded with a linear message history.
+    pub fn in_memory_with_messages(messages: Vec<Message>) -> Self {
+        let mut session = Self::in_memory();
+        for message in messages {
+            let _ = session.append(SessionEntry::Message {
+                id: uuid::Uuid::new_v4().to_string(),
+                parent_id: None,
+                message,
+            });
+        }
+        session
+    }
+
     /// Find the most recently modified session for a given cwd.
     pub fn continue_recent(cwd: &Path, session_dir: &Path) -> Result<Option<Self>> {
         if !session_dir.exists() {

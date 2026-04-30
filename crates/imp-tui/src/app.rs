@@ -14,9 +14,9 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Mou
 use imp_core::agent::{AgentCommand, AgentEvent, AgentHandle};
 use imp_core::builder::AgentBuilder;
 use imp_core::compaction::{
-    execute_compaction_with_retry, prepare_messages_for_compaction, select_compaction_strategy,
-    CompactionCapabilities, CompactionStrategy, COMPACTION_SUMMARY_PREFIX,
-    DEFAULT_KEEP_RECENT_GROUPS,
+    execute_compaction_with_retry, execute_manual_compaction, prepare_messages_for_compaction,
+    select_compaction_strategy, CompactionCapabilities, CompactionStrategy,
+    COMPACTION_SUMMARY_PREFIX, DEFAULT_KEEP_RECENT_GROUPS,
 };
 use imp_core::config::Config;
 use imp_core::personality::default_soul_markdown;
@@ -168,6 +168,8 @@ enum RuntimeSignal {
     AgentEvent(AgentEvent),
     AgentTaskCompleted,
     AgentTaskFailed(String),
+    CompactionTaskCompleted(String),
+    CompactionTaskFailed(String),
     LoginTaskSucceeded(String),
     LoginTaskFailed(String),
     UiRequest(crate::tui_interface::UiRequest),
@@ -266,6 +268,7 @@ pub struct App {
     // Agent
     pub agent_handle: Option<AgentHandle>,
     agent_task: Option<tokio::task::JoinHandle<Result<(), ImpCoreError>>>,
+    compaction_task: Option<tokio::task::JoinHandle<Result<String, String>>>,
     pub is_streaming: bool,
     pub message_queue: Vec<QueuedMessage>,
 
@@ -589,6 +592,7 @@ impl App {
             cwd,
             agent_handle: None,
             agent_task: None,
+            compaction_task: None,
             is_streaming: false,
             message_queue: Vec::new(),
             session,
@@ -715,7 +719,7 @@ impl App {
             .or_else(|| self.session.title(48))
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| "chat".to_string());
-        let identity = if self.is_streaming {
+        let identity = if self.is_streaming || self.compaction_task.is_some() {
             spinner_frame(self.tick)
         } else {
             "imp"
@@ -779,7 +783,7 @@ impl App {
             // Tick + periodic redraw for streaming/spinner
             self.tick = self.tick.wrapping_add(1);
             self.maybe_autoscroll_selection();
-            if self.is_streaming {
+            if self.is_streaming || self.compaction_task.is_some() {
                 self.sync_window_title();
                 self.needs_redraw = true;
             }
@@ -845,6 +849,24 @@ impl App {
             }
         }
 
+        let compaction_task_finished = self
+            .compaction_task
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished);
+        if compaction_task_finished {
+            if let Some(task) = self.compaction_task.take() {
+                match task.await {
+                    Ok(Ok(summary)) => {
+                        signals.push(RuntimeSignal::CompactionTaskCompleted(summary))
+                    }
+                    Ok(Err(error)) => signals.push(RuntimeSignal::CompactionTaskFailed(error)),
+                    Err(error) => signals.push(RuntimeSignal::CompactionTaskFailed(format!(
+                        "Internal compaction task failure: {error}"
+                    ))),
+                }
+            }
+        }
+
         let login_task_finished = self
             .login_task
             .as_ref()
@@ -899,6 +921,13 @@ impl App {
                     self.agent_handle = None;
                 }
                 self.present_agent_failure(error);
+            }
+            RuntimeSignal::CompactionTaskCompleted(summary) => {
+                self.finish_manual_compaction(summary)
+            }
+            RuntimeSignal::CompactionTaskFailed(error) => {
+                self.finish_compaction_status_message("Compaction failed.");
+                self.push_error_msg(&format!("Compaction failed: {error}"));
             }
             RuntimeSignal::LoginTaskSucceeded(message) => self.push_system_msg(&message),
             RuntimeSignal::LoginTaskFailed(message) => self.push_error_msg(&message),
@@ -1073,6 +1102,10 @@ impl App {
             .map(|m| !m.tool_calls.is_empty())
             .unwrap_or(active_tools > 0);
 
+        if self.compaction_task.is_some() {
+            return AnimationState::Thinking;
+        }
+
         AnimationState::from_streaming(
             self.is_streaming,
             has_visible_content,
@@ -1089,7 +1122,7 @@ impl App {
     }
 
     fn effective_tick_rate(&self) -> Duration {
-        if self.is_streaming || self.drag_autoscroll.is_some() {
+        if self.is_streaming || self.compaction_task.is_some() || self.drag_autoscroll.is_some() {
             Duration::from_millis(16)
         } else {
             Duration::from_millis(100)
@@ -3002,6 +3035,13 @@ impl App {
         }
 
         // Add user message to display
+        if self.compaction_task.is_some() {
+            self.push_system_msg(
+                "Compaction is running; wait for it to finish before sending a new prompt.",
+            );
+            return;
+        }
+
         self.messages.push(DisplayMessage {
             role: MessageRole::User,
             content: text.clone(),
@@ -4913,6 +4953,10 @@ impl App {
             self.push_error_msg("Cannot compact while the agent is actively streaming.");
             return;
         }
+        if self.compaction_task.is_some() {
+            self.push_system_msg("Compaction is already running.");
+            return;
+        }
 
         let active_messages = self.session.get_active_messages();
         let prepared =
@@ -4953,17 +4997,6 @@ impl App {
             }
         };
 
-        let api_key = match tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(resolve_provider_api_key(&mut auth_store, &provider_name))
-        }) {
-            Ok(key) => key,
-            Err(e) => {
-                self.push_error_msg(&format!("Failed to resolve auth for compaction: {e}"));
-                return;
-            }
-        };
-
         let model = Model {
             meta,
             provider: Arc::from(provider),
@@ -4972,26 +5005,10 @@ impl App {
         let model_meta = model.meta.clone();
         let model_provider = Arc::clone(&model.provider);
         let requested_max_tokens = self.config.max_tokens;
+        let thinking_level = self.thinking_level;
 
         let mut config = self.config.clone();
-        config.thinking = Some(self.thinking_level);
-
-        let lua_cwd = self.cwd.clone();
-        let user_config_dir = imp_core::config::Config::user_config_dir();
-        let (agent, _handle) = match AgentBuilder::new(config, self.cwd.clone(), model, api_key)
-            .lua_tool_loader(move |policy, tools| {
-                imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools, policy);
-            })
-            .build()
-        {
-            Ok(built) => built,
-            Err(e) => {
-                self.push_error_msg(&format!("Failed to build compaction agent: {e}"));
-                return;
-            }
-        };
-
-        let system_prompt = agent.system_prompt.clone();
+        config.thinking = Some(thinking_level);
 
         let strategy = select_compaction_strategy(&CompactionCapabilities {
             provider_id: &provider_name,
@@ -5004,29 +5021,58 @@ impl App {
             );
         }
 
-        let result = execute_compaction_with_retry(
-            &mut self.session,
-            DEFAULT_KEEP_RECENT_GROUPS,
-            2,
-            |prompt| {
-                use futures::StreamExt;
-                use imp_llm::provider::{CacheOptions, Context as LlmContext, RequestOptions};
-                use imp_llm::StreamEvent;
+        self.messages.push(DisplayMessage {
+            role: MessageRole::Compaction,
+            content: "Compacting context…".to_string(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: true,
+            timestamp: imp_llm::now(),
+        });
+        self.auto_scroll = true;
+        self.scroll_offset = 0;
+        self.invalidate_chat_render_cache();
 
-                let model_meta = model_meta.clone();
-                let model_provider = Arc::clone(&model_provider);
-                let api_key = agent.api_key.clone();
-                let system_prompt = system_prompt.clone();
-                let prompt = prompt.to_string();
-                let thinking_level = self.thinking_level;
-                let retry_policy = agent.retry_policy.clone();
+        let cwd = self.cwd.clone();
+        let lua_cwd = self.cwd.clone();
+        let user_config_dir = imp_core::config::Config::user_config_dir();
+        let task = tokio::spawn(async move {
+            let api_key = resolve_provider_api_key(&mut auth_store, &provider_name)
+                .await
+                .map_err(|e| format!("Failed to resolve auth for compaction: {e}"))?;
 
-                tokio::task::block_in_place(|| {
-                    let runtime = tokio::runtime::Handle::current();
-                    runtime.block_on(async move {
+            let model = Model {
+                meta: model_meta.clone(),
+                provider: Arc::clone(&model_provider),
+            };
+            let (agent, _handle) = AgentBuilder::new(config, cwd, model, api_key)
+                .lua_tool_loader(move |policy, tools| {
+                    imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools, policy);
+                })
+                .build()
+                .map_err(|e| format!("Failed to build compaction agent: {e}"))?;
+
+            let system_prompt = agent.system_prompt.clone();
+            let retry_policy = agent.retry_policy.clone();
+            execute_compaction_with_retry(
+                &mut SessionManager::in_memory_with_messages(active_messages),
+                DEFAULT_KEEP_RECENT_GROUPS,
+                2,
+                |prompt| {
+                    use futures::StreamExt;
+                    use imp_llm::provider::{CacheOptions, Context as LlmContext, RequestOptions};
+
+                    let model_meta = model_meta.clone();
+                    let model_provider = Arc::clone(&model_provider);
+                    let api_key = agent.api_key.clone();
+                    let system_prompt = system_prompt.clone();
+                    let prompt = prompt.to_string();
+                    let retry_policy = retry_policy.clone();
+
+                    futures::executor::block_on(async move {
                         let mut summary = String::new();
                         let mut message_end_text: Option<String> = None;
-
                         let model = Model {
                             meta: model_meta,
                             provider: model_provider,
@@ -5076,7 +5122,7 @@ impl App {
                                     }
                                 }
                                 Ok(_) => {}
-                                Err(_) => return None,
+                                Err(error) => return Err(error.to_string()),
                             }
                         }
 
@@ -5085,11 +5131,46 @@ impl App {
                         } else {
                             message_end_text.unwrap_or_default()
                         };
-                        (!final_text.trim().is_empty()).then_some(final_text)
+                        if final_text.trim().is_empty() {
+                            Err("Compaction summary was empty".to_string())
+                        } else {
+                            Ok(final_text)
+                        }
                     })
-                })
-            },
-        );
+                    .ok()
+                },
+            )
+            .map_err(|e| e.to_string())?
+            .map(|result| {
+                result
+                    .summary
+                    .trim_start_matches(COMPACTION_SUMMARY_PREFIX)
+                    .to_string()
+            })
+            .ok_or_else(|| "Not enough history to compact yet.".to_string())
+        });
+
+        self.compaction_task = Some(task);
+    }
+
+    fn finish_compaction_status_message(&mut self, content: &str) {
+        if let Some(message) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|message| message.role == MessageRole::Compaction && message.is_streaming)
+        {
+            message.content = content.to_string();
+            message.is_streaming = false;
+            self.invalidate_chat_render_cache();
+        }
+    }
+
+    fn finish_manual_compaction(&mut self, summary: String) {
+        let result =
+            execute_manual_compaction(&mut self.session, DEFAULT_KEEP_RECENT_GROUPS, |_| {
+                Some(summary.clone())
+            });
 
         match result {
             Ok(Some(compaction)) => {
@@ -5108,14 +5189,15 @@ impl App {
                     is_streaming: false,
                     timestamp: imp_llm::now(),
                 });
-                self.push_system_msg(&format!(
-                    "Compaction summary stored. Active context now uses the compacted branch view."
-                ));
+                self.push_system_msg(
+                    "Compaction summary stored. Active context now uses the compacted branch view.",
+                );
             }
             Ok(None) => {
-                self.push_system_msg("Not enough history to compact yet.");
+                self.finish_compaction_status_message("Not enough history to compact yet.");
             }
             Err(e) => {
+                self.finish_compaction_status_message("Compaction failed.");
                 self.push_error_msg(&format!("Compaction failed: {e}"));
             }
         }
