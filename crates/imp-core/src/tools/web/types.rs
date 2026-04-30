@@ -68,6 +68,23 @@ pub struct SearchResponse {
     pub provider: SearchProvider,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ExtractionQuality {
+    Good,
+    Partial,
+    Poor,
+}
+
+impl ExtractionQuality {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Good => "good",
+            Self::Partial => "partial",
+            Self::Poor => "poor",
+        }
+    }
+}
+
 /// Extracted page content from a read operation.
 #[derive(Debug, Clone)]
 pub struct PageContent {
@@ -91,6 +108,10 @@ pub struct PageContent {
     pub raw_body_bytes: usize,
     /// Informational warnings about potential page quality or extraction issues.
     pub diagnostics: Vec<String>,
+    /// Heuristic extraction quality signal.
+    pub quality: ExtractionQuality,
+    /// Compact reasons for non-good quality.
+    pub quality_reasons: Vec<String>,
 }
 
 /// Web tool configuration, typically from `[web]` in config.toml.

@@ -13,6 +13,7 @@ pub mod types;
 pub mod youtube;
 
 use async_trait::async_trait;
+use imp_llm::ContentBlock;
 use reqwest::Client;
 use serde_json::json;
 use std::sync::OnceLock;
@@ -60,8 +61,7 @@ impl Tool for WebTool {
                 "action": { "type": "string", "enum": ["search", "read"] },
                 "query": { "type": "string" },
                 "url": { "type": "string" },
-                "provider": { "type": "string", "enum": ["tavily", "exa", "linkup", "perplexity"] },
-                "maxResults": { "type": "number" }
+                "max_results": { "type": "integer", "minimum": 1, "maximum": 20 }
             },
             "required": ["action"]
         })
@@ -89,14 +89,10 @@ impl Tool for WebTool {
 async fn execute_search(params: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
     let query = match params["query"].as_str() {
         Some(q) if !q.is_empty() => q,
-        _ => return Ok(ToolOutput::error("Missing 'query' parameter")),
+        _ => return Ok(ToolOutput::error("web search requires query")),
     };
 
-    let max_results = params["maxResults"]
-        .as_u64()
-        .map(|n| n as usize)
-        .unwrap_or(5)
-        .min(20);
+    let max_results = max_results_from_params(&params);
 
     let provider = resolve_provider(&params, ctx);
 
@@ -105,23 +101,34 @@ async fn execute_search(params: serde_json::Value, ctx: &ToolContext) -> Result<
         Err(e) => return Ok(ToolOutput::error(e.to_string())),
     };
 
-    Ok(ToolOutput::text(truncate_output(format_search_response(
-        &response, query,
-    ))))
+    Ok(ToolOutput {
+        content: vec![ContentBlock::Text {
+            text: truncate_output(format_search_response(&response, query)),
+        }],
+        details: json!({
+            "action": "search",
+            "provider": response.provider.name(),
+            "query": query,
+            "max_results": max_results,
+            "results_count": response.results.len(),
+            "has_answer": response.answer.is_some(),
+            "results": response.results,
+        }),
+        is_error: false,
+    })
 }
 
-fn resolve_provider(params: &serde_json::Value, ctx: &ToolContext) -> SearchProvider {
-    // Explicit param override
-    if let Some(name) = params["provider"].as_str() {
-        match name {
-            "tavily" => return SearchProvider::Tavily,
-            "exa" => return SearchProvider::Exa,
-            "linkup" => return SearchProvider::Linkup,
-            "perplexity" => return SearchProvider::Perplexity,
-            _ => {}
-        }
-    }
+fn max_results_from_params(params: &serde_json::Value) -> usize {
+    params
+        .get("max_results")
+        .or_else(|| params.get("maxResults"))
+        .and_then(|value| value.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(5)
+        .clamp(1, 20)
+}
 
+fn resolve_provider(_params: &serde_json::Value, ctx: &ToolContext) -> SearchProvider {
     // Env-driven default: IMP_WEB_PROVIDER=exa
     if let Ok(env_provider) = std::env::var("IMP_WEB_PROVIDER") {
         match env_provider.to_lowercase().as_str() {
@@ -192,7 +199,7 @@ fn format_search_response(response: &types::SearchResponse, query: &str) -> Stri
 async fn execute_read(params: serde_json::Value) -> Result<ToolOutput> {
     let url = match params["url"].as_str() {
         Some(u) if !u.is_empty() => u,
-        _ => return Ok(ToolOutput::error("Missing 'url' parameter")),
+        _ => return Ok(ToolOutput::error("web read requires url")),
     };
 
     let page = match read::fetch_and_extract(http_client(), url).await {
@@ -236,7 +243,26 @@ async fn execute_read(params: serde_json::Value) -> Result<ToolOutput> {
     output.push_str(&page.text);
     output.push_str("\n</web_content>");
 
-    Ok(ToolOutput::text(truncate_output(output)))
+    Ok(ToolOutput {
+        content: vec![ContentBlock::Text {
+            text: truncate_output(output),
+        }],
+        details: json!({
+            "action": "read",
+            "requested_url": page.requested_url,
+            "final_url": page.url,
+            "status_code": page.status_code,
+            "content_type": page.content_type,
+            "format_received": page.format_received.name(),
+            "was_redirected": page.was_redirected,
+            "raw_body_bytes": page.raw_body_bytes,
+            "content_length": page.content_length,
+            "quality": page.quality.name(),
+            "quality_reasons": page.quality_reasons,
+            "diagnostics": page.diagnostics,
+        }),
+        is_error: false,
+    })
 }
 
 // ── output truncation ───────────────────────────────────────────────
@@ -281,6 +307,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn schema_hides_provider_and_uses_max_results() {
+        let schema = WebTool.parameters();
+        let properties = schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("max_results"));
+        assert!(!properties.contains_key("maxResults"));
+        assert!(!properties.contains_key("provider"));
+    }
+
+    #[test]
     fn resolve_provider_prefers_env_over_config() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".imp")).unwrap();
@@ -323,6 +358,17 @@ mod tests {
             Some(value) => std::env::set_var("IMP_WEB_PROVIDER", value),
             None => std::env::remove_var("IMP_WEB_PROVIDER"),
         }
+    }
+
+    #[test]
+    fn max_results_accepts_legacy_camel_case() {
+        let modern = serde_json::json!({"max_results": 7});
+        let legacy = serde_json::json!({"maxResults": 8});
+        let clamped = serde_json::json!({"max_results": 99});
+
+        assert_eq!(max_results_from_params(&modern), 7);
+        assert_eq!(max_results_from_params(&legacy), 8);
+        assert_eq!(max_results_from_params(&clamped), 20);
     }
 
     #[test]

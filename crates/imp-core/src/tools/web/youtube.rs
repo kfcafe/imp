@@ -2,7 +2,7 @@ use reqwest::Client;
 use serde_json::Value;
 use url::Url;
 
-use super::types::{ContentFormat, PageContent};
+use super::types::{ContentFormat, ExtractionQuality, PageContent};
 
 const WATCH_BASE_URL: &str = "https://www.youtube.com/watch";
 const PLAYER_RESPONSE_VAR: &str = "ytInitialPlayerResponse";
@@ -155,6 +155,8 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
         was_redirected,
         raw_body_bytes,
         diagnostics,
+        quality: ExtractionQuality::Good,
+        quality_reasons: Vec::new(),
     })
 }
 
