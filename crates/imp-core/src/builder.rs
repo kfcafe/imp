@@ -321,7 +321,6 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     tools.register_alias("bash", "shell");
     tools.register_alias("sh", "shell");
     tools.register_alias("imp", "spawn");
-    tools.register_alias("multi_edit", "edit"); // legacy compatibility; edit is canonical for transaction edits
     tools.register_alias("session_search", "recall");
 }
 
@@ -543,7 +542,7 @@ mod tests {
         assert!(agent.tools.get("spawn").is_some());
         assert!(agent.tools.get("imp").is_some());
         assert!(agent.tools.get("edit").is_some());
-        assert!(agent.tools.get("multi_edit").is_some());
+        assert!(agent.tools.get("multi_edit").is_none());
         assert!(agent.tools.get("memory").is_none());
         assert!(agent.tools.get("recall").is_some());
         assert!(agent.tools.get("session_search").is_some());

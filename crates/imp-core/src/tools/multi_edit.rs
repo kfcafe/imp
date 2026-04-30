@@ -24,19 +24,19 @@ impl Tool for MultiEditTool {
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Default path to edit; may be omitted when each edit includes its own path" },
-                "dryRun": { "type": "boolean", "description": "Validate and return combined diff without writing files" },
+                "dry_run": { "type": "boolean", "description": "Validate and return combined diff without writing files" },
                 "edits": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
                             "path": { "type": "string", "description": "Optional per-edit path for multi-file transactions" },
-                            "oldText": { "type": "string" },
-                            "newText": { "type": "string" }
+                            "old_text": { "type": "string" },
+                            "new_text": { "type": "string" }
                         },
-                        "required": ["oldText", "newText"]
+                        "required": ["old_text", "new_text"]
                     },
-                    "description": "Array of {oldText, newText, path?} edits validated before any file is written"
+                    "description": "Array of {old_text, new_text, path?} edits validated before any file is written"
                 }
             },
             "required": ["edits"]
@@ -53,7 +53,11 @@ impl Tool for MultiEditTool {
         ctx: ToolContext,
     ) -> Result<ToolOutput> {
         let raw_path = params["path"].as_str().unwrap_or("");
-        let dry_run = params["dryRun"].as_bool().unwrap_or(false);
+        let dry_run = params
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .or_else(|| params.get("dryRun").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
         let edits = match params["edits"].as_array() {
             Some(e) if !e.is_empty() => e,
             _ => return Ok(ToolOutput::error("Missing or empty edits array")),
@@ -107,11 +111,21 @@ impl Tool for MultiEditTool {
 
             let mut current = original.clone();
             for (i, edit) in file_edits.iter().enumerate() {
-                let old_text = edit["oldText"].as_str().unwrap_or("").replace("\r\n", "\n");
-                let new_text = edit["newText"].as_str().unwrap_or("").replace("\r\n", "\n");
+                let old_text = edit
+                    .get("old_text")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| edit.get("oldText").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .replace("\r\n", "\n");
+                let new_text = edit
+                    .get("new_text")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| edit.get("newText").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .replace("\r\n", "\n");
                 if old_text.is_empty() {
                     return Ok(ToolOutput::error(format!(
-                        "Edit {} in {edit_path}: missing oldText",
+                        "Edit {} in {edit_path}: missing old_text",
                         i + 1
                     )));
                 }
@@ -122,7 +136,7 @@ impl Tool for MultiEditTool {
                     }
                     Err(_) => {
                         return Ok(ToolOutput::error(format!(
-                            "Edit {} of {} failed in {edit_path}: could not find oldText in file (after applying previous edits).\noldText starts with: {:?}",
+                            "Edit {} of {} failed in {edit_path}: could not find old_text in file (after applying previous edits).\nold_text starts with: {:?}",
                             i + 1,
                             file_edits.len(),
                             truncate_chars_with_suffix(&old_text, 80, "")
@@ -239,7 +253,12 @@ fn reject_overlapping_exact_edits(
 ) -> Result<()> {
     let mut exact_ranges = Vec::new();
     for (i, edit) in file_edits.iter().enumerate() {
-        let old_text = edit["oldText"].as_str().unwrap_or("").replace("\r\n", "\n");
+        let old_text = edit
+            .get("old_text")
+            .and_then(|v| v.as_str())
+            .or_else(|| edit.get("oldText").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .replace("\r\n", "\n");
         if old_text.is_empty() {
             continue;
         }
