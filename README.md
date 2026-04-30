@@ -24,6 +24,7 @@ brew tap kfcafe/tap && brew install imp
 - [Architecture](#architecture)
 - [Development](#development)
 - [CLI Reference](#cli-reference)
+- [License](#license)
 
 ---
 
@@ -602,6 +603,14 @@ bash tools/run-stress.sh
 See `tools/README.md` for requirements and caveats.
 
 ---
+
+## License
+
+imp is licensed under the Mozilla Public License 2.0 (MPL-2.0).
+
+You may use imp commercially, embed it in proprietary products, build private tools around it, and use it internally. If you modify imp's MPL-covered source files and distribute those modified files or binaries built from them, those modified imp files must remain available under MPL-2.0. Separate applications, plugins, integrations, and larger works that use imp may remain under their own licenses.
+
+See [LICENSE](LICENSE) for the full license text.
 
 ## CLI Reference
 
