@@ -699,9 +699,10 @@ fn tool_input_summary_rows(tc: &DisplayToolCall) -> Vec<String> {
                 "reason", "run_id",
             ],
         ),
-        "ask" => {
-            summarize_named_fields(args, &["question", "options", "allowOther", "multiSelect"])
-        }
+        "ask_user" => summarize_named_fields(
+            args,
+            &["question", "choices", "allow_other", "multi_select"],
+        ),
         "web" => {
             summarize_named_fields(args, &["action", "query", "url", "provider", "maxResults"])
         }

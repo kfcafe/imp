@@ -1620,7 +1620,7 @@ fn tool_results_indicate_execution_blocker(
             return Some(NextActionStopReason::ExecutionBlocked);
         }
 
-        if result.tool_name == "ask" && !result.is_error {
+        if result.tool_name == "ask_user" && !result.is_error {
             return Some(NextActionStopReason::UserBlocker);
         }
 
@@ -2901,7 +2901,7 @@ mod tests {
     fn tool_results_indicate_execution_blocker_detects_ask_tool_as_user_blocker() {
         let result = imp_llm::ToolResultMessage {
             tool_call_id: "call_ask".to_string(),
-            tool_name: "ask".to_string(),
+            tool_name: "ask_user".to_string(),
             content: vec![ContentBlock::Text {
                 text: "blue".to_string(),
             }],

@@ -101,6 +101,7 @@ pub enum QueuedMessage {
 
 pub enum AskReply {
     Select(tokio::sync::oneshot::Sender<Option<usize>>),
+    MultiSelect(tokio::sync::oneshot::Sender<Option<Vec<usize>>>),
     Input(tokio::sync::oneshot::Sender<Option<String>>),
 }
 
@@ -994,6 +995,31 @@ impl App {
                         "type to filter or answer freely…".into(),
                     ),
                     AskReply::Select(reply),
+                );
+            }
+            UiRequest::MultiSelect {
+                title,
+                context,
+                options,
+                reply,
+            } => {
+                let ask_options: Vec<AskOption> = options
+                    .into_iter()
+                    .map(|o| AskOption {
+                        label: o.label,
+                        description: o.description,
+                        checked: false,
+                    })
+                    .collect();
+                self.begin_ask(
+                    AskState::with_placeholder(
+                        title,
+                        context,
+                        ask_options,
+                        true,
+                        "type to answer freely…".into(),
+                    ),
+                    AskReply::MultiSelect(reply),
                 );
             }
             UiRequest::Input {
@@ -4143,6 +4169,44 @@ impl App {
                     let _ = tx.send(None);
                 }
             }
+            (AskResult::Selected(indices), Some(AskReply::MultiSelect(tx))) => {
+                let labels: Vec<String> = indices
+                    .iter()
+                    .filter_map(|&i| state.options.get(i).map(|o| o.label.clone()))
+                    .collect();
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::User,
+                    content: labels.join(", "),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+                self.invalidate_chat_render_cache();
+                let _ = tx.send(Some(indices.clone()));
+            }
+            (AskResult::Text(text), Some(AskReply::MultiSelect(tx))) => {
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::User,
+                    content: text.clone(),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+                self.invalidate_chat_render_cache();
+                let indices: Vec<usize> = state
+                    .options
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, option)| {
+                        option.label.eq_ignore_ascii_case(text).then_some(index)
+                    })
+                    .collect();
+                let _ = tx.send((!indices.is_empty()).then_some(indices));
+            }
             _ => {}
         }
     }
@@ -4236,6 +4300,9 @@ impl App {
         if let Some(reply) = self.ask_reply.take() {
             match reply {
                 AskReply::Select(tx) => {
+                    let _ = tx.send(None);
+                }
+                AskReply::MultiSelect(tx) => {
                     let _ = tx.send(None);
                 }
                 AskReply::Input(tx) => {

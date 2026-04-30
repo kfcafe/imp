@@ -27,6 +27,18 @@ pub trait UserInterface: Send + Sync {
         options: &[SelectOption],
     ) -> Option<usize>;
 
+    /// Select multiple options. Returns None if no UI or cancelled.
+    async fn multi_select_with_context(
+        &self,
+        title: &str,
+        context: &str,
+        options: &[SelectOption],
+    ) -> Option<Vec<usize>> {
+        self.select_with_context(title, context, options)
+            .await
+            .map(|index| vec![index])
+    }
+
     /// Text input. Returns None if no UI or cancelled.
     async fn input(&self, title: &str, placeholder: &str) -> Option<String> {
         self.input_with_context(title, "", placeholder).await
@@ -95,6 +107,14 @@ impl UserInterface for NullInterface {
         _context: &str,
         _options: &[SelectOption],
     ) -> Option<usize> {
+        None
+    }
+    async fn multi_select_with_context(
+        &self,
+        _title: &str,
+        _context: &str,
+        _options: &[SelectOption],
+    ) -> Option<Vec<usize>> {
         None
     }
     async fn input_with_context(

@@ -225,7 +225,7 @@ fn identity_layer(
     s.push_str("- Use `read` to inspect a specific file with stable line-oriented output.\n");
     s.push_str("- Use `scan` for structural code understanding and for extracting code at file:line, file:start-end, or file#symbol. Prefer it over `shell`+search when you need symbols, call sites, or coherent code blocks.\n");
     s.push_str("- Use `edit` and `write` for file changes.\n");
-    s.push_str("- Use specialized tools like `mana`, `ask`, `web`, `extend`, and `recall` when the task calls for them. Use `recall` when you need to search past conversations.\n");
+    s.push_str("- Use specialized tools like `mana`, `ask_user`, `web`, `extend`, and `recall` when the task calls for them. Use `recall` when you need to search past conversations.\n");
 
     s.push_str("\nMana doctrine:\n");
     s.push_str("- Mana is imp's substrate for explicit work. Represent work in mana whenever structure, verification, retries, dependencies, or handoff would help. Any mana unit must be detailed enough for another agent to execute cold without guesswork, even if you end up doing the work yourself.\n");
@@ -1416,7 +1416,10 @@ mod tests {
         let task = TaskContext {
             title: "Fix auth".into(),
             description: "Tighten token validation".into(),
-            design: Some("Keep validation logic in the existing auth module; avoid a broader auth rewrite.".into()),
+            design: Some(
+                "Keep validation logic in the existing auth module; avoid a broader auth rewrite."
+                    .into(),
+            ),
             acceptance: None,
             verify: Some("cargo test auth".into()),
             verify_timeout_secs: Some(30),
@@ -1436,7 +1439,9 @@ mod tests {
             .text
             .contains("Keep validation logic in the existing auth module"));
         assert!(result.text.contains("Verify timeout: 30s"));
-        assert!(result.text.contains("Fail-first: verify was expected to fail before implementation"));
+        assert!(result
+            .text
+            .contains("Fail-first: verify was expected to fail before implementation"));
         assert!(result.text.contains("Notes:"));
         assert!(result
             .text
