@@ -1374,6 +1374,42 @@ mod tests {
     }
 
     #[test]
+    fn focused_tool_call_shows_arrow_in_summary_mode() {
+        let theme = Theme::default();
+        let highlighter = Highlighter::new();
+        let messages = vec![DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: vec![make_tool("tc-1")],
+            assistant_blocks: vec![DisplayAssistantBlock::ToolCall { id: "tc-1".into() }],
+            is_streaming: false,
+            timestamp: 0,
+        }];
+
+        let (lines, visible_tools) = build_chat_lines(
+            &messages,
+            &theme,
+            &highlighter,
+            80,
+            0,
+            Some(0),
+            true,
+            ChatToolDisplay::Summary,
+            5,
+            false,
+            AnimationLevel::Minimal,
+            AnimationState::Idle,
+        );
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(visible_tools.len(), 1);
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("▸") && line.contains("read") && line.contains("src/main.rs")));
+    }
+
+    #[test]
     fn streaming_placeholder_renders_waiting_in_chat() {
         let theme = Theme::default();
         let highlighter = Highlighter::new();

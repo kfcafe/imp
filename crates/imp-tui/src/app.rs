@@ -1497,11 +1497,7 @@ impl App {
 
         // Messages
         let chat_tool_display = self.config.ui.effective_chat_tool_display();
-        let chat_tool_focus = if self.active_pane == Pane::Chat {
-            self.tool_focus
-        } else {
-            None
-        };
+        let chat_tool_focus = self.tool_focus;
         let activity_state = self.current_activity_state();
         let total_chat_lines = {
             let chat_render = self.cached_chat_render(
