@@ -22,7 +22,7 @@ pub fn styled_tool_output_lines(
         "scan" => styled_scan_output(tc, theme),
         "mana" => styled_mana_output(tc, theme),
         "web" => styled_web_output(tc, theme),
-        "ask_user" | "spawn" | "recall" | "extend" | "audit_scan" | "openrouter_secret_run" => {
+        "ask_user" | "ask_agent" | "recall" | "extend" | "audit_scan" | "openrouter_secret_run" => {
             styled_status_output(tc, theme)
         }
         "color_palette" => styled_palette_output(tc, theme),

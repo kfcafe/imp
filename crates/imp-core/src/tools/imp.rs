@@ -1,84 +1,174 @@
 use async_trait::async_trait;
 use imp_llm::ThinkingLevel;
 use imp_llm::{AssistantMessage, ContentBlock};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::{Tool, ToolContext, ToolOutput};
 use crate::config::AgentMode;
 use crate::error::{Error, Result};
 use crate::imp_session::{ImpSession, SessionChoice, SessionOptions};
-use crate::mana_worker::{self, WorkerRunOptions};
 
 pub struct ImpTool;
 
-const DEFAULT_AD_HOC_SPAWN_TIMEOUT_SECS: u64 = 300;
-const AD_HOC_SPAWN_CANCEL_GRACE_SECS: u64 = 5;
-const DEFAULT_UNIT_WORKER_SYSTEM_PROMPT: &str =
-    "You are a mana unit worker. Execute the assigned unit exactly, use tools if available, update mana with evidence, and stop.";
+const DEFAULT_ASK_AGENT_TIMEOUT_SECS: u64 = 300;
+const ASK_AGENT_CANCEL_GRACE_SECS: u64 = 5;
+const MAX_ASK_AGENT_TIMEOUT_SECS: u64 = 1800;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskAgentWorkerType {
+    Reviewer,
+    Worker,
+    NoTools,
+}
+
+impl AskAgentWorkerType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Reviewer => "reviewer",
+            Self::Worker => "worker",
+            Self::NoTools => "no_tools",
+        }
+    }
+
+    fn mode(self) -> AgentMode {
+        match self {
+            Self::Reviewer | Self::NoTools => AgentMode::Reviewer,
+            Self::Worker => AgentMode::Worker,
+        }
+    }
+
+    fn no_tools(self) -> bool {
+        matches!(self, Self::NoTools)
+    }
+}
+
+impl Default for AskAgentWorkerType {
+    fn default() -> Self {
+        Self::Reviewer
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AskAgentConfig {
+    #[serde(default)]
+    pub default_worker_type: AskAgentWorkerType,
+    #[serde(default)]
+    pub profiles: AskAgentProfiles,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskAgentProfiles {
+    #[serde(default = "default_reviewer_profile")]
+    pub reviewer: AskAgentProfile,
+    #[serde(default = "default_worker_profile")]
+    pub worker: AskAgentProfile,
+    #[serde(default = "default_no_tools_profile")]
+    pub no_tools: AskAgentProfile,
+}
+
+impl Default for AskAgentProfiles {
+    fn default() -> Self {
+        Self {
+            reviewer: default_reviewer_profile(),
+            worker: default_worker_profile(),
+            no_tools: default_no_tools_profile(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskAgentProfile {
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub thinking: Option<ThinkingLevel>,
+    pub max_turns: Option<u32>,
+    pub max_tokens: Option<u32>,
+    pub timeout_secs: Option<u64>,
+    pub system_prompt: Option<String>,
+}
+
+impl Default for AskAgentProfile {
+    fn default() -> Self {
+        Self {
+            model: None,
+            provider: None,
+            thinking: None,
+            max_turns: None,
+            max_tokens: None,
+            timeout_secs: Some(DEFAULT_ASK_AGENT_TIMEOUT_SECS),
+            system_prompt: None,
+        }
+    }
+}
+
+fn default_reviewer_profile() -> AskAgentProfile {
+    AskAgentProfile {
+        thinking: Some(ThinkingLevel::Medium),
+        max_turns: Some(4),
+        timeout_secs: Some(DEFAULT_ASK_AGENT_TIMEOUT_SECS),
+        system_prompt: Some("You are a focused reviewer. Inspect, critique, and summarize. Do not make changes unless explicitly asked by the parent agent.".to_string()),
+        ..AskAgentProfile::default()
+    }
+}
+
+fn default_worker_profile() -> AskAgentProfile {
+    AskAgentProfile {
+        thinking: Some(ThinkingLevel::Low),
+        max_turns: Some(6),
+        timeout_secs: Some(DEFAULT_ASK_AGENT_TIMEOUT_SECS),
+        system_prompt: Some("You are a bounded helper worker. Complete the requested task directly, verify narrowly, and report concise evidence.".to_string()),
+        ..AskAgentProfile::default()
+    }
+}
+
+fn default_no_tools_profile() -> AskAgentProfile {
+    AskAgentProfile {
+        thinking: Some(ThinkingLevel::High),
+        max_turns: Some(2),
+        timeout_secs: Some(DEFAULT_ASK_AGENT_TIMEOUT_SECS),
+        system_prompt: Some("You are a no-tool reasoning helper. Think through the request and answer from the provided prompt only.".to_string()),
+        ..AskAgentProfile::default()
+    }
+}
 
 #[async_trait]
 impl Tool for ImpTool {
     fn name(&self) -> &str {
-        "spawn"
+        "ask_agent"
     }
 
     fn label(&self) -> &str {
-        "Spawn Worker"
+        "Ask Agent"
     }
 
     fn description(&self) -> &str {
-        "Spawn another agent worker. Supports durable mana-unit worker runs and bounded ad hoc helper sessions."
+        "Ask a bounded helper agent for focused review, implementation, or no-tool reasoning."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["spawn", "delegate"],
-                    "description": "Preferred: spawn another imp worker. `delegate` remains accepted as a compatibility alias during migration."
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["unit", "ad_hoc"],
-                    "description": "Worker mode. 'unit' runs a tracked mana unit; 'ad_hoc' runs a bounded transient helper session."
-                },
-                "unit_id": {
-                    "type": "string",
-                    "description": "Mana unit id to execute when mode='unit'"
-                },
                 "prompt": {
                     "type": "string",
-                    "description": "Prompt to run when mode='ad_hoc'"
+                    "description": "Prompt for the helper agent."
                 },
-                "mana_dir": {
+                "worker_type": {
                     "type": "string",
-                    "description": "Optional explicit mana directory or project root"
+                    "enum": ["reviewer", "worker", "no_tools"],
+                    "description": "Helper profile. Defaults to reviewer."
                 },
-                "defer_verify": {
-                    "type": "boolean",
-                    "description": "Skip inline verify/close when true"
-                },
-                "model": { "type": "string" },
-                "provider": { "type": "string" },
-                "thinking": { "type": "string" },
-                "max_turns": { "type": "number" },
-                "max_tokens": { "type": "number" },
-                "system_prompt": { "type": "string" },
                 "timeout_secs": {
-                    "type": "number",
-                    "description": "Maximum wall-clock time for ad_hoc spawn before it is cancelled and returns an error. Defaults to 300 seconds."
-                },
-                "no_tools": { "type": "boolean" },
-                "idempotency_key": {
-                    "type": "string",
-                    "description": "Optional caller-supplied dedupe key"
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_ASK_AGENT_TIMEOUT_SECS,
+                    "description": "Maximum wall-clock time before cancellation. Defaults from worker profile, fallback 300."
                 }
             },
-            "required": []
+            "required": ["prompt"]
         })
     }
 
@@ -94,77 +184,18 @@ impl Tool for ImpTool {
     ) -> Result<ToolOutput> {
         if !matches!(ctx.mode, AgentMode::Full | AgentMode::Orchestrator) {
             return Ok(ToolOutput::error(
-                "The spawn tool is only available in Full or Orchestrator mode.",
+                "The ask_agent tool is only available in Full or Orchestrator mode.",
             ));
         }
 
-        let Some(request) = resolve_spawn_request(&params) else {
+        if has_unit_mode_intent(&params) {
             return Ok(ToolOutput::error(
-                "Invalid spawn request. Use mode='unit' with unit_id, or mode='ad_hoc' with prompt. The action field is optional and defaults to 'spawn'.",
+                "ask_agent is ad_hoc-only. Use the native mana tool with action=run for durable unit execution.",
             ));
-        };
-
-        match request.mode {
-            SpawnMode::Unit => execute_unit_spawn(params, ctx).await,
-            SpawnMode::AdHoc => execute_ad_hoc_spawn(params, ctx).await,
         }
+
+        execute_ask_agent(params, ctx).await
     }
-}
-
-struct SpawnRequest {
-    mode: SpawnMode,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SpawnMode {
-    Unit,
-    AdHoc,
-}
-
-fn resolve_spawn_request(params: &serde_json::Value) -> Option<SpawnRequest> {
-    let action = optional_non_empty_string(params, "action").unwrap_or_else(|| "spawn".to_string());
-    if !matches!(action.as_str(), "spawn" | "delegate") {
-        return None;
-    }
-
-    let explicit_mode = optional_non_empty_string(params, "mode");
-    let mode = match explicit_mode.as_deref() {
-        Some("unit") => SpawnMode::Unit,
-        Some("ad_hoc") | Some("adhoc") | Some("ad-hoc") => SpawnMode::AdHoc,
-        Some(_) => return None,
-        None if optional_non_empty_string(params, "unit_id").is_some() => SpawnMode::Unit,
-        None if optional_non_empty_string(params, "prompt").is_some() => SpawnMode::AdHoc,
-        None => return None,
-    };
-
-    Some(SpawnRequest { mode })
-}
-
-fn build_spawn_details(
-    spawn_mode: &str,
-    durable: bool,
-    status: impl Into<String>,
-    success: bool,
-    summary: impl Into<String>,
-    model: serde_json::Value,
-    provider: serde_json::Value,
-    idempotency_key: Option<String>,
-    mode_details: serde_json::Value,
-) -> serde_json::Value {
-    json!({
-        "tool": "spawn",
-        "action": "spawn",
-        "spawn_mode": spawn_mode,
-        "delegation_mode": spawn_mode,
-        "durable": durable,
-        "status": status.into(),
-        "success": success,
-        "summary": summary.into(),
-        "model": model,
-        "provider": provider,
-        "idempotency_key": idempotency_key,
-        "mode_details": mode_details,
-    })
 }
 
 struct AdHocSpawnOutcome {
@@ -186,21 +217,12 @@ fn build_ad_hoc_spawn_outcome(final_text: Option<String>) -> AdHocSpawnOutcome {
         },
         None => AdHocSpawnOutcome {
             status: "completed_no_output",
-            summary: "Transient helper worker completed with no final text.".to_string(),
-            content: "Transient helper worker completed with no final text.".to_string(),
+            summary: "Helper agent completed with no final text.".to_string(),
+            content: "Helper agent completed with no final text.".to_string(),
             success: true,
             final_text: None,
         },
     }
-}
-
-fn unit_worker_status_is_error(status: mana_worker::WorkerStatus) -> bool {
-    matches!(
-        status,
-        mana_worker::WorkerStatus::Failed
-            | mana_worker::WorkerStatus::Blocked
-            | mana_worker::WorkerStatus::Cancelled
-    )
 }
 
 fn optional_non_empty_string(params: &serde_json::Value, key: &str) -> Option<String> {
@@ -212,178 +234,94 @@ fn optional_non_empty_string(params: &serde_json::Value, key: &str) -> Option<St
         .map(ToOwned::to_owned)
 }
 
-fn normalize_mana_dir_override(cwd: &Path, raw: &str) -> PathBuf {
-    let resolved = super::resolve_path(cwd, raw);
-    if resolved.file_name().and_then(|name| name.to_str()) == Some(".mana") {
-        resolved
-    } else {
-        let child = resolved.join(".mana");
-        if child.is_dir() {
-            child
-        } else {
-            resolved
-        }
-    }
-}
-
-fn unit_spawn_system_prompt(params: &serde_json::Value) -> String {
-    optional_non_empty_string(params, "system_prompt")
-        .unwrap_or_else(|| DEFAULT_UNIT_WORKER_SYSTEM_PROMPT.to_string())
-}
-
-fn ad_hoc_spawn_mode(params: &serde_json::Value) -> AgentMode {
-    if params
-        .get("no_tools")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        AgentMode::Reviewer
-    } else {
-        AgentMode::Worker
-    }
-}
-
-async fn execute_unit_spawn(params: serde_json::Value, ctx: ToolContext) -> Result<ToolOutput> {
-    let unit_id = params
-        .get("unit_id")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| Error::Tool("Missing required parameter: unit_id".into()))?;
-
-    let mana_dir_override = params
-        .get("mana_dir")
-        .and_then(|v| v.as_str())
-        .map(|raw| normalize_mana_dir_override(&ctx.cwd, raw));
-
-    let assignment =
-        mana_worker::load_assignment_with_mana_dir(&ctx.cwd, unit_id, mana_dir_override.as_deref())
-            .map_err(|e| Error::Tool(e.to_string()))?;
-
-    let options = WorkerRunOptions {
-        cwd: ctx.cwd.clone(),
-        model_override: None,
-        model: params
-            .get("model")
-            .and_then(|v| v.as_str())
-            .map(ToOwned::to_owned)
-            .or_else(|| assignment.model.clone()),
-        provider: params
-            .get("provider")
-            .and_then(|v| v.as_str())
-            .map(ToOwned::to_owned),
-        api_key: None,
-        thinking: parse_optional_thinking(&params)?,
-        max_turns: params
-            .get("max_turns")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32),
-        max_tokens: params
-            .get("max_tokens")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32),
-        system_prompt: Some(unit_spawn_system_prompt(&params)),
-        no_tools: params
-            .get("no_tools")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        mana_dir_override,
-        defer_verify: params
+fn has_unit_mode_intent(params: &serde_json::Value) -> bool {
+    optional_non_empty_string(params, "unit_id").is_some()
+        || optional_non_empty_string(params, "mana_dir").is_some()
+        || params
             .get("defer_verify")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        lua_loader: ctx.lua_tool_loader.clone(),
-    };
-
-    let idempotency_key = params
-        .get("idempotency_key")
-        .and_then(|v| v.as_str())
-        .map(ToOwned::to_owned);
-
-    let outcome = mana_worker::run_worker_assignment(assignment.clone(), options)
-        .await
-        .map_err(|e| Error::Tool(e.to_string()))?;
-
-    let status = format!("{:?}", outcome.result.status).to_lowercase();
-    let summary = outcome
-        .result
-        .summary
-        .clone()
-        .unwrap_or_else(|| format!("Spawned worker for unit {} finished.", assignment.id));
-
-    let content = outcome
-        .result
-        .summary
-        .clone()
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| match outcome.result.status {
-            mana_worker::WorkerStatus::Completed => {
-                format!(
-                    "Spawned worker for unit {} completed successfully.",
-                    assignment.id
-                )
-            }
-            mana_worker::WorkerStatus::AwaitingVerify => {
-                format!(
-                    "Spawned worker for unit {} completed and is awaiting verify.",
-                    assignment.id
-                )
-            }
-            mana_worker::WorkerStatus::Failed => {
-                format!("Spawned worker for unit {} failed.", assignment.id)
-            }
-            mana_worker::WorkerStatus::Blocked => {
-                format!("Spawned worker for unit {} is blocked.", assignment.id)
-            }
-            mana_worker::WorkerStatus::Cancelled => {
-                format!("Spawned worker for unit {} was cancelled.", assignment.id)
-            }
-        });
-
-    let success = !unit_worker_status_is_error(outcome.result.status);
-
-    Ok(ToolOutput {
-        content: vec![ContentBlock::Text { text: content }],
-        details: build_spawn_details(
-            "unit",
-            true,
-            status,
-            success,
-            summary,
-            json!(outcome.result.model),
-            json!(params.get("provider").and_then(|v| v.as_str())),
-            idempotency_key,
-            json!({
-                "unit_id": assignment.id,
-                "verify_passed": outcome.verify_passed,
-                "verify_output": outcome.verify_output,
-                "verifier_result": outcome.verifier_result,
-                "closed_after_verify": outcome.closed_after_verify,
-                "prefilled_file_count": outcome.prefilled_files.len(),
-            }),
-        ),
-        is_error: !success,
-    })
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        || matches!(
+            optional_non_empty_string(params, "mode").as_deref(),
+            Some("unit")
+        )
 }
 
-fn ad_hoc_spawn_timeout_secs(params: &serde_json::Value) -> u64 {
+fn ask_agent_worker_type(
+    params: &serde_json::Value,
+    config: &AskAgentConfig,
+) -> Result<AskAgentWorkerType> {
+    match optional_non_empty_string(params, "worker_type") {
+        Some(raw) => match raw.as_str() {
+            "reviewer" => Ok(AskAgentWorkerType::Reviewer),
+            "worker" => Ok(AskAgentWorkerType::Worker),
+            "no_tools" => Ok(AskAgentWorkerType::NoTools),
+            other => Err(Error::Tool(format!(
+                "Invalid worker_type '{other}'. Expected reviewer, worker, or no_tools."
+            ))),
+        },
+        None => Ok(config.default_worker_type),
+    }
+}
+
+fn profile_for(config: &AskAgentConfig, worker_type: AskAgentWorkerType) -> &AskAgentProfile {
+    match worker_type {
+        AskAgentWorkerType::Reviewer => &config.profiles.reviewer,
+        AskAgentWorkerType::Worker => &config.profiles.worker,
+        AskAgentWorkerType::NoTools => &config.profiles.no_tools,
+    }
+}
+
+fn ask_agent_timeout_secs(params: &serde_json::Value, profile: &AskAgentProfile) -> u64 {
     params
         .get("timeout_secs")
         .and_then(|v| v.as_u64())
         .filter(|secs| *secs > 0)
-        .unwrap_or(DEFAULT_AD_HOC_SPAWN_TIMEOUT_SECS)
+        .unwrap_or(
+            profile
+                .timeout_secs
+                .unwrap_or(DEFAULT_ASK_AGENT_TIMEOUT_SECS),
+        )
+        .min(MAX_ASK_AGENT_TIMEOUT_SECS)
 }
 
 fn ad_hoc_spawn_timeout_error(timeout_secs: u64) -> Error {
     Error::Tool(format!(
-        "ad_hoc spawn timed out after {timeout_secs}s and was cancelled"
+        "ask_agent timed out after {timeout_secs}s and was cancelled"
     ))
 }
 
-async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Result<ToolOutput> {
-    let timeout_secs = ad_hoc_spawn_timeout_secs(&params);
+fn build_ask_agent_details(
+    worker_type: AskAgentWorkerType,
+    durable: bool,
+    status: impl Into<String>,
+    success: bool,
+    summary: impl Into<String>,
+    model: serde_json::Value,
+    provider: serde_json::Value,
+    timeout_secs: u64,
+    final_text: Option<String>,
+) -> serde_json::Value {
+    json!({
+        "tool": "ask_agent",
+        "worker_type": worker_type.as_str(),
+        "durable": durable,
+        "status": status.into(),
+        "success": success,
+        "summary": summary.into(),
+        "model": model,
+        "provider": provider,
+        "timeout_secs": timeout_secs,
+        "final_text": final_text,
+    })
+}
+
+async fn execute_ask_agent(params: serde_json::Value, ctx: ToolContext) -> Result<ToolOutput> {
+    let worker_type = ask_agent_worker_type(&params, &ctx.config.ask_agent)?;
+    let profile = profile_for(&ctx.config.ask_agent, worker_type);
+    let timeout_secs = ask_agent_timeout_secs(&params, profile);
     let timeout = Duration::from_secs(timeout_secs);
-    let cancel_grace = Duration::from_secs(AD_HOC_SPAWN_CANCEL_GRACE_SECS);
+    let cancel_grace = Duration::from_secs(ASK_AGENT_CANCEL_GRACE_SECS);
     let prompt = params
         .get("prompt")
         .and_then(|v| v.as_str())
@@ -391,38 +329,18 @@ async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Re
         .filter(|s| !s.is_empty())
         .ok_or_else(|| Error::Tool("Missing required parameter: prompt".into()))?;
 
-    let idempotency_key = params
-        .get("idempotency_key")
-        .and_then(|v| v.as_str())
-        .map(ToOwned::to_owned);
-
     let session_options = SessionOptions {
         cwd: ctx.cwd.clone(),
         model_override: None,
-        model: params
-            .get("model")
-            .and_then(|v| v.as_str())
-            .map(ToOwned::to_owned),
-        provider: params
-            .get("provider")
-            .and_then(|v| v.as_str())
-            .map(ToOwned::to_owned),
+        model: profile.model.clone(),
+        provider: profile.provider.clone(),
         api_key: None,
-        thinking: parse_optional_thinking(&params)?,
-        mode: Some(ad_hoc_spawn_mode(&params)),
-        max_turns: params
-            .get("max_turns")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32),
-        max_tokens: params
-            .get("max_tokens")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32),
-        system_prompt: optional_non_empty_string(&params, "system_prompt"),
-        no_tools: params
-            .get("no_tools")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        thinking: profile.thinking,
+        mode: Some(worker_type.mode()),
+        max_turns: profile.max_turns,
+        max_tokens: profile.max_tokens,
+        system_prompt: profile.system_prompt.clone(),
+        no_tools: worker_type.no_tools(),
         session: SessionChoice::InMemory,
         task: None,
         facts: Vec::new(),
@@ -443,13 +361,31 @@ async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Re
         Ok(result) => result.map_err(|e| Error::Tool(e.to_string()))?,
         Err(_) => {
             let _ = session.cancel().await;
+            let mut aborted = false;
             if tokio::time::timeout(cancel_grace, session.wait())
                 .await
                 .is_err()
             {
                 session.abort();
+                aborted = true;
             }
-            return Err(ad_hoc_spawn_timeout_error(timeout_secs));
+            let error = ad_hoc_spawn_timeout_error(timeout_secs);
+            return Ok(ToolOutput {
+                content: vec![ContentBlock::Text {
+                    text: error.to_string(),
+                }],
+                details: json!({
+                    "tool": "ask_agent",
+                    "worker_type": worker_type.as_str(),
+                    "durable": false,
+                    "status": "timeout",
+                    "success": false,
+                    "timeout_secs": timeout_secs,
+                    "cancelled": true,
+                    "aborted": aborted,
+                }),
+                is_error: true,
+            });
         }
     }
 
@@ -460,19 +396,16 @@ async fn execute_ad_hoc_spawn(params: serde_json::Value, ctx: ToolContext) -> Re
         content: vec![ContentBlock::Text {
             text: outcome.content,
         }],
-        details: build_spawn_details(
-            "ad_hoc",
+        details: build_ask_agent_details(
+            worker_type,
             false,
             outcome.status,
             outcome.success,
             outcome.summary,
             json!(session.model().meta.id.clone()),
             json!(session.model().meta.provider.clone()),
-            idempotency_key,
-            json!({
-                "final_text": outcome.final_text,
-                "timeout_secs": timeout_secs,
-            }),
+            timeout_secs,
+            outcome.final_text,
         ),
         is_error: false,
     })
@@ -501,26 +434,6 @@ fn extract_final_assistant_text_from_messages(messages: &[imp_llm::Message]) -> 
 
 fn extract_final_assistant_text(session: &ImpSession) -> Option<String> {
     extract_final_assistant_text_from_messages(&session.session_manager().get_active_messages())
-}
-
-fn parse_optional_thinking(params: &serde_json::Value) -> Result<Option<ThinkingLevel>> {
-    let Some(raw) = params.get("thinking").and_then(|v| v.as_str()) else {
-        return Ok(None);
-    };
-
-    let level = match raw.to_ascii_lowercase().as_str() {
-        "off" | "none" => ThinkingLevel::Off,
-        "low" => ThinkingLevel::Low,
-        "medium" | "med" => ThinkingLevel::Medium,
-        "high" => ThinkingLevel::High,
-        other => {
-            return Err(Error::Tool(format!(
-                "Invalid thinking level '{other}'. Expected off, low, medium, or high.",
-            )))
-        }
-    };
-
-    Ok(Some(level))
 }
 
 #[cfg(test)]
@@ -562,174 +475,96 @@ mod tests {
                 .get("required")
                 .and_then(|v| v.as_array())
                 .map(Vec::len),
-            Some(0)
+            Some(1)
         );
+        assert_eq!(schema["required"][0].as_str(), Some("prompt"));
         assert_eq!(
             schema["properties"]["prompt"]["type"].as_str(),
             Some("string")
         );
         assert_eq!(
             schema["properties"]["timeout_secs"]["type"].as_str(),
-            Some("number")
+            Some("integer")
+        );
+        assert!(schema["properties"].get("unit_id").is_none());
+        assert!(schema["properties"].get("delegate").is_none());
+    }
+
+    #[test]
+    fn worker_type_defaults_to_reviewer_and_validates_values() {
+        let config = AskAgentConfig::default();
+        assert_eq!(
+            ask_agent_worker_type(&json!({}), &config).unwrap(),
+            AskAgentWorkerType::Reviewer
+        );
+        assert_eq!(
+            ask_agent_worker_type(&json!({"worker_type": "worker"}), &config).unwrap(),
+            AskAgentWorkerType::Worker
+        );
+        assert!(ask_agent_worker_type(&json!({"worker_type": "bad"}), &config).is_err());
+    }
+
+    #[test]
+    fn unit_payloads_are_directed_to_mana_run() {
+        assert!(has_unit_mode_intent(&json!({"unit_id": "123"})));
+        assert!(has_unit_mode_intent(&json!({"mode": "unit"})));
+        assert!(has_unit_mode_intent(&json!({"defer_verify": true})));
+        assert!(!has_unit_mode_intent(&json!({"prompt": "inspect"})));
+    }
+
+    #[test]
+    fn ask_agent_timeout_uses_profile_and_clamps_explicit_value() {
+        let mut profile = AskAgentProfile::default();
+        profile.timeout_secs = Some(42);
+        assert_eq!(ask_agent_timeout_secs(&json!({}), &profile), 42);
+        assert_eq!(
+            ask_agent_timeout_secs(&json!({"timeout_secs": 0}), &profile),
+            42
+        );
+        assert_eq!(
+            ask_agent_timeout_secs(&json!({"timeout_secs": 12}), &profile),
+            12
+        );
+        assert_eq!(
+            ask_agent_timeout_secs(&json!({"timeout_secs": 999_999}), &profile),
+            MAX_ASK_AGENT_TIMEOUT_SECS
         );
     }
 
     #[test]
-    fn spawn_defaults_action_and_infers_mode_from_payload_harden_spawn() {
-        assert_eq!(
-            resolve_spawn_request(&json!({"unit_id": "299"})).map(|request| request.mode),
-            Some(SpawnMode::Unit)
-        );
-        assert_eq!(
-            resolve_spawn_request(&json!({"prompt": "inspect this"})).map(|request| request.mode),
-            Some(SpawnMode::AdHoc)
-        );
-        assert_eq!(
-            resolve_spawn_request(
-                &json!({"action": "delegate", "mode": "ad-hoc", "prompt": "inspect this"})
-            )
-            .map(|request| request.mode),
-            Some(SpawnMode::AdHoc)
-        );
-        assert!(
-            resolve_spawn_request(&json!({"action": "run", "prompt": "inspect this"})).is_none()
-        );
-    }
-
-    #[test]
-    fn spawn_rejects_ambiguous_empty_payload_harden_spawn() {
-        assert!(resolve_spawn_request(&json!({})).is_none());
-        assert!(resolve_spawn_request(&json!({"prompt": "   "})).is_none());
-        assert!(resolve_spawn_request(&json!({"mode": "review", "prompt": "x"})).is_none());
-    }
-
-    #[test]
-    fn ad_hoc_spawn_timeout_defaults_when_missing_or_invalid() {
-        assert_eq!(
-            ad_hoc_spawn_timeout_secs(&json!({})),
-            DEFAULT_AD_HOC_SPAWN_TIMEOUT_SECS
-        );
-        assert_eq!(
-            ad_hoc_spawn_timeout_secs(&json!({"timeout_secs": 0})),
-            DEFAULT_AD_HOC_SPAWN_TIMEOUT_SECS
-        );
-        assert_eq!(ad_hoc_spawn_timeout_secs(&json!({"timeout_secs": 12})), 12);
-    }
-
-    #[test]
-    fn normalize_mana_dir_override_accepts_project_root_or_mana_dir() {
-        let temp = tempfile::tempdir().unwrap();
-        let project_root = temp.path().join("project");
-        let mana_dir = project_root.join(".mana");
-        std::fs::create_dir_all(&mana_dir).unwrap();
-
-        assert_eq!(
-            normalize_mana_dir_override(temp.path(), project_root.to_str().unwrap()),
-            mana_dir
-        );
-        assert_eq!(
-            normalize_mana_dir_override(temp.path(), mana_dir.to_str().unwrap()),
-            mana_dir
-        );
-    }
-
-    #[test]
-    fn unit_spawn_system_prompt_defaults_when_missing_or_blank() {
-        assert_eq!(
-            unit_spawn_system_prompt(&json!({})),
-            DEFAULT_UNIT_WORKER_SYSTEM_PROMPT
-        );
-        assert_eq!(
-            unit_spawn_system_prompt(&json!({"system_prompt": "   "})),
-            DEFAULT_UNIT_WORKER_SYSTEM_PROMPT
-        );
-        assert_eq!(
-            unit_spawn_system_prompt(&json!({"system_prompt": " custom worker "})),
-            "custom worker"
-        );
-    }
-
-    #[test]
-    fn ad_hoc_spawn_uses_worker_mode_unless_no_tools_requested() {
-        assert_eq!(ad_hoc_spawn_mode(&json!({})), AgentMode::Worker);
-        assert_eq!(
-            ad_hoc_spawn_mode(&json!({"no_tools": false})),
-            AgentMode::Worker
-        );
-        assert_eq!(
-            ad_hoc_spawn_mode(&json!({"no_tools": true})),
-            AgentMode::Reviewer
-        );
-    }
-
-    #[test]
-    fn optional_non_empty_string_trims_and_filters_blank_values() {
-        assert_eq!(optional_non_empty_string(&json!({}), "value"), None);
-        assert_eq!(
-            optional_non_empty_string(&json!({"value": "   "}), "value"),
-            None
-        );
-        assert_eq!(
-            optional_non_empty_string(&json!({"value": " hello "}), "value"),
-            Some("hello".to_string())
-        );
+    fn worker_type_maps_to_modes_and_tool_access() {
+        assert_eq!(AskAgentWorkerType::Reviewer.mode(), AgentMode::Reviewer);
+        assert_eq!(AskAgentWorkerType::Worker.mode(), AgentMode::Worker);
+        assert_eq!(AskAgentWorkerType::NoTools.mode(), AgentMode::Reviewer);
+        assert!(!AskAgentWorkerType::Reviewer.no_tools());
+        assert!(!AskAgentWorkerType::Worker.no_tools());
+        assert!(AskAgentWorkerType::NoTools.no_tools());
     }
 
     #[tokio::test]
-    async fn spawn_infers_unit_mode_when_mode_omitted_harden_spawn() {
+    async fn unit_mode_returns_mana_run_guidance() {
         let tool = ImpTool;
-        let result = tool
+        let out = tool
             .execute(
                 "call-1",
                 json!({"unit_id": "missing-unit-for-validation"}),
                 test_ctx(AgentMode::Orchestrator),
             )
-            .await;
-        match result {
-            Ok(_) => panic!("expected inferred unit mode to reach unit_id loading and fail there"),
-            Err(err) => assert!(!err.to_string().contains("Invalid spawn request")),
-        }
-    }
-
-    #[tokio::test]
-    async fn spawn_returns_non_panicking_help_for_invalid_payload_harden_spawn() {
-        let tool = ImpTool;
-        let out = tool
-            .execute("call-1", json!({}), test_ctx(AgentMode::Orchestrator))
             .await
             .unwrap();
 
         assert!(out.is_error);
-        let text = out.text_content().unwrap_or_default();
-        assert!(text.contains("mode='unit'"));
-        assert!(text.contains("mode='ad_hoc'"));
+        assert!(out
+            .text_content()
+            .unwrap_or_default()
+            .contains("mana tool with action=run"));
     }
 
     #[tokio::test]
-    async fn unit_mode_requires_unit_id_at_runtime() {
+    async fn missing_prompt_returns_error() {
         let tool = ImpTool;
         let result = tool
-            .execute(
-                "call-1",
-                json!({"action": "spawn", "mode": "unit"}),
-                test_ctx(AgentMode::Orchestrator),
-            )
-            .await;
-        match result {
-            Ok(_) => panic!("expected missing unit_id to return an error"),
-            Err(err) => assert!(err.to_string().contains("unit_id")),
-        }
-    }
-
-    #[tokio::test]
-    async fn ad_hoc_mode_requires_prompt_at_runtime() {
-        let tool = ImpTool;
-        let result = tool
-            .execute(
-                "call-1",
-                json!({"action": "spawn", "mode": "ad_hoc"}),
-                test_ctx(AgentMode::Orchestrator),
-            )
+            .execute("call-1", json!({}), test_ctx(AgentMode::Orchestrator))
             .await;
         match result {
             Ok(_) => panic!("expected missing prompt to return an error"),
@@ -743,7 +578,7 @@ mod tests {
         let out = tool
             .execute(
                 "call-1",
-                json!({"action": "spawn", "mode": "unit", "unit_id": "123"}),
+                json!({"prompt": "inspect"}),
                 test_ctx(AgentMode::Worker),
             )
             .await
@@ -753,56 +588,38 @@ mod tests {
         assert!(text.contains("Full or Orchestrator"));
     }
 
-    #[tokio::test]
-    async fn delegate_action_remains_accepted_as_compatibility_alias() {
-        let tool = ImpTool;
-        let result = tool
-            .execute(
-                "call-1",
-                json!({"action": "delegate", "mode": "unit"}),
-                test_ctx(AgentMode::Orchestrator),
-            )
-            .await;
-        match result {
-            Ok(_) => panic!("expected missing unit_id to return an error"),
-            Err(err) => assert!(err.to_string().contains("unit_id")),
-        }
-    }
-
     #[test]
-    fn build_spawn_details_keeps_shared_fields_and_groups_mode_specific_data() {
-        let details = build_spawn_details(
-            "ad_hoc",
+    fn build_ask_agent_details_keeps_stable_fields() {
+        let details = build_ask_agent_details(
+            AskAgentWorkerType::Reviewer,
             false,
             "completed",
             true,
             "summary",
             json!("model-x"),
             json!("provider-y"),
-            Some("idem-1".to_string()),
-            json!({"final_text": "hello"}),
+            300,
+            Some("hello".to_string()),
         );
 
         assert_eq!(
-            details.get("spawn_mode").and_then(|v| v.as_str()),
-            Some("ad_hoc")
+            details.get("tool").and_then(|v| v.as_str()),
+            Some("ask_agent")
         );
         assert_eq!(
-            details.get("delegation_mode").and_then(|v| v.as_str()),
-            Some("ad_hoc")
+            details.get("worker_type").and_then(|v| v.as_str()),
+            Some("reviewer")
         );
         assert_eq!(
-            details.get("status").and_then(|v| v.as_str()),
-            Some("completed")
+            details.get("durable").and_then(|v| v.as_bool()),
+            Some(false)
         );
         assert_eq!(details.get("success").and_then(|v| v.as_bool()), Some(true));
         assert_eq!(
-            details
-                .get("mode_details")
-                .and_then(|v| v.get("final_text"))
-                .and_then(|v| v.as_str()),
+            details.get("final_text").and_then(|v| v.as_str()),
             Some("hello")
         );
+        assert!(details.get("delegation_mode").is_none());
     }
 
     #[test]
@@ -825,25 +642,6 @@ mod tests {
         assert!(outcome.summary.contains("no final text"));
         assert!(outcome.content.contains("no final text"));
         assert!(outcome.final_text.is_none());
-    }
-
-    #[test]
-    fn unit_worker_status_is_error_for_failed_blocked_and_cancelled_only() {
-        assert!(!unit_worker_status_is_error(
-            mana_worker::WorkerStatus::Completed
-        ));
-        assert!(!unit_worker_status_is_error(
-            mana_worker::WorkerStatus::AwaitingVerify
-        ));
-        assert!(unit_worker_status_is_error(
-            mana_worker::WorkerStatus::Failed
-        ));
-        assert!(unit_worker_status_is_error(
-            mana_worker::WorkerStatus::Blocked
-        ));
-        assert!(unit_worker_status_is_error(
-            mana_worker::WorkerStatus::Cancelled
-        ));
     }
 
     #[test]

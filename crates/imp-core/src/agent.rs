@@ -1953,7 +1953,7 @@ fn mana_skill_follow_up_hint(
     let lower = prompt.to_ascii_lowercase();
 
     let orchestration_signal = [
-        "spawn",
+        "ask_agent",
         "delegate",
         "decompose",
         "decomposition",
