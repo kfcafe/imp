@@ -35,6 +35,10 @@ pub mod usage;
 pub use agent::{TimingEvent, TimingStage};
 pub use error::{Error, Result};
 pub use error_display::format_error_for_display;
+pub use imp_llm::{
+    CancellationMode, ContinuationMode, PersistentSessionMode, ResumabilityMode,
+    TransportCapabilities,
+};
 pub use mana_review::{ManaReviewState, TurnManaReview};
 pub use sdk::*;
 

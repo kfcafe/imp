@@ -24,7 +24,8 @@ pub use model::{
     ProviderRegistry,
 };
 pub use provider::{
-    CacheOptions, Context, Provider, RequestOptions, ThinkingLevel, ToolDefinition,
+    CacheOptions, CancellationMode, Context, ContinuationMode, PersistentSessionMode, Provider,
+    RequestOptions, ResumabilityMode, ThinkingLevel, ToolDefinition, TransportCapabilities,
 };
 pub use stream::{ProviderError, StreamEvent};
 pub use text::{prefix_chars, truncate_chars, truncate_chars_with_suffix};

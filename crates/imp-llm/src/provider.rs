@@ -34,6 +34,75 @@ pub trait Provider: Send + Sync {
 
     /// List available models for this provider.
     fn models(&self) -> &[ModelMeta];
+
+    /// Transport capabilities exposed to the runtime. Providers should only
+    /// report features implemented by this crate, not features merely present
+    /// in the upstream vendor API.
+    fn transport_capabilities(&self) -> TransportCapabilities {
+        TransportCapabilities::default()
+    }
+}
+
+/// Provider transport features visible to the agent runtime.
+///
+/// This is intentionally provider-neutral: specific APIs may call these
+/// concepts response IDs, sessions, conversations, or channels, but the agent
+/// should branch on durable behavior rather than vendor names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransportCapabilities {
+    pub request_response: bool,
+    pub streaming: bool,
+    pub continuation: ContinuationMode,
+    pub persistent_session: PersistentSessionMode,
+    pub cancellation: CancellationMode,
+    pub resumability: ResumabilityMode,
+}
+
+impl TransportCapabilities {
+    pub const fn stateless_streaming_http() -> Self {
+        Self {
+            request_response: true,
+            streaming: true,
+            continuation: ContinuationMode::None,
+            persistent_session: PersistentSessionMode::None,
+            cancellation: CancellationMode::DropLocalStream,
+            resumability: ResumabilityMode::RestartRequest,
+        }
+    }
+}
+
+impl Default for TransportCapabilities {
+    fn default() -> Self {
+        Self::stateless_streaming_http()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationMode {
+    None,
+    ProviderManagedId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistentSessionMode {
+    None,
+    WebSocket,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancellationMode {
+    DropLocalStream,
+    ProviderAbort,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumabilityMode {
+    RestartRequest,
+    ResumeProviderState,
 }
 
 /// Conversation context sent to the provider.
@@ -154,4 +223,21 @@ pub enum RetryCondition {
     ServerError,
     Timeout,
     ConnectionError,
+}
+
+#[cfg(test)]
+mod transport_capability_tests {
+    use super::*;
+
+    #[test]
+    fn default_transport_capabilities_are_conservative_streaming_http() {
+        let capabilities = TransportCapabilities::default();
+
+        assert!(capabilities.request_response);
+        assert!(capabilities.streaming);
+        assert_eq!(capabilities.continuation, ContinuationMode::None);
+        assert_eq!(capabilities.persistent_session, PersistentSessionMode::None);
+        assert_eq!(capabilities.cancellation, CancellationMode::DropLocalStream);
+        assert_eq!(capabilities.resumability, ResumabilityMode::RestartRequest);
+    }
 }
