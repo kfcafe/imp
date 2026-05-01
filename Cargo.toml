@@ -68,7 +68,7 @@ tree-sitter-python = "0.23"
 tree-sitter-go = "0.23"
 readability-rust = "0.1"
 project-detect = "0.1"
-mana-core = { version = "0.3.1", path = "../mana/crates/mana-core" }
+mana-core = "0.3.1"
 
 imp-llm = { version = "0.1.2", path = "crates/imp-llm" }
 imp-core = { version = "0.1.2", path = "crates/imp-core" }

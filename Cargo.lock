@@ -2258,6 +2258,8 @@ checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
 [[package]]
 name = "mana-cli"
 version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9929e511c8604c2e114f1b37e660c9d9bfbc550f70566ec72304fa6eaa24291"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2284,6 +2286,8 @@ dependencies = [
 [[package]]
 name = "mana-core"
 version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1823611e6135c0b65f340dd3abadab0911a3b1d64c85df1ef4851324f1aaa92a"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2304,6 +2308,8 @@ dependencies = [
 [[package]]
 name = "mana-pool"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "388d1ac2cfd0103735e4ad994ef5107647e6c33e345221c2b37a5abaaf7ad79f"
 dependencies = [
  "anyhow",
  "mana-core",
