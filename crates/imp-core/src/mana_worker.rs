@@ -962,8 +962,13 @@ mod tests {
             id: "2".to_string(),
             title: "Add test".to_string(),
             description: "Add a test for auth".to_string(),
-            design: Some("Follow the existing auth fixture setup instead of introducing a new harness".to_string()),
-            acceptance: Some("Auth regression test covers the fixture path failure mode".to_string()),
+            design: Some(
+                "Follow the existing auth fixture setup instead of introducing a new harness"
+                    .to_string(),
+            ),
+            acceptance: Some(
+                "Auth regression test covers the fixture path failure mode".to_string(),
+            ),
             verify: None,
             verify_timeout_secs: None,
             fail_first: false,
@@ -1016,7 +1021,10 @@ mod tests {
         };
         let ctx = build_task_context(&assignment);
         assert_eq!(ctx.title, "Refactor module");
-        assert_eq!(ctx.design.as_deref(), Some("Keep parser extraction local to the current module boundary"));
+        assert_eq!(
+            ctx.design.as_deref(),
+            Some("Keep parser extraction local to the current module boundary")
+        );
         assert_eq!(ctx.verify_timeout_secs, Some(45));
         assert!(ctx.fail_first);
         assert_eq!(ctx.verify.as_deref(), Some("cargo test"));
@@ -1027,7 +1035,10 @@ mod tests {
         assert_eq!(ctx.decisions, vec!["Use mod.rs or inline?"]);
         assert_eq!(ctx.context_paths, vec!["src/lib.rs", "src/parser.rs"]);
         assert!(ctx.constraints.iter().any(|c| c.contains("Scope changes")));
-        assert!(ctx.constraints.iter().any(|c| c.contains("fail-first contract")));
+        assert!(ctx
+            .constraints
+            .iter()
+            .any(|c| c.contains("fail-first contract")));
     }
 
     #[test]

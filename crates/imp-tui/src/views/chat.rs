@@ -1338,7 +1338,10 @@ mod tests {
             .iter()
             .position(|line| line.contains("thought for 20 seconds"))
             .unwrap();
-        let text_idx = rendered.iter().position(|line| line.contains("Done")).unwrap();
+        let text_idx = rendered
+            .iter()
+            .position(|line| line.contains("Done"))
+            .unwrap();
 
         assert!(first_thought_idx < tool_idx);
         assert!(tool_idx < second_thought_idx);
@@ -1497,9 +1500,9 @@ mod tests {
 
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
         assert_eq!(visible_tools.len(), 1);
-        assert!(rendered
-            .iter()
-            .any(|line| line.contains("▸") && line.contains("read") && line.contains("src/main.rs")));
+        assert!(rendered.iter().any(|line| line.contains("▸")
+            && line.contains("read")
+            && line.contains("src/main.rs")));
     }
 
     #[test]

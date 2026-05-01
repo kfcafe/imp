@@ -222,7 +222,11 @@ impl Tool for EditTool {
     }
 }
 
-fn get_str_param<'a>(params: &'a serde_json::Value, primary: &str, legacy: &str) -> Option<&'a str> {
+fn get_str_param<'a>(
+    params: &'a serde_json::Value,
+    primary: &str,
+    legacy: &str,
+) -> Option<&'a str> {
     params
         .get(primary)
         .and_then(|v| v.as_str())
@@ -243,7 +247,9 @@ async fn execute_anchor_edit(
     ctx: ToolContext,
 ) -> Result<ToolOutput> {
     let Some(anchor_start_id) = get_str_param(params, "anchor_start", "anchorStart") else {
-        return Ok(ToolOutput::error("Missing required parameter: anchor_start"));
+        return Ok(ToolOutput::error(
+            "Missing required parameter: anchor_start",
+        ));
     };
     let anchor_end_id = get_str_param(params, "anchor_end", "anchorEnd").unwrap_or(anchor_start_id);
     let Some(replacement) = get_str_param(params, "new_text", "replacement") else {
@@ -886,7 +892,13 @@ mod tests {
         assert_eq!(result.details["mode"], "anchored");
         assert_eq!(result.details["start_line"], 2);
         assert_eq!(result.details["end_line"], 2);
-        assert!(result.details["refreshed_anchors"].as_array().unwrap().len() >= 3);
+        assert!(
+            result.details["refreshed_anchors"]
+                .as_array()
+                .unwrap()
+                .len()
+                >= 3
+        );
     }
 
     #[tokio::test]

@@ -642,8 +642,13 @@ impl Agent {
                 review.begin_turn(turn);
             }
             let turn_started_at = Instant::now();
-            self.emit_timing(turn, TimingStage::ContextAssemblyStart, turn_started_at, None)
-                .await;
+            self.emit_timing(
+                turn,
+                TimingStage::ContextAssemblyStart,
+                turn_started_at,
+                None,
+            )
+            .await;
             let context_assembly_started_at = Instant::now();
 
             let mut usage = crate::context::context_usage(&self.messages, &self.model);
@@ -978,8 +983,13 @@ impl Agent {
                 })
                 .await;
 
-                self.emit_timing(turn, TimingStage::PostTurnAssessmentStart, turn_started_at, None)
-                    .await;
+                self.emit_timing(
+                    turn,
+                    TimingStage::PostTurnAssessmentStart,
+                    turn_started_at,
+                    None,
+                )
+                .await;
                 let assessment_started_at = Instant::now();
                 let assessment = self.assess_post_turn(&msg, &[], false, &mana_review);
                 self.emit_timing_with_details(
@@ -1035,8 +1045,13 @@ impl Agent {
             })
             .await;
 
-            self.emit_timing(turn, TimingStage::PostTurnAssessmentStart, turn_started_at, None)
-                .await;
+            self.emit_timing(
+                turn,
+                TimingStage::PostTurnAssessmentStart,
+                turn_started_at,
+                None,
+            )
+            .await;
             let assessment_started_at = Instant::now();
             let assessment = self.assess_post_turn(&msg, &results, true, &mana_review);
             self.emit_timing_with_details(

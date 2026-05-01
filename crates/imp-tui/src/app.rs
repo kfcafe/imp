@@ -5512,25 +5512,22 @@ impl App {
             }
             AgentEvent::RecoveryCheckpoint { .. } => {}
             AgentEvent::Timing { timing } => {
-                self.status_items.insert(
-                    "timing".to_string(),
-                    {
-                        let label = timing
-                            .label
-                            .as_deref()
-                            .map(|label| format!(" {label}"))
-                            .unwrap_or_default();
-                        let duration = timing
-                            .duration_ms
-                            .map(|ms| format!(" duration={ms}ms"))
-                            .unwrap_or_default();
-                        let elapsed = timing
-                            .since_llm_request_start_ms
-                            .map(|ms| format!(" llm={ms}ms"))
-                            .unwrap_or_else(|| format!(" turn={}ms", timing.since_turn_start_ms));
-                        format!("{}{}{}{}", timing.stage.as_str(), label, elapsed, duration)
-                    },
-                );
+                self.status_items.insert("timing".to_string(), {
+                    let label = timing
+                        .label
+                        .as_deref()
+                        .map(|label| format!(" {label}"))
+                        .unwrap_or_default();
+                    let duration = timing
+                        .duration_ms
+                        .map(|ms| format!(" duration={ms}ms"))
+                        .unwrap_or_default();
+                    let elapsed = timing
+                        .since_llm_request_start_ms
+                        .map(|ms| format!(" llm={ms}ms"))
+                        .unwrap_or_else(|| format!(" turn={}ms", timing.since_turn_start_ms));
+                    format!("{}{}{}{}", timing.stage.as_str(), label, elapsed, duration)
+                });
             }
             AgentEvent::TurnEnd {
                 index,

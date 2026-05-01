@@ -467,10 +467,7 @@ impl SessionManager {
     }
 
     /// Append a recovery checkpoint custom entry and return the persisted entry id.
-    pub fn append_recovery_checkpoint(
-        &mut self,
-        checkpoint: RecoveryCheckpoint,
-    ) -> Result<String> {
+    pub fn append_recovery_checkpoint(&mut self, checkpoint: RecoveryCheckpoint) -> Result<String> {
         let entry_id = uuid::Uuid::new_v4().to_string();
         let entry = recovery_checkpoint_entry(entry_id.clone(), checkpoint)?;
         self.append(entry)?;

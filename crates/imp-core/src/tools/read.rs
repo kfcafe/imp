@@ -251,16 +251,16 @@ fn parse_positive_usize(value: Option<&serde_json::Value>, field: &str) -> Resul
         )));
     };
     if number == 0 {
-        return Err(crate::error::Error::Tool(format!(
-            "{field} must be >= 1"
-        )));
+        return Err(crate::error::Error::Tool(format!("{field} must be >= 1")));
     }
     Ok(Some(number as usize))
 }
 
 fn apply_line_range(content: &str, range: Option<LineRange>) -> String {
     let lines: Vec<&str> = content.lines().collect();
-    let start = range.map(|range| range.start.saturating_sub(1)).unwrap_or(0);
+    let start = range
+        .map(|range| range.start.saturating_sub(1))
+        .unwrap_or(0);
     if start >= lines.len() {
         return String::new();
     }
