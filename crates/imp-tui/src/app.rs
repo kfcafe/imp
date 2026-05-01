@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -3044,12 +3045,95 @@ impl App {
         Ok(())
     }
 
+    fn try_prompt_command(&mut self, text: &str) -> bool {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+
+        if let Some(cmd) = trimmed.strip_prefix("!!") {
+            self.run_shell_command(cmd.trim());
+            return true;
+        }
+
+        if let Some(cmd) = trimmed.strip_prefix('!') {
+            self.run_shell_command(cmd.trim());
+            return true;
+        }
+
+        if let Some(cmd) = trimmed.strip_prefix(':') {
+            let cmd = cmd.trim();
+            if cmd.is_empty() {
+                self.push_system_msg("Usage: :cd <path>, :pwd, :! <command>, or : <command>");
+                return true;
+            }
+            if let Some(path) = cmd.strip_prefix("cd").and_then(command_arg) {
+                self.change_working_directory(path);
+                return true;
+            }
+            if cmd == "pwd" {
+                self.push_system_msg(&self.cwd.display().to_string());
+                return true;
+            }
+            let shell_cmd = cmd.strip_prefix('!').map(str::trim).unwrap_or(cmd);
+            self.run_shell_command(shell_cmd);
+            return true;
+        }
+
+        false
+    }
+
+    fn change_working_directory(&mut self, path: &str) {
+        if path.is_empty() {
+            self.push_system_msg(&self.cwd.display().to_string());
+            return;
+        }
+        let target = expand_prompt_path(path, &self.cwd);
+        match target.canonicalize() {
+            Ok(path) if path.is_dir() => {
+                self.cwd = path;
+                self.push_system_msg(&format!("cwd: {}", self.cwd.display()));
+            }
+            Ok(path) => self.push_error_msg(&format!("Not a directory: {}", path.display())),
+            Err(error) => self.push_error_msg(&format!("cd failed: {error}")),
+        }
+    }
+
+    fn run_shell_command(&mut self, command: &str) {
+        if command.is_empty() {
+            self.push_system_msg("Usage: ! <command> or !! <command>");
+            return;
+        }
+        match Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&self.cwd)
+            .output()
+        {
+            Ok(output) => {
+                let mut text = format!("$ {command}\n");
+                text.push_str(&String::from_utf8_lossy(&output.stdout));
+                text.push_str(&String::from_utf8_lossy(&output.stderr));
+                if !output.status.success() {
+                    text.push_str(&format!("\n(exit {})", output.status));
+                }
+                self.push_system_msg(text.trim_end());
+            }
+            Err(error) => self.push_error_msg(&format!("Shell command failed: {error}")),
+        }
+    }
+
     fn send_message(&mut self) {
         let text = self.editor.content().to_string();
         if text.trim().is_empty() {
             return;
         }
 
+        if self.try_prompt_command(&text) {
+            self.editor.push_history();
+            self.editor.clear();
+            return;
+        }
         // Check for slash commands
         if let Some(cmd_text) = text.strip_prefix('/') {
             let typed = cmd_text.trim();
@@ -3204,6 +3288,11 @@ impl App {
   Shift+Tab     Cycle thinking level\n\
   @             File finder\n\
   /command      Slash commands\n\
+  ! <cmd>       Run shell command in current cwd\n\
+  !! <cmd>      Run shell command without adding output to agent context\n\
+  :cd <path>    Change working directory\n\
+  :pwd          Show working directory\n\
+  : <cmd>       Run shell command\n\
   PageUp/Down   Scroll",
                 );
             }
@@ -3362,6 +3451,11 @@ impl App {
                     "  /login [provider]   — OAuth login (Anthropic/OpenAI/Kimi Code)\n",
                     "  /secrets [provider] — save/list API keys & service secrets\n",
                     "  /help       — this message\n",
+                    "  :cd <path>  — change working directory\n",
+                    "  :pwd        — show working directory\n",
+                    "  : <cmd>     — run shell command\n",
+                    "  ! <cmd>     — run shell command\n",
+                    "  !! <cmd>    — run shell command without adding output to agent context\n",
                     "\nTools: web.read supports web pages and public YouTube URLs (metadata + captions when available).\n",
                     "  /quit       — exit",
                 ));
@@ -5627,6 +5721,31 @@ fn command_dropdown_area(editor_area: Rect, max_height: u16) -> Rect {
     }
 }
 
+fn command_arg(rest: &str) -> Option<&str> {
+    if rest.is_empty() {
+        Some("")
+    } else {
+        rest.strip_prefix(char::is_whitespace).map(str::trim)
+    }
+}
+
+fn expand_prompt_path(path: &str, cwd: &Path) -> PathBuf {
+    let expanded = if path == "~" {
+        std::env::var_os("HOME").map(PathBuf::from)
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest))
+    } else {
+        None
+    };
+
+    let path = expanded.unwrap_or_else(|| PathBuf::from(path));
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    }
+}
+
 #[cfg(test)]
 mod session_lifecycle {
     use super::*;
@@ -5891,6 +6010,41 @@ mod session_lifecycle {
             other => panic!("expected user message, got {other:?}"),
         };
         assert_eq!(stored_text, pasted);
+    }
+
+    #[test]
+    fn prompt_commands_change_cwd_and_run_shell_without_session_message() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("project");
+        let child = cwd.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let mut app = make_app_with_session(SessionManager::in_memory(), cwd.clone());
+
+        app.editor.set_content(":cd child");
+        app.send_message();
+        assert_eq!(app.cwd, child.canonicalize().unwrap());
+        assert!(app.session.get_messages().is_empty());
+
+        app.editor.set_content("!! pwd");
+        app.send_message();
+        assert!(app.session.get_messages().is_empty());
+        assert!(app
+            .messages
+            .last()
+            .map(|message| message.content.contains(child.to_string_lossy().as_ref()))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn prompt_path_expansion_handles_relative_absolute_and_home_paths() {
+        let cwd = PathBuf::from("/tmp/project");
+        assert_eq!(expand_prompt_path("child", &cwd), cwd.join("child"));
+        assert_eq!(
+            expand_prompt_path("/var/tmp", &cwd),
+            PathBuf::from("/var/tmp")
+        );
+        assert!(command_arg(" foo").is_some_and(|arg| arg == "foo"));
+        assert!(command_arg("foo").is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

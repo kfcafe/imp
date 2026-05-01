@@ -539,7 +539,8 @@ impl Widget for EditorView<'_> {
 
         // Placeholder text when empty and not streaming
         if self.state.content.is_empty() && !self.is_streaming {
-            let placeholder = "Ask anything… ⇧↵ newline  @file attach context  / palette  : shell";
+            let placeholder =
+                "Ask anything… ⇧↵ newline  @file attach context  / palette  ! or : shell  :cd cwd";
             buf.set_string(
                 inner.x,
                 inner.y,
