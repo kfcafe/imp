@@ -724,94 +724,127 @@ async fn run_verify_command(
     Ok((result.passed, output))
 }
 
+const MAX_WORKER_PROMPT_FIELD_CHARS: usize = 4_000;
+const MAX_WORKER_PROMPT_LIST_ITEMS: usize = 12;
+
+fn bounded_field(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() <= MAX_WORKER_PROMPT_FIELD_CHARS {
+        return trimmed.to_string();
+    }
+    format!(
+        "{}\n[truncated: {} additional bytes]",
+        &trimmed[..MAX_WORKER_PROMPT_FIELD_CHARS],
+        trimmed.len() - MAX_WORKER_PROMPT_FIELD_CHARS
+    )
+}
+
+fn push_section(prompt: &mut String, heading: &str, body: &str) {
+    let body = body.trim();
+    if body.is_empty() {
+        return;
+    }
+    prompt.push_str("\n\n## ");
+    prompt.push_str(heading);
+    prompt.push('\n');
+    prompt.push_str(&bounded_field(body));
+}
+
+fn push_list_section<'a, I>(prompt: &mut String, heading: &str, items: I)
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut emitted = 0usize;
+    let mut omitted = 0usize;
+    let mut lines = String::new();
+    for item in items {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        if emitted < MAX_WORKER_PROMPT_LIST_ITEMS {
+            lines.push_str("- ");
+            lines.push_str(item);
+            lines.push('\n');
+            emitted += 1;
+        } else {
+            omitted += 1;
+        }
+    }
+    if omitted > 0 {
+        lines.push_str(&format!("- … {omitted} more omitted for prompt bounds\n"));
+    }
+    if !lines.trim().is_empty() {
+        push_section(prompt, heading, lines.trim_end());
+    }
+}
+
 /// Build a task prompt string from a worker assignment.
 ///
 /// This is the user-facing prompt that starts the agent's work.
 pub fn build_task_prompt(assignment: &WorkerAssignment) -> String {
-    let mut prompt = format!("Task: {}", assignment.title);
+    let mut prompt = format!(
+        "# Mana worker assignment\n\nUnit: {}\nTitle: {}\nWorkspace: {}",
+        assignment.id,
+        assignment.title,
+        assignment.workspace_root.display()
+    );
 
-    if !assignment.description.trim().is_empty() {
-        prompt.push_str("\n\n");
-        prompt.push_str(assignment.description.trim());
+    push_section(&mut prompt, "Task", &assignment.description);
+
+    if let Some(design) = assignment.design.as_deref() {
+        push_section(&mut prompt, "Design / architecture context", design);
     }
 
-    if let Some(design) = assignment
-        .design
-        .as_deref()
-        .map(str::trim)
-        .filter(|d| !d.is_empty())
-    {
-        prompt.push_str("\n\nDesign:\n");
-        prompt.push_str(design);
+    if let Some(acceptance) = assignment.acceptance.as_deref() {
+        push_section(&mut prompt, "Acceptance criteria", acceptance);
     }
 
-    if let Some(notes) = assignment
-        .notes
-        .as_deref()
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-    {
-        prompt.push_str("\n\nNotes:\n");
-        prompt.push_str(notes);
-    }
-
-    if let Some(acceptance) = assignment
-        .acceptance
-        .as_deref()
-        .map(str::trim)
-        .filter(|a| !a.is_empty())
-    {
-        prompt.push_str("\n\nAcceptance:\n");
-        prompt.push_str(acceptance);
-    }
-
-    if !assignment.files.is_empty() || !assignment.paths.is_empty() {
-        prompt.push_str("\n\nReferenced files:\n");
-        for path in assignment.paths.iter().chain(assignment.files.iter()) {
-            prompt.push_str("- ");
-            prompt.push_str(path);
-            prompt.push('\n');
-        }
-        while prompt.ends_with('\n') {
-            prompt.pop();
-        }
+    if !assignment.paths.is_empty() || !assignment.files.is_empty() {
+        push_list_section(
+            &mut prompt,
+            "Relevant paths",
+            assignment
+                .paths
+                .iter()
+                .chain(assignment.files.iter())
+                .map(String::as_str),
+        );
     }
 
     if !assignment.dependencies.is_empty() {
-        prompt.push_str("\n\nDependencies:\n");
-        for dep in &assignment.dependencies {
-            prompt.push_str("- ");
-            prompt.push_str(dep);
-            prompt.push('\n');
-        }
-        while prompt.ends_with('\n') {
-            prompt.pop();
-        }
+        push_list_section(
+            &mut prompt,
+            "Dependencies / blockers",
+            assignment.dependencies.iter().map(String::as_str),
+        );
     }
 
     if !assignment.decisions.is_empty() {
-        prompt.push_str("\n\nUnresolved decisions:\n");
-        for decision in &assignment.decisions {
-            prompt.push_str("- ");
-            prompt.push_str(decision);
-            prompt.push('\n');
-        }
-        while prompt.ends_with('\n') {
-            prompt.pop();
-        }
+        push_list_section(
+            &mut prompt,
+            "Decisions to respect",
+            assignment.decisions.iter().map(String::as_str),
+        );
+    }
+
+    if let Some(notes) = assignment.notes.as_deref() {
+        push_section(&mut prompt, "Current notes / prior context", notes);
     }
 
     if !assignment.attempts.is_empty() {
-        prompt.push_str("\n\nPrevious attempts:\n");
-        for attempt in &assignment.attempts {
-            prompt.push_str(&format!(
-                "- Attempt {} ({}): {}\n",
-                attempt.number, attempt.outcome, attempt.summary
-            ));
-        }
-        while prompt.ends_with('\n') {
-            prompt.pop();
-        }
+        let attempts = assignment
+            .attempts
+            .iter()
+            .map(|attempt| {
+                format!(
+                    "- Attempt {} ({}): {}",
+                    attempt.number, attempt.outcome, attempt.summary
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_section(&mut prompt, "Previous attempts", &attempts);
     }
 
     if let Some(verify) = assignment
@@ -820,15 +853,27 @@ pub fn build_task_prompt(assignment: &WorkerAssignment) -> String {
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        prompt.push_str("\n\nVerify command: ");
-        prompt.push_str(verify);
+        let mut verify_section = format!("Command: {verify}");
         if let Some(timeout_secs) = assignment.verify_timeout_secs {
-            prompt.push_str(&format!("\nVerify timeout: {}s", timeout_secs));
+            verify_section.push_str(&format!("\nTimeout: {timeout_secs}s"));
         }
         if assignment.fail_first {
-            prompt.push_str("\nFail-first: verify was expected to fail before implementation; preserve that contract.");
+            verify_section.push_str("\nFail-first: verify was expected to fail before implementation; preserve that contract.");
         }
+        push_section(&mut prompt, "Verification contract", &verify_section);
+    } else if assignment.acceptance.is_some() {
+        push_section(
+            &mut prompt,
+            "Verification contract",
+            "No verify command is defined. Use the acceptance criteria as the completion gate and record concrete evidence before closing.",
+        );
     }
+
+    push_section(
+        &mut prompt,
+        "Completion instructions",
+        "Stay inside this unit's scope. Update mana notes with discoveries or blockers. Run the verify command or equivalent focused checks before claiming completion. If the stored verify is stale/invalid, record equivalent evidence and close with force only with an explicit reason. Do not retry a failed approach unchanged.",
+    );
 
     prompt
 }
@@ -951,9 +996,14 @@ mod tests {
             model: None,
         };
         let prompt = build_task_prompt(&assignment);
-        assert!(prompt.contains("Task: Fix the bug"));
+        assert!(prompt.contains("# Mana worker assignment"));
+        assert!(prompt.contains("Unit: 1"));
+        assert!(prompt.contains("Title: Fix the bug"));
+        assert!(prompt.contains("## Task"));
         assert!(prompt.contains("null pointer"));
-        assert!(prompt.contains("Verify command: cargo test"));
+        assert!(prompt.contains("## Verification contract"));
+        assert!(prompt.contains("Command: cargo test"));
+        assert!(prompt.contains("## Completion instructions"));
     }
 
     #[test]
@@ -986,17 +1036,53 @@ mod tests {
             model: None,
         };
         let prompt = build_task_prompt(&assignment);
-        assert!(prompt.contains("Design:"));
+        assert!(prompt.contains("## Design / architecture context"));
         assert!(prompt.contains("Follow the existing auth fixture setup"));
-        assert!(prompt.contains("Acceptance:"));
+        assert!(prompt.contains("## Acceptance criteria"));
         assert!(prompt.contains("Auth regression test covers the fixture path failure mode"));
-        assert!(prompt.contains("Notes:"));
+        assert!(prompt.contains("## Current notes / prior context"));
         assert!(prompt.contains("Check the fixtures module"));
-        assert!(prompt.contains("Previous attempts:"));
-        assert!(prompt.contains("Referenced files:"));
+        assert!(prompt.contains("## Previous attempts"));
+        assert!(prompt.contains("## Relevant paths"));
         assert!(prompt.contains("tests/auth.rs"));
         assert!(prompt.contains("src/fixtures.rs"));
         assert!(prompt.contains("Attempt 1 (fail): Wrong fixture path"));
+    }
+
+    #[test]
+    fn build_task_prompt_is_bounded_and_excludes_unrelated_noise() {
+        let many_paths = (0..20)
+            .map(|i| format!("src/file_{i}.rs"))
+            .collect::<Vec<_>>();
+        let assignment = WorkerAssignment {
+            id: "4".to_string(),
+            title: "Bound context".to_string(),
+            description: "x".repeat(MAX_WORKER_PROMPT_FIELD_CHARS + 100),
+            design: None,
+            acceptance: Some("Acceptance stays visible".to_string()),
+            verify: None,
+            verify_timeout_secs: None,
+            fail_first: false,
+            notes: Some("Current useful note".to_string()),
+            decisions: vec!["Decision A".to_string()],
+            dependencies: vec!["dep-1".to_string()],
+            paths: many_paths,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            workspace_root: PathBuf::from("/tmp"),
+            model: None,
+        };
+
+        let prompt = build_task_prompt(&assignment);
+
+        assert!(prompt.contains("[truncated:"));
+        assert!(prompt.contains("… 8 more omitted for prompt bounds"));
+        assert!(prompt.contains("Acceptance stays visible"));
+        assert!(prompt.contains("Current useful note"));
+        assert!(prompt.contains("Decision A"));
+        assert!(prompt.contains("dep-1"));
+        assert!(prompt.contains("No verify command is defined"));
+        assert!(!prompt.contains("unrelated unit"));
     }
 
     #[test]
