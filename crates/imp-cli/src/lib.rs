@@ -2250,6 +2250,10 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
             "label": timing.label,
             "success": timing.success,
         }),
+        AgentEvent::RecoveryCheckpoint { checkpoint } => json!({
+            "type": "recovery_checkpoint",
+            "checkpoint": checkpoint,
+        }),
         AgentEvent::Warning { message } => json!({ "type": "warning", "message": message }),
         AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
         AgentEvent::ToolOutputDelta { .. } => return Ok(()), // handled in TUI only
@@ -2901,6 +2905,10 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             "duration_ms": timing.duration_ms,
             "label": timing.label,
             "success": timing.success,
+        }),
+        AgentEvent::RecoveryCheckpoint { checkpoint } => json!({
+            "type": "recovery_checkpoint",
+            "checkpoint": checkpoint,
         }),
         AgentEvent::Warning { message } => {
             json!({ "type": "warning", "message": message })

@@ -5510,6 +5510,7 @@ impl App {
             AgentEvent::Warning { message } => {
                 self.push_warning_msg(&message);
             }
+            AgentEvent::RecoveryCheckpoint { .. } => {}
             AgentEvent::Timing { timing } => {
                 self.status_items.insert(
                     "timing".to_string(),

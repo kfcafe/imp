@@ -32,7 +32,7 @@ pub mod typescript_extensions;
 pub mod ui;
 pub mod usage;
 
-pub use agent::{TimingEvent, TimingStage};
+pub use agent::{RecoveryCheckpoint, RecoveryCheckpointKind, TimingEvent, TimingStage};
 pub use error::{Error, Result};
 pub use error_display::format_error_for_display;
 pub use imp_llm::{

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use imp_llm::{truncate_chars_with_suffix, AssistantMessage, Message, Model, ToolResultMessage};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::AgentEvent;
+use crate::agent::{AgentEvent, RecoveryCheckpoint};
 use crate::error::Result;
 use crate::usage::{
     canonical_usage_record_for_assistant_turn_with_model_meta, usage_record_entry,
@@ -13,6 +13,7 @@ use crate::usage::{
 
 pub const CHECKPOINT_CUSTOM_TYPE: &str = "checkpoint-record";
 pub const CHECKPOINT_RECORD_VERSION: u32 = 1;
+pub const RECOVERY_CHECKPOINT_CUSTOM_TYPE: &str = "recovery-checkpoint";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionCheckpointRecord {
@@ -125,6 +126,18 @@ pub fn checkpoint_record_entry(
         parent_id: None,
         custom_type: CHECKPOINT_CUSTOM_TYPE.to_string(),
         data: serde_json::to_value(record)?,
+    })
+}
+
+pub fn recovery_checkpoint_entry(
+    entry_id: impl Into<String>,
+    checkpoint: RecoveryCheckpoint,
+) -> Result<SessionEntry> {
+    Ok(SessionEntry::Custom {
+        id: entry_id.into(),
+        parent_id: None,
+        custom_type: RECOVERY_CHECKPOINT_CUSTOM_TYPE.to_string(),
+        data: serde_json::to_value(checkpoint)?,
     })
 }
 
@@ -453,6 +466,17 @@ impl SessionManager {
         Ok(entry_id)
     }
 
+    /// Append a recovery checkpoint custom entry and return the persisted entry id.
+    pub fn append_recovery_checkpoint(
+        &mut self,
+        checkpoint: RecoveryCheckpoint,
+    ) -> Result<String> {
+        let entry_id = uuid::Uuid::new_v4().to_string();
+        let entry = recovery_checkpoint_entry(entry_id.clone(), checkpoint)?;
+        self.append(entry)?;
+        Ok(entry_id)
+    }
+
     /// Persist the session entries implied by an agent event.
     ///
     /// Returns a short description of what was written so callers can surface
@@ -491,6 +515,10 @@ impl SessionManager {
                 if usage_entry_id.is_some() {
                     persisted.push("canonical usage");
                 }
+            }
+            AgentEvent::RecoveryCheckpoint { checkpoint } => {
+                self.append_recovery_checkpoint(checkpoint.clone())?;
+                persisted.push("recovery checkpoint");
             }
             _ => {}
         }
@@ -1742,6 +1770,30 @@ mod tests {
         }
     }
 
+    fn make_test_model() -> Model {
+        Model {
+            meta: ModelMeta {
+                id: "test-model".into(),
+                provider: "test-provider".into(),
+                name: "Test Model".into(),
+                context_window: 8192,
+                max_output_tokens: 2048,
+                pricing: ModelPricing {
+                    input_per_mtok: 1.0,
+                    output_per_mtok: 2.0,
+                    cache_read_per_mtok: 0.5,
+                    cache_write_per_mtok: 1.0,
+                },
+                capabilities: Capabilities {
+                    reasoning: false,
+                    images: false,
+                    tool_use: true,
+                },
+            },
+            provider: std::sync::Arc::new(NoopProvider { models: Vec::new() }),
+        }
+    }
+
     fn make_msg_entry(id: &str, text: &str) -> SessionEntry {
         SessionEntry::Message {
             id: id.to_string(),
@@ -2209,27 +2261,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let session_dir = tmp.path().join("sessions");
         let cwd = tmp.path().join("project");
-        let model = Model {
-            meta: imp_llm::ModelMeta {
-                id: "test-model".into(),
-                provider: "test-provider".into(),
-                name: "Test Model".into(),
-                context_window: 8192,
-                max_output_tokens: 2048,
-                pricing: ModelPricing {
-                    input_per_mtok: 1.0,
-                    output_per_mtok: 2.0,
-                    cache_read_per_mtok: 0.5,
-                    cache_write_per_mtok: 1.0,
-                },
-                capabilities: Capabilities {
-                    reasoning: false,
-                    images: false,
-                    tool_use: true,
-                },
-            },
-            provider: std::sync::Arc::new(NoopProvider { models: Vec::new() }),
-        };
+        let model = make_test_model();
 
         let mut mgr = SessionManager::new(&cwd, &session_dir).unwrap();
         let message = AssistantMessage {
@@ -2343,5 +2375,71 @@ mod tests {
 
         let result = mgr.navigate("nonexistent");
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod recovery_ledger_tests {
+    use super::*;
+    use crate::agent::{RecoveryCheckpoint, RecoveryCheckpointKind};
+
+    #[test]
+    fn recovery_checkpoint_entry_redacts_tool_args_and_output() {
+        let raw_secret_arg = "super-secret-token";
+        let raw_tool_output = "sensitive command output";
+        let checkpoint = RecoveryCheckpoint {
+            version: 1,
+            turn: 3,
+            kind: RecoveryCheckpointKind::ToolExecutionStart,
+            tool_call_id: Some("call_123".to_string()),
+            tool_name: Some("bash".to_string()),
+            args_hash: Some("0123456789abcdef".to_string()),
+            success: None,
+            error_class: None,
+            timestamp: 42,
+        };
+
+        let entry = recovery_checkpoint_entry("recovery-1", checkpoint).unwrap();
+        let encoded = serde_json::to_string(&entry).unwrap();
+
+        assert!(encoded.contains("recovery-checkpoint"));
+        assert!(encoded.contains("tool_execution_start"));
+        assert!(encoded.contains("0123456789abcdef"));
+        assert!(!encoded.contains(raw_secret_arg));
+        assert!(!encoded.contains(raw_tool_output));
+    }
+
+    #[test]
+    fn append_recovery_checkpoint_persists_redacted_custom_entry() {
+        let mut session = SessionManager::in_memory();
+        let checkpoint = RecoveryCheckpoint {
+            version: 1,
+            turn: 1,
+            kind: RecoveryCheckpointKind::ToolExecutionEnd,
+            tool_call_id: Some("call_456".to_string()),
+            tool_name: Some("edit".to_string()),
+            args_hash: Some("abcdef0123456789".to_string()),
+            success: Some(true),
+            error_class: None,
+            timestamp: 99,
+        };
+
+        let entry_id = session.append_recovery_checkpoint(checkpoint).unwrap();
+
+        assert!(!entry_id.is_empty());
+        let entry = session.entries().last().expect("recovery checkpoint entry");
+        let SessionEntry::Custom {
+            custom_type, data, ..
+        } = entry
+        else {
+            panic!("expected custom recovery checkpoint entry");
+        };
+        assert_eq!(custom_type, RECOVERY_CHECKPOINT_CUSTOM_TYPE);
+        assert_eq!(data["kind"], "tool_execution_end");
+        assert_eq!(data["tool_name"], "edit");
+        assert_eq!(data["args_hash"], "abcdef0123456789");
+        let encoded = serde_json::to_string(data).unwrap();
+        assert!(!encoded.contains("oldText"));
+        assert!(!encoded.contains("newText"));
     }
 }

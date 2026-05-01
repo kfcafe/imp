@@ -7,6 +7,7 @@ use imp_llm::{
     AssistantMessage, ContentBlock, Context, Cost, Message, Model, RequestOptions, StopReason,
     StreamEvent, ThinkingLevel, Usage,
 };
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use imp_llm::provider::RetryPolicy;
@@ -64,6 +65,43 @@ pub struct TimingEvent {
     pub success: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryCheckpointKind {
+    ProviderRequestStart,
+    AssistantToolCallObserved,
+    ToolExecutionStart,
+    ToolExecutionEnd,
+    ToolResultAddedToContext,
+    ProviderRequestCompleted,
+}
+
+impl RecoveryCheckpointKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderRequestStart => "provider_request_start",
+            Self::AssistantToolCallObserved => "assistant_tool_call_observed",
+            Self::ToolExecutionStart => "tool_execution_start",
+            Self::ToolExecutionEnd => "tool_execution_end",
+            Self::ToolResultAddedToContext => "tool_result_added_to_context",
+            Self::ProviderRequestCompleted => "provider_request_completed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryCheckpoint {
+    pub version: u32,
+    pub turn: u32,
+    pub kind: RecoveryCheckpointKind,
+    pub tool_call_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub args_hash: Option<String>,
+    pub success: Option<bool>,
+    pub error_class: Option<String>,
+    pub timestamp: u64,
+}
+
 /// Events emitted by the agent during execution.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
@@ -114,6 +152,9 @@ pub enum AgentEvent {
     },
     Timing {
         timing: TimingEvent,
+    },
+    RecoveryCheckpoint {
+        checkpoint: RecoveryCheckpoint,
     },
     Error {
         error: String,
@@ -674,6 +715,16 @@ impl Agent {
 
             // Stream the LLM response with retry on transient startup failures.
             let llm_request_started_at = Instant::now();
+            self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+                turn,
+                RecoveryCheckpointKind::ProviderRequestStart,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await;
             self.emit_timing(
                 turn,
                 TimingStage::LlmRequestStart,
@@ -774,6 +825,17 @@ impl Agent {
                                     )
                                     .await;
                                 }
+                                let args_hash = Self::tool_args_hash(&arguments);
+                                self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+                                    turn,
+                                    RecoveryCheckpointKind::AssistantToolCallObserved,
+                                    Some(id.clone()),
+                                    Some(name.clone()),
+                                    Some(args_hash),
+                                    None,
+                                    None,
+                                ))
+                                .await;
                                 ordered_content.push(ContentBlock::ToolCall {
                                     id: id.clone(),
                                     name: name.clone(),
@@ -789,6 +851,16 @@ impl Agent {
                                     turn_started_at,
                                     Some(llm_request_started_at),
                                 )
+                                .await;
+                                self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+                                    turn,
+                                    RecoveryCheckpointKind::ProviderRequestCompleted,
+                                    None,
+                                    None,
+                                    None,
+                                    Some(true),
+                                    None,
+                                ))
                                 .await;
                                 if let Some(ref usage) = message.usage {
                                     total_usage.add(usage);
@@ -942,6 +1014,16 @@ impl Agent {
                 .await;
 
             for result in &results {
+                self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+                    turn,
+                    RecoveryCheckpointKind::ToolResultAddedToContext,
+                    Some(result.tool_call_id.clone()),
+                    Some(result.tool_name.clone()),
+                    None,
+                    Some(!result.is_error),
+                    None,
+                ))
+                .await;
                 self.messages.push(Message::ToolResult(result.clone()));
             }
 
@@ -1170,6 +1252,39 @@ impl Agent {
         let _ = self.event_tx.send(AgentEvent::Timing { timing }).await;
     }
 
+    async fn emit_recovery_checkpoint(&self, checkpoint: RecoveryCheckpoint) {
+        let _ = self
+            .event_tx
+            .send(AgentEvent::RecoveryCheckpoint { checkpoint })
+            .await;
+    }
+
+    fn recovery_checkpoint(
+        turn: u32,
+        kind: RecoveryCheckpointKind,
+        tool_call_id: Option<String>,
+        tool_name: Option<String>,
+        args_hash: Option<String>,
+        success: Option<bool>,
+        error_class: Option<String>,
+    ) -> RecoveryCheckpoint {
+        RecoveryCheckpoint {
+            version: 1,
+            turn,
+            kind,
+            tool_call_id,
+            tool_name,
+            args_hash,
+            success,
+            error_class,
+            timestamp: imp_llm::now(),
+        }
+    }
+
+    fn tool_args_hash(args: &serde_json::Value) -> String {
+        format!("{:016x}", crate::tools::stable_hash(args.to_string()))
+    }
+
     /// Execute tool calls from a single assistant message.
     async fn execute_tools(
         &self,
@@ -1272,6 +1387,7 @@ impl Agent {
         turn: u32,
         turn_started_at: Instant,
     ) -> imp_llm::ToolResultMessage {
+        let args_hash = Self::tool_args_hash(&args);
         let repeat_check = self.repeated_tool_call_check(call_id, tool_name, &args);
         let tool_started_at = Instant::now();
         self.emit_timing_with_details(
@@ -1283,6 +1399,17 @@ impl Agent {
             Some(tool_name.to_string()),
             None,
         )
+        .await;
+
+        self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+            turn,
+            RecoveryCheckpointKind::ToolExecutionStart,
+            Some(call_id.to_string()),
+            Some(tool_name.to_string()),
+            Some(args_hash.clone()),
+            None,
+            None,
+        ))
         .await;
 
         if let RepeatedToolCallCheck::Block(loop_result) = repeat_check {
@@ -1306,6 +1433,16 @@ impl Agent {
                 Some(tool_name.to_string()),
                 Some(false),
             )
+            .await;
+            self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+                turn,
+                RecoveryCheckpointKind::ToolExecutionEnd,
+                Some(call_id.to_string()),
+                Some(tool_name.to_string()),
+                Some(args_hash.clone()),
+                Some(false),
+                Some("repeated_tool_call_blocked".to_string()),
+            ))
             .await;
             return loop_result;
         }
@@ -1338,6 +1475,16 @@ impl Agent {
                 result: result.clone(),
             })
             .await;
+            self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+                turn,
+                RecoveryCheckpointKind::ToolExecutionEnd,
+                Some(call_id.to_string()),
+                Some(tool_name.to_string()),
+                Some(args_hash.clone()),
+                Some(false),
+                Some("mode_blocked".to_string()),
+            ))
+            .await;
             return result;
         }
 
@@ -1352,6 +1499,16 @@ impl Agent {
                 result: result.clone(),
             })
             .await;
+            self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+                turn,
+                RecoveryCheckpointKind::ToolExecutionEnd,
+                Some(call_id.to_string()),
+                Some(tool_name.to_string()),
+                Some(args_hash.clone()),
+                Some(false),
+                Some("hook_blocked".to_string()),
+            ))
+            .await;
             return result;
         }
 
@@ -1364,6 +1521,16 @@ impl Agent {
                         tool_call_id: call_id.to_string(),
                         result: result.clone(),
                     })
+                    .await;
+                    self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+                        turn,
+                        RecoveryCheckpointKind::ToolExecutionEnd,
+                        Some(call_id.to_string()),
+                        Some(tool_name.to_string()),
+                        Some(args_hash.clone()),
+                        Some(false),
+                        Some("policy_blocked".to_string()),
+                    ))
                     .await;
                     return result;
                 }
@@ -1381,6 +1548,16 @@ impl Agent {
                     tool_call_id: call_id.to_string(),
                     result: result.clone(),
                 })
+                .await;
+                self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+                    turn,
+                    RecoveryCheckpointKind::ToolExecutionEnd,
+                    Some(call_id.to_string()),
+                    Some(tool_name.to_string()),
+                    Some(args_hash.clone()),
+                    Some(false),
+                    Some("validation_error".to_string()),
+                ))
                 .await;
                 return result;
             }
@@ -1504,6 +1681,17 @@ impl Agent {
             Some(tool_name.to_string()),
             Some(!result.is_error),
         )
+        .await;
+
+        self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+            turn,
+            RecoveryCheckpointKind::ToolExecutionEnd,
+            Some(call_id.to_string()),
+            Some(tool_name.to_string()),
+            Some(args_hash),
+            Some(!result.is_error),
+            result.is_error.then(|| "tool_error".to_string()),
+        ))
         .await;
 
         if let RepeatedToolCallCheck::Warn(warning) = repeat_check {
