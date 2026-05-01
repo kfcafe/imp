@@ -1106,6 +1106,18 @@ fn validate_mana_action(action: &str, params: &serde_json::Value) -> Option<Tool
                 );
             }
         }
+        "reparent" => {
+            if !has_text(params, "id") {
+                return missing(
+                    vec!["id"],
+                    "reparent requires id and parent.",
+                    vec!["id", "parent", "reason"],
+                );
+            }
+            if params.get("parent").is_none() {
+                return missing(vec!["parent"], "reparent requires the new parent id. Root detach can be added as a separate explicit action later.", vec!["id", "parent", "reason"]);
+            }
+        }
         "run_state" | "evaluate" => {
             if !has_text(params, "run_id") {
                 return missing(
@@ -1776,7 +1788,7 @@ impl Tool for ManaTool {
         let mut properties = serde_json::Map::new();
         properties.insert(
             "action".into(),
-            json!({ "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "run_state", "evaluate", "claim", "release", "logs", "agents", "next", "tree", "reopen", "verify", "fail", "delete", "dep_add", "dep_remove", "fact_create", "fact_verify", "notes_append", "decision_add", "decision_resolve", "guide", "template"] }),
+            json!({ "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "run_state", "evaluate", "claim", "release", "logs", "agents", "next", "tree", "reopen", "verify", "fail", "delete", "dep_add", "dep_remove", "fact_create", "fact_verify", "notes_append", "decision_add", "decision_resolve", "reparent", "guide", "template"] }),
         );
         properties.insert("id".into(), json!({ "type": "string" }));
         properties.insert(
@@ -2568,6 +2580,35 @@ impl Tool for ManaTool {
                 Ok(agents) => Ok(json_output(&agents)),
                 Err(e) => Ok(ToolOutput::error(e.to_string())),
             },
+            "reparent" => {
+                let id = params["id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("reparent requires 'id'".into()))?;
+                let parent = parse_optional_string(&params["parent"]);
+                let reason = parse_optional_string(&params["reason"])
+                    .or_else(|| parse_optional_string(&params["parent_reason"]));
+                let result = mana_core::api::reparent_unit(
+                    &mana_dir,
+                    id,
+                    mana_core::ops::reparent::ReparentParams {
+                        parent: parent.clone(),
+                        reason: reason.clone(),
+                    },
+                )
+                .map_err(|error| crate::error::Error::Tool(error.to_string()))?;
+                let details = serde_json::to_value(&result).unwrap_or(serde_json::Value::Null);
+                let summary = format!(
+                    "mana delta: reparented {} from {} to {}",
+                    id,
+                    result.old_parent.as_deref().unwrap_or("<root>"),
+                    result.new_parent.as_deref().unwrap_or("<root>")
+                );
+                set_mana_delta_widget(&ctx, summary.clone(), reason.clone()).await;
+                let mut details_obj = details.as_object().cloned().unwrap_or_default();
+                details_obj.insert("action".into(), json!("reparent"));
+                details_obj.insert("reason".into(), json!(reason));
+                Ok(text_output(summary, serde_json::Value::Object(details_obj)))
+            }
             "run_state" | "evaluate" => {
                 let run_id = params["run_id"].as_str();
                 match run_state_snapshot(&self.run_store, run_id) {
@@ -3334,6 +3375,8 @@ mod tests {
         assert!(properties.contains_key("scope"));
         assert!(properties.contains_key("path"));
         assert!(properties.contains_key("parent_reason"));
+        let actions = properties["action"]["enum"].as_array().unwrap();
+        assert!(actions.iter().any(|value| value == "reparent"));
 
         assert!(!properties.contains_key("mana_scope"));
         assert!(!properties.contains_key("mana_dir"));
@@ -3386,6 +3429,83 @@ mod tests {
             &json!({ "id": "304", "decisions": ["Use canonical names"] }),
         )
         .is_none());
+    }
+
+    #[test]
+    fn mana_validation_requires_parent_for_reparent() {
+        let output = validate_mana_action("reparent", &json!({ "id": "313.2" }))
+            .expect("reparent without parent should fail validation");
+
+        assert!(output.is_error);
+        assert_eq!(output.details["missing"], json!(["parent"]));
+        assert_eq!(
+            output.details["canonical_fields"],
+            json!(["id", "parent", "reason"])
+        );
+    }
+
+    #[tokio::test]
+    async fn reparent_moves_child_between_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
+        let tool = ManaTool::default();
+
+        let old_parent = tool
+            .execute(
+                "old_parent",
+                json!({ "action": "create", "title": "Old Parent" }),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let old_parent_id = old_parent.details["unit"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let new_parent = tool
+            .execute(
+                "new_parent",
+                json!({ "action": "create", "title": "New Parent" }),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let new_parent_id = new_parent.details["unit"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let child = tool
+            .execute(
+                "child",
+                json!({ "action": "create", "title": "Child", "parent": old_parent_id, "parent_reason": "Initial grouping" }),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let child_id = child.details["unit"]["id"].as_str().unwrap().to_string();
+
+        let moved = tool
+            .execute(
+                "move_child",
+                json!({
+                    "action": "reparent",
+                    "id": child_id,
+                    "parent": new_parent_id,
+                    "reason": "Belongs under the new reliability epic"
+                }),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!moved.is_error);
+        assert_eq!(moved.details["action"], json!("reparent"));
+        assert_eq!(moved.details["old_parent"], json!(old_parent_id));
+        assert_eq!(moved.details["new_parent"], json!(new_parent_id));
+        assert!(moved
+            .text_content()
+            .unwrap_or_default()
+            .contains("reparented"));
     }
 
     #[tokio::test]
