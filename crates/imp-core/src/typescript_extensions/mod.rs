@@ -487,7 +487,7 @@ export default function dynamicToolsExtension(pi: ExtensionAPI) {
             return;
         }
 
-        let source = Path::new("/Users/asher/.pi/agent/extensions/color-palette");
+        let source = Path::new("/Users/test/.pi/agent/extensions/color-palette");
         if !source.exists() {
             return;
         }

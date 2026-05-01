@@ -579,7 +579,7 @@ mod tests {
         std::fs::create_dir_all(&imp_dir).unwrap();
         std::fs::write(
             imp_dir.join("memory.md"),
-            "Project lives at /Users/asher/tower and uses root mana.",
+            "Project lives at /Users/test/tower and uses root mana.",
         )
         .unwrap();
         std::fs::write(
@@ -600,7 +600,7 @@ mod tests {
         .build()
         .unwrap();
 
-        assert!(!agent.system_prompt.contains("/Users/asher/tower"));
+        assert!(!agent.system_prompt.contains("/Users/test/tower"));
         assert!(!agent.system_prompt.contains("/tower for Tower work"));
 
         if let Some(prev) = prev {
@@ -620,7 +620,7 @@ mod tests {
         std::fs::create_dir_all(&imp_dir).unwrap();
         std::fs::write(
             imp_dir.join("memory.md"),
-            "Project lives at /Users/asher/tower and uses root mana.",
+            "Project lives at /Users/test/tower and uses root mana.",
         )
         .unwrap();
 
@@ -629,14 +629,14 @@ mod tests {
 
         let (agent, _handle) = AgentBuilder::new(
             config,
-            PathBuf::from("/Users/asher/tower/imp"),
+            PathBuf::from("/Users/test/tower/imp"),
             test_model(),
             "key".into(),
         )
         .build()
         .unwrap();
 
-        assert!(agent.system_prompt.contains("/Users/asher/tower"));
+        assert!(agent.system_prompt.contains("/Users/test/tower"));
 
         if let Some(prev) = prev {
             std::env::set_var("XDG_CONFIG_HOME", prev);

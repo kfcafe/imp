@@ -694,9 +694,9 @@ fn mix_channel(base: u8, target: u8, amount: f32) -> u8 {
 }
 
 fn abbreviate_home(path: &str) -> String {
-    if path == "/Users/asher" {
+    if path == "/Users/test" {
         "~".to_string()
-    } else if let Some(rest) = path.strip_prefix("/Users/asher/") {
+    } else if let Some(rest) = path.strip_prefix("/Users/test/") {
         format!("~/{rest}")
     } else {
         path.to_string()
@@ -999,13 +999,13 @@ mod tests {
 
     #[test]
     fn abbreviate_home_prefers_tilde() {
-        assert_eq!(abbreviate_home("/Users/asher/tower/imp"), "~/tower/imp");
+        assert_eq!(abbreviate_home("/Users/test/tower/imp"), "~/tower/imp");
         assert_eq!(abbreviate_home("/tmp/project"), "/tmp/project");
     }
 
     #[test]
     fn identity_label_prefers_tilde_path() {
-        let rendered = build_identity_label("/Users/asher/tower/imp", "chat", 80);
+        let rendered = build_identity_label("/Users/test/tower/imp", "chat", 80);
         let text: String = rendered
             .into_iter()
             .map(|span| span.content.into_owned())

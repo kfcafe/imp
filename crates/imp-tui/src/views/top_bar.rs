@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn shorten_path_over_limit() {
-        let long = "/Users/asher/very/long/deeply/nested/project/path";
+        let long = "/Users/test/very/long/deeply/nested/project/path";
         let short = shorten_path(long, 25);
         assert!(short.len() <= 27);
         assert!(short.starts_with('…'));

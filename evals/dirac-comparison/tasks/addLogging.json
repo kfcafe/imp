@@ -4,7 +4,7 @@
   "repo": "https://github.com/microsoft/vscode.git",
   "commit": "fb4e4303186e940ee0b9f011661c5b86e6712907",
   "prompt": "Find every exact definition of runCommand across the entire repository and add simple console.log statements to track their entry and exit. Ensure the exit logging is guaranteed to fire regardless of early returns or errors, without modifying any existing imports or method signatures.",
-  "imp_command": "/Users/asher/imp/target/debug/imp --provider $PROVIDER --model $MODEL --mode json --max-turns 80 --print @prompt.md",
+  "imp_command": "target/debug/imp --provider $PROVIDER --model $MODEL --mode json --max-turns 80 --print @prompt.md",
   "verifier": "repo-specific type/lint command TBD after pinning commit",
   "dirac_reference": {
     "patch": "evals/dirac-comparison/reference/dirac/dirac_refactor_addLogging",
