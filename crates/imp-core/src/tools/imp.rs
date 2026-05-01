@@ -487,7 +487,7 @@ mod tests {
             Some("integer")
         );
         assert!(schema["properties"].get("unit_id").is_none());
-        assert!(schema["properties"].get("delegate").is_none());
+        assert!(schema["properties"].get("mode").is_none());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! imp-owned worker and evidence contract types.
 //!
-//! These DTOs define the boundary between imp's mana worker runtime, spawn tool,
+//! These DTOs define the boundary between imp's mana worker runtime,
 //! and future runner surfaces. They used to live in the experimental
 //! the earlier experimental contracts crate, but currently only imp consumes
 //! them, so they stay
