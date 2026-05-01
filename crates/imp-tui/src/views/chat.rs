@@ -107,6 +107,7 @@ impl DisplayMessage {
                                 details: arguments.clone(),
                                 is_error: false,
                                 expanded: false,
+                                thought_for_secs: None,
                                 streaming_lines: Vec::new(),
                                 streaming_output: String::new(),
                             });
@@ -1136,6 +1137,7 @@ mod tests {
             details: serde_json::json!({"path": "src/main.rs"}),
             is_error: false,
             expanded: false,
+            thought_for_secs: None,
             streaming_lines: Vec::new(),
             streaming_output: String::new(),
         }

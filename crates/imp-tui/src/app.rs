@@ -347,6 +347,7 @@ pub struct App {
     sidebar_detail_cache: Option<SidebarDetailCache>,
 
     // Turn activity tracking
+    turn_thinking_started_at: Option<Instant>,
     pub turn_tracker: TurnTracker,
 
     // Display helpers
@@ -641,6 +642,7 @@ impl App {
             chat_render_cache: None,
             sidebar_stream_cache: None,
             sidebar_detail_cache: None,
+            turn_thinking_started_at: None,
             turn_tracker: TurnTracker::new(),
             theme,
             highlighter: Highlighter::new(),
@@ -1281,6 +1283,11 @@ impl App {
             animation_level: self.config.ui.animations,
             theme: self.theme_kind(),
         }
+    }
+
+    fn thought_for_tool_call_secs(&self) -> Option<u64> {
+        self.turn_thinking_started_at
+            .map(|started_at| started_at.elapsed().as_secs().max(1))
     }
 
     fn selected_tool_call(&self) -> Option<DisplayToolCall> {
@@ -5304,6 +5311,7 @@ impl App {
                 self.tool_focus_pinned = false;
                 self.sidebar_auto_follow = true;
                 self.invalidate_chat_render_cache();
+                self.turn_thinking_started_at = Some(Instant::now());
                 self.turn_tracker.reset();
             }
             AgentEvent::AgentEnd { cost, .. } => {
@@ -5332,6 +5340,7 @@ impl App {
                     self.editor.set_content(&text);
                     self.send_message();
                 }
+                self.turn_thinking_started_at = None;
             }
             AgentEvent::MessageDelta { delta } => {
                 // Keep the current default compact: the main transcript shows
@@ -5339,6 +5348,7 @@ impl App {
                 let tools_expanded = self.tools_expanded
                     && self.config.ui.effective_chat_tool_display()
                         == imp_core::config::ChatToolDisplay::Interleaved;
+                let thought_for_secs = self.thought_for_tool_call_secs();
                 if let Some(last) = self.latest_streaming_message_mut() {
                     match delta {
                         StreamEvent::TextDelta { text } => {
@@ -5361,6 +5371,7 @@ impl App {
                                 details: arguments,
                                 is_error: false,
                                 expanded: tools_expanded,
+                                thought_for_secs,
                                 streaming_lines: Vec::new(),
                                 streaming_output: String::new(),
                             });
@@ -6375,6 +6386,7 @@ mod session_lifecycle {
                 details: serde_json::Value::Null,
                 is_error: false,
                 expanded: false,
+                thought_for_secs: None,
                 streaming_lines: Vec::new(),
                 streaming_output: String::new(),
             }],
@@ -6739,6 +6751,7 @@ mod session_lifecycle {
                 details: serde_json::Value::Null,
                 is_error: false,
                 expanded: false,
+                thought_for_secs: None,
                 streaming_lines: Vec::new(),
                 streaming_output: String::new(),
             }],
@@ -6942,6 +6955,7 @@ mod session_lifecycle {
             details: serde_json::json!({ "path": "src/lib.rs" }),
             is_error: false,
             expanded: false,
+            thought_for_secs: None,
             streaming_lines: Vec::new(),
             streaming_output: String::new(),
         };
@@ -6961,6 +6975,7 @@ mod session_lifecycle {
             details: serde_json::json!({ "path": "src/lib.rs" }),
             is_error: false,
             expanded: false,
+            thought_for_secs: None,
             streaming_lines: Vec::new(),
             streaming_output: String::new(),
         };
@@ -6999,6 +7014,7 @@ mod session_lifecycle {
                 details: serde_json::Value::Null,
                 is_error: false,
                 expanded: false,
+                thought_for_secs: None,
                 streaming_lines: Vec::new(),
                 streaming_output: String::new(),
             }],
@@ -7043,6 +7059,7 @@ mod session_lifecycle {
                 details: serde_json::Value::Null,
                 is_error: false,
                 expanded: false,
+                thought_for_secs: None,
                 streaming_lines: Vec::new(),
                 streaming_output: String::new(),
             }],

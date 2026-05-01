@@ -585,6 +585,7 @@ mod tests {
             details: serde_json::Value::Null,
             is_error: false,
             expanded: true,
+            thought_for_secs: None,
             streaming_lines: Vec::new(),
             streaming_output: String::new(),
         }

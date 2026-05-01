@@ -73,6 +73,8 @@ pub struct DisplayToolCall {
     pub details: serde_json::Value,
     pub is_error: bool,
     pub expanded: bool,
+    /// Seconds from assistant turn start until this tool call was requested.
+    pub thought_for_secs: Option<u64>,
     /// Rolling buffer of recent streaming output lines for inline chat display.
     pub streaming_lines: Vec<String>,
     /// Full streaming output collected while the tool is still running.
@@ -152,6 +154,15 @@ impl DisplayToolCall {
             spans.push(Span::styled(self.args_summary.clone(), theme.muted_style()));
         }
 
+        if !is_running {
+            if let Some(seconds) = self.thought_for_secs {
+                spans.push(Span::styled(
+                    format!(" thought for {}", format_duration_seconds(seconds)),
+                    theme.muted_style(),
+                ));
+            }
+        }
+
         // Result summary when collapsed — just line count (icon already shows status)
         if !self.expanded {
             if let Some(ref output) = self.output {
@@ -228,6 +239,22 @@ impl DisplayToolCall {
             }
             "mana" => format_mana_args(args),
             _ => summarize_json_object(args),
+        }
+    }
+}
+
+fn format_duration_seconds(seconds: u64) -> String {
+    match seconds {
+        0 | 1 => "1 second".to_string(),
+        2..=59 => format!("{seconds} seconds"),
+        _ => {
+            let minutes = seconds / 60;
+            let remaining_seconds = seconds % 60;
+            if remaining_seconds == 0 {
+                format!("{minutes}m")
+            } else {
+                format!("{minutes}m {remaining_seconds}s")
+            }
         }
     }
 }
@@ -633,6 +660,7 @@ mod tests {
             details: serde_json::Value::Null,
             is_error,
             expanded: false,
+            thought_for_secs: None,
             streaming_lines: Vec::new(),
             streaming_output: String::new(),
         }

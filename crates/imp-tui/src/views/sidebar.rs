@@ -1361,6 +1361,7 @@ mod tests {
             }),
             is_error: false,
             expanded: false,
+            thought_for_secs: None,
             streaming_lines: Vec::new(),
             streaming_output: String::new(),
         };
@@ -1408,6 +1409,7 @@ mod tests {
             }),
             is_error: false,
             expanded: false,
+            thought_for_secs: None,
             streaming_lines: Vec::new(),
             streaming_output: String::new(),
         };
@@ -1438,6 +1440,7 @@ mod tests {
             }),
             is_error: false,
             expanded: false,
+            thought_for_secs: None,
             streaming_lines: Vec::new(),
             streaming_output: String::new(),
         };
@@ -1503,6 +1506,7 @@ mod tests {
             details: serde_json::Value::Null,
             is_error,
             expanded: false,
+            thought_for_secs: None,
             streaming_lines: Vec::new(),
             streaming_output: String::new(),
         }
