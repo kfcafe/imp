@@ -1566,6 +1566,76 @@ fn run_state_snapshot(
         .and_then(|store| store.snapshot(run_id))
 }
 
+fn run_recovery_details(state: &NativeRunState) -> serde_json::Value {
+    let failed_units: Vec<_> = state
+        .units
+        .iter()
+        .filter(|unit| unit.status == "failed")
+        .map(|unit| {
+            json!({
+                "id": unit.id,
+                "title": unit.title,
+                "failure_summary": unit.failure_summary,
+                "error": unit.error,
+            })
+        })
+        .collect();
+    let running_units: Vec<_> = state
+        .units
+        .iter()
+        .filter(|unit| unit.status == "running")
+        .map(|unit| json!({ "id": unit.id, "title": unit.title, "agent": unit.agent }))
+        .collect();
+    let awaiting_verify_units: Vec<_> = state
+        .units
+        .iter()
+        .filter(|unit| unit.status == "awaiting_verify")
+        .map(|unit| json!({ "id": unit.id, "title": unit.title }))
+        .collect();
+    let last_event_at_ms = state.finished_at_ms.unwrap_or(state.started_at_ms);
+    let mut next_actions = Vec::new();
+    let mut retry_requires_unit_update = false;
+
+    if !failed_units.is_empty() || state.status == "failed" || state.summary.total_failed > 0 {
+        retry_requires_unit_update = true;
+        next_actions.push("Inspect failed units with mana action=show id=<unit>".to_string());
+        next_actions.push(
+            "Append notes with the failure evidence and changed retry plan before rerun"
+                .to_string(),
+        );
+        next_actions
+            .push("Retry only after updating failed units; do not rerun unchanged".to_string());
+    }
+    if !awaiting_verify_units.is_empty() || state.summary.total_awaiting_verify > 0 {
+        next_actions.push("Verify candidate-complete units or close with equivalent evidence if stored verify is stale".to_string());
+    }
+    if state.status == "running" || !running_units.is_empty() {
+        next_actions.push("Inspect logs/agents before assuming the run is stale".to_string());
+    }
+    if next_actions.is_empty() {
+        next_actions.push("No recovery action required".to_string());
+    }
+
+    json!({
+        "status": state.status,
+        "failed_units": failed_units,
+        "running_units": running_units,
+        "awaiting_verify_units": awaiting_verify_units,
+        "stale_workers": [],
+        "last_event_at_ms": last_event_at_ms,
+        "next_actions": next_actions,
+        "retry_requires_unit_update": retry_requires_unit_update,
+    })
+}
+
+fn run_state_details(state: &NativeRunState) -> serde_json::Value {
+    let mut details = serde_json::to_value(state).unwrap_or(serde_json::Value::Null);
+    if let Some(object) = details.as_object_mut() {
+        object.insert("recovery".to_string(), run_recovery_details(state));
+    }
+    details
+}
+
 fn run_state_output(state: &NativeRunState) -> ToolOutput {
     let mut lines = vec![format!(
         "Native mana orchestration {}: {} · {}",
@@ -1599,10 +1669,13 @@ fn run_state_output(state: &NativeRunState) -> ToolOutput {
     if let Some(last) = state.log_lines.last() {
         lines.push(format!("Latest: {last}"));
     }
-    text_output(
-        lines.join("\n"),
-        serde_json::to_value(state).unwrap_or(serde_json::Value::Null),
-    )
+    let recovery = run_recovery_details(state);
+    if let Some(actions) = recovery["next_actions"].as_array() {
+        if let Some(first) = actions.first().and_then(|value| value.as_str()) {
+            lines.push(format!("Next: {first}"));
+        }
+    }
+    text_output(lines.join("\n"), run_state_details(state))
 }
 
 fn evaluate_run_output(state: &NativeRunState) -> ToolOutput {
@@ -1643,9 +1716,17 @@ fn evaluate_run_output(state: &NativeRunState) -> ToolOutput {
         .map(|line| format!("Latest: {line}"))
         .unwrap_or_else(|| "Latest: (no stream events captured yet)".to_string());
 
+    let recovery = run_recovery_details(state);
+    let next = recovery["next_actions"]
+        .as_array()
+        .and_then(|actions| actions.first())
+        .and_then(|value| value.as_str())
+        .map(|action| format!("Next: {action}"))
+        .unwrap_or_else(|| "Next: No recovery action required".to_string());
+
     text_output(
-        format!("{headline}\n{runtime}\n{latest}"),
-        serde_json::to_value(state).unwrap_or(serde_json::Value::Null),
+        format!("{headline}\n{runtime}\n{latest}\n{next}"),
+        run_state_details(state),
     )
 }
 
@@ -2909,8 +2990,8 @@ mod tests {
     use super::{
         evaluate_run_output, mana_close_error_output, mana_close_force_reason_error,
         mana_guide_output, mana_template_output, parent_placement_details, parse_guide_topic,
-        parse_template_kind, stream_event_line, validate_mana_action, GuideTopic, ManaRunStore,
-        ManaTool, NativeRunState, TemplateKind,
+        parse_template_kind, run_state_output, stream_event_line, validate_mana_action, GuideTopic,
+        ManaRunStore, ManaTool, NativeRunState, RunUnitStatus, TemplateKind,
     };
     use crate::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
     use crate::ui::{NotifyLevel, NullInterface, WidgetContent};
@@ -4386,5 +4467,66 @@ mod tests {
         let text = output.text_content().unwrap_or("");
         assert!(text.contains("2 failed unit"));
         assert!(text.contains("Latest: ✗ 7 failed verify"));
+        assert!(text.contains("Next: Inspect failed units"));
+        assert_eq!(
+            output.details["recovery"]["retry_requires_unit_update"],
+            json!(true)
+        );
+        assert!(output.details["recovery"]["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action
+                .as_str()
+                .unwrap_or_default()
+                .contains("do not rerun unchanged")));
+    }
+
+    #[test]
+    fn run_state_output_includes_recovery_details() {
+        let mut state = NativeRunState::new(
+            "run-8".to_string(),
+            "unit 8".to_string(),
+            false,
+            &mana::commands::run::NativeRunParams {
+                target: mana::commands::run::RunTarget::Unit("8".to_string()),
+                jobs: 1,
+                dry_run: false,
+                loop_mode: false,
+                keep_going: false,
+                timeout: 30,
+                idle_timeout: 5,
+                json_stream: true,
+                review: false,
+            },
+        );
+        state.status = "failed".to_string();
+        state.summary.total_failed = 1;
+        state.units.push(RunUnitStatus {
+            id: "8".to_string(),
+            title: "Failed unit".to_string(),
+            status: "failed".to_string(),
+            round: Some(1),
+            agent: Some("imp-worker".to_string()),
+            model: None,
+            duration_secs: Some(3),
+            tool_count: Some(2),
+            turns: Some(1),
+            failure_summary: Some("verify failed".to_string()),
+            error: Some("exit 1".to_string()),
+        });
+
+        let output = run_state_output(&state);
+        let text = output.text_content().unwrap_or_default();
+
+        assert!(text.contains("Next: Inspect failed units"));
+        assert_eq!(
+            output.details["recovery"]["failed_units"][0]["id"],
+            json!("8")
+        );
+        assert_eq!(
+            output.details["recovery"]["retry_requires_unit_update"],
+            json!(true)
+        );
     }
 }
