@@ -75,6 +75,10 @@ Current high-priority decomposition targets:
 - `crates/imp-cli/src/lib.rs`: split args, auth/setup, headless worker mode, RPC mode, chat shell, and import/install helpers
 - `crates/imp-core/src/tools/mana.rs`: split schema/action dispatch, native run orchestration, run-state persistence, rendering, and policy
 
+## Agent-local install workflow
+
+For this workspace, prefer `uu install --default` when the user asks to install the current `imp` build locally. This matches the source-install path and avoids guessing a `cargo install` target.
+
 ## Useful docs
 
 - `README.md`
