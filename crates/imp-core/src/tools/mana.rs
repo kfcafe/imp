@@ -1205,6 +1205,251 @@ fn spawn_background_run(
     });
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuideTopic {
+    Overview,
+    Task,
+    Epic,
+    Decision,
+    Notes,
+    Verify,
+    Orchestrate,
+    WorkerContext,
+}
+
+impl GuideTopic {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Task => "task",
+            Self::Epic => "epic",
+            Self::Decision => "decision",
+            Self::Notes => "notes",
+            Self::Verify => "verify",
+            Self::Orchestrate => "orchestrate",
+            Self::WorkerContext => "worker_context",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "overview" => Some(Self::Overview),
+            "task" => Some(Self::Task),
+            "epic" => Some(Self::Epic),
+            "decision" => Some(Self::Decision),
+            "notes" => Some(Self::Notes),
+            "verify" => Some(Self::Verify),
+            "orchestrate" => Some(Self::Orchestrate),
+            "worker_context" => Some(Self::WorkerContext),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemplateKind {
+    Epic,
+    Task,
+    Fact,
+}
+
+impl TemplateKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Epic => "epic",
+            Self::Task => "task",
+            Self::Fact => "fact",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "epic" => Some(Self::Epic),
+            "task" => Some(Self::Task),
+            "fact" => Some(Self::Fact),
+            _ => None,
+        }
+    }
+}
+
+fn parse_guide_topic(params: &serde_json::Value) -> Result<GuideTopic> {
+    let topic = parse_optional_string(&params["topic"]).unwrap_or_else(|| "overview".to_string());
+    GuideTopic::parse(&topic).ok_or_else(|| {
+        crate::error::Error::Tool(format!(
+            "Invalid mana guide topic '{topic}'. Use overview, task, epic, decision, notes, verify, orchestrate, or worker_context."
+        ))
+    })
+}
+
+fn parse_optional_guide_topic(params: &serde_json::Value) -> Result<Option<GuideTopic>> {
+    match parse_optional_string(&params["topic"]) {
+        Some(topic) => GuideTopic::parse(&topic).map(Some).ok_or_else(|| {
+            crate::error::Error::Tool(format!(
+                "Invalid mana template topic '{topic}'. Use overview, task, epic, decision, notes, verify, orchestrate, or worker_context."
+            ))
+        }),
+        None => Ok(None),
+    }
+}
+
+fn parse_template_kind(params: &serde_json::Value) -> Result<TemplateKind> {
+    let kind = parse_optional_string(&params["kind"]).unwrap_or_else(|| "task".to_string());
+    TemplateKind::parse(&kind).ok_or_else(|| {
+        crate::error::Error::Tool(format!(
+            "Invalid mana template kind '{kind}'. Use epic, task, or fact."
+        ))
+    })
+}
+
+fn topic_guidance(topic: GuideTopic) -> (&'static str, Vec<&'static str>, Vec<&'static str>) {
+    match topic {
+        GuideTopic::Overview => (
+            "Use mana when work needs durable scope, verification, dependencies, retries, or handoff; use direct edits for small one-pass changes.",
+            vec![
+                "Create epics for durable goals and tasks for executable units.",
+                "Record decisions/notes when context should survive the turn.",
+                "Close only after the verify command or equivalent evidence passes.",
+            ],
+            vec!["template kind=task", "guide topic=orchestrate"],
+        ),
+        GuideTopic::Task => (
+            "A task is a worker-ready executable spec with clear scope, acceptance, files, and a verify gate.",
+            vec![
+                "Title the outcome, not the activity.",
+                "Description should include current state, exact steps, edge cases, and non-goals.",
+                "Acceptance and verify define done.",
+            ],
+            vec!["template kind=task", "create kind=task title=... verify=..."],
+        ),
+        GuideTopic::Epic => (
+            "An epic is a durable feature/spec container that decomposes into executable child tasks.",
+            vec![
+                "Capture goal, constraints, architecture direction, and sequencing.",
+                "Keep implementation in child tasks with verify commands.",
+            ],
+            vec!["template kind=epic", "create kind=epic title=... feature=true"],
+        ),
+        GuideTopic::Decision => (
+            "Use decisions for scope, architecture, sequencing, and tradeoffs future workers should not relitigate.",
+            vec![
+                "Add decisions when a choice changes implementation direction.",
+                "Resolve decisions when the blocker is answered or superseded.",
+            ],
+            vec!["decision_add id=... description=...", "decision_resolve id=... resolve_decisions=..."],
+        ),
+        GuideTopic::Notes => (
+            "Use notes for durable progress, diagnosis, blockers, failed attempts, and retry changes.",
+            vec![
+                "Append concrete evidence, commands, files, and observed errors.",
+                "After failures, update notes before retrying with a changed plan.",
+            ],
+            vec!["notes_append id=... notes=..."],
+        ),
+        GuideTopic::Verify => (
+            "Verification is first-class: acceptance says what must be true; verify is the command/evidence that proves it.",
+            vec![
+                "Use fail_first for regression tasks where the check should fail before implementation.",
+                "Prefer narrow, repeatable commands over broad expensive checks.",
+                "If verify is wrong, record why and use equivalent evidence explicitly.",
+            ],
+            vec!["create title=... acceptance=... verify=...", "verify id=..."],
+        ),
+        GuideTopic::Orchestrate => (
+            "Orchestration runs ready tasks in dependency waves and returns run_id for state/log inspection.",
+            vec![
+                "Create dependencies before running parallel waves.",
+                "Use run_state/logs/agents to inspect active work.",
+                "Update failed units with new context before retrying.",
+            ],
+            vec!["run targets=[...]", "run_state run_id=...", "logs run_id=..."],
+        ),
+        GuideTopic::WorkerContext => (
+            "Worker context is assembled from unit fields: title, description, acceptance, verify, paths, dependencies, notes, and decisions.",
+            vec![
+                "Write units so another agent can execute cold without guessing.",
+                "Put architecture or scope choices in decisions/notes, not transient chat.",
+            ],
+            vec!["show id=...", "notes_append id=... notes=..."],
+        ),
+    }
+}
+
+fn mana_guide_output(topic: GuideTopic) -> ToolOutput {
+    let (summary, guidance, next_actions) = topic_guidance(topic);
+    text_output(
+        format!(
+            "mana guide: {}\n{}\n- {}\nnext: {}",
+            topic.as_str(),
+            summary,
+            guidance.join("\n- "),
+            next_actions.join("; ")
+        ),
+        json!({
+            "action": "guide",
+            "topic": topic.as_str(),
+            "summary": summary,
+            "guidance": guidance,
+            "next_actions": next_actions,
+        }),
+    )
+}
+
+fn template_body(kind: TemplateKind, topic: Option<GuideTopic>) -> serde_json::Value {
+    match kind {
+        TemplateKind::Epic => json!({
+            "kind": "epic",
+            "title": "Outcome-oriented goal",
+            "description": "Goal, users, constraints, architecture direction, decomposition plan, and non-goals.",
+            "acceptance": "Child tasks cover implementation, verification, docs, and rollout risks.",
+            "feature": true,
+            "labels": ["feature"],
+        }),
+        TemplateKind::Task => json!({
+            "kind": "task",
+            "title": "Implement/fix concrete outcome",
+            "description": "Current state, exact steps, relevant files, edge cases, and scope boundaries. Include enough context for a cold worker.",
+            "acceptance": "Observable behavior or artifact that defines done.",
+            "verify": "targeted command that proves the task",
+            "paths": ["path/to/file"],
+            "fail_first": topic == Some(GuideTopic::Verify),
+        }),
+        TemplateKind::Fact => json!({
+            "kind": "fact",
+            "title": "Verifiable project claim",
+            "verify": "command that exits 0 while the claim remains true",
+            "ttl_days": 30,
+            "paths": ["path/to/evidence"],
+        }),
+    }
+}
+
+fn mana_template_output(kind: TemplateKind, topic: Option<GuideTopic>) -> ToolOutput {
+    let template = template_body(kind, topic);
+    let topic_text = topic.map(|topic| topic.as_str()).unwrap_or("general");
+    let summary = match kind {
+        TemplateKind::Epic => "Epic template for durable feature/spec containers.",
+        TemplateKind::Task => "Task template for worker-ready executable specs.",
+        TemplateKind::Fact => "Fact template for re-checkable project claims.",
+    };
+    text_output(
+        format!(
+            "mana template: {} ({})\n{}\n{}",
+            kind.as_str(),
+            topic_text,
+            summary,
+            serde_json::to_string_pretty(&template).unwrap_or_else(|_| template.to_string())
+        ),
+        json!({
+            "action": "template",
+            "kind": kind.as_str(),
+            "topic": topic_text,
+            "summary": summary,
+            "template": template,
+            "next_actions": ["create", "update", "notes_append"],
+        }),
+    )
+}
+
 fn text_output(text: String, details: serde_json::Value) -> ToolOutput {
     ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text }],
@@ -1445,7 +1690,7 @@ impl Tool for ManaTool {
         let mut properties = serde_json::Map::new();
         properties.insert(
             "action".into(),
-            json!({ "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "run_state", "evaluate", "claim", "release", "logs", "agents", "next", "tree", "reopen", "verify", "fail", "delete", "dep_add", "dep_remove", "fact_create", "fact_verify", "notes_append", "decision_add", "decision_resolve"] }),
+            json!({ "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "run_state", "evaluate", "claim", "release", "logs", "agents", "next", "tree", "reopen", "verify", "fail", "delete", "dep_add", "dep_remove", "fact_create", "fact_verify", "notes_append", "decision_add", "decision_resolve", "guide", "template"] }),
         );
         properties.insert("id".into(), json!({ "type": "string" }));
         properties.insert(
@@ -1469,6 +1714,10 @@ impl Tool for ManaTool {
             json!({ "type": "string", "description": "Native in-session mana run ID, returned by action=run" }),
         );
         properties.insert("title".into(), json!({ "type": "string" }));
+        properties.insert(
+            "topic".into(),
+            json!({ "type": "string", "enum": ["overview", "task", "epic", "decision", "notes", "verify", "orchestrate", "worker_context"], "description": "Guide/template topic" }),
+        );
         properties.insert(
             "verify".into(),
             json!({ "type": "string", "description": "Shell command, must exit 0" }),
@@ -1591,6 +1840,17 @@ impl Tool for ManaTool {
             .ok_or_else(|| crate::error::Error::Tool("missing 'action' parameter".into()))?;
 
         let mode = ctx.mode;
+
+        match action {
+            "guide" => return Ok(mana_guide_output(parse_guide_topic(&params)?)),
+            "template" => {
+                return Ok(mana_template_output(
+                    parse_template_kind(&params)?,
+                    parse_optional_guide_topic(&params)?,
+                ))
+            }
+            _ => {}
+        }
 
         if !mode.allows_mana_action(action) {
             let mode_name = format!("{mode:?}").to_lowercase();
@@ -2496,8 +2756,9 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        evaluate_run_output, stream_event_line, validate_mana_action, ManaRunStore, ManaTool,
-        NativeRunState,
+        evaluate_run_output, mana_guide_output, mana_template_output, parse_guide_topic,
+        parse_template_kind, stream_event_line, validate_mana_action, GuideTopic, ManaRunStore,
+        ManaTool, NativeRunState, TemplateKind,
     };
     use crate::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
     use crate::ui::{NotifyLevel, NullInterface, WidgetContent};
@@ -2836,6 +3097,45 @@ mod tests {
         assert_eq!(unit["feature"], true);
         assert_eq!(unit["fail_first"], true);
         assert_eq!(unit["verify_timeout"], 12);
+    }
+
+    #[test]
+    fn mana_guide_outputs_concise_structured_topic() {
+        let output = mana_guide_output(GuideTopic::Verify);
+
+        assert!(!output.is_error);
+        assert_eq!(output.details["action"], json!("guide"));
+        assert_eq!(output.details["topic"], json!("verify"));
+        assert!(output.details["guidance"].as_array().unwrap().len() <= 3);
+        assert!(output
+            .text_content()
+            .unwrap_or_default()
+            .contains("mana guide: verify"));
+    }
+
+    #[test]
+    fn mana_template_outputs_task_template() {
+        let output = mana_template_output(TemplateKind::Task, Some(GuideTopic::Verify));
+
+        assert!(!output.is_error);
+        assert_eq!(output.details["action"], json!("template"));
+        assert_eq!(output.details["kind"], json!("task"));
+        assert_eq!(output.details["template"]["fail_first"], json!(true));
+        assert!(output.details["template"]["verify"].is_string());
+    }
+
+    #[test]
+    fn mana_guide_and_template_validate_topic_and_kind() {
+        assert!(parse_guide_topic(&json!({ "topic": "orchestrate" })).is_ok());
+        assert!(parse_guide_topic(&json!({ "topic": "bad" }))
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid mana guide topic"));
+        assert!(parse_template_kind(&json!({ "kind": "fact" })).is_ok());
+        assert!(parse_template_kind(&json!({ "kind": "job" }))
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid mana template kind"));
     }
 
     #[test]
