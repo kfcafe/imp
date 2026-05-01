@@ -34,6 +34,7 @@ pub enum MessageRole {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DisplayAssistantBlock {
     Text(String),
+    ThoughtDuration { seconds: u64 },
     ToolCall { id: String },
 }
 
@@ -107,7 +108,6 @@ impl DisplayMessage {
                                 details: arguments.clone(),
                                 is_error: false,
                                 expanded: false,
-                                thought_for_secs: None,
                                 streaming_lines: Vec::new(),
                                 streaming_output: String::new(),
                             });
@@ -160,6 +160,18 @@ impl DisplayMessage {
 
     pub fn push_assistant_text_delta(&mut self, text: &str) {
         self.add_assistant_text_block(text);
+    }
+
+    pub fn push_assistant_thought_duration(&mut self, seconds: u64) {
+        let seconds = seconds.max(1);
+        if matches!(
+            self.assistant_blocks.last(),
+            Some(DisplayAssistantBlock::ThoughtDuration { .. })
+        ) {
+            return;
+        }
+        self.assistant_blocks
+            .push(DisplayAssistantBlock::ThoughtDuration { seconds });
     }
 
     pub fn push_assistant_tool_call(&mut self, tool_call: DisplayToolCall) {
@@ -679,6 +691,16 @@ fn build_chat_lines(
                                     }
                                 }
                             }
+                            DisplayAssistantBlock::ThoughtDuration { seconds } => {
+                                all_lines.extend(wrap_text_with_prefix(
+                                    &format!("  thought for {}", format_duration_seconds(*seconds)),
+                                    &[],
+                                    &[],
+                                    theme.muted_style(),
+                                    width,
+                                    word_wrap,
+                                ));
+                            }
                             DisplayAssistantBlock::ToolCall { id } => {
                                 let focused = tool_focus == Some(tool_call_counter);
                                 tool_call_counter += 1;
@@ -803,6 +825,22 @@ fn build_chat_lines(
     }
 
     (all_lines, tool_line_indices)
+}
+
+fn format_duration_seconds(seconds: u64) -> String {
+    match seconds {
+        0 | 1 => "1 second".to_string(),
+        2..=59 => format!("{seconds} seconds"),
+        _ => {
+            let minutes = seconds / 60;
+            let remaining_seconds = seconds % 60;
+            if remaining_seconds == 0 {
+                format!("{minutes}m")
+            } else {
+                format!("{minutes}m {remaining_seconds}s")
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1137,7 +1175,6 @@ mod tests {
             details: serde_json::json!({"path": "src/main.rs"}),
             is_error: false,
             expanded: false,
-            thought_for_secs: None,
             streaming_lines: Vec::new(),
             streaming_output: String::new(),
         }
@@ -1252,6 +1289,60 @@ mod tests {
         );
 
         assert!(visible_tools.is_empty());
+    }
+
+    #[test]
+    fn assistant_blocks_preserve_thought_duration_tool_thought_order() {
+        let display = DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: vec![make_tool("tc-1")],
+            assistant_blocks: vec![
+                DisplayAssistantBlock::ThoughtDuration { seconds: 5 },
+                DisplayAssistantBlock::ToolCall { id: "tc-1".into() },
+                DisplayAssistantBlock::ThoughtDuration { seconds: 20 },
+                DisplayAssistantBlock::Text("Done".into()),
+            ],
+            is_streaming: false,
+            timestamp: 0,
+        };
+
+        let theme = Theme::default();
+        let highlighter = Highlighter::new();
+        let (lines, _) = build_chat_lines(
+            &[display],
+            &theme,
+            &highlighter,
+            80,
+            0,
+            None,
+            true,
+            ChatToolDisplay::Interleaved,
+            5,
+            false,
+            AnimationLevel::Minimal,
+            AnimationState::Idle,
+        );
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        let first_thought_idx = rendered
+            .iter()
+            .position(|line| line.contains("thought for 5 seconds"))
+            .unwrap();
+        let tool_idx = rendered
+            .iter()
+            .position(|line| line.contains("read") && line.contains("src/main.rs"))
+            .unwrap();
+        let second_thought_idx = rendered
+            .iter()
+            .position(|line| line.contains("thought for 20 seconds"))
+            .unwrap();
+        let text_idx = rendered.iter().position(|line| line.contains("Done")).unwrap();
+
+        assert!(first_thought_idx < tool_idx);
+        assert!(tool_idx < second_thought_idx);
+        assert!(second_thought_idx < text_idx);
     }
 
     #[test]
