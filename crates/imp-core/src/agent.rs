@@ -22,31 +22,46 @@ use crate::ui::NotifyLevel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimingStage {
+    ContextAssemblyStart,
+    ContextAssemblyEnd,
     LlmRequestStart,
     FirstStreamEvent,
     FirstTextDelta,
     FirstToolCall,
     MessageEnd,
+    ToolExecutionStart,
+    ToolExecutionEnd,
+    PostTurnAssessmentStart,
+    PostTurnAssessmentEnd,
 }
 
 impl TimingStage {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::ContextAssemblyStart => "context_assembly_start",
+            Self::ContextAssemblyEnd => "context_assembly_end",
             Self::LlmRequestStart => "llm_request_start",
             Self::FirstStreamEvent => "first_stream_event",
             Self::FirstTextDelta => "first_text_delta",
             Self::FirstToolCall => "first_tool_call",
             Self::MessageEnd => "message_end",
+            Self::ToolExecutionStart => "tool_execution_start",
+            Self::ToolExecutionEnd => "tool_execution_end",
+            Self::PostTurnAssessmentStart => "post_turn_assessment_start",
+            Self::PostTurnAssessmentEnd => "post_turn_assessment_end",
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimingEvent {
     pub turn: u32,
     pub stage: TimingStage,
     pub since_turn_start_ms: u64,
-    pub since_llm_request_start_ms: u64,
+    pub since_llm_request_start_ms: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub label: Option<String>,
+    pub success: Option<bool>,
 }
 
 /// Events emitted by the agent during execution.
@@ -586,6 +601,9 @@ impl Agent {
                 review.begin_turn(turn);
             }
             let turn_started_at = Instant::now();
+            self.emit_timing(turn, TimingStage::ContextAssemblyStart, turn_started_at, None)
+                .await;
+            let context_assembly_started_at = Instant::now();
 
             let mut usage = crate::context::context_usage(&self.messages, &self.model);
             if usage.ratio >= self.context_config.observation_mask_threshold {
@@ -621,6 +639,16 @@ impl Agent {
                 cache_options: self.cache_options.clone(),
                 effort: None,
             };
+            self.emit_timing_with_details(
+                turn,
+                TimingStage::ContextAssemblyEnd,
+                turn_started_at,
+                None,
+                Some(context_assembly_started_at.elapsed().as_millis() as u64),
+                None,
+                Some(true),
+            )
+            .await;
 
             self.hooks.fire(&HookEvent::BeforeLlmCall).await;
 
@@ -650,7 +678,7 @@ impl Agent {
                 turn,
                 TimingStage::LlmRequestStart,
                 turn_started_at,
-                llm_request_started_at,
+                Some(llm_request_started_at),
             )
             .await;
             let model = clone_model(&self.model);
@@ -704,7 +732,7 @@ impl Agent {
                                 turn,
                                 TimingStage::FirstStreamEvent,
                                 turn_started_at,
-                                llm_request_started_at,
+                                Some(llm_request_started_at),
                             )
                             .await;
                         }
@@ -722,7 +750,7 @@ impl Agent {
                                         turn,
                                         TimingStage::FirstTextDelta,
                                         turn_started_at,
-                                        llm_request_started_at,
+                                        Some(llm_request_started_at),
                                     )
                                     .await;
                                 }
@@ -742,7 +770,7 @@ impl Agent {
                                         turn,
                                         TimingStage::FirstToolCall,
                                         turn_started_at,
-                                        llm_request_started_at,
+                                        Some(llm_request_started_at),
                                     )
                                     .await;
                                 }
@@ -759,7 +787,7 @@ impl Agent {
                                     turn,
                                     TimingStage::MessageEnd,
                                     turn_started_at,
-                                    llm_request_started_at,
+                                    Some(llm_request_started_at),
                                 )
                                 .await;
                                 if let Some(ref usage) = message.usage {
@@ -878,7 +906,20 @@ impl Agent {
                 })
                 .await;
 
+                self.emit_timing(turn, TimingStage::PostTurnAssessmentStart, turn_started_at, None)
+                    .await;
+                let assessment_started_at = Instant::now();
                 let assessment = self.assess_post_turn(&msg, &[], false, &mana_review);
+                self.emit_timing_with_details(
+                    turn,
+                    TimingStage::PostTurnAssessmentEnd,
+                    turn_started_at,
+                    None,
+                    Some(assessment_started_at.elapsed().as_millis() as u64),
+                    None,
+                    Some(true),
+                )
+                .await;
                 self.emit(AgentEvent::TurnAssessment {
                     index: turn,
                     assessment: assessment.debug_view(),
@@ -896,7 +937,9 @@ impl Agent {
             }
 
             // Execute tool calls
-            let results = self.execute_tools(tool_calls, cancel_token).await;
+            let results = self
+                .execute_tools(turn, turn_started_at, tool_calls, cancel_token)
+                .await;
 
             for result in &results {
                 self.messages.push(Message::ToolResult(result.clone()));
@@ -910,7 +953,20 @@ impl Agent {
             })
             .await;
 
+            self.emit_timing(turn, TimingStage::PostTurnAssessmentStart, turn_started_at, None)
+                .await;
+            let assessment_started_at = Instant::now();
             let assessment = self.assess_post_turn(&msg, &results, true, &mana_review);
+            self.emit_timing_with_details(
+                turn,
+                TimingStage::PostTurnAssessmentEnd,
+                turn_started_at,
+                None,
+                Some(assessment_started_at.elapsed().as_millis() as u64),
+                None,
+                Some(true),
+            )
+            .await;
             self.emit(AgentEvent::TurnAssessment {
                 index: turn,
                 assessment: assessment.debug_view(),
@@ -1076,15 +1132,40 @@ impl Agent {
         turn: u32,
         stage: TimingStage,
         turn_started_at: Instant,
-        llm_request_started_at: Instant,
+        llm_request_started_at: Option<Instant>,
+    ) {
+        self.emit_timing_with_details(
+            turn,
+            stage,
+            turn_started_at,
+            llm_request_started_at,
+            None,
+            None,
+            None,
+        )
+        .await;
+    }
+
+    async fn emit_timing_with_details(
+        &self,
+        turn: u32,
+        stage: TimingStage,
+        turn_started_at: Instant,
+        llm_request_started_at: Option<Instant>,
+        duration_ms: Option<u64>,
+        label: Option<String>,
+        success: Option<bool>,
     ) {
         let now = Instant::now();
         let timing = TimingEvent {
             turn,
             stage,
             since_turn_start_ms: now.duration_since(turn_started_at).as_millis() as u64,
-            since_llm_request_start_ms: now.duration_since(llm_request_started_at).as_millis()
-                as u64,
+            since_llm_request_start_ms: llm_request_started_at
+                .map(|started_at| now.duration_since(started_at).as_millis() as u64),
+            duration_ms,
+            label,
+            success,
         };
         let _ = self.event_tx.send(AgentEvent::Timing { timing }).await;
     }
@@ -1092,6 +1173,8 @@ impl Agent {
     /// Execute tool calls from a single assistant message.
     async fn execute_tools(
         &self,
+        turn: u32,
+        turn_started_at: Instant,
         calls: Vec<(String, String, serde_json::Value)>,
         cancel_token: Arc<std::sync::atomic::AtomicBool>,
     ) -> Vec<imp_llm::ToolResultMessage> {
@@ -1109,7 +1192,9 @@ impl Agent {
         let mut results = join_all(readonly.into_iter().map(|(index, id, name, args)| {
             let cancel_token = Arc::clone(&cancel_token);
             async move {
-                let result = self.execute_one_tool(&id, &name, args, cancel_token).await;
+                let result = self
+                    .execute_one_tool(&id, &name, args, cancel_token, turn, turn_started_at)
+                    .await;
                 (index, result)
             }
         }))
@@ -1117,7 +1202,14 @@ impl Agent {
 
         for (index, id, name, args) in mutable {
             let result = self
-                .execute_one_tool(&id, &name, args, Arc::clone(&cancel_token))
+                .execute_one_tool(
+                    &id,
+                    &name,
+                    args,
+                    Arc::clone(&cancel_token),
+                    turn,
+                    turn_started_at,
+                )
                 .await;
             results.push((index, result));
         }
@@ -1177,8 +1269,22 @@ impl Agent {
         tool_name: &str,
         args: serde_json::Value,
         cancel_token: Arc<std::sync::atomic::AtomicBool>,
+        turn: u32,
+        turn_started_at: Instant,
     ) -> imp_llm::ToolResultMessage {
         let repeat_check = self.repeated_tool_call_check(call_id, tool_name, &args);
+        let tool_started_at = Instant::now();
+        self.emit_timing_with_details(
+            turn,
+            TimingStage::ToolExecutionStart,
+            turn_started_at,
+            None,
+            None,
+            Some(tool_name.to_string()),
+            None,
+        )
+        .await;
+
         if let RepeatedToolCallCheck::Block(loop_result) = repeat_check {
             self.emit(AgentEvent::ToolExecutionStart {
                 tool_call_id: call_id.to_string(),
@@ -1190,6 +1296,16 @@ impl Agent {
                 tool_call_id: call_id.to_string(),
                 result: loop_result.clone(),
             })
+            .await;
+            self.emit_timing_with_details(
+                turn,
+                TimingStage::ToolExecutionEnd,
+                turn_started_at,
+                None,
+                Some(tool_started_at.elapsed().as_millis() as u64),
+                Some(tool_name.to_string()),
+                Some(false),
+            )
             .await;
             return loop_result;
         }
@@ -1378,6 +1494,16 @@ impl Agent {
             tool_call_id: call_id.to_string(),
             result: result.clone(),
         })
+        .await;
+        self.emit_timing_with_details(
+            turn,
+            TimingStage::ToolExecutionEnd,
+            turn_started_at,
+            None,
+            Some(tool_started_at.elapsed().as_millis() as u64),
+            Some(tool_name.to_string()),
+            Some(!result.is_error),
+        )
         .await;
 
         if let RepeatedToolCallCheck::Warn(warning) = repeat_check {
@@ -3406,22 +3532,29 @@ mod tests {
         let timings: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
-                AgentEvent::Timing { timing } => Some(*timing),
+                AgentEvent::Timing { timing } => Some(timing.clone()),
                 _ => None,
             })
             .collect();
 
-        assert!(timings.len() >= 4);
-        assert_eq!(timings[0].stage, TimingStage::LlmRequestStart);
-        assert_eq!(timings[1].stage, TimingStage::FirstStreamEvent);
-        assert_eq!(timings[2].stage, TimingStage::FirstTextDelta);
+        assert!(timings.len() >= 7);
+        assert_eq!(timings[0].stage, TimingStage::ContextAssemblyStart);
+        assert_eq!(timings[1].stage, TimingStage::ContextAssemblyEnd);
+        assert_eq!(timings[2].stage, TimingStage::LlmRequestStart);
+        assert_eq!(timings[3].stage, TimingStage::FirstStreamEvent);
+        assert_eq!(timings[4].stage, TimingStage::FirstTextDelta);
         assert!(timings
             .iter()
             .any(|timing| timing.stage == TimingStage::MessageEnd));
+        assert!(timings
+            .iter()
+            .any(|timing| timing.stage == TimingStage::PostTurnAssessmentEnd));
 
         for timing in timings {
             assert_eq!(timing.turn, 0);
-            assert!(timing.since_turn_start_ms >= timing.since_llm_request_start_ms);
+            if let Some(since_llm_request_start_ms) = timing.since_llm_request_start_ms {
+                assert!(timing.since_turn_start_ms >= since_llm_request_start_ms);
+            }
         }
     }
 

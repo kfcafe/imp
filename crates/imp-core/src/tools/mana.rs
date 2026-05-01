@@ -852,6 +852,66 @@ fn parse_on_fail(value: &serde_json::Value) -> Result<Option<OnFailAction>> {
     }
 }
 
+fn mana_close_force_reason_error(id: &str) -> ToolOutput {
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text {
+            text: format!(
+                "mana close {id} with force=true requires reason with equivalent verify evidence"
+            ),
+        }],
+        details: json!({
+            "action": "close",
+            "id": id,
+            "ok": false,
+            "force": true,
+            "missing": ["reason"],
+            "hint": "When stored verify is stale or invalid, rerun equivalent checks and close with force=true plus a reason that names the passing commands/evidence.",
+            "example": {
+                "action": "close",
+                "id": id,
+                "force": true,
+                "reason": "Equivalent verify passed: cargo test -p imp-core mana -- --nocapture; commit abc123"
+            }
+        }),
+        is_error: true,
+    }
+}
+
+fn mana_close_error_output(id: &str, error: String) -> ToolOutput {
+    let verify_related = is_close_verify_error(&error);
+    let hint = if verify_related {
+        Some("If the stored verify command is stale or invalid, run equivalent focused checks, then close with force=true and reason containing the passing commands/evidence.")
+    } else {
+        None
+    };
+    let text = match hint {
+        Some(hint) => format!("{error}\n\nRecovery: {hint}"),
+        None => error.clone(),
+    };
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "action": "close",
+            "id": id,
+            "ok": false,
+            "error": error,
+            "verify_related": verify_related,
+            "recovery_hint": hint,
+            "force_requires_reason": true,
+        }),
+        is_error: true,
+    }
+}
+
+fn is_close_verify_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("verify")
+        || lower.contains("verification")
+        || lower.contains("exit")
+        || lower.contains("command")
+        || lower.contains("timed out")
+}
+
 fn mana_validation_error(
     action: &str,
     missing: Vec<&'static str>,
@@ -1792,7 +1852,10 @@ impl Tool for ManaTool {
             "pass_ok".into(),
             json!({ "type": "boolean", "description": "Permit fact creation even if verify currently passes" }),
         );
-        properties.insert("force".into(), json!({ "type": "boolean" }));
+        properties.insert(
+            "force".into(),
+            json!({ "type": "boolean", "description": "For close: bypass stored verify only with a reason containing equivalent verification evidence" }),
+        );
         properties.insert("reason".into(), json!({ "type": "string" }));
         properties.insert("all".into(), json!({ "type": "boolean" }));
         properties.insert(
@@ -1992,9 +2055,14 @@ impl Tool for ManaTool {
                 let id = params["id"]
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("close requires 'id'".into()))?;
+                let force = params["force"].as_bool().unwrap_or(false);
+                let reason = params["reason"].as_str().map(|s| s.to_string());
+                if force && reason.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+                    return Ok(mana_close_force_reason_error(id));
+                }
                 let opts = mana_core::ops::close::CloseOpts {
-                    reason: params["reason"].as_str().map(|s| s.to_string()),
-                    force: params["force"].as_bool().unwrap_or(false),
+                    reason: reason.clone(),
+                    force,
                     defer_verify: false,
                 };
                 match mana_core::api::close_unit(&mana_dir, id, opts) {
@@ -2007,21 +2075,25 @@ impl Tool for ManaTool {
                             set_mana_delta_widget(
                                 &ctx,
                                 summary,
-                                params["reason"].as_str().map(|s| s.to_string()),
+                                reason.clone(),
                             )
                             .await;
                         }
                         let mut details_obj = details.as_object().cloned().unwrap_or_default();
                         details_obj.insert("action".into(), json!("close"));
-                        if let Some(reason) = params["reason"].as_str() {
+                        details_obj.insert("force".into(), json!(force));
+                        if let Some(reason) = reason.as_deref() {
                             details_obj.insert("reason".into(), json!(reason));
+                            if force {
+                                details_obj.insert("equivalent_verify_evidence".into(), json!(reason));
+                            }
                         }
                         Ok(text_output(
                             format!("Closed unit {id}"),
                             serde_json::Value::Object(details_obj),
                         ))
                     }
-                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                    Err(e) => Ok(mana_close_error_output(id, e.to_string())),
                 }
             }
             "update" => {
@@ -2756,9 +2828,10 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        evaluate_run_output, mana_guide_output, mana_template_output, parse_guide_topic,
-        parse_template_kind, stream_event_line, validate_mana_action, GuideTopic, ManaRunStore,
-        ManaTool, NativeRunState, TemplateKind,
+        evaluate_run_output, mana_close_error_output, mana_close_force_reason_error,
+        mana_guide_output, mana_template_output, parse_guide_topic, parse_template_kind,
+        stream_event_line, validate_mana_action, GuideTopic, ManaRunStore, ManaTool,
+        NativeRunState, TemplateKind,
     };
     use crate::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
     use crate::ui::{NotifyLevel, NullInterface, WidgetContent};
@@ -3097,6 +3170,44 @@ mod tests {
         assert_eq!(unit["feature"], true);
         assert_eq!(unit["fail_first"], true);
         assert_eq!(unit["verify_timeout"], 12);
+    }
+
+    #[test]
+    fn close_force_requires_reason_with_evidence() {
+        let output = mana_close_force_reason_error("313.2");
+
+        assert!(output.is_error);
+        assert_eq!(output.details["action"], json!("close"));
+        assert_eq!(output.details["missing"], json!(["reason"]));
+        assert!(output
+            .text_content()
+            .unwrap_or_default()
+            .contains("equivalent verify evidence"));
+    }
+
+    #[test]
+    fn close_verify_errors_include_recovery_hint() {
+        let output = mana_close_error_output(
+            "313.2",
+            "Verify command failed during close: cargo test -p imp-core one two --no-run"
+                .to_string(),
+        );
+
+        assert!(output.is_error);
+        assert_eq!(output.details["verify_related"], json!(true));
+        assert_eq!(output.details["force_requires_reason"], json!(true));
+        let hint = output.details["recovery_hint"].as_str().unwrap_or_default();
+        assert!(hint.contains("equivalent focused checks"));
+    }
+
+    #[test]
+    fn close_non_verify_errors_stay_plain() {
+        let output = mana_close_error_output("313.2", "Unit not found".to_string());
+
+        assert!(output.is_error);
+        assert_eq!(output.details["verify_related"], json!(false));
+        assert!(output.details["recovery_hint"].is_null());
+        assert_eq!(output.text_content().unwrap_or_default(), "Unit not found");
     }
 
     #[test]

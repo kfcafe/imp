@@ -2058,12 +2058,33 @@ fn emit_startup_timing(timer: &mut StartupTimer, stage: StartupStage) {
 }
 
 fn format_timing_event(timing: &TimingEvent) -> String {
+    let llm = timing
+        .since_llm_request_start_ms
+        .map(|ms| format!(" llm={ms}ms"))
+        .unwrap_or_default();
+    let duration = timing
+        .duration_ms
+        .map(|ms| format!(" duration={ms}ms"))
+        .unwrap_or_default();
+    let label = timing
+        .label
+        .as_ref()
+        .map(|label| format!(" label={label}"))
+        .unwrap_or_default();
+    let success = timing
+        .success
+        .map(|success| format!(" success={success}"))
+        .unwrap_or_default();
+
     format!(
-        "[timing turn={} stage={} turn={}ms llm={}ms]",
+        "[timing turn={} stage={} turn={}ms{}{}{}{}]",
         timing.turn,
         timing.stage.as_str(),
         timing.since_turn_start_ms,
-        timing.since_llm_request_start_ms,
+        llm,
+        duration,
+        label,
+        success,
     )
 }
 
@@ -2225,6 +2246,9 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
             "stage": timing.stage.as_str(),
             "since_turn_start_ms": timing.since_turn_start_ms,
             "since_llm_request_start_ms": timing.since_llm_request_start_ms,
+            "duration_ms": timing.duration_ms,
+            "label": timing.label,
+            "success": timing.success,
         }),
         AgentEvent::Warning { message } => json!({ "type": "warning", "message": message }),
         AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
@@ -2874,6 +2898,9 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             "stage": timing.stage.as_str(),
             "since_turn_start_ms": timing.since_turn_start_ms,
             "since_llm_request_start_ms": timing.since_llm_request_start_ms,
+            "duration_ms": timing.duration_ms,
+            "label": timing.label,
+            "success": timing.success,
         }),
         AgentEvent::Warning { message } => {
             json!({ "type": "warning", "message": message })
@@ -5499,7 +5526,10 @@ mod tests {
                 turn: 2,
                 stage: imp_core::TimingStage::FirstTextDelta,
                 since_turn_start_ms: 150,
-                since_llm_request_start_ms: 120,
+                since_llm_request_start_ms: Some(120),
+                duration_ms: Some(30),
+                label: Some("model".to_string()),
+                success: Some(true),
             },
         };
         let json = rpc_agent_event_to_json(&event);
@@ -5508,6 +5538,9 @@ mod tests {
         assert_eq!(json["stage"], "first_text_delta");
         assert_eq!(json["since_turn_start_ms"], 150);
         assert_eq!(json["since_llm_request_start_ms"], 120);
+        assert_eq!(json["duration_ms"], 30);
+        assert_eq!(json["label"], "model");
+        assert_eq!(json["success"], true);
     }
 
     #[test]
