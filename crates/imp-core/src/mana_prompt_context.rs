@@ -273,7 +273,7 @@ mod tests {
 
         let mut stale = Unit::new(
             "2",
-            "A very long fact title that should be truncated before it reaches the prompt because prompt context should stay bounded and selective for interactive startup",
+            "A very long fact title that should be truncated before it reaches the prompt because prompt context should stay bounded and selective for interactive startup and this suffix forces truncation",
         );
         stale.last_verified = None;
 

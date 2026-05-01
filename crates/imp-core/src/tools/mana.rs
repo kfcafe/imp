@@ -2375,6 +2375,7 @@ impl Tool for ManaTool {
                 let decisions = parse_csv_strings(&params["decisions"], "decisions")?;
                 let resolve_decisions =
                     parse_csv_strings(&params["resolve_decisions"], "resolve_decisions")?;
+                let labels = parse_csv_strings(&params["labels"], "labels")?;
                 let update_params = mana_core::ops::update::UpdateParams {
                     title: parse_optional_string(&params["title"]),
                     description: parse_optional_string(&params["description"]),
@@ -2384,7 +2385,10 @@ impl Tool for ManaTool {
                     status: parse_optional_string(&params["status"]),
                     priority: params["priority"].as_u64().map(|p| p as u8),
                     assignee: parse_optional_string(&params["assignee"]),
-                    add_label: parse_optional_string(&params["add_label"]),
+                    add_label: labels
+                        .into_iter()
+                        .next()
+                        .or_else(|| parse_optional_string(&params["add_label"])),
                     remove_label: parse_optional_string(&params["remove_label"]),
                     decisions,
                     resolve_decisions,
@@ -3854,7 +3858,10 @@ mod tests {
             .unwrap();
         let unit = &result.details["unit"];
         assert_eq!(unit["acceptance"], "must pass auth flow");
-        assert_eq!(unit["labels"][0], "backend");
+        assert_eq!(
+            unit["labels"].as_array().cloned().unwrap_or_default(),
+            vec![json!("backend")]
+        );
         assert_eq!(unit["decisions"][0], "Choose retry limit");
     }
 
