@@ -852,6 +852,32 @@ fn parse_on_fail(value: &serde_json::Value) -> Result<Option<OnFailAction>> {
     }
 }
 
+fn parent_placement_details(
+    parent: Option<&str>,
+    parent_reason: Option<&str>,
+) -> serde_json::Value {
+    match (parent, parent_reason) {
+        (Some(parent), Some(reason)) if !reason.trim().is_empty() => json!({
+            "parent": parent,
+            "parent_reason": reason,
+            "warning": null,
+            "hint": "Parent placement was explained explicitly.",
+        }),
+        (Some(parent), _) => json!({
+            "parent": parent,
+            "parent_reason": null,
+            "warning": "parent_reason_missing",
+            "hint": "Before creating follow-up work under the active epic, confirm it belongs to that product/scope. If this is a workflow, reliability, or cross-cutting issue, attach it to a matching epic or create one instead.",
+        }),
+        (None, _) => json!({
+            "parent": null,
+            "parent_reason": null,
+            "warning": null,
+            "hint": "No parent selected. For durable multi-step work, choose or create the matching epic before adding child tasks.",
+        }),
+    }
+}
+
 fn mana_close_force_reason_error(id: &str) -> ToolOutput {
     ToolOutput {
         content: vec![imp_llm::ContentBlock::Text {
@@ -1800,6 +1826,10 @@ impl Tool for ManaTool {
             json!({ "type": "string", "description": "Assignee or owner for the unit" }),
         );
         properties.insert("parent".into(), json!({ "type": "string" }));
+        properties.insert(
+            "parent_reason".into(),
+            json!({ "type": "string", "description": "For create: why this unit belongs under the chosen parent; helps prevent mis-scoped work graphs" }),
+        );
         let mut deps = string_or_array();
         deps["description"] = json!("Dependency unit IDs as a comma-separated string or array");
         properties.insert("deps".into(), deps);
@@ -2007,8 +2037,14 @@ impl Tool for ManaTool {
                         let summary = unit_delta_label(&unit_value)
                             .map(|label| format!("mana delta: created {label}"))
                             .unwrap_or_else(|| "mana delta: created unit".to_string());
-                        let detail = parse_optional_string(&params["parent"])
-                            .map(|parent| format!("parent {parent}"));
+                        let parent = parse_optional_string(&params["parent"]);
+                        let parent_reason = parse_optional_string(&params["parent_reason"]);
+                        let detail = parent
+                            .as_ref()
+                            .map(|parent| match parent_reason.as_deref() {
+                                Some(reason) => format!("parent {parent}: {reason}"),
+                                None => format!("parent {parent}; parent_reason missing"),
+                            });
                         set_mana_delta_widget(&ctx, summary.clone(), detail).await;
                         Ok(text_output(
                             summary,
@@ -2019,6 +2055,8 @@ impl Tool for ManaTool {
                                 "verify": params["verify"],
                                 "priority": params["priority"],
                                 "parent": params["parent"],
+                                "parent_reason": params["parent_reason"],
+                                "placement": parent_placement_details(parent.as_deref(), parent_reason.as_deref()),
                                 "deps": params["deps"],
                                 "labels": params["labels"],
                                 "unit": unit_value,
@@ -2829,9 +2867,9 @@ mod tests {
 
     use super::{
         evaluate_run_output, mana_close_error_output, mana_close_force_reason_error,
-        mana_guide_output, mana_template_output, parse_guide_topic, parse_template_kind,
-        stream_event_line, validate_mana_action, GuideTopic, ManaRunStore, ManaTool,
-        NativeRunState, TemplateKind,
+        mana_guide_output, mana_template_output, parent_placement_details, parse_guide_topic,
+        parse_template_kind, stream_event_line, validate_mana_action, GuideTopic, ManaRunStore,
+        ManaTool, NativeRunState, TemplateKind,
     };
     use crate::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
     use crate::ui::{NotifyLevel, NullInterface, WidgetContent};
@@ -3173,6 +3211,32 @@ mod tests {
     }
 
     #[test]
+    fn parent_placement_details_warns_when_parent_reason_missing() {
+        let details = parent_placement_details(Some("304"), None);
+
+        assert_eq!(details["parent"], json!("304"));
+        assert_eq!(details["warning"], json!("parent_reason_missing"));
+        assert!(details["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("confirm it belongs"));
+    }
+
+    #[test]
+    fn parent_placement_details_accepts_explicit_reason() {
+        let details = parent_placement_details(
+            Some("313"),
+            Some("This is workflow reliability work, not tool schema audit."),
+        );
+
+        assert_eq!(details["warning"], serde_json::Value::Null);
+        assert_eq!(
+            details["parent_reason"],
+            json!("This is workflow reliability work, not tool schema audit.")
+        );
+    }
+
+    #[test]
     fn close_force_requires_reason_with_evidence() {
         let output = mana_close_force_reason_error("313.2");
 
@@ -3269,6 +3333,7 @@ mod tests {
         assert!(properties.contains_key("targets"));
         assert!(properties.contains_key("scope"));
         assert!(properties.contains_key("path"));
+        assert!(properties.contains_key("parent_reason"));
 
         assert!(!properties.contains_key("mana_scope"));
         assert!(!properties.contains_key("mana_dir"));
