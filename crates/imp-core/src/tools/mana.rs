@@ -852,6 +852,199 @@ fn parse_on_fail(value: &serde_json::Value) -> Result<Option<OnFailAction>> {
     }
 }
 
+fn mana_validation_error(
+    action: &str,
+    missing: Vec<&'static str>,
+    invalid: Vec<&'static str>,
+    hint: &'static str,
+    canonical_fields: Vec<&'static str>,
+) -> ToolOutput {
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text {
+            text: format!("mana {action} validation failed: {hint}"),
+        }],
+        details: json!({
+            "action": action,
+            "ok": false,
+            "missing": missing,
+            "invalid": invalid,
+            "hint": hint,
+            "canonical_fields": canonical_fields,
+        }),
+        is_error: true,
+    }
+}
+
+fn has_text(params: &serde_json::Value, field: &str) -> bool {
+    parse_optional_string(&params[field]).is_some()
+}
+
+fn has_nonempty_csv(params: &serde_json::Value, field: &str) -> bool {
+    parse_csv_strings(&params[field], field)
+        .map(|values| !values.is_empty())
+        .unwrap_or(false)
+}
+
+fn validate_mana_action(action: &str, params: &serde_json::Value) -> Option<ToolOutput> {
+    let missing = |fields: Vec<&'static str>, hint: &'static str, canonical: Vec<&'static str>| {
+        Some(mana_validation_error(
+            action,
+            fields,
+            Vec::new(),
+            hint,
+            canonical,
+        ))
+    };
+
+    if params.get("path").is_some() && params.get("paths").is_none() {
+        match action {
+            "create" | "update" | "fact_create" => {
+                return Some(mana_validation_error(
+                    action,
+                    Vec::new(),
+                    vec!["path"],
+                    "Use path for project/.mana location; use paths to attach relevant files to units.",
+                    vec!["path", "paths"],
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    match action {
+        "show" | "claim" | "release" | "close" | "reopen" | "verify" | "fail" | "delete" => {
+            if !has_text(params, "id") {
+                return missing(vec!["id"], "Provide the unit id.", vec!["id"]);
+            }
+        }
+        "create" => {
+            if !has_text(params, "title") {
+                return missing(
+                    vec!["title"],
+                    "create requires title. For executable tasks, include description, acceptance, and verify.",
+                    vec!["title", "description", "acceptance", "verify", "paths"],
+                );
+            }
+        }
+        "update" => {
+            if !has_text(params, "id") {
+                return missing(
+                    vec!["id"],
+                    "update requires the unit id to modify.",
+                    vec!["id"],
+                );
+            }
+        }
+        "notes_append" => {
+            let mut fields = Vec::new();
+            if !has_text(params, "id") {
+                fields.push("id");
+            }
+            if !has_text(params, "notes") {
+                fields.push("notes");
+            }
+            if !fields.is_empty() {
+                return missing(
+                    fields,
+                    "notes_append requires id and notes; use notes for durable progress/context.",
+                    vec!["id", "notes"],
+                );
+            }
+        }
+        "decision_add" => {
+            let mut fields = Vec::new();
+            if !has_text(params, "id") {
+                fields.push("id");
+            }
+            if !has_text(params, "description") && !has_nonempty_csv(params, "decisions") {
+                fields.push("description");
+            }
+            if !fields.is_empty() {
+                return missing(fields, "decision_add requires id and description/decisions for scope, architecture, or sequencing choices.", vec!["id", "description", "decisions"]);
+            }
+        }
+        "decision_resolve" => {
+            let mut fields = Vec::new();
+            if !has_text(params, "id") {
+                fields.push("id");
+            }
+            if !has_nonempty_csv(params, "resolve_decisions") {
+                fields.push("resolve_decisions");
+            }
+            if !fields.is_empty() {
+                return missing(
+                    fields,
+                    "decision_resolve requires id and resolve_decisions.",
+                    vec!["id", "resolve_decisions"],
+                );
+            }
+        }
+        "dep_add" | "dep_remove" => {
+            let mut fields = Vec::new();
+            if !has_text(params, "from_id") {
+                fields.push("from_id");
+            }
+            if !has_text(params, "dep_id") {
+                fields.push("dep_id");
+            }
+            if !fields.is_empty() {
+                return missing(
+                    fields,
+                    "Dependency edits require from_id and dep_id.",
+                    vec!["from_id", "dep_id"],
+                );
+            }
+        }
+        "fact_create" => {
+            let mut fields = Vec::new();
+            if !has_text(params, "title") {
+                fields.push("title");
+            }
+            if !has_text(params, "verify") {
+                fields.push("verify");
+            }
+            if !fields.is_empty() {
+                return missing(
+                    fields,
+                    "fact_create requires title and verify so the fact is re-checkable.",
+                    vec!["title", "verify", "paths"],
+                );
+            }
+        }
+        "logs" => {
+            if !has_text(params, "id") && !has_text(params, "run_id") {
+                return missing(
+                    vec!["id"],
+                    "logs requires id or run_id.",
+                    vec!["id", "run_id"],
+                );
+            }
+        }
+        "run_state" | "evaluate" => {
+            if !has_text(params, "run_id") {
+                return missing(
+                    vec!["run_id"],
+                    "run_state/evaluate requires run_id from mana action=run.",
+                    vec!["run_id"],
+                );
+            }
+        }
+        "run" => {
+            if params.get("target").is_some() && params.get("targets").is_none() {
+                return Some(mana_validation_error(
+                    action,
+                    Vec::new(),
+                    vec!["target"],
+                    "Use targets for explicit unit ids; target is an internal run concept.",
+                    vec!["targets", "id"],
+                ));
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
 fn parse_unit_kind(value: &serde_json::Value) -> Result<Option<UnitType>> {
     let Some(raw) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
@@ -1406,6 +1599,10 @@ impl Tool for ManaTool {
             )));
         }
 
+        if let Some(validation_error) = validate_mana_action(action, &params) {
+            return Ok(validation_error);
+        }
+
         let mana_dir = resolve_mana_dir(&ctx.cwd, &params).map_err(crate::error::Error::Tool)?;
 
         match action {
@@ -1666,8 +1863,9 @@ impl Tool for ManaTool {
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("decision_add requires 'id'".into()))?;
                 let decision = parse_optional_string(&params["description"])
+                    .or_else(|| parse_csv_strings(&params["decisions"], "decisions").ok().and_then(|mut decisions| decisions.drain(..).next()))
                     .or_else(|| parse_optional_string(&params["notes"]))
-                    .ok_or_else(|| crate::error::Error::Tool("decision_add requires 'description' or 'notes'".into()))?;
+                    .ok_or_else(|| crate::error::Error::Tool("decision_add requires 'description' or 'decisions'".into()))?;
                 let update_params = mana_core::ops::update::UpdateParams {
                     title: None,
                     description: None,
@@ -2297,7 +2495,10 @@ mod tests {
     use serde_json::json;
     use tokio::sync::mpsc;
 
-    use super::{evaluate_run_output, stream_event_line, ManaRunStore, ManaTool, NativeRunState};
+    use super::{
+        evaluate_run_output, stream_event_line, validate_mana_action, ManaRunStore, ManaTool,
+        NativeRunState,
+    };
     use crate::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
     use crate::ui::{NotifyLevel, NullInterface, WidgetContent};
 
@@ -2668,6 +2869,47 @@ mod tests {
         let kind_enum = properties["kind"]["enum"].as_array().unwrap();
         assert!(kind_enum.iter().any(|value| value == "task"));
         assert!(!kind_enum.iter().any(|value| value == "job"));
+    }
+
+    #[test]
+    fn mana_validation_teaches_required_fields() {
+        let output = validate_mana_action("notes_append", &json!({ "id": "304" }))
+            .expect("notes_append without notes should fail validation");
+
+        assert!(output.is_error);
+        assert_eq!(output.details["action"], json!("notes_append"));
+        assert_eq!(output.details["missing"], json!(["notes"]));
+        assert_eq!(output.details["canonical_fields"], json!(["id", "notes"]));
+        assert!(output
+            .text_content()
+            .unwrap_or_default()
+            .contains("requires id and notes"));
+    }
+
+    #[test]
+    fn mana_validation_rejects_path_when_paths_is_intended() {
+        let output = validate_mana_action(
+            "create",
+            &json!({ "title": "Doc task", "path": "src/lib.rs" }),
+        )
+        .expect("create with path attachment should teach paths");
+
+        assert!(output.is_error);
+        assert_eq!(output.details["invalid"], json!(["path"]));
+        assert!(output
+            .text_content()
+            .unwrap_or_default()
+            .contains("Use path for project/.mana location"));
+    }
+
+    #[test]
+    fn mana_validation_allows_valid_create_and_decision_add() {
+        assert!(validate_mana_action("create", &json!({ "title": "Build thing" })).is_none());
+        assert!(validate_mana_action(
+            "decision_add",
+            &json!({ "id": "304", "decisions": ["Use canonical names"] }),
+        )
+        .is_none());
     }
 
     #[tokio::test]
