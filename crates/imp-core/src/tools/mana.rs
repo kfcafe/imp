@@ -18,6 +18,8 @@ use crate::error::Result;
 use crate::ui::{NotifyLevel, WidgetContent};
 const MAX_OUTPUT_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
+const DEFAULT_LIST_LIMIT: usize = 20;
+const MAX_LIST_LIMIT: usize = 50;
 const MAX_STORED_RUN_EVENTS: usize = 64;
 const MAX_PERSISTED_RUN_LOG_LINES: usize = 50;
 const FINISHED_RUN_TTL_MS: u128 = 60 * 60 * 1000;
@@ -1088,7 +1090,7 @@ fn validate_mana_action(action: &str, params: &serde_json::Value) -> Option<Tool
             if !has_text(params, "title") {
                 return missing(
                     vec!["title"],
-                    "create requires title. For executable tasks, include description, acceptance, and verify.",
+                    "create requires title. Before creating, check list/show for an existing relevant unit; update or notes_append when the durable state belongs there. For executable tasks, include description, acceptance, and verify.",
                     vec!["title", "description", "acceptance", "verify", "paths"],
                 );
             }
@@ -1541,11 +1543,12 @@ fn topic_guidance(topic: GuideTopic) -> (&'static str, Vec<&'static str>, Vec<&'
         GuideTopic::Overview => (
             "Use mana when work needs durable scope, verification, dependencies, retries, or handoff; use direct edits for small one-pass changes.",
             vec![
-                "Create epics for durable goals and tasks for executable units.",
+                "Before creating, inspect existing relevant units with list/show and update or append notes when the new state belongs there.",
+                "Create epics for new durable goals and tasks for new executable units, not for routine progress on existing work.",
                 "Record decisions/notes when context should survive the turn.",
                 "Close only after the verify command or equivalent evidence passes.",
             ],
-            vec!["template kind=task", "guide topic=orchestrate"],
+            vec!["list status=in_progress", "show id=...", "update id=...", "template kind=task"],
         ),
         GuideTopic::Task => (
             "A task is a worker-ready executable spec with clear scope, acceptance, files, and a verify gate.",
@@ -2016,6 +2019,73 @@ fn truncate_with_note(text: &str) -> String {
     output
 }
 
+fn compact_list_output(entries: &[mana_core::index::IndexEntry], requested_limit: Option<usize>) -> ToolOutput {
+    let limit = requested_limit
+        .unwrap_or(DEFAULT_LIST_LIMIT)
+        .clamp(1, MAX_LIST_LIMIT);
+    let shown = entries.len().min(limit);
+    let units: Vec<_> = entries
+        .iter()
+        .take(limit)
+        .map(|entry| {
+            json!({
+                "id": entry.id,
+                "title": entry.title,
+                "status": entry.status,
+                "priority": entry.priority,
+                "kind": entry.kind,
+                "parent": entry.parent,
+                "labels": entry.labels,
+                "updated_at": entry.updated_at,
+                "claimed_by": entry.claimed_by,
+                "has_verify": entry.has_verify,
+                "attempts": entry.attempts,
+                "paths": entry.paths,
+            })
+        })
+        .collect();
+
+    let mut lines = vec![format!(
+        "mana list: showing {shown} of {} units. Prefer `show` + `update`/`notes_append` on an existing relevant unit before `create`.",
+        entries.len()
+    )];
+    for entry in entries.iter().take(limit) {
+        let parent = entry
+            .parent
+            .as_ref()
+            .map(|parent| format!(" parent={parent}"))
+            .unwrap_or_default();
+        let claimed = entry
+            .claimed_by
+            .as_ref()
+            .map(|claimed_by| format!(" claimed={claimed_by}"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "- {} P{} {:?} {:?}{}{} — {}",
+            entry.id, entry.priority, entry.status, entry.kind, parent, claimed, entry.title
+        ));
+    }
+    if entries.len() > shown {
+        lines.push(format!(
+            "[{} more omitted; narrow with status/parent/label/priority or request all only when needed]",
+            entries.len() - shown
+        ));
+    }
+
+    text_output(
+        lines.join("\n"),
+        json!({
+            "action": "list",
+            "total": entries.len(),
+            "shown": shown,
+            "limit": limit,
+            "truncated": entries.len() > shown,
+            "hint": "Prefer updating existing relevant units; use show id=... before create when unsure.",
+            "units": units,
+        }),
+    )
+}
+
 fn scored_units_to_text(units: &[ScoredUnit]) -> String {
     if units.is_empty() {
         return "No ready units. Create one with: mana create \"task\" --verify \"cmd\""
@@ -2211,7 +2281,7 @@ impl Tool for ManaTool {
         );
         properties.insert(
             "count".into(),
-            json!({ "type": "integer", "description": "Number of next recommendations to return" }),
+            json!({ "type": "integer", "description": "Maximum results for list/next output; list defaults to 20 and caps at 50" }),
         );
         properties.insert(
             "background".into(),
@@ -2291,7 +2361,10 @@ impl Tool for ManaTool {
                     include_closed: params["all"].as_bool().unwrap_or(false),
                 };
                 match mana_core::api::list_units(&mana_dir, &list_params) {
-                    Ok(entries) => Ok(json_output(&entries)),
+                    Ok(entries) => Ok(compact_list_output(
+                        &entries,
+                        params["count"].as_u64().map(|count| count as usize),
+                    )),
                     Err(e) => {
                         let message = format!("mana run failed: {e}");
                         ctx.ui
@@ -3322,7 +3395,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        evaluate_run_output, mana_close_error_output, mana_close_force_reason_error,
+        compact_list_output, evaluate_run_output, mana_close_error_output, mana_close_force_reason_error,
         mana_guide_output, mana_template_output, parent_placement_details, parse_guide_topic,
         parse_template_kind, retry_guardrail_for_targets, run_state_output, stream_event_line,
         target_ids_from_run_target, unix_time_ms, validate_mana_action, GuideTopic, ManaRunStore,
@@ -3423,6 +3496,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         };
 
         let tool = ManaTool::default();
@@ -3490,6 +3564,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         };
         (ctx, tempfile::tempdir().unwrap())
     }
@@ -3532,6 +3607,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         };
         (ctx, tempfile::tempdir().unwrap(), widgets)
     }
@@ -3743,6 +3819,70 @@ mod tests {
             .text_content()
             .unwrap_or_default()
             .contains("mana guide: verify"));
+    }
+
+    #[test]
+    fn mana_overview_guide_prefers_update_before_create() {
+        let output = mana_guide_output(GuideTopic::Overview);
+        let text = output.text_content().unwrap_or_default();
+
+        assert!(text.contains("Before creating"));
+        assert!(text.contains("update"));
+        assert!(text.contains("notes"));
+    }
+
+    #[test]
+    fn compact_list_output_caps_and_guides_toward_existing_units() {
+        let now = chrono::Utc::now();
+        let entries: Vec<mana_core::index::IndexEntry> = (0..60)
+            .map(|i| mana_core::index::IndexEntry {
+                id: format!("330.{i}"),
+                title: format!("Task {i}"),
+                status: mana_core::unit::Status::Open,
+                priority: 1,
+                parent: Some("330".to_string()),
+                dependencies: Vec::new(),
+                labels: vec!["mana".to_string()],
+                assignee: None,
+                updated_at: now,
+                produces: Vec::new(),
+                requires: Vec::new(),
+                has_verify: true,
+                verify: Some("cargo test".to_string()),
+                created_at: now,
+                claimed_by: None,
+                attempts: 0,
+                paths: vec!["crates/imp-core/src/tools/mana.rs".to_string()],
+                kind: mana_core::unit::UnitType::Task,
+                feature: false,
+                has_decisions: false,
+            })
+            .collect();
+
+        let output = compact_list_output(&entries, Some(100));
+        let text = output.text_content().unwrap_or_default();
+
+        assert!(!output.is_error);
+        assert_eq!(output.details["total"], json!(60));
+        assert_eq!(output.details["shown"], json!(50));
+        assert_eq!(output.details["limit"], json!(50));
+        assert_eq!(output.details["truncated"], json!(true));
+        assert_eq!(output.details["units"].as_array().unwrap().len(), 50);
+        assert!(text.contains("Prefer `show` + `update`/`notes_append`"));
+        assert!(text.contains("10 more omitted"));
+        assert!(!text.contains("verify\":\"cargo test"));
+    }
+
+    #[test]
+    fn create_validation_hint_prefers_existing_unit_when_title_missing() {
+        let output = validate_mana_action("create", &json!({}))
+            .expect("create without title should fail validation");
+
+        assert!(output.is_error);
+        assert!(output
+            .text_content()
+            .unwrap_or_default()
+            .contains("Before creating, check list/show"));
     }
 
     #[test]
@@ -4015,6 +4155,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         };
         let tool = ManaTool::default();
         let reopened = tool
@@ -4050,6 +4191,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         };
         let verify = tool
             .execute(
@@ -4084,6 +4226,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         };
         let fact = tool.execute("call_fact", json!({ "action": "fact_create", "title": "Auth fact", "verify": "test -d .mana", "description": "fact body", "ttl_days": 7 }), ctx3).await.unwrap();
         assert_eq!(fact.details["unit"]["unit_type"], "fact");
@@ -4188,6 +4331,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -4234,6 +4378,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -4293,6 +4438,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -4345,6 +4491,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -4578,6 +4725,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         };
 
         let tool = ManaTool::default();

@@ -428,11 +428,8 @@ fn agents_md_layer(agents: &[AgentsMd]) -> String {
     s
 }
 
-fn skills_layer(skills: &[Skill], mode: &AgentMode) -> String {
+fn skills_layer(skills: &[Skill], _mode: &AgentMode) -> String {
     let mut s = String::from("Available skills (use read to load when relevant):\n");
-    if let Some(trigger) = mana_skill_trigger(skills, mode) {
-        s.push_str(&format!("- Trigger: {trigger}\n"));
-    }
     for skill in skills {
         s.push_str(&format!(
             "- {}: {} [{}]\n",
@@ -442,46 +439,6 @@ fn skills_layer(skills: &[Skill], mode: &AgentMode) -> String {
         ));
     }
     s
-}
-
-fn mana_skill_trigger(skills: &[Skill], mode: &AgentMode) -> Option<&'static str> {
-    let has_mana = skills.iter().any(|skill| skill.name == "mana");
-    let has_mana_basics = skills.iter().any(|skill| skill.name == "mana-basics");
-
-    match mode {
-        AgentMode::Full | AgentMode::Orchestrator | AgentMode::Planner => {
-            if has_mana {
-                Some("Load `mana` before writing or restructuring mana units for non-trivial work.")
-            } else {
-                None
-            }
-        }
-        AgentMode::Worker => {
-            if has_mana_basics {
-                Some(
-                    "Load `mana-basics` before using worker-safe mana actions beyond a quick status check.",
-                )
-            } else if has_mana {
-                Some(
-                    "Load `mana` before using worker-safe mana actions beyond a quick status check.",
-                )
-            } else {
-                None
-            }
-        }
-        AgentMode::Auditor => {
-            if has_mana_basics {
-                Some(
-                    "Load `mana-basics` before inspecting mana state across multiple units or runs.",
-                )
-            } else if has_mana {
-                Some("Load `mana` before inspecting mana state across multiple units or runs.")
-            } else {
-                None
-            }
-        }
-        AgentMode::Reviewer => None,
-    }
 }
 
 fn facts_layer(facts: &[Fact]) -> String {
@@ -785,7 +742,7 @@ mod tests {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(result.text.contains(
-            "During planning and design conversations, proactively externalize durable structure as it appears."
+            "During planning and design conversations, externalize durable structure when it appears, but do not create/update mana merely because text sounds plan-like."
         ));
         assert!(result.text.contains("epic, child job, note, or decision"));
         assert!(result
@@ -797,13 +754,13 @@ mod tests {
         assert!(result.text.contains(
             "Summarize the delta only when it adds value beyond what the mana tool or UI already made visible."
         ));
-        assert!(result.text.contains(
-            "Treat mana updates as checkpoints when useful, not necessarily completion."
-        ));
+        assert!(result
+            .text
+            .contains("Mana writes are usually checkpoints, not proof of completion."));
         assert_eq!(
             result
                 .text
-                .matches("Treat mana updates as checkpoints when useful")
+                .matches("Mana writes are usually checkpoints, not proof of completion")
                 .count(),
             1,
             "mana checkpoint guidance should appear once"
@@ -860,8 +817,8 @@ mod tests {
 
     #[test]
     fn system_prompt_no_mana_guidance_or_delegation_in_prompt() {
-        // Mana guidance and delegation blocks have been moved to the mana skill.
-        // Verify they no longer appear regardless of tool availability.
+        // Extended mana guidance lives in native `mana guide`/`mana template` affordances.
+        // Verify large legacy prompt blocks no longer appear regardless of tool availability.
         let mut reg = make_registry();
         reg.register(Arc::new(FakeTool {
             name: "bash",
@@ -1033,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_includes_mode_aware_mana_skill_trigger() {
+    fn system_prompt_does_not_add_mode_aware_mana_skill_trigger() {
         let reg = make_registry();
         let skills = vec![make_skill(
             "mana",
@@ -1058,14 +1015,12 @@ mod tests {
             guardrail_profile: None,
         });
 
-        assert!(result.text.contains("- Trigger:"));
-        assert!(result.text.contains(
-            "Load `mana` before writing or restructuring mana units for non-trivial work."
-        ));
+        assert!(!result.text.contains("- Trigger:"));
+        assert!(!result.text.contains("Load `mana`"));
     }
 
     #[test]
-    fn system_prompt_orchestrator_uses_same_mana_trigger() {
+    fn system_prompt_orchestrator_does_not_add_mana_skill_trigger() {
         let reg = make_registry();
         let skills = vec![make_skill(
             "mana",
@@ -1090,13 +1045,12 @@ mod tests {
             guardrail_profile: None,
         });
 
-        assert!(result.text.contains(
-            "Load `mana` before writing or restructuring mana units for non-trivial work."
-        ));
+        assert!(!result.text.contains("- Trigger:"));
+        assert!(!result.text.contains("Load `mana`"));
     }
 
     #[test]
-    fn system_prompt_worker_prefers_mana_basics_trigger() {
+    fn system_prompt_worker_does_not_add_mana_basics_trigger() {
         let reg = make_registry();
         let skills = vec![
             make_skill(
@@ -1128,9 +1082,8 @@ mod tests {
             guardrail_profile: None,
         });
 
-        assert!(result.text.contains(
-            "Load `mana-basics` before using worker-safe mana actions beyond a quick status check."
-        ));
+        assert!(!result.text.contains("- Trigger:"));
+        assert!(!result.text.contains("Load `mana-basics`"));
     }
 
     #[test]

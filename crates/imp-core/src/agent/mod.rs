@@ -16,6 +16,7 @@ use crate::mana_review::{
     ManaMutationAction, ManaMutationRecord, ManaReviewScope, ManaReviewScopeKind, ManaReviewState,
     ManaUnitSnapshot, TurnManaReview, TurnManaReviewAccumulator,
 };
+use crate::policy::RunPolicy;
 use crate::roles::Role;
 use crate::tools::{LuaToolLoader, ToolRegistry};
 
@@ -67,11 +68,11 @@ pub struct Agent {
     pub retry_policy: RetryPolicy,
     /// Active agent mode — controls which tools are permitted.
     pub mode: AgentMode,
-    /// Whether a mana skill is available in discovered resources.
+    /// Whether the legacy mana reference skill is available as an optional fallback.
     pub has_mana_skill: bool,
-    /// Whether a mana-basics skill is available in discovered resources.
+    /// Whether the legacy mana-basics reference skill is available as an optional fallback.
     pub has_mana_basics_skill: bool,
-    /// Whether a mana-delegation skill is available in discovered resources.
+    /// Whether the legacy mana-delegation reference skill is available as an optional fallback.
     pub has_mana_delegation_skill: bool,
     /// Engineering guardrails config.
     pub guardrail_config: GuardrailConfig,
@@ -105,6 +106,8 @@ pub struct Agent {
     turn_mana_review: Arc<std::sync::Mutex<TurnManaReviewAccumulator>>,
     /// Resolved runtime config for tool-specific policy checks.
     pub config: Arc<Config>,
+    /// Per-run tool/write policy layered on top of AgentMode.
+    pub run_policy: RunPolicy,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_tx: mpsc::Sender<AgentCommand>,
@@ -192,6 +195,7 @@ impl Agent {
             queued_execution_debt_follow_up: false,
             turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
             config: Arc::new(Config::default()),
+            run_policy: RunPolicy::default(),
             lua_tool_loader: None,
 
             event_tx,
@@ -475,10 +479,10 @@ fn should_queue_execution_debt_follow_up(
 fn should_queue_mana_externalization_follow_up(
     message: &AssistantMessage,
     mode: AgentMode,
-    has_mana_skill: bool,
+    _has_mana_skill: bool,
     already_queued: bool,
 ) -> bool {
-    if already_queued || !has_mana_skill {
+    if already_queued {
         return false;
     }
 
@@ -1118,8 +1122,8 @@ fn mana_skill_follow_up_hint(
     prompt: &str,
     mode: AgentMode,
     tools_available: bool,
-    has_mana_skill: bool,
-    has_mana_basics_skill: bool,
+    _has_mana_skill: bool,
+    _has_mana_basics_skill: bool,
     _has_mana_delegation_skill: bool,
 ) -> Option<&'static str> {
     if !tools_available {
@@ -1156,8 +1160,6 @@ fn mana_skill_follow_up_hint(
         "mana update",
         "mana create",
         "mana run",
-        "unit",
-        "units",
     ]
     .iter()
     .any(|needle| lower.contains(needle));
@@ -1166,20 +1168,10 @@ fn mana_skill_follow_up_hint(
         AgentMode::Full | AgentMode::Orchestrator | AgentMode::Planner
             if orchestration_signal || mana_signal =>
         {
-            if has_mana_skill {
-                Some("Before you continue: load `mana` with `read` and follow it for unit design, decomposition, retries, and worker handoff.")
-            } else {
-                None
-            }
+            Some("Before you continue: use native mana `guide` or `template` actions if you need extra help with unit design, decomposition, retries, or worker handoff.")
         }
         AgentMode::Worker | AgentMode::Auditor if mana_signal => {
-            if has_mana_basics_skill {
-                Some("Before you continue: load `mana-basics` with `read` and follow the allowed native mana workflow for this mode.")
-            } else if has_mana_skill {
-                Some("Before you continue: load `mana` with `read` and follow the allowed native mana workflow for this mode.")
-            } else {
-                None
-            }
+            Some("Before you continue: use the native mana tool and stay within this mode's allowed mana workflow. Use the `guide` action if you need help.")
         }
         _ => None,
     }
