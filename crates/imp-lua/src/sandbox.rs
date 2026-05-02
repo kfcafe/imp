@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
 };
 
 use imp_core::config::{AgentMode, Config, LuaCapabilityPolicy};

@@ -12,7 +12,7 @@ use mana_core::unit::{OnFailAction, UnitType};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::{Tool, ToolContext, ToolOutput, ToolUpdate, truncate_head};
+use super::{truncate_head, Tool, ToolContext, ToolOutput, ToolUpdate};
 use crate::error::Result;
 use crate::ui::{NotifyLevel, WidgetContent};
 const MAX_OUTPUT_LINES: usize = 2000;
@@ -3200,12 +3200,11 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        GuideTopic, INTERRUPTED_RUN_STALE_MS, ManaRunStore, ManaTool, NativeRunState, RunTarget,
-        RunUnitStatus, TemplateKind, evaluate_run_output, mana_close_error_output,
-        mana_close_force_reason_error, mana_guide_output, mana_template_output,
-        parent_placement_details, parse_guide_topic, parse_template_kind,
-        retry_guardrail_for_targets, run_state_output, stream_event_line,
-        target_ids_from_run_target, unix_time_ms, validate_mana_action,
+        evaluate_run_output, mana_close_error_output, mana_close_force_reason_error,
+        mana_guide_output, mana_template_output, parent_placement_details, parse_guide_topic,
+        parse_template_kind, retry_guardrail_for_targets, run_state_output, stream_event_line,
+        target_ids_from_run_target, unix_time_ms, validate_mana_action, GuideTopic, ManaRunStore,
+        ManaTool, NativeRunState, RunTarget, RunUnitStatus, TemplateKind, INTERRUPTED_RUN_STALE_MS,
     };
     use crate::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
     use crate::ui::{NotifyLevel, NullInterface, WidgetContent};
@@ -3552,12 +3551,10 @@ mod tests {
 
         assert_eq!(details["parent"], json!("304"));
         assert_eq!(details["warning"], json!("parent_reason_missing"));
-        assert!(
-            details["hint"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("confirm it belongs")
-        );
+        assert!(details["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("confirm it belongs"));
     }
 
     #[test]
@@ -3581,12 +3578,10 @@ mod tests {
         assert!(output.is_error);
         assert_eq!(output.details["action"], json!("close"));
         assert_eq!(output.details["missing"], json!(["reason"]));
-        assert!(
-            output
-                .text_content()
-                .unwrap_or_default()
-                .contains("equivalent verify evidence")
-        );
+        assert!(output
+            .text_content()
+            .unwrap_or_default()
+            .contains("equivalent verify evidence"));
     }
 
     #[test]
@@ -3622,12 +3617,10 @@ mod tests {
         assert_eq!(output.details["action"], json!("guide"));
         assert_eq!(output.details["topic"], json!("verify"));
         assert!(output.details["guidance"].as_array().unwrap().len() <= 3);
-        assert!(
-            output
-                .text_content()
-                .unwrap_or_default()
-                .contains("mana guide: verify")
-        );
+        assert!(output
+            .text_content()
+            .unwrap_or_default()
+            .contains("mana guide: verify"));
     }
 
     #[test]
@@ -3644,19 +3637,15 @@ mod tests {
     #[test]
     fn mana_guide_and_template_validate_topic_and_kind() {
         assert!(parse_guide_topic(&json!({ "topic": "orchestrate" })).is_ok());
-        assert!(
-            parse_guide_topic(&json!({ "topic": "bad" }))
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid mana guide topic")
-        );
+        assert!(parse_guide_topic(&json!({ "topic": "bad" }))
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid mana guide topic"));
         assert!(parse_template_kind(&json!({ "kind": "fact" })).is_ok());
-        assert!(
-            parse_template_kind(&json!({ "kind": "job" }))
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid mana template kind")
-        );
+        assert!(parse_template_kind(&json!({ "kind": "job" }))
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid mana template kind"));
     }
 
     #[test]
@@ -3704,12 +3693,10 @@ mod tests {
         assert_eq!(output.details["action"], json!("notes_append"));
         assert_eq!(output.details["missing"], json!(["notes"]));
         assert_eq!(output.details["canonical_fields"], json!(["id", "notes"]));
-        assert!(
-            output
-                .text_content()
-                .unwrap_or_default()
-                .contains("requires id and notes")
-        );
+        assert!(output
+            .text_content()
+            .unwrap_or_default()
+            .contains("requires id and notes"));
     }
 
     #[test]
@@ -3722,24 +3709,20 @@ mod tests {
 
         assert!(output.is_error);
         assert_eq!(output.details["invalid"], json!(["path"]));
-        assert!(
-            output
-                .text_content()
-                .unwrap_or_default()
-                .contains("Use path for project/.mana location")
-        );
+        assert!(output
+            .text_content()
+            .unwrap_or_default()
+            .contains("Use path for project/.mana location"));
     }
 
     #[test]
     fn mana_validation_allows_valid_create_and_decision_add() {
         assert!(validate_mana_action("create", &json!({ "title": "Build thing" })).is_none());
-        assert!(
-            validate_mana_action(
-                "decision_add",
-                &json!({ "id": "304", "decisions": ["Use canonical names"] }),
-            )
-            .is_none()
-        );
+        assert!(validate_mana_action(
+            "decision_add",
+            &json!({ "id": "304", "decisions": ["Use canonical names"] }),
+        )
+        .is_none());
     }
 
     #[test]
@@ -3813,12 +3796,10 @@ mod tests {
         assert_eq!(moved.details["action"], json!("reparent"));
         assert_eq!(moved.details["old_parent"], json!(old_parent_id));
         assert_eq!(moved.details["new_parent"], json!(new_parent_id));
-        assert!(
-            moved
-                .text_content()
-                .unwrap_or_default()
-                .contains("reparented")
-        );
+        assert!(moved
+            .text_content()
+            .unwrap_or_default()
+            .contains("reparented"));
     }
 
     #[tokio::test]
@@ -4005,12 +3986,10 @@ mod tests {
             .unwrap();
         let unit = &result.details["unit"];
         assert_eq!(unit["title"], "Test unit");
-        assert!(
-            unit["notes"]
-                .as_str()
-                .unwrap_or("")
-                .contains("diagnosis from turn 2")
-        );
+        assert!(unit["notes"]
+            .as_str()
+            .unwrap_or("")
+            .contains("diagnosis from turn 2"));
     }
 
     #[tokio::test]
@@ -4709,16 +4688,14 @@ mod tests {
             output.details["recovery"]["retry_requires_unit_update"],
             json!(true)
         );
-        assert!(
-            output.details["recovery"]["next_actions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|action| action
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("do not rerun unchanged"))
-        );
+        assert!(output.details["recovery"]["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action
+                .as_str()
+                .unwrap_or_default()
+                .contains("do not rerun unchanged")));
     }
 
     #[test]
@@ -4855,13 +4832,11 @@ mod tests {
 
         assert_eq!(guardrail["retry_requires_unit_update"], json!(true));
         assert_eq!(guardrail["blocked_units"][0]["id"], json!(id));
-        assert!(
-            guardrail["next_actions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|action| action.as_str().unwrap_or_default().contains("Append notes"))
-        );
+        assert!(guardrail["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action.as_str().unwrap_or_default().contains("Append notes")));
     }
 
     #[test]
@@ -5013,15 +4988,13 @@ mod tests {
             output.details["recovery"]["stale_workers"][0]["run_id"],
             run_id
         );
-        assert!(
-            output.details["recovery"]["next_actions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|action| action
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("interrupted/stale"))
-        );
+        assert!(output.details["recovery"]["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action
+                .as_str()
+                .unwrap_or_default()
+                .contains("interrupted/stale")));
     }
 }

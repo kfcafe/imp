@@ -237,6 +237,7 @@ fn identity_layer(
     s.push_str("- Map durable planning artifacts deliberately: use an epic, child job, note, or decision based on the shape of the information, and keep facts reserved for verifiable claims.\n");
     s.push_str("- Do not ask permission merely to capture plan artifacts in mana. Do ask before making consequential scope, architecture, destructive, or execution commitments on the user's behalf.\n");
     s.push_str("- If durable planning state changed this turn, make the between-turn mana update before the substantive reply. Summarize the delta only when it adds value beyond what the mana tool or UI already made visible.\n");
+    s.push_str("- Treat mana updates as checkpoints when useful, not necessarily completion.\n");
     s.push_str("- A future wiki layer at `.mana/wiki/` will hold synthesized project knowledge; for now, use mana facts for verifiable claims and mana units/notes for everything else that should survive the session.\n");
 
     // Append role instructions after identity layer
@@ -795,6 +796,17 @@ mod tests {
         assert!(result.text.contains(
             "Summarize the delta only when it adds value beyond what the mana tool or UI already made visible."
         ));
+        assert!(result.text.contains(
+            "Treat mana updates as checkpoints when useful, not necessarily completion."
+        ));
+        assert_eq!(
+            result
+                .text
+                .matches("Treat mana updates as checkpoints when useful")
+                .count(),
+            1,
+            "mana checkpoint guidance should appear once"
+        );
         assert_eq!(
             result
                 .text

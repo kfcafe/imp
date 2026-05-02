@@ -1,14 +1,14 @@
 use std::process::{Command, Stdio};
 
 use async_trait::async_trait;
-use imp_core::Error as CoreError;
 use imp_core::storage;
 use imp_core::tools::lua::{parameter_schema_from_lua, tool_output_from_lua_result};
 use imp_core::tools::{Tool, ToolContext, ToolOutput, ToolRegistry};
 use imp_core::ui::{ComponentSpec, SelectOption};
+use imp_core::Error as CoreError;
 use imp_llm::auth::AuthStore;
 use mlua::{Function, Lua, MultiValue, Table, Value};
-use serde_json::{Value as JsonValue, json};
+use serde_json::{json, Value as JsonValue};
 use std::sync::{Arc, Mutex};
 
 use crate::sandbox::{
@@ -388,35 +388,44 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
                     "imp.exec() is disabled for this runtime",
                 ));
             }
-            let mut command = Command::new("sh");
-            command.arg("-c");
-
-            // Build the full command string
-            let full_cmd = if let Some(args_table) = args {
-                let mut parts = vec![cmd];
+            let output = if let Some(args_table) = args {
+                let mut command = Command::new(&cmd);
                 for pair in args_table.sequence_values::<String>() {
-                    parts.push(pair?);
+                    command.arg(pair?);
                 }
-                parts.join(" ")
-            } else {
-                cmd
-            };
-            command.stdin(Stdio::null()).arg(&full_cmd);
 
-            // Apply opts
-            if let Some(opts_table) = &opts {
-                if let Ok(Some(cwd)) = opts_table.get::<Option<String>>("cwd") {
-                    command.current_dir(cwd);
-                }
-                if let Ok(Some(env_table)) = opts_table.get::<Option<Table>>("env") {
-                    for pair in env_table.pairs::<String, String>() {
-                        let (name, value) = pair?;
-                        command.env(name, value);
+                if let Some(opts_table) = &opts {
+                    if let Ok(Some(cwd)) = opts_table.get::<Option<String>>("cwd") {
+                        command.current_dir(cwd);
+                    }
+                    if let Ok(Some(env_table)) = opts_table.get::<Option<Table>>("env") {
+                        for pair in env_table.pairs::<String, String>() {
+                            let (name, value) = pair?;
+                            command.env(name, value);
+                        }
                     }
                 }
-            }
 
-            let output = command.output().map_err(mlua::Error::external)?;
+                command.stdin(Stdio::null()).output()
+            } else {
+                let mut command = Command::new("sh");
+                command.arg("-c").arg(&cmd);
+
+                if let Some(opts_table) = &opts {
+                    if let Ok(Some(cwd)) = opts_table.get::<Option<String>>("cwd") {
+                        command.current_dir(cwd);
+                    }
+                    if let Ok(Some(env_table)) = opts_table.get::<Option<Table>>("env") {
+                        for pair in env_table.pairs::<String, String>() {
+                            let (name, value) = pair?;
+                            command.env(name, value);
+                        }
+                    }
+                }
+
+                command.stdin(Stdio::null()).output()
+            }
+            .map_err(mlua::Error::external)?;
 
             let result = lua_inner.create_table()?;
             result.set(

@@ -72,10 +72,12 @@ pub fn load_extensions(
 pub fn reload(
     user_config_dir: &Path,
     project_dir: Option<&Path>,
+    policy: &imp_core::config::LuaCapabilityPolicy,
 ) -> Result<(LuaRuntime, Vec<LuaExtension>), LuaError> {
     let extensions = discover_extensions(user_config_dir, project_dir);
     let runtime = LuaRuntime::new()?;
     crate::bridge::setup_host_api(&runtime)?;
+    runtime.apply_capability_policy(policy);
     load_extensions(&runtime, &extensions);
     Ok((runtime, extensions))
 }
