@@ -218,6 +218,29 @@ impl Agent {
             return result;
         }
 
+        if let crate::policy::ToolPolicyDecision::Denied(reason) =
+            self.run_policy.check_tool(tool_name)
+        {
+            let result =
+                crate::tools::ToolOutput::error(reason).into_tool_result(call_id, tool_name);
+            self.emit(AgentEvent::ToolExecutionEnd {
+                tool_call_id: call_id.to_string(),
+                result: result.clone(),
+            })
+            .await;
+            self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+                turn,
+                RecoveryCheckpointKind::ToolExecutionEnd,
+                Some(call_id.to_string()),
+                Some(tool_name.to_string()),
+                Some(args_hash.clone()),
+                Some(false),
+                Some("run_policy_blocked".to_string()),
+            ))
+            .await;
+            return result;
+        }
+
         if let Some(blocking_result) = before_results.into_iter().find(|result| result.block) {
             let reason = blocking_result
                 .reason
@@ -340,6 +363,7 @@ impl Agent {
                     read_max_lines: self.read_max_lines,
                     turn_mana_review: self.turn_mana_review.clone(),
                     config: self.config.clone(),
+                    run_policy: self.run_policy.clone(),
                 };
 
                 // Forward tool output deltas to event stream

@@ -1325,9 +1325,18 @@ mod tests {
             std::env::remove_var(PERSISTENT_TRANSPORT_ENV);
         }
 
-        assert_eq!(capabilities.persistent_session, PersistentSessionMode::WebSocket);
-        assert_eq!(capabilities.continuation, ContinuationMode::ProviderManagedId);
-        assert_eq!(capabilities.resumability, ResumabilityMode::ResumeProviderState);
+        assert_eq!(
+            capabilities.persistent_session,
+            PersistentSessionMode::WebSocket
+        );
+        assert_eq!(
+            capabilities.continuation,
+            ContinuationMode::ProviderManagedId
+        );
+        assert_eq!(
+            capabilities.resumability,
+            ResumabilityMode::ResumeProviderState
+        );
         assert!(capabilities.streaming);
     }
 
@@ -1364,5 +1373,4 @@ mod tests {
         assert!(!encoded.contains("previous_response_id"));
         assert!(!encoded.contains("session_id"));
     }
-
 }

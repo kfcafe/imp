@@ -63,6 +63,7 @@ pub struct LuaCallContext {
     pub lua_tool_loader: Option<imp_core::tools::LuaToolLoader>,
     pub mode: AgentMode,
     pub read_max_lines: usize,
+    pub run_policy: imp_core::policy::RunPolicy,
     pub config: Arc<Config>,
 }
 
@@ -85,6 +86,7 @@ impl LuaCallContext {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 imp_core::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            run_policy: self.run_policy.clone(),
             config: Arc::clone(&self.config),
         }
     }
@@ -105,6 +107,7 @@ impl From<ToolContext> for LuaCallContext {
             lua_tool_loader: ctx.lua_tool_loader,
             mode: ctx.mode,
             read_max_lines: ctx.read_max_lines,
+            run_policy: ctx.run_policy,
             config: ctx.config,
         }
     }

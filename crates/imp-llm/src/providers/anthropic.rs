@@ -479,7 +479,7 @@ fn build_request(model: &Model, context: Context, options: RequestOptions) -> Ap
 
     let thinking = match budget {
         None => None,
-        Some(b) if adaptive => Some(ApiThinking::Adaptive),
+        Some(_) if adaptive => Some(ApiThinking::Adaptive),
         Some(b) => Some(ApiThinking::Enabled { budget_tokens: b }),
     };
 

@@ -68,6 +68,7 @@ tree-sitter-rust = "0.23"
 tree-sitter-typescript = "0.23"
 tree-sitter-python = "0.23"
 tree-sitter-go = "0.23"
+tree-sitter-kotlin-ng = "1.1.0"
 readability-rust = "0.1"
 project-detect = "0.1"
 mana-core = { version = "0.3.1", path = "../mana/crates/mana-core" }

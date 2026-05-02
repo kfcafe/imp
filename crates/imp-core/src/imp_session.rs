@@ -43,6 +43,7 @@ use crate::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use crate::builder::AgentBuilder;
 use crate::config::{AgentMode, Config};
 use crate::error::{Error, Result};
+use crate::policy::RunPolicy;
 use crate::session::{SessionCheckpointRecord, SessionEntry, SessionManager};
 use crate::storage;
 use crate::system_prompt::{Fact, TaskContext};
@@ -119,6 +120,9 @@ pub struct SessionOptions {
     /// pass `None` to skip Lua extensions.
     pub lua_loader: Option<LuaToolLoader>,
 
+    /// Per-run tool/write policy layered on top of AgentMode.
+    pub run_policy: RunPolicy,
+
     /// Custom UI implementation. Defaults to `NullInterface`.
     pub ui: Option<Arc<dyn UserInterface>>,
 
@@ -149,6 +153,7 @@ impl Default for SessionOptions {
             task: None,
             facts: Vec::new(),
             lua_loader: None,
+            run_policy: RunPolicy::default(),
             ui: None,
             auth_path: None,
             context_prefill: Vec::new(),
@@ -337,6 +342,7 @@ impl ImpSession {
         if let Some(lua_loader) = options.lua_loader {
             builder = builder.lua_tool_loader(move |policy, tools| lua_loader(policy, tools));
         }
+        builder = builder.run_policy(options.run_policy.clone());
 
         let (mut agent, handle) = builder.build()?;
 

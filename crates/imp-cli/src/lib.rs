@@ -271,6 +271,22 @@ struct Cli {
     #[arg(long)]
     tools: Option<String>,
 
+    /// Allow a tool by exact name for this run (repeatable)
+    #[arg(long = "allow-tool")]
+    allow_tools: Vec<String>,
+
+    /// Deny a tool by exact name for this run (repeatable)
+    #[arg(long = "deny-tool")]
+    deny_tools: Vec<String>,
+
+    /// Allow writes matching this path/glob relative to the worker cwd (repeatable)
+    #[arg(long = "allow-write")]
+    allow_writes: Vec<String>,
+
+    /// Deny writes matching this path/glob relative to the worker cwd (repeatable)
+    #[arg(long = "deny-write")]
+    deny_writes: Vec<String>,
+
     /// Disable all built-in tools
     #[arg(long)]
     no_tools: bool,
@@ -282,6 +298,10 @@ struct Cli {
     /// Output mode: interactive, rpc, json
     #[arg(long, default_value = "interactive")]
     mode: String,
+
+    /// Final output format for --print: text or json
+    #[arg(long, default_value = "text")]
+    output: String,
 
     /// Maximum turns before stopping (default: 50)
     #[arg(long)]
@@ -2986,6 +3006,55 @@ async fn emit_protocol_error(stdout_tx: &mpsc::Sender<Value>, error: impl Into<S
         .await;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrintOutputMode {
+    Text,
+    Json,
+}
+
+impl PrintOutputMode {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "text" | "human" => Ok(Self::Text),
+            "json" => Ok(Self::Json),
+            other => Err(format!("unknown --output mode `{other}`; use text or json")),
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+struct PrintJsonOutcome {
+    status: String,
+    final_text: String,
+    policy_violations: Vec<PrintPolicyViolation>,
+    tool_calls: Vec<PrintToolCall>,
+    usage: Option<PrintUsage>,
+    cost: Option<PrintCost>,
+}
+
+#[derive(Debug, Serialize)]
+struct PrintPolicyViolation {
+    tool: String,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PrintToolCall {
+    tool: String,
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PrintUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct PrintCost {
+    total: f64,
+}
+
 async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut startup_timer = StartupTimer::new(cli.verbose);
     emit_startup_timing(&mut startup_timer, StartupStage::ProcessStart);
@@ -3010,6 +3079,19 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         SessionChoice::New
     };
 
+    let mut run_policy = imp_core::policy::RunPolicy::default();
+    for tool in &cli.allow_tools {
+        run_policy = run_policy.allow_tool(tool);
+    }
+    for tool in &cli.deny_tools {
+        run_policy = run_policy.deny_tool(tool);
+    }
+    for pattern in &cli.allow_writes {
+        run_policy = run_policy.allow_write(pattern);
+    }
+    for pattern in &cli.deny_writes {
+        run_policy = run_policy.deny_write(pattern);
+    }
     let mut options = SessionOptions {
         cwd: cwd.clone(),
         model: cli.model.clone(),
@@ -3023,6 +3105,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         max_tokens: cli.max_tokens.or(config.max_tokens),
         system_prompt: cli.system_prompt.clone(),
         no_tools: cli.no_tools,
+        run_policy,
         session: session_choice,
         ..Default::default()
     };
@@ -3046,19 +3129,36 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
 
     let mut printed_trailing_newline = false;
 
+    let print_output_mode = PrintOutputMode::parse(&cli.output)?;
+    let json_output = print_output_mode == PrintOutputMode::Json;
+    let mut json_outcome = PrintJsonOutcome {
+        status: "done".to_string(),
+        ..Default::default()
+    };
+    let mut active_tool: Option<String> = None;
+
     while let Some(event) = session.recv_event().await {
         match event {
             AgentEvent::MessageDelta { delta } => match delta {
                 StreamEvent::TextDelta { text } => {
-                    print!("{text}");
-                    printed_trailing_newline = false;
+                    if json_output {
+                        json_outcome.final_text.push_str(&text);
+                    } else {
+                        print!("{text}");
+                        printed_trailing_newline = false;
+                    }
                 }
-                StreamEvent::ThinkingDelta { text } => eprint!("{text}"),
+                StreamEvent::ThinkingDelta { text } => {
+                    if !json_output {
+                        eprint!("{text}")
+                    }
+                }
                 _ => {}
             },
             AgentEvent::ToolExecutionStart {
                 tool_name, args, ..
             } if !cli.no_tools => {
+                active_tool = Some(tool_name.clone());
                 let summary = match tool_name.as_str() {
                     "bash" => args
                         .get("command")
@@ -3077,36 +3177,60 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                         .to_string(),
                     _ => String::new(),
                 };
-                if summary.is_empty() {
-                    eprintln!("[tool: {tool_name}]");
-                } else {
-                    eprintln!("[tool: {tool_name} {summary}]");
-                }
-            }
-            AgentEvent::ToolExecutionEnd { result, .. } if !cli.no_tools => {
-                if result.is_error {
-                    let text: String = result
-                        .content
-                        .iter()
-                        .filter_map(|b| match b {
-                            imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
-                    if !text.is_empty() {
-                        eprintln!("[error: {}]", truncate_chars_with_suffix(&text, 100, ""));
+                if !json_output {
+                    if summary.is_empty() {
+                        eprintln!("[tool: {tool_name}]");
+                    } else {
+                        eprintln!("[tool: {tool_name} {summary}]");
                     }
                 }
             }
+            AgentEvent::ToolExecutionEnd { result, .. } if !cli.no_tools => {
+                let tool_name = active_tool.take().unwrap_or_else(|| "unknown".to_string());
+                let status = if result.is_error { "error" } else { "ok" }.to_string();
+                let text: String = result
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if json_output {
+                    if result.is_error && text.contains("run policy") {
+                        json_outcome.status = "policy_denied".to_string();
+                        json_outcome.policy_violations.push(PrintPolicyViolation {
+                            tool: tool_name.clone(),
+                            reason: text.clone(),
+                        });
+                    }
+                    json_outcome.tool_calls.push(PrintToolCall {
+                        tool: tool_name,
+                        status,
+                    });
+                } else if result.is_error && !text.is_empty() {
+                    eprintln!("[error: {}]", truncate_chars_with_suffix(&text, 100, ""));
+                }
+            }
             AgentEvent::TurnEnd { .. } => {
-                if !printed_trailing_newline {
+                if !json_output && !printed_trailing_newline {
                     println!();
                     printed_trailing_newline = true;
                 }
             }
             AgentEvent::Error { error } => {
-                eprintln!("Error: {}", format_error_for_display(&error));
+                json_outcome.status = "failed".to_string();
+                if json_output {
+                    if !json_outcome.final_text.is_empty() {
+                        json_outcome.final_text.push('\n');
+                    }
+                    json_outcome
+                        .final_text
+                        .push_str(&format_error_for_display(&error));
+                } else {
+                    eprintln!("Error: {}", format_error_for_display(&error));
+                }
             }
             AgentEvent::Timing { timing } => {
                 if cli.verbose {
@@ -3114,10 +3238,18 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                 }
             }
             AgentEvent::AgentEnd { usage, cost } => {
-                eprintln!(
-                    "\n[tokens: ↑{} ↓{} | cost: ${:.4}]",
-                    usage.input_tokens, usage.output_tokens, cost.total
-                );
+                if json_output {
+                    json_outcome.usage = Some(PrintUsage {
+                        input_tokens: usage.input_tokens,
+                        output_tokens: usage.output_tokens,
+                    });
+                    json_outcome.cost = Some(PrintCost { total: cost.total });
+                } else {
+                    eprintln!(
+                        "\n[tokens: ↑{} ↓{} | cost: ${:.4}]",
+                        usage.input_tokens, usage.output_tokens, cost.total
+                    );
+                }
             }
             _ => {}
         }
@@ -3127,6 +3259,10 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         .wait()
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+    if json_output {
+        println!("{}", serde_json::to_string(&json_outcome)?);
+    }
 
     Ok(())
 }
@@ -4647,9 +4783,14 @@ mod tests {
             session: None,
             no_session: false,
             tools: None,
+            allow_tools: Vec::new(),
+            deny_tools: Vec::new(),
+            allow_writes: Vec::new(),
+            deny_writes: Vec::new(),
             no_tools: false,
             system_prompt: None,
             mode: "interactive".to_string(),
+            output: "text".to_string(),
             max_turns: None,
             max_tokens: None,
             verbose: false,
@@ -5563,8 +5704,11 @@ mod tests {
             id: "42".to_string(),
             title: "Fix the widget".to_string(),
             description: "The widget is broken.\nPlease fix it.".to_string(),
+            design: None,
             acceptance: Some("Widget tests pass".to_string()),
             verify: Some("cargo test -p imp-cli".to_string()),
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: Some("Check the edge case.".to_string()),
             decisions: vec!["Keep the CLI thin".to_string()],
             dependencies: Vec::new(),

@@ -107,6 +107,9 @@ impl Tool for EditTool {
             return Ok(ToolOutput::error("Missing required parameter: old_text"));
         }
 
+        if let Err(error) = ctx.check_write_path(&path) {
+            return Ok(ToolOutput::error(error));
+        }
         if !path.exists() {
             let suggestions = suggest_similar_files(&ctx.cwd, raw_path);
             let mut msg = format!("File not found: {}", path.display());
@@ -259,6 +262,9 @@ async fn execute_anchor_edit(
     };
     let dry_run = get_bool_param(params, "dry_run", "dryRun").unwrap_or(false);
 
+    if let Err(error) = ctx.check_write_path(path) {
+        return Ok(ToolOutput::error(error));
+    }
     if !path.exists() {
         let suggestions = suggest_similar_files(&ctx.cwd, raw_path);
         let mut msg = format!("File not found: {}", path.display());
@@ -442,6 +448,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         }
     }
 

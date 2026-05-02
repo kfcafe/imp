@@ -72,6 +72,25 @@ use crate::views::tools::DisplayToolCall;
 use crate::views::tree::{flatten_tree, TreeView, TreeViewState};
 use crate::views::welcome::{needs_welcome, WelcomeState, WelcomeStep, WelcomeView};
 
+const LUA_RESTART_DIRECTIVE: &str = "__IMP_RESTART_AFTER_COMMAND__";
+
+fn lua_result_requests_restart(result: Option<&str>) -> bool {
+    result.is_some_and(|text| {
+        text.lines()
+            .any(|line| line.trim() == LUA_RESTART_DIRECTIVE)
+    })
+}
+
+fn strip_lua_restart_directive(result: &str) -> String {
+    result
+        .lines()
+        .filter(|line| line.trim() != LUA_RESTART_DIRECTIVE)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     Chat,
@@ -173,6 +192,10 @@ enum RuntimeSignal {
     CompactionTaskCompleted(String),
     CompactionTaskFailed(String),
     LuaCommandCompleted {
+        command: String,
+        result: Option<String>,
+    },
+    LuaCommandRestartRequested {
         command: String,
         result: Option<String>,
     },
@@ -891,7 +914,12 @@ impl App {
             if let Some(task) = self.lua_command_task.take() {
                 match task.await {
                     Ok((command, Ok(result))) => {
-                        signals.push(RuntimeSignal::LuaCommandCompleted { command, result })
+                        if lua_result_requests_restart(result.as_deref()) {
+                            signals
+                                .push(RuntimeSignal::LuaCommandRestartRequested { command, result })
+                        } else {
+                            signals.push(RuntimeSignal::LuaCommandCompleted { command, result })
+                        }
                     }
                     Ok((command, Err(error))) => {
                         signals.push(RuntimeSignal::LuaCommandFailed { command, error })
@@ -971,6 +999,13 @@ impl App {
                 if let Some(text) = result {
                     self.push_system_msg(&text);
                 }
+            }
+            RuntimeSignal::LuaCommandRestartRequested { command, result } => {
+                self.finish_lua_command_status_message(&format!("/{command} finished."));
+                if let Some(text) = result {
+                    self.push_system_msg(&strip_lua_restart_directive(&text));
+                }
+                self.restart_after_lua_command();
             }
             RuntimeSignal::LuaCommandFailed { command, error } => {
                 self.finish_lua_command_status_message(&format!("/{command} failed."));
@@ -3843,6 +3878,7 @@ impl App {
             lua_tool_loader: None,
             mode: imp_core::config::AgentMode::Full,
             read_max_lines: self.config.ui.read_max_lines,
+            run_policy: Default::default(),
             config: Arc::new(self.config.clone()),
         }
     }
@@ -3905,6 +3941,28 @@ impl App {
         });
         self.lua_command_task = Some(task);
         true
+    }
+
+    fn restart_after_lua_command(&mut self) {
+        match std::env::current_exe() {
+            Ok(exe) => match std::process::Command::new(&exe).spawn() {
+                Ok(_) => {
+                    self.push_system_msg("Restarting imp into the updated binary…");
+                    self.running = false;
+                }
+                Err(error) => {
+                    self.push_error_msg(&format!(
+                        "Restart requested, but failed to launch {}: {error}",
+                        exe.display()
+                    ));
+                }
+            },
+            Err(error) => {
+                self.push_error_msg(&format!(
+                    "Restart requested, but failed to resolve current imp executable: {error}"
+                ));
+            }
+        }
     }
 
     fn start_secrets_flow(&mut self, provider: &str) {

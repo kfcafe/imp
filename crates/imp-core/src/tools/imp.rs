@@ -345,6 +345,7 @@ async fn execute_ask_agent(params: serde_json::Value, ctx: ToolContext) -> Resul
         task: None,
         facts: Vec::new(),
         lua_loader: None,
+        run_policy: Default::default(),
         ui: Some(ctx.ui.clone()),
         auth_path: None,
         context_prefill: Vec::new(),
@@ -462,6 +463,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         }
     }
 

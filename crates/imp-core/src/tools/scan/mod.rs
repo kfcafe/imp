@@ -4,6 +4,7 @@
 //! Produces rich output: visibility, signatures, fields, variants, trait impls.
 
 pub mod go;
+pub mod kotlin;
 pub mod python;
 pub mod rust;
 pub mod types;
@@ -51,6 +52,11 @@ const BLOCK_KINDS: &[&str] = &[
     "function_definition",
     "class_definition",
     "decorated_definition",
+    // Kotlin
+    "class_declaration",
+    "object_declaration",
+    "function_declaration",
+    "property_declaration",
     // Go
     "function_declaration",
     "method_declaration",
@@ -169,7 +175,7 @@ impl Tool for ScanTool {
             details: json!({
                 "action": action_name,
                 "files_analyzed": files.len(),
-                "supported_languages": ["rust", "typescript", "javascript", "python", "go"],
+                "supported_languages": ["rust", "typescript", "javascript", "python", "go", "kotlin"],
                 "types_count": result.types.len(),
                 "functions_count": result.functions.len(),
             }),
@@ -246,6 +252,7 @@ fn extract_files(files: &[PathBuf], cwd: &Path) -> ScanResult {
             "tsx" => typescript::parse(&source, &rel, true, &mut result),
             "py" => python::parse(&source, &rel, &mut result),
             "go" => go::parse(&source, &rel, &mut result),
+            "kt" | "kts" => kotlin::parse(&source, &rel, &mut result),
             "js" | "jsx" => typescript::parse(&source, &rel, ext == "jsx", &mut result),
             // TODO: add more languages as tree-sitter grammars are added
             _ => {}
@@ -292,7 +299,7 @@ fn collect_source_files(root: &Path) -> Result<Vec<PathBuf>> {
 fn is_supported(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
-        Some("rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go")
+        Some("rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "kt" | "kts")
     )
 }
 
@@ -733,6 +740,7 @@ fn get_parser(path: &Path) -> Option<tree_sitter::Parser> {
         "js" | "jsx" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         "py" => tree_sitter_python::LANGUAGE.into(),
         "go" => tree_sitter_go::LANGUAGE.into(),
+        "kt" | "kts" => tree_sitter_kotlin_ng::LANGUAGE.into(),
         _ => return None,
     };
     let mut parser = tree_sitter::Parser::new();
@@ -860,6 +868,8 @@ fn node_has_name(node: tree_sitter::Node, source: &str, name: &str) -> bool {
             || kind == "type_identifier"
             || kind == "name"
             || kind == "property_identifier"
+            || kind == "simple_identifier"
+            || kind == "variable_identifier"
         {
             let text = &source[child.byte_range()];
             if text == name {
@@ -873,7 +883,12 @@ fn node_has_name(node: tree_sitter::Node, source: &str, name: &str) -> bool {
         let inner_children: Vec<_> = child.children(&mut inner_cursor).collect();
         for inner in inner_children {
             let ik = inner.kind();
-            if ik == "identifier" || ik == "type_identifier" || ik == "name" {
+            if ik == "identifier"
+                || ik == "type_identifier"
+                || ik == "name"
+                || ik == "simple_identifier"
+                || ik == "variable_identifier"
+            {
                 let text = &source[inner.byte_range()];
                 if text == name {
                     return true;
@@ -891,6 +906,7 @@ fn language_for_path(path: &Path) -> Option<&'static str> {
         "js" | "jsx" => Some("javascript"),
         "py" => Some("python"),
         "go" => Some("go"),
+        "kt" | "kts" => Some("kotlin"),
         _ => None,
     }
 }
@@ -973,6 +989,7 @@ mod tests {
             turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            run_policy: Default::default(),
             config: std::sync::Arc::new(crate::config::Config::default()),
         };
 

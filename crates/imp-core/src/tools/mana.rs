@@ -2019,7 +2019,10 @@ fn truncate_with_note(text: &str) -> String {
     output
 }
 
-fn compact_list_output(entries: &[mana_core::index::IndexEntry], requested_limit: Option<usize>) -> ToolOutput {
+fn compact_list_output(
+    entries: &[mana_core::index::IndexEntry],
+    requested_limit: Option<usize>,
+) -> ToolOutput {
     let limit = requested_limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .clamp(1, MAX_LIST_LIMIT);
@@ -3395,9 +3398,10 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        compact_list_output, evaluate_run_output, mana_close_error_output, mana_close_force_reason_error,
-        mana_guide_output, mana_template_output, parent_placement_details, parse_guide_topic,
-        parse_template_kind, retry_guardrail_for_targets, run_state_output, stream_event_line,
+        compact_list_output, evaluate_run_output, mana_close_error_output,
+        mana_close_force_reason_error, mana_guide_output, mana_template_output,
+        parent_placement_details, parse_guide_topic, parse_template_kind,
+        retry_guardrail_for_targets, run_state_output, stream_event_line,
         target_ids_from_run_target, unix_time_ms, validate_mana_action, GuideTopic, ManaRunStore,
         ManaTool, NativeRunState, RunTarget, RunUnitStatus, TemplateKind, INTERRUPTED_RUN_STALE_MS,
     };

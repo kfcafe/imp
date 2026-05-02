@@ -85,6 +85,9 @@ impl Tool for MultiEditTool {
 
         for (edit_path, file_edits) in edits_by_path {
             let path = super::resolve_path(&ctx.cwd, &edit_path);
+            if let Err(error) = ctx.check_write_path(&path) {
+                return Ok(ToolOutput::error(error));
+            }
             if !path.exists() {
                 let suggestions = suggest_similar_files(&ctx.cwd, &edit_path);
                 let mut msg = format!("File not found: {}", path.display());
@@ -305,6 +308,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         }
     }
 

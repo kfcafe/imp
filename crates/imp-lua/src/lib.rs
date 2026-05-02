@@ -106,6 +106,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 imp_core::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            run_policy: Default::default(),
             config: Arc::new(imp_core::config::Config::default()),
             lua_tool_loader: None,
         }
@@ -1041,6 +1042,7 @@ mod tests {
             anchor_store: Arc::new(imp_core::tools::AnchorStore::new()),
             mode: imp_core::config::AgentMode::Full,
             read_max_lines: 500,
+            run_policy: Default::default(),
             lua_tool_loader: None,
             config: Arc::new(imp_core::config::Config::default()),
         }

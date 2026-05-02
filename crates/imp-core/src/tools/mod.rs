@@ -221,6 +221,8 @@ pub struct ToolContext {
     pub turn_mana_review: Arc<std::sync::Mutex<TurnManaReviewAccumulator>>,
     /// Resolved runtime config for tool-specific policy checks.
     pub config: Arc<crate::config::Config>,
+    /// Per-run tool/write policy layered on top of AgentMode.
+    pub run_policy: crate::policy::RunPolicy,
 }
 
 /// In-session file content cache. Avoids re-reading files that haven't changed.
@@ -450,6 +452,13 @@ impl FileHistory {
 impl ToolContext {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn check_write_path(&self, path: &Path) -> std::result::Result<(), String> {
+        match self.run_policy.check_write_path(&self.cwd, path) {
+            crate::policy::WritePolicyDecision::Allowed => Ok(()),
+            crate::policy::WritePolicyDecision::Denied(reason) => Err(reason),
+        }
     }
 }
 

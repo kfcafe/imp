@@ -19,6 +19,7 @@ pub mod mana_review;
 pub mod mana_worker;
 pub mod memory;
 pub mod personality;
+pub mod policy;
 pub mod resources;
 pub mod retry;
 pub mod roles;

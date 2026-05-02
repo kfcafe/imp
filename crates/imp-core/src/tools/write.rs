@@ -47,6 +47,10 @@ impl Tool for WriteTool {
 
         let path = super::resolve_path(&ctx.cwd, raw_path);
 
+        if let Err(error) = ctx.check_write_path(&path) {
+            return Ok(ToolOutput::error(error));
+        }
+
         if path.is_dir() {
             return Ok(ToolOutput::error(format!(
                 "Path is a directory, not a file: {}",
@@ -254,6 +258,7 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
         }
     }
 
@@ -263,6 +268,135 @@ mod tests {
         config.write.overwrite_policy = overwrite_policy;
         ctx.config = Arc::new(config);
         ctx
+    }
+
+    fn test_ctx_with_run_policy(dir: &Path, run_policy: crate::policy::RunPolicy) -> ToolContext {
+        let mut ctx = test_ctx(dir);
+        ctx.run_policy = run_policy;
+        ctx
+    }
+
+    #[tokio::test]
+    async fn write_path_policy_allows_matching_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteTool;
+
+        let result = tool
+            .execute(
+                "c-allow-write",
+                serde_json::json!({"path": "CHANGELOG.md", "content": "updated"}),
+                test_ctx_with_run_policy(
+                    dir.path(),
+                    crate::policy::RunPolicy::new().allow_write("CHANGELOG.md"),
+                ),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("CHANGELOG.md")).unwrap(),
+            "updated"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_path_policy_blocks_unlisted_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteTool;
+
+        let result = tool
+            .execute(
+                "c-deny-write",
+                serde_json::json!({"path": "src/lib.rs", "content": "updated"}),
+                test_ctx_with_run_policy(
+                    dir.path(),
+                    crate::policy::RunPolicy::new().allow_write("CHANGELOG.md"),
+                ),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.text_content().unwrap().contains("write allowlist"));
+        assert!(!dir.path().join("src/lib.rs").exists());
+    }
+
+    #[tokio::test]
+    async fn write_path_policy_blocks_parent_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let relative =
+            pathdiff::diff_paths(outside.path().join("CHANGELOG.md"), dir.path()).unwrap();
+        let tool = WriteTool;
+
+        let result = tool
+            .execute(
+                "c-traversal",
+                serde_json::json!({"path": relative, "content": "updated"}),
+                test_ctx_with_run_policy(
+                    dir.path(),
+                    crate::policy::RunPolicy::new().allow_write("CHANGELOG.md"),
+                ),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result
+            .text_content()
+            .unwrap()
+            .contains("outside the worker root"));
+        assert!(!outside.path().join("CHANGELOG.md").exists());
+    }
+
+    #[tokio::test]
+    async fn write_path_policy_deny_overrides_allow() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteTool;
+
+        let result = tool
+            .execute(
+                "c-deny-override",
+                serde_json::json!({"path": "CHANGELOG.md", "content": "updated"}),
+                test_ctx_with_run_policy(
+                    dir.path(),
+                    crate::policy::RunPolicy::new()
+                        .allow_write("CHANGELOG.md")
+                        .deny_write("CHANGELOG.md"),
+                ),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.text_content().unwrap().contains("denylist"));
+        assert!(!dir.path().join("CHANGELOG.md").exists());
+    }
+
+    #[tokio::test]
+    async fn write_path_policy_glob_allows_matching_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        let tool = WriteTool;
+
+        let result = tool
+            .execute(
+                "c-glob-write",
+                serde_json::json!({"path": "docs/CHANGELOG.md", "content": "updated"}),
+                test_ctx_with_run_policy(
+                    dir.path(),
+                    crate::policy::RunPolicy::new().allow_write("docs/*.md"),
+                ),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("docs/CHANGELOG.md")).unwrap(),
+            "updated"
+        );
     }
 
     #[tokio::test]

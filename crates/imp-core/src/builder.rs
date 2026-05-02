@@ -7,6 +7,7 @@ use crate::agent::{Agent, AgentHandle};
 use crate::config::{Config, LuaCapabilityPolicy};
 use crate::error::Result;
 use crate::mana_prompt_context;
+use crate::policy::RunPolicy;
 use crate::resources;
 use crate::roles::Role;
 use crate::system_prompt::{self, Fact, TaskContext};
@@ -72,6 +73,8 @@ pub struct AgentBuilder {
     /// and imp-lua.
     #[allow(clippy::type_complexity)]
     lua_tool_loader: Option<LuaToolLoader>,
+    /// Per-run tool/write policy layered on top of AgentMode.
+    run_policy: RunPolicy,
 }
 
 impl AgentBuilder {
@@ -88,6 +91,7 @@ impl AgentBuilder {
             system_prompt_override: None,
             extra_tools: None,
             lua_tool_loader: None,
+            run_policy: RunPolicy::default(),
         }
     }
 
@@ -139,6 +143,12 @@ impl AgentBuilder {
         F: Fn(&LuaCapabilityPolicy, &mut ToolRegistry) + Send + Sync + 'static,
     {
         self.lua_tool_loader = Some(Arc::new(f));
+        self
+    }
+
+    /// Apply a per-run policy on top of the configured agent mode.
+    pub fn run_policy(mut self, policy: RunPolicy) -> Self {
+        self.run_policy = policy;
         self
     }
 
@@ -198,6 +208,7 @@ impl AgentBuilder {
         agent.read_max_lines = self.config.ui.read_max_lines;
         agent.continue_policy = self.config.ui.continue_policy;
         agent.config = Arc::new(self.config.clone());
+        agent.run_policy = self.run_policy;
         agent.lua_tool_loader = self.lua_tool_loader.clone();
 
         // Register native tools
