@@ -172,6 +172,14 @@ enum RuntimeSignal {
     AgentTaskFailed(String),
     CompactionTaskCompleted(String),
     CompactionTaskFailed(String),
+    LuaCommandCompleted {
+        command: String,
+        result: Option<String>,
+    },
+    LuaCommandFailed {
+        command: String,
+        error: String,
+    },
     LoginTaskSucceeded(String),
     LoginTaskFailed(String),
     UiRequest(crate::tui_interface::UiRequest),
@@ -271,6 +279,7 @@ pub struct App {
     pub agent_handle: Option<AgentHandle>,
     agent_task: Option<tokio::task::JoinHandle<Result<(), ImpCoreError>>>,
     compaction_task: Option<tokio::task::JoinHandle<Result<String, String>>>,
+    lua_command_task: Option<tokio::task::JoinHandle<(String, Result<Option<String>, String>)>>,
     pub is_streaming: bool,
     pub message_queue: Vec<QueuedMessage>,
 
@@ -597,6 +606,7 @@ impl App {
             agent_handle: None,
             agent_task: None,
             compaction_task: None,
+            lua_command_task: None,
             is_streaming: false,
             message_queue: Vec::new(),
             session,
@@ -873,6 +883,27 @@ impl App {
             }
         }
 
+        let lua_command_task_finished = self
+            .lua_command_task
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished);
+        if lua_command_task_finished {
+            if let Some(task) = self.lua_command_task.take() {
+                match task.await {
+                    Ok((command, Ok(result))) => {
+                        signals.push(RuntimeSignal::LuaCommandCompleted { command, result })
+                    }
+                    Ok((command, Err(error))) => {
+                        signals.push(RuntimeSignal::LuaCommandFailed { command, error })
+                    }
+                    Err(error) => signals.push(RuntimeSignal::LuaCommandFailed {
+                        command: "lua".to_string(),
+                        error: format!("Lua command task failure: {error}"),
+                    }),
+                }
+            }
+        }
+
         let login_task_finished = self
             .login_task
             .as_ref()
@@ -934,6 +965,16 @@ impl App {
             RuntimeSignal::CompactionTaskFailed(error) => {
                 self.finish_compaction_status_message("Compaction failed.");
                 self.push_error_msg(&format!("Compaction failed: {error}"));
+            }
+            RuntimeSignal::LuaCommandCompleted { command, result } => {
+                self.finish_lua_command_status_message(&format!("/{command} finished."));
+                if let Some(text) = result {
+                    self.push_system_msg(&text);
+                }
+            }
+            RuntimeSignal::LuaCommandFailed { command, error } => {
+                self.finish_lua_command_status_message(&format!("/{command} failed."));
+                self.push_error_msg(&format!("Lua command error: {error}"));
             }
             RuntimeSignal::LoginTaskSucceeded(message) => self.push_system_msg(&message),
             RuntimeSignal::LoginTaskFailed(message) => self.push_error_msg(&message),
@@ -1353,33 +1394,17 @@ impl App {
             .unwrap_or("this project")
             .to_string();
 
-        let (command_lines, lua_extension_summary) = match &self.lua_runtime {
+        let lua_extension_summary = match &self.lua_runtime {
             Some(runtime) => match runtime.lock() {
-                Ok(rt) => {
-                    let mut commands = rt.command_names();
-                    commands.sort();
-                    (
-                        commands
-                            .into_iter()
-                            .map(|name| format!("• /{name}"))
-                            .collect::<Vec<_>>(),
-                        summarize_inline(
-                            lua_extensions.iter().map(|ext| ext.name.clone()).collect(),
-                            3,
-                        ),
-                    )
-                }
-                Err(_) => (
-                    vec!["• unavailable (runtime lock error)".to_string()],
-                    "unavailable (runtime lock error)".to_string(),
-                ),
-            },
-            None => (
-                vec!["• none loaded".to_string()],
-                summarize_inline(
+                Ok(_) => summarize_inline(
                     lua_extensions.iter().map(|ext| ext.name.clone()).collect(),
                     3,
                 ),
+                Err(_) => "unavailable (runtime lock error)".to_string(),
+            },
+            None => summarize_inline(
+                lua_extensions.iter().map(|ext| ext.name.clone()).collect(),
+                3,
             ),
         };
 
@@ -1480,14 +1505,9 @@ impl App {
             lines
         };
 
-        let command_names = command_lines
-            .iter()
-            .filter_map(|line| line.trim().strip_prefix('•'))
-            .map(|line| line.trim().to_string())
-            .collect::<Vec<_>>();
         let extension_lines = vec![
             format!("• lua: {lua_extension_summary}"),
-            format!("• lua commands: {}", summarize_inline(command_names, 5)),
+            "• commands: /command".to_string(),
             "• shell: /new, /model, /resume, /settings, /personality, /setup".to_string(),
             format!("• mode: {mode}"),
         ];
@@ -3161,9 +3181,9 @@ impl App {
         }
 
         // Add user message to display
-        if self.compaction_task.is_some() {
+        if self.compaction_task.is_some() || self.lua_command_task.is_some() {
             self.push_system_msg(
-                "Compaction is running; wait for it to finish before sending a new prompt.",
+                "A background slash command is running; wait for it to finish before sending a new prompt.",
             );
             return;
         }
@@ -3847,17 +3867,43 @@ impl App {
         if !guard.has_command(cmd_name) {
             return false;
         }
-
-        // Execute via LuaRuntime's helper (keeps mlua types internal)
-        let call_ctx = self.lua_command_call_context();
-        let result = guard.execute_command_with_context(cmd_name, args, Some(call_ctx));
         drop(guard);
 
-        match result {
-            Ok(Some(text)) => self.push_system_msg(&text),
-            Ok(None) => {} // Command executed silently
-            Err(e) => self.push_system_msg(&format!("Lua command error: {e}")),
+        // Execute via LuaRuntime's helper (keeps mlua types internal) on a
+        // background task so extension commands share /compact's non-blocking
+        // transcript animation and completion flow.
+        if self.lua_command_task.is_some() {
+            self.push_system_msg("A Lua command is already running.");
+            return true;
         }
+
+        let command_label = cmd_name.to_string();
+        let args = args.to_string();
+        let call_ctx = self.lua_command_call_context();
+        self.messages.push(DisplayMessage {
+            role: MessageRole::Compaction,
+            content: format!("Running /{command_label}…"),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: true,
+            timestamp: imp_llm::now(),
+        });
+        self.auto_scroll = true;
+        self.scroll_offset = 0;
+        self.invalidate_chat_render_cache();
+
+        let task_command = command_label.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let result = match runtime.lock() {
+                Ok(guard) => guard
+                    .execute_command_with_context(&task_command, &args, Some(call_ctx))
+                    .map_err(|error| error.to_string()),
+                Err(_) => Err("Lua runtime lock poisoned".to_string()),
+            };
+            (task_command, result)
+        });
+        self.lua_command_task = Some(task);
         true
     }
 
@@ -5363,6 +5409,19 @@ impl App {
     }
 
     fn finish_compaction_status_message(&mut self, content: &str) {
+        if let Some(message) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|message| message.role == MessageRole::Compaction && message.is_streaming)
+        {
+            message.content = content.to_string();
+            message.is_streaming = false;
+            self.invalidate_chat_render_cache();
+        }
+    }
+
+    fn finish_lua_command_status_message(&mut self, content: &str) {
         if let Some(message) = self
             .messages
             .iter_mut()

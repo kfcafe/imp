@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use mana::commands::agents::{agents_file_path, load_agents};
@@ -726,6 +727,43 @@ fn mana_widget_lines(summary: impl Into<String>, detail: Option<String>) -> Widg
     WidgetContent::Lines(lines)
 }
 
+fn mana_run_widget_lines(
+    run_id: &str,
+    scope: &str,
+    state: Option<&NativeRunState>,
+) -> WidgetContent {
+    let Some(state) = state else {
+        return mana_widget_lines(
+            format!("mana {run_id}: starting"),
+            Some(format!("{scope} · waiting for first event")),
+        );
+    };
+
+    let summary = format!(
+        "mana {}: {} · {}/{} done · {} failed",
+        state.run_id,
+        state.status,
+        state.summary.total_closed,
+        state.summary.total_units,
+        state.summary.total_failed
+    );
+    let mut detail = vec![format!(
+        "{} · {} events · {}s elapsed",
+        state.scope,
+        state.event_count,
+        unix_time_ms().saturating_sub(state.started_at_ms) / 1000
+    )];
+    if let Some(active) = state.units.iter().find(|unit| unit.status == "running") {
+        detail.push(format!("running {} {}", active.id, active.title));
+    } else if let Some(queued) = state.units.iter().find(|unit| unit.status == "queued") {
+        detail.push(format!("queued {} {}", queued.id, queued.title));
+    }
+    if let Some(last) = state.log_lines.last() {
+        detail.push(last.clone());
+    }
+    mana_widget_lines(summary, Some(detail.join(" · ")))
+}
+
 async fn set_mana_delta_widget(
     ctx: &ToolContext,
     summary: impl Into<String>,
@@ -1218,11 +1256,12 @@ fn background_run_started_output(
     run_args: &NativeRunParams,
 ) -> ToolOutput {
     let text = format!(
-        "Started native mana orchestration in background for {scope} as {run_id}. Mana will coordinate the run and dispatch imp workers underneath. Use mana(action=\"run_state\", run_id=\"{run_id}\") for orchestration status, mana(action=\"logs\", run_id=\"{run_id}\") for recent native events, and mana(action=\"agents\") / mana(action=\"logs\", id=...) for worker output."
+        "Started native mana orchestration in background for {scope} as {run_id}. Live progress will appear in the mana status widget; inspect this tool call or use mana(action=\"run_state\", run_id=\"{run_id}\") for current state, mana(action=\"logs\", run_id=\"{run_id}\") for recent native events, and mana(action=\"agents\") / mana(action=\"logs\", id=...) for worker output."
     );
     ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text }],
         details: json!({
+            "action": "run",
             "background": true,
             "run_id": run_id,
             "scope": scope,
@@ -1235,6 +1274,13 @@ fn background_run_started_output(
             "loop": run_args.loop_mode,
             "dry_run": run_args.dry_run,
             "review": run_args.review,
+            "timeout": run_args.timeout,
+            "idle_timeout": run_args.idle_timeout,
+            "status": "background_started",
+            "next": {
+                "state": format!("mana(action=\\\"run_state\\\", run_id=\\\"{run_id}\\\")"),
+                "logs": format!("mana(action=\\\"logs\\\", run_id=\\\"{run_id}\\\")")
+            }
         }),
         is_error: false,
     }
@@ -1257,16 +1303,54 @@ fn spawn_background_run(
             Some(&format!("mana orchestration: running {scope}")),
         )
         .await;
-        ui.set_widget(
-            "mana",
-            Some(mana_widget_lines(
-                format!("orchestrating {scope}"),
-                Some(format!(
-                    "native mana tool → mana orchestration → imp workers · inspect with mana run_state/logs (run_id={run_id})"
-                )),
-            )),
-        )
-        .await;
+        ui.set_widget("mana", Some(mana_run_widget_lines(&run_id, &scope, None)))
+            .await;
+
+        let run_store_for_progress = run_store.clone();
+        let run_id_for_progress = run_id.clone();
+        let scope_for_progress = scope.clone();
+        let ui_for_progress = ui.clone();
+        let progress_task = tokio::spawn(async move {
+            let started = Instant::now();
+            let mut interval = tokio::time::interval(Duration::from_millis(750));
+            loop {
+                interval.tick().await;
+                let state = run_state_snapshot(&run_store_for_progress, Some(&run_id_for_progress));
+                if let Some(state) = state.as_ref() {
+                    let status = format!(
+                        "mana {}: {} · {}/{} done · {} failed",
+                        run_id_for_progress,
+                        state.status,
+                        state.summary.total_closed,
+                        state.summary.total_units,
+                        state.summary.total_failed
+                    );
+                    ui_for_progress.set_status("mana", Some(&status)).await;
+                    ui_for_progress
+                        .set_widget(
+                            "mana",
+                            Some(mana_run_widget_lines(
+                                &run_id_for_progress,
+                                &scope_for_progress,
+                                Some(state),
+                            )),
+                        )
+                        .await;
+                    if state.finished_at_ms.is_some()
+                        || matches!(state.status.as_str(), "finished" | "failed" | "interrupted")
+                    {
+                        break;
+                    }
+                } else if started.elapsed() > Duration::from_secs(5) {
+                    ui_for_progress
+                        .set_status(
+                            "mana",
+                            Some(&format!("mana {run_id_for_progress}: waiting for events")),
+                        )
+                        .await;
+                }
+            }
+        });
 
         let run_store_for_sink = run_store.clone();
         let run_id_for_sink = run_id.clone();
@@ -1280,6 +1364,8 @@ fn spawn_background_run(
             )
         })
         .await;
+
+        progress_task.abort();
 
         match result {
             Ok(Ok(view)) => {
@@ -3113,28 +3199,64 @@ impl Tool for ManaTool {
 
                 send_update(
                     &ctx,
-                    format!("Starting mana run {run_id}..."),
+                    format!("Starting mana run {run_id} ({scope})..."),
                     json!({"kind": "mana_run_status", "status": "starting", "run_id": run_id, "scope": scope}),
                 );
                 ctx.ui
-                    .set_widget(
-                        "mana",
-                        Some(mana_widget_lines(
-                            format!("running mana ({run_id})"),
-                            Some(format!("native foreground orchestration · {scope}")),
-                        )),
-                    )
+                    .set_widget("mana", Some(mana_run_widget_lines(&run_id, &scope, None)))
                     .await;
                 ctx.ui.set_status("mana", Some("mana: running")).await;
 
                 let run_store = self.run_store.clone();
                 let run_id_for_sink = run_id.clone();
                 let update_tx = ctx.update_tx.clone();
+                let ui_for_sink = ctx.ui.clone();
+                let scope_for_sink = scope.clone();
+                let last_ui_update = Arc::new(std::sync::Mutex::new(
+                    Instant::now() - Duration::from_secs(1),
+                ));
                 match mana::commands::run::run_with_stream_capture_and_sink(
                     &mana_dir,
                     run_params,
                     Some(Arc::new(move |event| {
                         update_run_store_with_event(&run_store, &run_id_for_sink, &event);
+                        let should_update_ui = last_ui_update
+                            .lock()
+                            .map(|last| last.elapsed() >= Duration::from_millis(250))
+                            .unwrap_or(true)
+                            || matches!(
+                                event,
+                                StreamEvent::RunStart { .. }
+                                    | StreamEvent::UnitStart { .. }
+                                    | StreamEvent::UnitDone { .. }
+                                    | StreamEvent::RunEnd { .. }
+                                    | StreamEvent::Error { .. }
+                            );
+                        if should_update_ui {
+                            if let Some(state) = run_state_snapshot(&run_store, Some(&run_id_for_sink)) {
+                                let status = format!(
+                                    "mana {}: {} · {}/{} done · {} failed",
+                                    run_id_for_sink,
+                                    state.status,
+                                    state.summary.total_closed,
+                                    state.summary.total_units,
+                                    state.summary.total_failed
+                                );
+                                let ui = ui_for_sink.clone();
+                                let widget = mana_run_widget_lines(
+                                    &run_id_for_sink,
+                                    &scope_for_sink,
+                                    Some(&state),
+                                );
+                                tokio::spawn(async move {
+                                    ui.set_status("mana", Some(&status)).await;
+                                    ui.set_widget("mana", Some(widget)).await;
+                                });
+                            }
+                            if let Ok(mut last) = last_ui_update.lock() {
+                                *last = Instant::now();
+                            }
+                        }
                         if let Some(line) = stream_event_line(&event) {
                             let _ = update_tx.try_send(ToolUpdate {
                                 content: vec![imp_llm::ContentBlock::Text { text: line }],

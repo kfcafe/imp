@@ -233,11 +233,11 @@ fn identity_layer(
     s.push_str("- Include current state, concrete steps, file paths with intent, edge cases, and a targeted verify command.\n");
     s.push_str("- Update units with new context after failures; do not retry unchanged.\n");
     s.push_str("- Mana is the durable project context — session memory is ephemeral, personal memory is global preferences; project plans, architecture decisions, verified facts, and implementation structure belong in mana, not in session history or memory.md.\n");
-    s.push_str("- During planning and design conversations, proactively externalize durable structure as it appears. When the conversation settles on a goal, decomposition, architecture direction, dependency, blocker, or follow-up that should survive the turn, create or update mana during the conversation.\n");
+    s.push_str("- During planning and design conversations, externalize durable structure when it appears, but do not create/update mana merely because text sounds plan-like. Write mana when project/work state actually changed, handoff/recovery/parallelism matters, or orchestration needs explicit units.\n");
     s.push_str("- Map durable planning artifacts deliberately: use an epic, child job, note, or decision based on the shape of the information, and keep facts reserved for verifiable claims.\n");
     s.push_str("- Do not ask permission merely to capture plan artifacts in mana. Do ask before making consequential scope, architecture, destructive, or execution commitments on the user's behalf.\n");
     s.push_str("- If durable planning state changed this turn, make the between-turn mana update before the substantive reply. Summarize the delta only when it adds value beyond what the mana tool or UI already made visible.\n");
-    s.push_str("- Treat mana updates as checkpoints when useful, not necessarily completion.\n");
+    s.push_str("- Mana writes are usually checkpoints, not proof of completion. Continue after create/update/notes/decision actions when the requested outcome is still incomplete; stop only on verified completion, a real blocker, or a user-facing decision point.\n");
     s.push_str("- A future wiki layer at `.mana/wiki/` will hold synthesized project knowledge; for now, use mana facts for verifiable claims and mana units/notes for everything else that should survive the session.\n");
 
     // Append role instructions after identity layer
@@ -285,9 +285,10 @@ fn execution_policy_layer() -> String {
     s.push_str("- Prefer mana-native inspection and progress recording over ad hoc shell workflows when mana already models the work state.\n");
     s.push_str("- For worker-style execution, keep planning lightweight and execution direct; use `mana update` to record discoveries and blockers instead of carrying them only in transient chat.\n");
     s.push_str("- If a mana unit is underspecified, identify the exact missing context and either inspect the relevant artifacts or report the gap precisely rather than inventing missing requirements.\n");
-    s.push_str("- Treat chat as discussion and mana as the persistent external work and idea graph. When a conversation produces durable structure — plans, architecture, decomposition, migrations, blockers, dependencies, or follow-up work — represent that structure in mana during the conversation, not after it.\n");
+    s.push_str("- Treat chat as discussion and mana as the persistent external work and idea graph. When a conversation produces durable structure — goals, architecture direction, decomposition, dependencies, blockers, decisions, or follow-up work — represent that structure in mana before relying on chat memory.\n");
+    s.push_str("- Avoid mana overuse: do not create/update mana for every plan-like sentence, small one-pass task, conversational aside, or completion bookkeeping. Prefer native mana when durable state, verification, recovery, or orchestration value is clear.\n");
     s.push_str("- When durable planning state changes, update mana before the substantive reply when that durable state should become the source of truth for the next turn. Avoid restating mana-visible deltas verbosely when the tool output or UI already shows them.\n");
-    s.push_str("- Do not use mana only when work is large; use it whenever externalizing the plan is likely to improve execution quality, correctness, scope clarity, reviewability, or future continuation.\n");
+    s.push_str("- Do not use mana only when work is large; use it when externalizing the plan improves execution quality, correctness, scope clarity, reviewability, handoff, recovery, or future continuation.\n");
     s.push_str("- Prefer native mana actions over shell or direct file mutation for durable planning/work structure. Use append-style mana updates to keep the graph current during conversation.\n");
     s.push_str("- If work spans more than one project or clearly belongs at the ecosystem layer, target root mana explicitly rather than relying on the nearest project scope.\n");
     s

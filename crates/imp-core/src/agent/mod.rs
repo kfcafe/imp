@@ -2,164 +2,31 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures::{future::join_all, StreamExt};
-use imp_llm::{
-    AssistantMessage, ContentBlock, Context, Cost, Message, Model, RequestOptions, StopReason,
-    StreamEvent, ThinkingLevel, Usage,
-};
-use serde::{Deserialize, Serialize};
+use imp_llm::{AssistantMessage, ContentBlock, Message, Model, StopReason, ThinkingLevel, Usage};
+#[cfg(test)]
+use imp_llm::{Context, RequestOptions, StreamEvent};
 use tokio::sync::mpsc;
 
 use imp_llm::provider::RetryPolicy;
 
 use crate::config::{AgentMode, Config, ContextConfig, ContinuePolicy};
-use crate::error::Result;
-use crate::guardrails::{self, GuardrailConfig, GuardrailLevel, GuardrailProfile};
+use crate::guardrails::{GuardrailConfig, GuardrailProfile};
 use crate::hooks::{HookBackgroundEvent, HookEvent, HookRunner};
-use crate::mana_review::{ManaReviewState, TurnManaReview, TurnManaReviewAccumulator};
+use crate::mana_review::{
+    ManaMutationAction, ManaMutationRecord, ManaReviewScope, ManaReviewScopeKind, ManaReviewState,
+    ManaUnitSnapshot, TurnManaReview, TurnManaReviewAccumulator,
+};
 use crate::roles::Role;
 use crate::tools::{LuaToolLoader, ToolRegistry};
-use crate::ui::NotifyLevel;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimingStage {
-    ContextAssemblyStart,
-    ContextAssemblyEnd,
-    LlmRequestStart,
-    FirstStreamEvent,
-    FirstTextDelta,
-    FirstToolCall,
-    MessageEnd,
-    ToolExecutionStart,
-    ToolExecutionEnd,
-    PostTurnAssessmentStart,
-    PostTurnAssessmentEnd,
-}
+mod events;
+mod mana_loop;
+mod run_loop;
+mod tool_execution;
 
-impl TimingStage {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ContextAssemblyStart => "context_assembly_start",
-            Self::ContextAssemblyEnd => "context_assembly_end",
-            Self::LlmRequestStart => "llm_request_start",
-            Self::FirstStreamEvent => "first_stream_event",
-            Self::FirstTextDelta => "first_text_delta",
-            Self::FirstToolCall => "first_tool_call",
-            Self::MessageEnd => "message_end",
-            Self::ToolExecutionStart => "tool_execution_start",
-            Self::ToolExecutionEnd => "tool_execution_end",
-            Self::PostTurnAssessmentStart => "post_turn_assessment_start",
-            Self::PostTurnAssessmentEnd => "post_turn_assessment_end",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TimingEvent {
-    pub turn: u32,
-    pub stage: TimingStage,
-    pub since_turn_start_ms: u64,
-    pub since_llm_request_start_ms: Option<u64>,
-    pub duration_ms: Option<u64>,
-    pub label: Option<String>,
-    pub success: Option<bool>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RecoveryCheckpointKind {
-    ProviderRequestStart,
-    AssistantToolCallObserved,
-    ToolExecutionStart,
-    ToolExecutionEnd,
-    ToolResultAddedToContext,
-    ProviderRequestCompleted,
-}
-
-impl RecoveryCheckpointKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ProviderRequestStart => "provider_request_start",
-            Self::AssistantToolCallObserved => "assistant_tool_call_observed",
-            Self::ToolExecutionStart => "tool_execution_start",
-            Self::ToolExecutionEnd => "tool_execution_end",
-            Self::ToolResultAddedToContext => "tool_result_added_to_context",
-            Self::ProviderRequestCompleted => "provider_request_completed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecoveryCheckpoint {
-    pub version: u32,
-    pub turn: u32,
-    pub kind: RecoveryCheckpointKind,
-    pub tool_call_id: Option<String>,
-    pub tool_name: Option<String>,
-    pub args_hash: Option<String>,
-    pub success: Option<bool>,
-    pub error_class: Option<String>,
-    pub timestamp: u64,
-}
-
-/// Events emitted by the agent during execution.
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
-    AgentStart {
-        model: String,
-        timestamp: u64,
-    },
-    AgentEnd {
-        usage: Usage,
-        cost: Cost,
-    },
-    TurnStart {
-        index: u32,
-    },
-    TurnAssessment {
-        index: u32,
-        assessment: NextActionAssessment,
-    },
-    TurnEnd {
-        index: u32,
-        message: AssistantMessage,
-        mana_review: TurnManaReview,
-    },
-    MessageStart {
-        message: Message,
-    },
-    MessageDelta {
-        delta: StreamEvent,
-    },
-    MessageEnd {
-        message: Message,
-    },
-    ToolExecutionStart {
-        tool_call_id: String,
-        tool_name: String,
-        args: serde_json::Value,
-    },
-    ToolOutputDelta {
-        tool_call_id: String,
-        text: String,
-    },
-    ToolExecutionEnd {
-        tool_call_id: String,
-        result: imp_llm::ToolResultMessage,
-    },
-    Warning {
-        message: String,
-    },
-    Timing {
-        timing: TimingEvent,
-    },
-    RecoveryCheckpoint {
-        checkpoint: RecoveryCheckpoint,
-    },
-    Error {
-        error: String,
-    },
-}
+pub use events::{
+    AgentEvent, RecoveryCheckpoint, RecoveryCheckpointKind, TimingEvent, TimingStage,
+};
 
 /// Commands sent to the agent (from UI or orchestrator).
 #[derive(Debug, Clone)]
@@ -169,233 +36,13 @@ pub enum AgentCommand {
     FollowUp(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum NextAction {
-    Continue {
-        prompt: String,
-        reason: ContinueReason,
-    },
-    Stop {
-        reason: NextActionStopReason,
-    },
-}
+mod turn_assessment;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContinueReason {
-    ExternalizationNeeded,
-    HighConfidenceVisibleNextStep,
-    ExecutionDebt,
-}
-
-impl ContinueReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::ExternalizationNeeded => "externalization_needed",
-            Self::HighConfidenceVisibleNextStep => "high_confidence_visible_next_step",
-            Self::ExecutionDebt => "execution_debt",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NextActionStopReason {
-    NoAutomaticFollowUp,
-    NoProgress,
-    RepeatedAction,
-    UserBlocker,
-    ExecutionBlocked,
-    DecompositionCompleted,
-    WorkCompleted,
-}
-
-impl NextActionStopReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::NoAutomaticFollowUp => "no_automatic_follow_up",
-            Self::NoProgress => "no_progress",
-            Self::RepeatedAction => "repeated_action",
-            Self::UserBlocker => "user_blocker",
-            Self::ExecutionBlocked => "execution_blocked",
-            Self::DecompositionCompleted => "decomposition_completed",
-            Self::WorkCompleted => "work_completed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeEvidence {
-    repeated_action: bool,
-    execution_stop_reason: Option<NextActionStopReason>,
-    work_completed: bool,
-    execution_debt: bool,
-    execution_evidence: bool,
-    planning_only_progress: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ManaEvidence {
-    stop_reason: Option<NextActionStopReason>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TextFallbackEvidence {
-    planner_stop_reason: Option<NextActionStopReason>,
-    execution_stop_reason: Option<NextActionStopReason>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ContinueRecommendation {
-    prompt: String,
-    reason: ContinueReason,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NextActionAssessment {
-    pub runtime: NextActionRuntimeEvidence,
-    pub mana: NextActionManaEvidence,
-    pub text_fallback: NextActionTextFallbackEvidence,
-    pub continue_recommendation: Option<NextActionContinueRecommendation>,
-    pub chosen_action: NextActionDebugView,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NextActionRuntimeEvidence {
-    pub repeated_action: bool,
-    pub execution_stop_reason: Option<String>,
-    pub work_completed: bool,
-    pub execution_debt: bool,
-    pub execution_evidence: bool,
-    pub planning_only_progress: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NextActionManaEvidence {
-    pub stop_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NextActionTextFallbackEvidence {
-    pub planner_stop_reason: Option<String>,
-    pub execution_stop_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NextActionContinueRecommendation {
-    pub prompt: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NextActionDebugView {
-    Continue { prompt: String, reason: String },
-    Stop { reason: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PostTurnAssessment {
-    runtime: RuntimeEvidence,
-    mana: ManaEvidence,
-    text_fallback: TextFallbackEvidence,
-    continue_recommendation: Option<ContinueRecommendation>,
-}
-
-impl PostTurnAssessment {
-    fn into_next_action(self) -> NextAction {
-        if self.runtime.repeated_action {
-            return NextAction::Stop {
-                reason: NextActionStopReason::RepeatedAction,
-            };
-        }
-
-        if let Some(reason) = self.runtime.execution_stop_reason {
-            return NextAction::Stop { reason };
-        }
-
-        if self.runtime.work_completed {
-            return NextAction::Stop {
-                reason: NextActionStopReason::WorkCompleted,
-            };
-        }
-
-        if let Some(reason) = self.mana.stop_reason {
-            return NextAction::Stop { reason };
-        }
-
-        if let Some(reason) = self.text_fallback.planner_stop_reason {
-            return NextAction::Stop { reason };
-        }
-
-        if let Some(reason) = self.text_fallback.execution_stop_reason {
-            return NextAction::Stop { reason };
-        }
-
-        if let Some(continue_recommendation) = self.continue_recommendation {
-            return NextAction::Continue {
-                prompt: continue_recommendation.prompt,
-                reason: continue_recommendation.reason,
-            };
-        }
-
-        if self.runtime.planning_only_progress {
-            return NextAction::Stop {
-                reason: NextActionStopReason::NoProgress,
-            };
-        }
-
-        NextAction::Stop {
-            reason: NextActionStopReason::NoAutomaticFollowUp,
-        }
-    }
-
-    fn debug_view(&self) -> NextActionAssessment {
-        let chosen_action = match self.clone().into_next_action() {
-            NextAction::Continue { prompt, reason } => NextActionDebugView::Continue {
-                prompt,
-                reason: reason.as_str().to_string(),
-            },
-            NextAction::Stop { reason } => NextActionDebugView::Stop {
-                reason: reason.as_str().to_string(),
-            },
-        };
-
-        NextActionAssessment {
-            runtime: NextActionRuntimeEvidence {
-                repeated_action: self.runtime.repeated_action,
-                execution_stop_reason: self
-                    .runtime
-                    .execution_stop_reason
-                    .map(|reason| reason.as_str().to_string()),
-                work_completed: self.runtime.work_completed,
-                execution_debt: self.runtime.execution_debt,
-                execution_evidence: self.runtime.execution_evidence,
-                planning_only_progress: self.runtime.planning_only_progress,
-            },
-            mana: NextActionManaEvidence {
-                stop_reason: self
-                    .mana
-                    .stop_reason
-                    .map(|reason| reason.as_str().to_string()),
-            },
-            text_fallback: NextActionTextFallbackEvidence {
-                planner_stop_reason: self
-                    .text_fallback
-                    .planner_stop_reason
-                    .map(|reason| reason.as_str().to_string()),
-                execution_stop_reason: self
-                    .text_fallback
-                    .execution_stop_reason
-                    .map(|reason| reason.as_str().to_string()),
-            },
-            continue_recommendation: self.continue_recommendation.clone().map(|recommendation| {
-                NextActionContinueRecommendation {
-                    prompt: recommendation.prompt,
-                    reason: recommendation.reason.as_str().to_string(),
-                }
-            }),
-            chosen_action,
-        }
-    }
-}
+use turn_assessment::{
+    ContinueReason, ContinueRecommendation, ManaEvidence, NextAction, NextActionStopReason,
+    PostTurnAssessment, RuntimeEvidence, TextFallbackEvidence,
+};
+pub use turn_assessment::{NextActionAssessment, NextActionDebugView};
 
 /// The core agent — runs the ReAct loop (reason, act, observe).
 pub struct Agent {
@@ -560,547 +207,6 @@ impl Agent {
         };
 
         (agent, handle)
-    }
-
-    /// Run the agent loop with an initial prompt.
-    pub async fn run(&mut self, prompt: String) -> Result<()> {
-        self.emit(AgentEvent::AgentStart {
-            model: self.model.meta.id.clone(),
-            timestamp: imp_llm::now(),
-        })
-        .await;
-        self.hooks
-            .fire(&HookEvent::OnAgentStart { prompt: &prompt })
-            .await;
-
-        self.messages.push(Message::user(&prompt));
-
-        self.cancel_token
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        let mut turn: u32 = 0;
-        let mut total_usage = Usage::default();
-        let mut cancelled = false;
-        let mut queued_follow_ups: std::collections::VecDeque<String> =
-            std::collections::VecDeque::new();
-        let mut queued_pre_turn_follow_ups: std::collections::VecDeque<String> =
-            std::collections::VecDeque::new();
-
-        if let Some(nudge) = mana_skill_follow_up_hint(
-            &prompt,
-            self.mode,
-            !self.tools.is_empty(),
-            self.has_mana_skill,
-            self.has_mana_basics_skill,
-            self.has_mana_delegation_skill,
-        ) {
-            queued_pre_turn_follow_ups.push_back(nudge.to_string());
-        }
-
-        loop {
-            if turn >= self.max_turns {
-                self.emit(AgentEvent::Error {
-                    error: format!("Max turns exceeded ({})", self.max_turns),
-                })
-                .await;
-                let cost = total_usage.cost(&self.model.meta.pricing);
-                self.emit(AgentEvent::AgentEnd {
-                    usage: total_usage,
-                    cost,
-                })
-                .await;
-                return Err(crate::error::Error::MaxTurns(self.max_turns));
-            }
-
-            if turn > 0 {
-                if let Some(follow_up) = queued_pre_turn_follow_ups.pop_front() {
-                    self.messages.push(Message::user(&follow_up));
-                }
-            }
-
-            // Check for commands between turns (non-blocking)
-            while let Ok(cmd) = self.command_rx.try_recv() {
-                match cmd {
-                    AgentCommand::Cancel => {
-                        self.cancel_token
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
-                        cancelled = true;
-                        break;
-                    }
-                    AgentCommand::Steer(msg) => {
-                        self.messages.push(Message::user(&msg));
-                    }
-                    AgentCommand::FollowUp(msg) => queued_follow_ups.push_back(msg),
-                }
-            }
-
-            if cancelled {
-                break;
-            }
-
-            self.emit(AgentEvent::TurnStart { index: turn }).await;
-            if let Ok(mut review) = self.turn_mana_review.lock() {
-                review.begin_turn(turn);
-            }
-            let turn_started_at = Instant::now();
-            self.emit_timing(
-                turn,
-                TimingStage::ContextAssemblyStart,
-                turn_started_at,
-                None,
-            )
-            .await;
-            let context_assembly_started_at = Instant::now();
-
-            let mut usage = crate::context::context_usage(&self.messages, &self.model);
-            if usage.ratio >= self.context_config.observation_mask_threshold {
-                crate::context::mask_observations(
-                    &mut self.messages,
-                    self.context_config.mask_window,
-                );
-                self.hooks
-                    .fire(&HookEvent::OnContextThreshold { ratio: usage.ratio })
-                    .await;
-                // Masking can materially reduce context size, so any subsequent
-                // logic must use fresh usage rather than the pre-masking snapshot.
-                usage = crate::context::context_usage(&self.messages, &self.model);
-            }
-
-            // Context management is observation-mask only. Full conversation
-            // compaction has been removed because the rewrite-based behavior
-            // was too error-prone to keep in the runtime.
-
-            // Build context and options for the LLM
-            let context = Context {
-                messages: self.messages.clone(),
-            };
-
-            let options = RequestOptions {
-                thinking_level: self.thinking_level,
-                // Use configured output cap when present; otherwise let providers
-                // choose their own sensible default output budget.
-                max_tokens: self.max_tokens,
-                temperature: None,
-                system_prompt: self.system_prompt.clone(),
-                tools: self.tools.definitions(),
-                cache_options: self.cache_options.clone(),
-                effort: None,
-            };
-            self.emit_timing_with_details(
-                turn,
-                TimingStage::ContextAssemblyEnd,
-                turn_started_at,
-                None,
-                Some(context_assembly_started_at.elapsed().as_millis() as u64),
-                None,
-                Some(true),
-            )
-            .await;
-
-            self.hooks.fire(&HookEvent::BeforeLlmCall).await;
-
-            // Pre-flight OAuth token refresh: if we have an auth store and the
-            // token is expired, refresh it before making the API call. This
-            // avoids wasting a round-trip on a guaranteed 401.
-            if let Some(ref auth_store) = self.auth_store {
-                let mut store = auth_store.lock().await;
-                if store.is_oauth_expired("anthropic") {
-                    match store.resolve_with_refresh("anthropic").await {
-                        Ok(new_key) => {
-                            self.api_key = new_key;
-                        }
-                        Err(e) => {
-                            let message = format!(
-                                "OAuth token refresh failed before request: {e}. Continuing with existing credentials."
-                            );
-                            let _ = self.ui.notify(&message, NotifyLevel::Warning).await;
-                        }
-                    }
-                }
-            }
-
-            // Stream the LLM response with retry on transient startup failures.
-            let llm_request_started_at = Instant::now();
-            self.emit_recovery_checkpoint(Self::recovery_checkpoint(
-                turn,
-                RecoveryCheckpointKind::ProviderRequestStart,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ))
-            .await;
-            self.emit_timing(
-                turn,
-                TimingStage::LlmRequestStart,
-                turn_started_at,
-                Some(llm_request_started_at),
-            )
-            .await;
-            let model = clone_model(&self.model);
-            let context = context.clone();
-            let options = options.clone();
-            let api_key = self.api_key.clone();
-            let mut stream = crate::retry::stream_with_retry(
-                move || {
-                    model
-                        .provider
-                        .stream(&model, context.clone(), options.clone(), &api_key)
-                },
-                self.retry_policy.clone(),
-            );
-
-            let mut ordered_content: Vec<ContentBlock> = Vec::new();
-            let mut tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
-            let mut assistant_msg: Option<AssistantMessage> = None;
-            let mut saw_first_stream_event = false;
-            let mut saw_first_text_delta = false;
-            let mut saw_first_tool_call = false;
-            let mut saw_provider_message_end = false;
-            let cancel_token = Arc::clone(&self.cancel_token);
-            cancel_token.store(false, std::sync::atomic::Ordering::Relaxed);
-
-            while let Some(event_result) = stream.next().await {
-                // Check for cancel during event processing
-                while let Ok(cmd) = self.command_rx.try_recv() {
-                    match cmd {
-                        AgentCommand::Cancel => {
-                            cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
-                            cancelled = true;
-                            break;
-                        }
-                        AgentCommand::Steer(msg) => {
-                            self.messages.push(Message::user(&msg));
-                        }
-                        AgentCommand::FollowUp(msg) => queued_follow_ups.push_back(msg),
-                    }
-                }
-
-                if cancelled {
-                    break;
-                }
-
-                match event_result {
-                    Ok(event) => {
-                        if !saw_first_stream_event {
-                            saw_first_stream_event = true;
-                            self.emit_timing(
-                                turn,
-                                TimingStage::FirstStreamEvent,
-                                turn_started_at,
-                                Some(llm_request_started_at),
-                            )
-                            .await;
-                        }
-                        // Forward as delta
-                        self.emit(AgentEvent::MessageDelta {
-                            delta: event.clone(),
-                        })
-                        .await;
-
-                        match event {
-                            StreamEvent::TextDelta { text } => {
-                                if !saw_first_text_delta {
-                                    saw_first_text_delta = true;
-                                    self.emit_timing(
-                                        turn,
-                                        TimingStage::FirstTextDelta,
-                                        turn_started_at,
-                                        Some(llm_request_started_at),
-                                    )
-                                    .await;
-                                }
-                                push_stream_text_block(&mut ordered_content, text);
-                            }
-                            StreamEvent::ThinkingDelta { text } => {
-                                push_stream_thinking_block(&mut ordered_content, text);
-                            }
-                            StreamEvent::ToolCall {
-                                id,
-                                name,
-                                arguments,
-                            } => {
-                                if !saw_first_tool_call {
-                                    saw_first_tool_call = true;
-                                    self.emit_timing(
-                                        turn,
-                                        TimingStage::FirstToolCall,
-                                        turn_started_at,
-                                        Some(llm_request_started_at),
-                                    )
-                                    .await;
-                                }
-                                let args_hash = Self::tool_args_hash(&arguments);
-                                self.emit_recovery_checkpoint(Self::recovery_checkpoint(
-                                    turn,
-                                    RecoveryCheckpointKind::AssistantToolCallObserved,
-                                    Some(id.clone()),
-                                    Some(name.clone()),
-                                    Some(args_hash),
-                                    None,
-                                    None,
-                                ))
-                                .await;
-                                ordered_content.push(ContentBlock::ToolCall {
-                                    id: id.clone(),
-                                    name: name.clone(),
-                                    arguments: arguments.clone(),
-                                });
-                                tool_calls.push((id, name, arguments));
-                            }
-                            StreamEvent::MessageEnd { message } => {
-                                saw_provider_message_end = true;
-                                self.emit_timing(
-                                    turn,
-                                    TimingStage::MessageEnd,
-                                    turn_started_at,
-                                    Some(llm_request_started_at),
-                                )
-                                .await;
-                                self.emit_recovery_checkpoint(Self::recovery_checkpoint(
-                                    turn,
-                                    RecoveryCheckpointKind::ProviderRequestCompleted,
-                                    None,
-                                    None,
-                                    None,
-                                    Some(true),
-                                    None,
-                                ))
-                                .await;
-                                if let Some(ref usage) = message.usage {
-                                    total_usage.add(usage);
-                                }
-                                assistant_msg = Some(message);
-                            }
-                            StreamEvent::MessageStart { .. } => {}
-                            StreamEvent::Error { error } => {
-                                self.emit(AgentEvent::Error {
-                                    error: format!(
-                                        "Provider stream failed after partial output: {error}"
-                                    ),
-                                })
-                                .await;
-                                // Build a minimal error message to push
-                                let err_msg = AssistantMessage {
-                                    content: vec![ContentBlock::Text { text: error }],
-                                    usage: None,
-                                    stop_reason: StopReason::Error("Stream error".to_string()),
-                                    timestamp: imp_llm::now(),
-                                };
-                                self.messages.push(Message::Assistant(err_msg.clone()));
-                                let mana_review = self.finish_turn_mana_review(turn);
-                                self.emit(AgentEvent::TurnEnd {
-                                    index: turn,
-                                    message: err_msg,
-                                    mana_review,
-                                })
-                                .await;
-                                let cost = total_usage.cost(&self.model.meta.pricing);
-                                self.emit(AgentEvent::AgentEnd {
-                                    usage: total_usage,
-                                    cost,
-                                })
-                                .await;
-                                return Err(crate::error::Error::Llm(imp_llm::Error::Provider(
-                                    "Stream error".to_string(),
-                                )));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let error = match &e {
-                            imp_llm::Error::Stream(message) => {
-                                format!("Provider stream failed after partial output: {message}")
-                            }
-                            _ => e.to_string(),
-                        };
-                        self.emit(AgentEvent::Error {
-                            error: error.clone(),
-                        })
-                        .await;
-                        let cost = total_usage.cost(&self.model.meta.pricing);
-                        self.emit(AgentEvent::AgentEnd {
-                            usage: total_usage,
-                            cost,
-                        })
-                        .await;
-                        return Err(e.into());
-                    }
-                }
-            }
-
-            if cancelled {
-                // Emit TurnEnd with whatever we have so far
-                let partial = assistant_msg.unwrap_or_else(|| {
-                    build_assistant_message(&ordered_content, &tool_calls, None)
-                });
-                self.messages.push(Message::Assistant(partial.clone()));
-                let mana_review = self.finish_turn_mana_review(turn);
-                self.emit(AgentEvent::TurnEnd {
-                    index: turn,
-                    message: partial,
-                    mana_review,
-                })
-                .await;
-                break;
-            }
-
-            // Use the MessageEnd message if provided; otherwise the provider
-            // stream ended without a terminal completion event and should be
-            // treated as an error rather than silently synthesized as success.
-            let msg = match assistant_msg {
-                Some(message) => message,
-                None if !saw_provider_message_end => {
-                    let error = format!(
-                        "Provider stream ended unexpectedly before completing the message (missing terminal completion event after {} content block(s) and {} tool call(s))",
-                        ordered_content.len(),
-                        tool_calls.len()
-                    );
-                    self.emit(AgentEvent::Error {
-                        error: error.clone(),
-                    })
-                    .await;
-                    let cost = total_usage.cost(&self.model.meta.pricing);
-                    self.emit(AgentEvent::AgentEnd {
-                        usage: total_usage,
-                        cost,
-                    })
-                    .await;
-                    return Err(crate::error::Error::Llm(imp_llm::Error::Stream(error)));
-                }
-                None => build_assistant_message(&ordered_content, &tool_calls, None),
-            };
-
-            self.messages.push(Message::Assistant(msg.clone()));
-
-            if tool_calls.is_empty() {
-                // No tool calls — the model is done unless a queued follow-up exists.
-                let mana_review = self.finish_turn_mana_review(turn);
-                self.emit(AgentEvent::TurnEnd {
-                    index: turn,
-                    message: msg.clone(),
-                    mana_review: mana_review.clone(),
-                })
-                .await;
-
-                self.emit_timing(
-                    turn,
-                    TimingStage::PostTurnAssessmentStart,
-                    turn_started_at,
-                    None,
-                )
-                .await;
-                let assessment_started_at = Instant::now();
-                let assessment = self.assess_post_turn(&msg, &[], false, &mana_review);
-                self.emit_timing_with_details(
-                    turn,
-                    TimingStage::PostTurnAssessmentEnd,
-                    turn_started_at,
-                    None,
-                    Some(assessment_started_at.elapsed().as_millis() as u64),
-                    None,
-                    Some(true),
-                )
-                .await;
-                self.emit(AgentEvent::TurnAssessment {
-                    index: turn,
-                    assessment: assessment.debug_view(),
-                })
-                .await;
-                let next_action = assessment.into_next_action();
-                self.enqueue_next_action(&mut queued_follow_ups, next_action);
-
-                if let Some(follow_up) = queued_follow_ups.pop_front() {
-                    self.messages.push(Message::user(&follow_up));
-                    turn += 1;
-                    continue;
-                }
-                break;
-            }
-
-            // Execute tool calls
-            let results = self
-                .execute_tools(turn, turn_started_at, tool_calls, cancel_token)
-                .await;
-
-            for result in &results {
-                self.emit_recovery_checkpoint(Self::recovery_checkpoint(
-                    turn,
-                    RecoveryCheckpointKind::ToolResultAddedToContext,
-                    Some(result.tool_call_id.clone()),
-                    Some(result.tool_name.clone()),
-                    None,
-                    Some(!result.is_error),
-                    None,
-                ))
-                .await;
-                self.messages.push(Message::ToolResult(result.clone()));
-            }
-
-            let mana_review = self.finish_turn_mana_review(turn);
-            self.emit(AgentEvent::TurnEnd {
-                index: turn,
-                message: msg.clone(),
-                mana_review: mana_review.clone(),
-            })
-            .await;
-
-            self.emit_timing(
-                turn,
-                TimingStage::PostTurnAssessmentStart,
-                turn_started_at,
-                None,
-            )
-            .await;
-            let assessment_started_at = Instant::now();
-            let assessment = self.assess_post_turn(&msg, &results, true, &mana_review);
-            self.emit_timing_with_details(
-                turn,
-                TimingStage::PostTurnAssessmentEnd,
-                turn_started_at,
-                None,
-                Some(assessment_started_at.elapsed().as_millis() as u64),
-                None,
-                Some(true),
-            )
-            .await;
-            self.emit(AgentEvent::TurnAssessment {
-                index: turn,
-                assessment: assessment.debug_view(),
-            })
-            .await;
-            let next_action = assessment.into_next_action();
-            let should_stop_after_tool_turn = matches!(
-                next_action,
-                NextAction::Stop {
-                    reason: NextActionStopReason::RepeatedAction,
-                }
-            );
-            self.enqueue_next_action(&mut queued_follow_ups, next_action);
-
-            if let Some(follow_up) = queued_follow_ups.pop_front() {
-                self.messages.push(Message::user(&follow_up));
-            }
-
-            if should_stop_after_tool_turn {
-                break;
-            }
-
-            turn += 1;
-        }
-
-        let cost = total_usage.cost(&self.model.meta.pricing);
-        self.emit(AgentEvent::AgentEnd {
-            usage: total_usage,
-            cost,
-        })
-        .await;
-
-        if cancelled {
-            return Err(crate::error::Error::Cancelled);
-        }
-
-        Ok(())
     }
 
     fn assess_post_turn(
@@ -1300,424 +406,6 @@ impl Agent {
         format!("{:016x}", crate::tools::stable_hash(args.to_string()))
     }
 
-    /// Execute tool calls from a single assistant message.
-    async fn execute_tools(
-        &self,
-        turn: u32,
-        turn_started_at: Instant,
-        calls: Vec<(String, String, serde_json::Value)>,
-        cancel_token: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Vec<imp_llm::ToolResultMessage> {
-        let mut readonly = Vec::new();
-        let mut mutable = Vec::new();
-
-        for (index, (id, name, args)) in calls.into_iter().enumerate() {
-            if self.tools.get(&name).is_some_and(|tool| tool.is_readonly()) {
-                readonly.push((index, id, name, args));
-            } else {
-                mutable.push((index, id, name, args));
-            }
-        }
-
-        let mut results = join_all(readonly.into_iter().map(|(index, id, name, args)| {
-            let cancel_token = Arc::clone(&cancel_token);
-            async move {
-                let result = self
-                    .execute_one_tool(&id, &name, args, cancel_token, turn, turn_started_at)
-                    .await;
-                (index, result)
-            }
-        }))
-        .await;
-
-        for (index, id, name, args) in mutable {
-            let result = self
-                .execute_one_tool(
-                    &id,
-                    &name,
-                    args,
-                    Arc::clone(&cancel_token),
-                    turn,
-                    turn_started_at,
-                )
-                .await;
-            results.push((index, result));
-        }
-
-        results.sort_by_key(|(index, _)| *index);
-        results.into_iter().map(|(_, result)| result).collect()
-    }
-
-    fn repeated_tool_call_check(
-        &self,
-        call_id: &str,
-        tool_name: &str,
-        args: &serde_json::Value,
-    ) -> RepeatedToolCallCheck {
-        let args_json = serde_json::to_string(args).unwrap_or_else(|_| "<unserializable>".into());
-        let mut state = match self.last_tool_call.lock() {
-            Ok(s) => s,
-            Err(_) => return RepeatedToolCallCheck::Ok,
-        };
-
-        let consecutive = match state.as_mut() {
-            Some(prev) if prev.tool_name == tool_name && prev.args_json == args_json => {
-                prev.consecutive += 1;
-                prev.consecutive
-            }
-            _ => {
-                *state = Some(RepeatedToolCallState {
-                    tool_name: tool_name.to_string(),
-                    args_json,
-                    consecutive: 1,
-                });
-                1
-            }
-        };
-
-        if consecutive == 3 {
-            return RepeatedToolCallCheck::Warn(format!(
-                "Warning: identical tool call repeated 3 times in a row for '{tool_name}'. The result may not have changed. Consider using the information you already have or trying a different action."
-            ));
-        }
-
-        if consecutive >= 4 {
-            return RepeatedToolCallCheck::Block(
-                crate::tools::ToolOutput::error(format!(
-                    "Blocked: identical tool call repeated {consecutive} times in a row for '{tool_name}'. The result likely has not changed. Use the information you already have or try a different action."
-                ))
-                .into_tool_result(call_id, tool_name),
-            );
-        }
-
-        RepeatedToolCallCheck::Ok
-    }
-
-    async fn execute_one_tool(
-        &self,
-        call_id: &str,
-        tool_name: &str,
-        args: serde_json::Value,
-        cancel_token: Arc<std::sync::atomic::AtomicBool>,
-        turn: u32,
-        turn_started_at: Instant,
-    ) -> imp_llm::ToolResultMessage {
-        let args_hash = Self::tool_args_hash(&args);
-        let repeat_check = self.repeated_tool_call_check(call_id, tool_name, &args);
-        let tool_started_at = Instant::now();
-        self.emit_timing_with_details(
-            turn,
-            TimingStage::ToolExecutionStart,
-            turn_started_at,
-            None,
-            None,
-            Some(tool_name.to_string()),
-            None,
-        )
-        .await;
-
-        self.emit_recovery_checkpoint(Self::recovery_checkpoint(
-            turn,
-            RecoveryCheckpointKind::ToolExecutionStart,
-            Some(call_id.to_string()),
-            Some(tool_name.to_string()),
-            Some(args_hash.clone()),
-            None,
-            None,
-        ))
-        .await;
-
-        if let RepeatedToolCallCheck::Block(loop_result) = repeat_check {
-            self.emit(AgentEvent::ToolExecutionStart {
-                tool_call_id: call_id.to_string(),
-                tool_name: tool_name.to_string(),
-                args: args.clone(),
-            })
-            .await;
-            self.emit(AgentEvent::ToolExecutionEnd {
-                tool_call_id: call_id.to_string(),
-                result: loop_result.clone(),
-            })
-            .await;
-            self.emit_timing_with_details(
-                turn,
-                TimingStage::ToolExecutionEnd,
-                turn_started_at,
-                None,
-                Some(tool_started_at.elapsed().as_millis() as u64),
-                Some(tool_name.to_string()),
-                Some(false),
-            )
-            .await;
-            self.emit_recovery_checkpoint(Self::recovery_checkpoint(
-                turn,
-                RecoveryCheckpointKind::ToolExecutionEnd,
-                Some(call_id.to_string()),
-                Some(tool_name.to_string()),
-                Some(args_hash.clone()),
-                Some(false),
-                Some("repeated_tool_call_blocked".to_string()),
-            ))
-            .await;
-            return loop_result;
-        }
-
-        self.emit(AgentEvent::ToolExecutionStart {
-            tool_call_id: call_id.to_string(),
-            tool_name: tool_name.to_string(),
-            args: args.clone(),
-        })
-        .await;
-
-        let before_results = self
-            .hooks
-            .fire(&HookEvent::BeforeToolCall {
-                tool_name,
-                args: &args,
-            })
-            .await;
-
-        // Execution-time mode guard — reject tools not permitted by the active mode.
-        if !self.mode.allows_tool(tool_name) {
-            let reason = format!(
-                "Tool '{tool_name}' is not available in {} mode",
-                format!("{:?}", self.mode).to_lowercase()
-            );
-            let result =
-                crate::tools::ToolOutput::error(reason).into_tool_result(call_id, tool_name);
-            self.emit(AgentEvent::ToolExecutionEnd {
-                tool_call_id: call_id.to_string(),
-                result: result.clone(),
-            })
-            .await;
-            self.emit_recovery_checkpoint(Self::recovery_checkpoint(
-                turn,
-                RecoveryCheckpointKind::ToolExecutionEnd,
-                Some(call_id.to_string()),
-                Some(tool_name.to_string()),
-                Some(args_hash.clone()),
-                Some(false),
-                Some("mode_blocked".to_string()),
-            ))
-            .await;
-            return result;
-        }
-
-        if let Some(blocking_result) = before_results.into_iter().find(|result| result.block) {
-            let reason = blocking_result
-                .reason
-                .unwrap_or_else(|| format!("Tool call blocked by hook: {tool_name}"));
-            let result =
-                crate::tools::ToolOutput::error(reason).into_tool_result(call_id, tool_name);
-            self.emit(AgentEvent::ToolExecutionEnd {
-                tool_call_id: call_id.to_string(),
-                result: result.clone(),
-            })
-            .await;
-            self.emit_recovery_checkpoint(Self::recovery_checkpoint(
-                turn,
-                RecoveryCheckpointKind::ToolExecutionEnd,
-                Some(call_id.to_string()),
-                Some(tool_name.to_string()),
-                Some(args_hash.clone()),
-                Some(false),
-                Some("hook_blocked".to_string()),
-            ))
-            .await;
-            return result;
-        }
-
-        if tool_name == "bash" {
-            if let Some(command) = args.get("command").and_then(|v| v.as_str()) {
-                if let Some(hint) = mana_bash_equivalent_hint(command) {
-                    let result =
-                        crate::tools::ToolOutput::error(hint).into_tool_result(call_id, tool_name);
-                    self.emit(AgentEvent::ToolExecutionEnd {
-                        tool_call_id: call_id.to_string(),
-                        result: result.clone(),
-                    })
-                    .await;
-                    self.emit_recovery_checkpoint(Self::recovery_checkpoint(
-                        turn,
-                        RecoveryCheckpointKind::ToolExecutionEnd,
-                        Some(call_id.to_string()),
-                        Some(tool_name.to_string()),
-                        Some(args_hash.clone()),
-                        Some(false),
-                        Some("policy_blocked".to_string()),
-                    ))
-                    .await;
-                    return result;
-                }
-            }
-        }
-
-        // Validate args against the tool's JSON schema before execution so the
-        // model can self-correct on bad types or missing required fields.
-        if let Some(tool) = self.tools.get(tool_name) {
-            let schema = tool.parameters();
-            if let Err(e) = crate::tools::validate_tool_args(&schema, &args) {
-                let result = crate::tools::ToolOutput::error(e.to_string())
-                    .into_tool_result(call_id, tool_name);
-                self.emit(AgentEvent::ToolExecutionEnd {
-                    tool_call_id: call_id.to_string(),
-                    result: result.clone(),
-                })
-                .await;
-                self.emit_recovery_checkpoint(Self::recovery_checkpoint(
-                    turn,
-                    RecoveryCheckpointKind::ToolExecutionEnd,
-                    Some(call_id.to_string()),
-                    Some(tool_name.to_string()),
-                    Some(args_hash.clone()),
-                    Some(false),
-                    Some("validation_error".to_string()),
-                ))
-                .await;
-                return result;
-            }
-        }
-
-        let mut result = match self.tools.get(tool_name) {
-            Some(tool) => {
-                let (update_tx, mut update_rx) = mpsc::channel(64);
-                let ctx = crate::tools::ToolContext {
-                    cwd: self.cwd.clone(),
-                    cancelled: Arc::clone(&cancel_token),
-                    update_tx,
-                    command_tx: self.command_tx.clone(),
-                    ui: self.ui.clone(),
-                    file_cache: self.file_cache.clone(),
-                    checkpoint_state: self.checkpoint_state.clone(),
-                    file_tracker: self.file_tracker.clone(),
-                    anchor_store: self.anchor_store.clone(),
-                    lua_tool_loader: self.lua_tool_loader.clone(),
-                    mode: self.mode,
-                    read_max_lines: self.read_max_lines,
-                    turn_mana_review: self.turn_mana_review.clone(),
-                    config: self.config.clone(),
-                };
-
-                // Forward tool output deltas to event stream
-                let event_tx = self.event_tx.clone();
-                let delta_call_id = call_id.to_string();
-                let forwarder = tokio::spawn(async move {
-                    while let Some(update) = update_rx.recv().await {
-                        for block in &update.content {
-                            if let imp_llm::ContentBlock::Text { text } = block {
-                                let _ = event_tx
-                                    .send(AgentEvent::ToolOutputDelta {
-                                        tool_call_id: delta_call_id.clone(),
-                                        text: text.clone(),
-                                    })
-                                    .await;
-                            }
-                        }
-                    }
-                });
-
-                let exec_result = match tool.execute(call_id, args.clone(), ctx).await {
-                    Ok(output) => output.into_tool_result(call_id, tool_name),
-                    Err(e) => crate::tools::ToolOutput::error(e.to_string())
-                        .into_tool_result(call_id, tool_name),
-                };
-                forwarder.await.ok();
-                exec_result
-            }
-            None => crate::tools::ToolOutput::error(format!("Unknown tool: {tool_name}"))
-                .into_tool_result(call_id, tool_name),
-        };
-
-        let after_results = self
-            .hooks
-            .fire(&HookEvent::AfterToolCall {
-                tool_name,
-                result: &result,
-            })
-            .await;
-
-        if let Some(modified_content) = after_results
-            .into_iter()
-            .filter_map(|hook_result| hook_result.modified_content)
-            .next_back()
-        {
-            result.content = modified_content;
-        }
-
-        if !result.is_error && matches!(tool_name, "write" | "edit" | "multi_edit") {
-            if let Some(path) = extract_file_path(self.cwd.as_path(), &args) {
-                self.hooks
-                    .fire(&HookEvent::AfterFileWrite {
-                        file: path.as_path(),
-                    })
-                    .await;
-
-                // Run guardrail after-write checks when enabled
-                if let Some(profile) = self.guardrail_profile {
-                    if self.guardrail_config.should_check_path(&path) {
-                        let check_results = guardrails::run_after_write_checks(
-                            &self.guardrail_config,
-                            profile,
-                            &self.cwd,
-                        )
-                        .await;
-
-                        if !check_results.is_empty() {
-                            let level = self.guardrail_config.effective_level();
-                            let msg = guardrails::format_check_results(&check_results, level);
-                            if !msg.is_empty() && msg != "Guardrail checks passed." {
-                                // Append guardrail output to the tool result
-                                result.content.push(imp_llm::ContentBlock::Text {
-                                    text: format!("\n\n{msg}"),
-                                });
-                                if level == GuardrailLevel::Enforce
-                                    && check_results.iter().any(|r| !r.success)
-                                {
-                                    result.is_error = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        self.emit(AgentEvent::ToolExecutionEnd {
-            tool_call_id: call_id.to_string(),
-            result: result.clone(),
-        })
-        .await;
-        self.emit_timing_with_details(
-            turn,
-            TimingStage::ToolExecutionEnd,
-            turn_started_at,
-            None,
-            Some(tool_started_at.elapsed().as_millis() as u64),
-            Some(tool_name.to_string()),
-            Some(!result.is_error),
-        )
-        .await;
-
-        self.emit_recovery_checkpoint(Self::recovery_checkpoint(
-            turn,
-            RecoveryCheckpointKind::ToolExecutionEnd,
-            Some(call_id.to_string()),
-            Some(tool_name.to_string()),
-            Some(args_hash),
-            Some(!result.is_error),
-            result.is_error.then(|| "tool_error".to_string()),
-        ))
-        .await;
-
-        if let RepeatedToolCallCheck::Warn(warning) = repeat_check {
-            result.content.push(imp_llm::ContentBlock::Text {
-                text: format!("\n\n{warning}"),
-            });
-        }
-
-        result
-    }
-
     fn finish_turn_mana_review(&self, turn: u32) -> TurnManaReview {
         match self.turn_mana_review.lock() {
             Ok(review) => {
@@ -1806,32 +494,48 @@ fn should_queue_mana_externalization_follow_up(
     }
 
     let text = assistant_message_text(message);
-    if text.trim().is_empty() {
-        return false;
-    }
+    durable_mana_externalization_signal(&text)
+}
 
+fn durable_mana_externalization_signal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    let planning_signal = [
-        "plan",
-        "phase",
-        "rollout",
-        "decompose",
-        "break",
-        "split",
-        "architecture",
-        "migration",
-        "follow-up",
-        "next step",
-        "next steps",
+    let durable_state_signal = [
+        "acceptance",
+        "architecture decision",
+        "blocker",
+        "blocked by",
         "dependency",
         "dependencies",
-        "verify",
-        "acceptance",
+        "durable",
+        "follow-up work",
+        "handoff",
+        "migration",
+        "orchestration",
+        "parallel",
+        "phase 1",
+        "phase 2",
+        "verify gate",
+        "worker",
+        "workers",
     ]
     .iter()
     .any(|needle| lower.contains(needle));
 
-    planning_signal
+    let explicit_mana_signal = [
+        "create mana",
+        "create a mana",
+        "externalize",
+        "mana unit",
+        "mana units",
+        "record this",
+        "save this plan",
+        "split this into units",
+        "turn this into mana",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+
+    durable_state_signal || explicit_mana_signal
 }
 
 fn mana_externalization_follow_up_text() -> &'static str {
@@ -1911,6 +615,134 @@ fn confidence_continue_follow_up_text() -> &'static str {
 
 fn execution_debt_follow_up_text() -> &'static str {
     "You have recorded or planned work, but the requested outcome is not satisfied yet. Continue working until the user's requested outcome is satisfied, or until concrete evidence shows it cannot be completed. Do not stop merely because you recorded a plan, updated mana, or completed one intermediate step."
+}
+
+fn mana_result_action(result: &imp_llm::ToolResultMessage) -> Option<&str> {
+    if result.tool_name != "mana" {
+        return None;
+    }
+
+    result
+        .details
+        .get("action")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            result
+                .details
+                .get("mana_loop_policy")
+                .and_then(|policy| policy.get("action"))
+                .and_then(|value| value.as_str())
+        })
+}
+
+fn mana_review_scope_from_result(result: &imp_llm::ToolResultMessage) -> ManaReviewScope {
+    let display = result
+        .details
+        .get("path")
+        .or_else(|| result.details.get("mana_dir"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("auto")
+        .to_string();
+
+    ManaReviewScope {
+        kind: if display == "auto" {
+            ManaReviewScopeKind::None
+        } else {
+            ManaReviewScopeKind::ExplicitPath
+        },
+        display,
+    }
+}
+
+fn unit_snapshot_from_value(value: &serde_json::Value) -> Option<ManaUnitSnapshot> {
+    serde_json::from_value(value.clone()).ok()
+}
+
+fn unit_snapshot_from_result(result: &imp_llm::ToolResultMessage) -> Option<ManaUnitSnapshot> {
+    result
+        .details
+        .get("unit")
+        .and_then(unit_snapshot_from_value)
+}
+
+fn mana_mutation_action(action: &str) -> Option<ManaMutationAction> {
+    match action {
+        "create" => Some(ManaMutationAction::Create),
+        "close" => Some(ManaMutationAction::Close),
+        "update" => Some(ManaMutationAction::Update),
+        "notes_append" => Some(ManaMutationAction::NotesAppend),
+        "decision_add" => Some(ManaMutationAction::DecisionAdd),
+        "decision_resolve" => Some(ManaMutationAction::DecisionResolve),
+        "reopen" => Some(ManaMutationAction::Reopen),
+        "fail" => Some(ManaMutationAction::Fail),
+        "delete" => Some(ManaMutationAction::Delete),
+        "dep_add" => Some(ManaMutationAction::DepAdd),
+        "dep_remove" => Some(ManaMutationAction::DepRemove),
+        "fact_create" => Some(ManaMutationAction::FactCreate),
+        _ => None,
+    }
+}
+
+fn mutation_record_from_mana_result(
+    result: &imp_llm::ToolResultMessage,
+) -> Option<ManaMutationRecord> {
+    if result.is_error || result.tool_name != "mana" {
+        return None;
+    }
+
+    let action_name = mana_result_action(result)?;
+    let action = mana_mutation_action(action_name)?;
+    let after_unit = unit_snapshot_from_result(result);
+    let deleted_unit = if action == ManaMutationAction::Delete {
+        let id = result.details.get("id")?.as_str()?.to_string();
+        let title = result
+            .details
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or(&id)
+            .to_string();
+        Some(crate::mana_review::ManaUnitRef::new(id, title, None))
+    } else {
+        None
+    };
+
+    if after_unit.is_none()
+        && deleted_unit.is_none()
+        && !matches!(
+            action,
+            ManaMutationAction::DepAdd | ManaMutationAction::DepRemove
+        )
+    {
+        return None;
+    }
+
+    Some(ManaMutationRecord {
+        action,
+        scope: mana_review_scope_from_result(result),
+        before_unit: None,
+        after_unit,
+        deleted_unit,
+        parent_unit: None,
+        related_unit: None,
+        field_changes: Vec::new(),
+        notes_appended: Vec::new(),
+        decision_events: Vec::new(),
+    })
+}
+
+fn record_mana_mutation_results(
+    turn_mana_review: &std::sync::Arc<std::sync::Mutex<TurnManaReviewAccumulator>>,
+    tool_results: &[imp_llm::ToolResultMessage],
+) {
+    let Ok(mut review) = turn_mana_review.lock() else {
+        return;
+    };
+
+    for result in tool_results {
+        if let Some(record) = mutation_record_from_mana_result(result) {
+            review.push(record);
+        }
+    }
 }
 
 fn tool_results_indicate_repeated_action(tool_results: &[imp_llm::ToolResultMessage]) -> bool {
@@ -2001,10 +833,18 @@ fn tool_results_indicate_execution_debt(
     tool_results.iter().any(|result| {
         !result.is_error
             && result.tool_name == "mana"
-            && matches!(
-                result.details.get("action").and_then(|v| v.as_str()),
-                Some("create" | "update" | "notes_append" | "decision_add" | "dep_add" | "claim")
-            )
+            && result
+                .details
+                .get("action")
+                .and_then(|v| v.as_str())
+                .is_some_and(|action| {
+                    matches!(
+                        mana_loop::classify_mana_action(action),
+                        mana_loop::ManaActionClass::ProgressCheckpoint
+                            | mana_loop::ManaActionClass::GraphMutation
+                            | mana_loop::ManaActionClass::DecisionFact
+                    )
+                })
     })
 }
 
@@ -2027,10 +867,17 @@ fn tool_results_indicate_execution_evidence(
         match result.tool_name.as_str() {
             "write" | "edit" | "multi_edit" | "openrouter_secret_run" => true,
             "bash" | "shell" => true,
-            "mana" => matches!(
-                result.details.get("action").and_then(|v| v.as_str()),
-                Some("run" | "verify" | "close" | "fail")
-            ),
+            "mana" => result
+                .details
+                .get("action")
+                .and_then(|v| v.as_str())
+                .is_some_and(|action| {
+                    matches!(
+                        mana_loop::classify_mana_action(action),
+                        mana_loop::ManaActionClass::Lifecycle
+                            | mana_loop::ManaActionClass::Orchestration
+                    )
+                }),
             _ => false,
         }
     })

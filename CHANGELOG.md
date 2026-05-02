@@ -18,6 +18,7 @@ Use this section for changes that have landed on `main` after the 0.1.3 draft.
 - Added mana `guide` and `template` actions so agents can inspect task/epic/decision/verify/orchestration guidance from the native mana tool.
 - Added validation hints to mana actions to make schema errors and missing arguments easier for agents to recover from.
 - Added skill-provided slash command discovery and command-palette display for Lua slash commands.
+- Added `/update-imp` as the local Lua updater command for bumping, pushing, installing, and verifying nightly imp builds.
 
 ### Changed
 
@@ -25,6 +26,7 @@ Use this section for changes that have landed on `main` after the 0.1.3 draft.
 - Simplified `git`, `scan`, `edit`, and related tool schemas and metadata so agents receive cleaner, more bounded tool interfaces.
 - Made anchored edits a first-class edit mode and added explicit line-range support to `read`.
 - Made TUI `/compact` run asynchronously with visible progress instead of blocking the interface.
+- Made Lua slash commands run with the same background progress interaction as `/compact` instead of blocking the TUI.
 - Strengthened mana worker context assembly and improved mana unit closure reliability after implementation.
 - Switched project licensing metadata and repository license text to MPL-2.0.
 
@@ -34,6 +36,8 @@ Use this section for changes that have landed on `main` after the 0.1.3 draft.
 - Added clearer write overwrite behavior without expanding the write schema surface.
 - Removed stale spawn references after the helper-agent redesign.
 - Improved prompt wrapping, selected-tool indicators, tool-call inspector styling, and startup version display in the TUI.
+- Deduplicated Lua extension loading and startup command surfacing so commands such as `/update-imp` appear once.
+- Fixed Lua command reload policy handling and argument execution so reloaded extensions preserve configured capabilities and pass argv without shell joining.
 
 ### Documentation
 
