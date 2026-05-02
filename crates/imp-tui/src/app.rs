@@ -8,69 +8,69 @@ use std::time::{Duration, Instant};
 use imp_core::format_error_for_display;
 use imp_core::ui::WidgetContent;
 
-use imp_lua::loader::discover_extensions;
 use imp_lua::LuaRuntime;
+use imp_lua::loader::discover_extensions;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use imp_core::Error as ImpCoreError;
 use imp_core::agent::{AgentCommand, AgentEvent, AgentHandle};
 use imp_core::builder::AgentBuilder;
 use imp_core::compaction::{
-    execute_compaction_with_retry, execute_manual_compaction, prepare_messages_for_compaction,
-    select_compaction_strategy, CompactionCapabilities, CompactionStrategy,
-    COMPACTION_SUMMARY_PREFIX, DEFAULT_KEEP_RECENT_GROUPS,
+    COMPACTION_SUMMARY_PREFIX, CompactionCapabilities, CompactionStrategy,
+    DEFAULT_KEEP_RECENT_GROUPS, execute_compaction_with_retry, execute_manual_compaction,
+    prepare_messages_for_compaction, select_compaction_strategy,
 };
 use imp_core::config::Config;
 use imp_core::personality::default_soul_markdown;
 use imp_core::session::{SessionEntry, SessionManager};
-use imp_core::Error as ImpCoreError;
 use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelMeta, ModelRegistry, ProviderRegistry};
 use imp_llm::providers::create_provider;
 use imp_llm::{
-    truncate_chars_with_suffix, Cost, Message, Model, StreamEvent, ThinkingLevel, Usage,
+    Cost, Message, Model, StreamEvent, ThinkingLevel, Usage, truncate_chars_with_suffix,
 };
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::Clear;
-use ratatui::Frame;
 
-use crate::animation::{spinner_frame, AnimationState};
+use crate::animation::{AnimationState, spinner_frame};
 use crate::highlight::Highlighter;
 use crate::keybindings::{self, Action};
 use crate::selection::{
-    extract_selected_text, SelectablePane, SelectionOverlay, SelectionState, TextSurface,
+    SelectablePane, SelectionOverlay, SelectionState, TextSurface, extract_selected_text,
 };
-use crate::terminal::{ring_terminal_bell, set_window_title, InteractiveTerminal};
+use crate::terminal::{InteractiveTerminal, ring_terminal_bell, set_window_title};
 use crate::theme::Theme;
 use crate::turn_tracker::TurnTracker;
 use crate::views::ask_bar::AskState;
 use crate::views::chat::{
-    build_chat_render_data, build_click_map, build_text_surface_from_lines,
-    clamped_scroll_offset_for_total_lines, DisplayMessage, MessageRole, RenderedChatView,
+    DisplayMessage, MessageRole, RenderedChatView, build_chat_render_data, build_click_map,
+    build_text_surface_from_lines, clamped_scroll_offset_for_total_lines,
 };
 use crate::views::command_palette::{
-    builtin_commands, merge_extension_commands, merge_skill_commands, CommandPaletteState,
-    CommandPaletteView,
+    CommandPaletteState, CommandPaletteView, builtin_commands, merge_extension_commands,
+    merge_skill_commands,
 };
 use crate::views::editor::{EditorState, EditorView};
-use crate::views::file_finder::{collect_project_files, FileFinderState, FileFinderView};
-use crate::views::login_picker::{login_providers, LoginPickerState, LoginPickerView};
+use crate::views::file_finder::{FileFinderState, FileFinderView, collect_project_files};
+use crate::views::login_picker::{LoginPickerState, LoginPickerView, login_providers};
 use crate::views::model_selector::{ModelSelection, ModelSelectorState, ModelSelectorView};
 use crate::views::personality::{PersonalityScope, PersonalityState, PersonalityView};
-use crate::views::secrets_picker::{secret_providers, SecretsPickerState, SecretsPickerView};
+use crate::views::secrets_picker::{SecretsPickerState, SecretsPickerView, secret_providers};
 use crate::views::session_picker::{SessionPickerState, SessionPickerView};
 use crate::views::settings::{SettingsState, SettingsView};
 use crate::views::sidebar::{
-    build_detail_render_data, build_detail_text_surface_from_plain_lines, build_stream_lines,
-    sidebar_sub_areas, Sidebar, SidebarDetailRenderData, SidebarView,
+    Sidebar, SidebarDetailRenderData, SidebarView, build_detail_render_data,
+    build_detail_text_surface_from_plain_lines, build_stream_lines, sidebar_sub_areas,
 };
 use crate::views::startup::{
-    summarize_inline, StartupAction, StartupPanelData, StartupPanelView, StartupSection,
+    StartupAction, StartupPanelData, StartupPanelView, StartupSection, summarize_inline,
 };
 use crate::views::status::StatusInfo;
 use crate::views::tools::DisplayToolCall;
-use crate::views::tree::{flatten_tree, TreeView, TreeViewState};
-use crate::views::welcome::{needs_welcome, WelcomeState, WelcomeStep, WelcomeView};
+use crate::views::tree::{TreeView, TreeViewState, flatten_tree};
+use crate::views::welcome::{WelcomeState, WelcomeStep, WelcomeView, needs_welcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
@@ -304,6 +304,7 @@ pub struct App {
     completed_turns_in_run: u32,
     suppress_completion_notification: bool,
     pub ui_rx: Option<tokio::sync::mpsc::Receiver<crate::tui_interface::UiRequest>>,
+    lua_command_ui: Option<Arc<dyn imp_core::ui::UserInterface>>,
     pub ask_state: Option<crate::views::ask_bar::AskState>,
     pub ask_reply: Option<AskReply>,
     secrets_flow: Option<SecretsFlowState>,
@@ -620,6 +621,7 @@ impl App {
             completed_turns_in_run: 0,
             suppress_completion_notification: false,
             ui_rx: None,
+            lua_command_ui: None,
             ask_state: None,
             ask_reply: None,
             secrets_flow: None,
@@ -3002,7 +3004,9 @@ impl App {
 
         // Wire TuiInterface so the ask tool works
         let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(16);
-        agent.ui = crate::tui_interface::TuiInterface::new(ui_tx);
+        let tui_ui = crate::tui_interface::TuiInterface::new(ui_tx);
+        agent.ui = tui_ui.clone();
+        self.lua_command_ui = Some(tui_ui);
         self.ui_rx = Some(ui_rx);
 
         // Apply max_turns override from CLI
@@ -3792,6 +3796,33 @@ impl App {
         }
     }
 
+    fn lua_command_call_context(&self) -> imp_lua::LuaCallContext {
+        let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
+        let (command_tx, _command_rx) = tokio::sync::mpsc::channel(16);
+        let ui: Arc<dyn imp_core::ui::UserInterface> = self
+            .lua_command_ui
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::new(imp_core::ui::NullInterface));
+        imp_lua::LuaCallContext {
+            cwd: self.cwd.clone(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx,
+            command_tx,
+            ui,
+            file_cache: Arc::new(imp_core::tools::FileCache::new()),
+            checkpoint_state: Arc::new(imp_core::tools::CheckpointState::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(
+                imp_core::tools::FileTracker::default(),
+            )),
+            anchor_store: Arc::new(imp_core::tools::AnchorStore::new()),
+            lua_tool_loader: None,
+            mode: imp_core::config::AgentMode::Full,
+            read_max_lines: self.config.ui.read_max_lines,
+            config: Arc::new(self.config.clone()),
+        }
+    }
+
     /// Try to dispatch a slash command to a Lua extension handler.
     /// Returns `true` if a matching Lua command was found and executed.
     fn try_lua_command(&mut self, cmd: &str) -> bool {
@@ -3814,7 +3845,8 @@ impl App {
         }
 
         // Execute via LuaRuntime's helper (keeps mlua types internal)
-        let result = guard.execute_command(cmd_name, args);
+        let call_ctx = self.lua_command_call_context();
+        let result = guard.execute_command_with_context(cmd_name, args, Some(call_ctx));
         drop(guard);
 
         match result {
@@ -5751,9 +5783,9 @@ mod session_lifecycle {
     use super::*;
     use imp_core::config::Config;
     use imp_core::session::{SessionEntry, SessionManager};
+    use imp_llm::ThinkingLevel;
     use imp_llm::auth::{AuthStore, OAuthCredential, StoredCredential};
     use imp_llm::model::ModelRegistry;
-    use imp_llm::ThinkingLevel;
     use imp_llm::{AssistantMessage, ContentBlock, StopReason};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
@@ -6028,11 +6060,12 @@ mod session_lifecycle {
         app.editor.set_content("!! pwd");
         app.send_message();
         assert!(app.session.get_messages().is_empty());
-        assert!(app
-            .messages
-            .last()
-            .map(|message| message.content.contains(child.to_string_lossy().as_ref()))
-            .unwrap_or(false));
+        assert!(
+            app.messages
+                .last()
+                .map(|message| message.content.contains(child.to_string_lossy().as_ref()))
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -6087,9 +6120,11 @@ mod session_lifecycle {
 
         let commands = app.slash_commands();
 
-        assert!(commands
-            .iter()
-            .any(|cmd| cmd.name == "explain-code" && cmd.description.contains("Skill:")));
+        assert!(
+            commands
+                .iter()
+                .any(|cmd| cmd.name == "explain-code" && cmd.description.contains("Skill:"))
+        );
     }
 
     #[test]
@@ -6284,12 +6319,13 @@ mod session_lifecycle {
         let mut app = make_app();
         // /mouse is no longer a recognized command — it should fall through to unknown
         app.execute_command("mouse");
-        assert!(app
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("Unknown command"));
+        assert!(
+            app.messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Unknown command")
+        );
     }
 
     #[test]
@@ -6330,9 +6366,11 @@ mod session_lifecycle {
         let commands = app.slash_commands();
 
         assert!(commands.iter().any(|cmd| cmd.name == "new"));
-        assert!(commands
-            .iter()
-            .any(|cmd| cmd.name == "greet" && cmd.description == "Say hello from Lua"));
+        assert!(
+            commands
+                .iter()
+                .any(|cmd| cmd.name == "greet" && cmd.description == "Say hello from Lua")
+        );
     }
 
     #[test]
@@ -7167,12 +7205,13 @@ mod session_lifecycle {
         app.handle_normal_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
             .unwrap();
 
-        assert!(app
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("No read file selected"));
+        assert!(
+            app.messages
+                .last()
+                .unwrap()
+                .content
+                .contains("No read file selected")
+        );
     }
 
     #[test]
@@ -7276,12 +7315,13 @@ mod session_lifecycle {
 
         app.handle_normal_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
             .unwrap();
-        assert!(app
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("Copied selection"));
+        assert!(
+            app.messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Copied selection")
+        );
     }
 
     #[test]
@@ -7302,12 +7342,13 @@ mod session_lifecycle {
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER))
             .unwrap();
 
-        assert!(app
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("Copied selection"));
+        assert!(
+            app.messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Copied selection")
+        );
         assert_eq!(app.ctrl_c_count, 0);
     }
 

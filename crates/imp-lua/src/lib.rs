@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use imp_core::config::LuaCapabilityPolicy;
 use imp_core::tools::ToolRegistry;
 
-pub use bridge::{json_to_lua_value, load_lua_tools, lua_value_to_json, setup_host_api, LuaTool};
-pub use loader::{discover_extensions, load_extensions, reload, LuaExtension};
+pub use bridge::{LuaTool, json_to_lua_value, load_lua_tools, lua_value_to_json, setup_host_api};
+pub use loader::{LuaExtension, discover_extensions, load_extensions, reload};
 pub use sandbox::{
     LuaCallContext, LuaCommandHandle, LuaError, LuaHookHandle, LuaRuntime, LuaToolHandle,
 };
@@ -132,18 +132,26 @@ mod tests {
             .expect("runtime should initialize");
         let guard = runtime.lock().unwrap();
 
-        assert!(!guard
-            .allow_native_tool_calls()
-            .load(std::sync::atomic::Ordering::Relaxed));
-        assert!(guard
-            .allow_shell_exec()
-            .load(std::sync::atomic::Ordering::Relaxed));
-        assert!(guard
-            .allow_http()
-            .load(std::sync::atomic::Ordering::Relaxed));
-        assert!(guard
-            .allow_secrets()
-            .load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            !guard
+                .allow_native_tool_calls()
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        assert!(
+            guard
+                .allow_shell_exec()
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        assert!(
+            guard
+                .allow_http()
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        assert!(
+            guard
+                .allow_secrets()
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
         assert!(guard.allowed_env().lock().unwrap().contains("ALLOWED_ONE"));
     }
 
@@ -501,6 +509,64 @@ mod tests {
 
         let is_nil: bool = rt.lua().globals().get("_is_nil").unwrap();
         assert!(is_nil);
+    }
+
+    // ── imp.ui ─────────────────────────────────────────────────
+
+    #[test]
+    fn imp_ui_confirm_returns_nil_without_call_context() {
+        let rt = make_runtime();
+        rt.exec(
+            r#"
+            _confirm_result = imp.ui.confirm("Proceed?", "No UI should be unavailable")
+            _is_nil = (_confirm_result == nil)
+        "#,
+        )
+        .unwrap();
+
+        let is_nil: bool = rt.lua().globals().get("_is_nil").unwrap();
+        assert!(is_nil);
+    }
+
+    #[test]
+    fn imp_ui_request_reports_unavailable_without_call_context() {
+        let rt = make_runtime();
+        rt.exec(
+            r#"
+            _ui_result = imp.ui.request({ kind = "confirm", title = "Proceed?" })
+        "#,
+        )
+        .unwrap();
+
+        let result: mlua::Table = rt.lua().globals().get("_ui_result").unwrap();
+        let ok: bool = result.get("ok").unwrap();
+        let reason: String = result.get("reason").unwrap();
+        assert!(!ok);
+        assert_eq!(reason, "unavailable");
+    }
+
+    #[test]
+    fn lua_command_can_call_imp_ui_confirm_safely_headless() {
+        let rt = make_runtime();
+        rt.exec(
+            r#"
+            imp.register_command("confirm-test", {
+                handler = function(args)
+                    local yes = imp.ui.confirm("Proceed?", args)
+                    if yes == nil then
+                        return "unavailable"
+                    end
+                    return tostring(yes)
+                end
+            })
+        "#,
+        )
+        .unwrap();
+
+        let output = rt
+            .execute_command_with_context("confirm-test", "headless", Some(test_ctx().into()))
+            .unwrap();
+        assert_eq!(output.as_deref(), Some("unavailable"));
     }
 
     // ── Hot reload ──────────────────────────────────────────────
