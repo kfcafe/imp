@@ -27,6 +27,10 @@ pub async fn search(
         SearchProvider::Exa => exa_search(client, &api_key, query, max_results).await,
         SearchProvider::Linkup => linkup_search(client, &api_key, query, max_results).await,
         SearchProvider::Perplexity => perplexity_search(client, &api_key, query, max_results).await,
+        SearchProvider::GitHub => Err(SearchError::Api(
+            "GitHub search is selected with web.search sources=['github'], not as a web search provider"
+                .to_string(),
+        )),
     }?;
 
     Ok(response)
@@ -104,6 +108,9 @@ async fn tavily_search(
                     url: r["url"].as_str().unwrap_or("").to_string(),
                     snippet: r["content"].as_str().map(String::from),
                     date: None,
+                    source_type: None,
+                    kind: None,
+                    metadata: None,
                 })
                 .collect()
         })
@@ -163,6 +170,9 @@ async fn exa_search(
                     url: r["url"].as_str().unwrap_or("").to_string(),
                     snippet: r["text"].as_str().map(|t| truncate(t, 500)),
                     date: r["publishedDate"].as_str().map(String::from),
+                    source_type: None,
+                    kind: None,
+                    metadata: None,
                 })
                 .collect()
         })
@@ -226,6 +236,9 @@ async fn linkup_search(
                     url: r["url"].as_str().unwrap_or("").to_string(),
                     snippet: r["snippet"].as_str().map(String::from),
                     date: None,
+                    source_type: None,
+                    kind: None,
+                    metadata: None,
                 })
                 .collect()
         })
@@ -286,6 +299,9 @@ async fn perplexity_search(
                     url: r["url"].as_str().unwrap_or("").to_string(),
                     snippet: r["snippet"].as_str().map(String::from),
                     date: r["date"].as_str().map(String::from),
+                    source_type: None,
+                    kind: None,
+                    metadata: None,
                 })
                 .collect()
         })

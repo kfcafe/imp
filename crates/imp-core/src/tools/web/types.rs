@@ -28,6 +28,7 @@ pub enum SearchProvider {
     Exa,
     Linkup,
     Perplexity,
+    GitHub,
 }
 
 impl SearchProvider {
@@ -37,6 +38,7 @@ impl SearchProvider {
             Self::Exa => "EXA_API_KEY",
             Self::Linkup => "LINKUP_API_KEY",
             Self::Perplexity => "PERPLEXITY_API_KEY",
+            Self::GitHub => "GITHUB_TOKEN",
         }
     }
 
@@ -46,6 +48,7 @@ impl SearchProvider {
             Self::Exa => "exa",
             Self::Linkup => "linkup",
             Self::Perplexity => "perplexity",
+            Self::GitHub => "github",
         }
     }
 }
@@ -57,6 +60,12 @@ pub struct SearchResult {
     pub url: String,
     pub snippet: Option<String>,
     pub date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Response from a search provider.

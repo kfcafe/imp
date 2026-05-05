@@ -202,7 +202,7 @@ fn validate_url(url: &str) -> Result<Url, ReadError> {
         scheme => {
             return Err(ReadError::UnsafeUrl(format!(
                 "unsupported URL scheme: {scheme}"
-            )))
+            )));
         }
     }
 

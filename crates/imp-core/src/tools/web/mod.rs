@@ -1,7 +1,7 @@
 //! Web tool — search the web and read pages.
 //!
 //! Single tool with two actions:
-//! - `search`: query a search API (Tavily, Exa, Linkup, or Perplexity)
+//! - `search`: query a search API (Tavily, Exa, Linkup, or Perplexity), or GitHub when `sources` includes `github`
 //! - `read`: fetch a URL and extract readable content natively
 //!
 //! Search provider is config-driven (`[web] search_provider = "tavily"`).
@@ -11,6 +11,8 @@ pub mod read;
 pub mod search;
 pub mod types;
 pub mod youtube;
+
+mod github;
 
 use async_trait::async_trait;
 use imp_llm::ContentBlock;
@@ -61,7 +63,26 @@ impl Tool for WebTool {
                 "action": { "type": "string", "enum": ["search", "read"] },
                 "query": { "type": "string" },
                 "url": { "type": "string" },
-                "max_results": { "type": "integer", "minimum": 1, "maximum": 20 }
+                "max_results": { "type": "integer", "minimum": 1, "maximum": 20 },
+                "sources": {
+                    "type": "array",
+                    "items": { "type": "string", "enum": ["web", "github"] },
+                    "description": "Optional search source. Use ['github'] for read-only GitHub repository search."
+                },
+                "github": {
+                    "type": "object",
+                    "properties": {
+                        "type": { "type": "string", "enum": ["repositories", "issues", "pull_requests", "code", "releases"] },
+                        "owner": { "type": "string" },
+                        "repo": { "type": "string" },
+                        "org": { "type": "string" },
+                        "language": { "type": "string" },
+                        "topic": { "type": "string" },
+                        "min_stars": { "type": "integer", "minimum": 0 },
+                        "updated_since": { "type": "string", "description": "ISO date such as 2025-01-01" }
+                    },
+                    "additionalProperties": false
+                }
             },
             "required": ["action"]
         })
@@ -93,6 +114,31 @@ async fn execute_search(params: serde_json::Value, ctx: &ToolContext) -> Result<
     };
 
     let max_results = max_results_from_params(&params);
+
+    if should_search_github(&params) {
+        let response =
+            match github::search(http_client(), query, max_results, params.get("github")).await {
+                Ok(resp) => resp,
+                Err(e) => return Ok(ToolOutput::error(e.to_string())),
+            };
+
+        return Ok(ToolOutput {
+            content: vec![ContentBlock::Text {
+                text: truncate_output(format_search_response(&response, query)),
+            }],
+            details: json!({
+                "action": "search",
+                "source": "github",
+                "provider": response.provider.name(),
+                "query": query,
+                "max_results": max_results,
+                "results_count": response.results.len(),
+                "has_answer": response.answer.is_some(),
+                "results": response.results,
+            }),
+            is_error: false,
+        });
+    }
 
     let provider = resolve_provider(&params, ctx);
 
@@ -126,6 +172,19 @@ fn max_results_from_params(params: &serde_json::Value) -> usize {
         .map(|n| n as usize)
         .unwrap_or(5)
         .clamp(1, 20)
+}
+
+fn should_search_github(params: &serde_json::Value) -> bool {
+    params
+        .get("sources")
+        .and_then(|value| value.as_array())
+        .is_some_and(|sources| {
+            sources.iter().any(|source| {
+                source
+                    .as_str()
+                    .is_some_and(|s| s.eq_ignore_ascii_case("github"))
+            })
+        })
 }
 
 fn resolve_provider(_params: &serde_json::Value, ctx: &ToolContext) -> SearchProvider {
@@ -201,6 +260,35 @@ async fn execute_read(params: serde_json::Value) -> Result<ToolOutput> {
         Some(u) if !u.is_empty() => u,
         _ => return Ok(ToolOutput::error("web read requires url")),
     };
+
+    if github::is_github_url(url) {
+        let gh = match github::read_url(http_client(), url).await {
+            Ok(read) => read,
+            Err(e) => return Ok(ToolOutput::error(e.to_string())),
+        };
+        let mut output = format!(
+            "# {}\nURL: {}\nSource: GitHub ({})\n\n---\n\n",
+            gh.title, gh.url, gh.kind
+        );
+        output.push_str("<web_content>\n");
+        output.push_str(&gh.text);
+        output.push_str("\n</web_content>");
+        return Ok(ToolOutput {
+            content: vec![ContentBlock::Text {
+                text: truncate_output(output),
+            }],
+            details: json!({
+                "action": "read",
+                "source": "github",
+                "kind": gh.kind,
+                "title": gh.title,
+                "url": gh.url,
+                "content_length": gh.text.len(),
+                "github": gh.details,
+            }),
+            is_error: false,
+        });
+    }
 
     let page = match read::fetch_and_extract(http_client(), url).await {
         Ok(page) => page,
@@ -380,6 +468,9 @@ mod tests {
                 url: "https://rust-lang.org".into(),
                 snippet: Some("A systems programming language".into()),
                 date: None,
+                source_type: None,
+                kind: None,
+                metadata: None,
             }],
             answer: Some("Rust is a systems programming language.".into()),
             provider: SearchProvider::Tavily,
