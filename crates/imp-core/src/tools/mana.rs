@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -7,14 +7,16 @@ use mana::commands::agents::{agents_file_path, load_agents};
 use mana::commands::logs::find_all_logs;
 use mana::commands::next::ScoredUnit;
 use mana::commands::run::{NativeRunParams, RunSummary, RunTarget, RunUnitStatus, RunView};
-use mana::stream::StreamEvent;
+use mana::stream::{self, StreamEvent};
 use mana_core::ops::claim::ClaimParams;
+use mana_core::ops::run as mana_run_core;
 use mana_core::unit::{OnFailAction, UnitType};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{truncate_head, Tool, ToolContext, ToolOutput, ToolUpdate};
 use crate::error::Result;
+use crate::mana_worker::{self, WorkerRunOptions, WorkerStatus};
 use crate::ui::{NotifyLevel, WidgetContent};
 const MAX_OUTPUT_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
@@ -1304,6 +1306,353 @@ fn background_run_started_output(
     }
 }
 
+fn runtime_info_for_run(
+    args: &NativeRunParams,
+    ctx: &ToolContext,
+) -> mana::commands::run::RunRuntimeInfo {
+    mana::commands::run::RunRuntimeInfo {
+        direct_agent: Some("imp".to_string()),
+        model: args.run_model.clone().or_else(|| ctx.config.model.clone()),
+    }
+}
+
+fn stream_runtime_info_for_run(
+    args: &NativeRunParams,
+    ctx: &ToolContext,
+) -> stream::RunRuntimeInfo {
+    runtime_info_for_run(args, ctx).into()
+}
+
+fn core_target_from_native(target: &RunTarget) -> mana_run_core::RunTarget {
+    match target {
+        RunTarget::AllReady => mana_run_core::RunTarget::AllReady,
+        RunTarget::Unit(id) => mana_run_core::RunTarget::Unit(id.clone()),
+        RunTarget::Explicit(ids) => mana_run_core::RunTarget::Explicit(ids.clone()),
+    }
+}
+
+fn mana_workspace_root(mana_dir: &Path, fallback: &Path) -> PathBuf {
+    mana_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| fallback.to_path_buf())
+}
+
+fn parse_run_thinking(value: Option<&str>) -> Option<imp_llm::ThinkingLevel> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        "off" => Some(imp_llm::ThinkingLevel::Off),
+        "minimal" => Some(imp_llm::ThinkingLevel::Minimal),
+        "low" => Some(imp_llm::ThinkingLevel::Low),
+        "medium" => Some(imp_llm::ThinkingLevel::Medium),
+        "high" => Some(imp_llm::ThinkingLevel::High),
+        "xhigh" => Some(imp_llm::ThinkingLevel::XHigh),
+        _ => None,
+    }
+}
+
+fn thinking_to_run_string(value: Option<imp_llm::ThinkingLevel>) -> Option<String> {
+    value.map(|level| {
+        match level {
+            imp_llm::ThinkingLevel::Off => "off",
+            imp_llm::ThinkingLevel::Minimal => "minimal",
+            imp_llm::ThinkingLevel::Low => "low",
+            imp_llm::ThinkingLevel::Medium => "medium",
+            imp_llm::ThinkingLevel::High => "high",
+            imp_llm::ThinkingLevel::XHigh => "xhigh",
+        }
+        .to_string()
+    })
+}
+
+#[derive(Debug)]
+struct DirectUnitOutcome {
+    event: StreamEvent,
+    status: RunUnitStatus,
+}
+
+async fn run_direct_unit(
+    unit: mana_run_core::ReadyUnit,
+    round: usize,
+    mana_dir: PathBuf,
+    workspace_root: PathBuf,
+    run_args: NativeRunParams,
+    ctx: ToolContext,
+) -> DirectUnitOutcome {
+    let started = Instant::now();
+    let assignment = match mana_worker::load_assignment_with_mana_dir(
+        &workspace_root,
+        &unit.id,
+        Some(&mana_dir),
+    ) {
+        Ok(assignment) => assignment,
+        Err(error) => {
+            let error = error.to_string();
+            return DirectUnitOutcome {
+                event: StreamEvent::UnitDone {
+                    id: unit.id.clone(),
+                    success: false,
+                    duration_secs: started.elapsed().as_secs(),
+                    error: Some(error.clone()),
+                    total_tokens: None,
+                    total_cost: None,
+                    tool_count: None,
+                    turns: None,
+                    failure_summary: Some(error.clone()),
+                },
+                status: RunUnitStatus {
+                    id: unit.id,
+                    title: unit.title,
+                    status: "failed".to_string(),
+                    round: Some(round),
+                    agent: Some("imp".to_string()),
+                    model: None,
+                    duration_secs: Some(started.elapsed().as_secs()),
+                    tool_count: None,
+                    turns: None,
+                    failure_summary: Some(error.clone()),
+                    error: Some(error),
+                },
+            };
+        }
+    };
+    let options = WorkerRunOptions {
+        cwd: workspace_root,
+        model_override: None,
+        model: unit
+            .model
+            .clone()
+            .or_else(|| run_args.run_model.clone())
+            .or_else(|| ctx.config.model.clone()),
+        provider: None,
+        api_key: None,
+        thinking: parse_run_thinking(run_args.run_thinking.as_deref()).or(ctx.config.thinking),
+        max_turns: Some(run_args.timeout),
+        max_tokens: None,
+        system_prompt: None,
+        no_tools: false,
+        mana_dir_override: Some(mana_dir),
+        defer_verify: false,
+        lua_loader: ctx.lua_tool_loader.clone(),
+    };
+    let outcome = mana_worker::run_worker_assignment(assignment, options).await;
+    let duration_secs = started.elapsed().as_secs();
+    let (success, error, tool_count, turns, failure_summary, model) = match outcome {
+        Ok(outcome) => {
+            let success = matches!(
+                outcome.result.status,
+                WorkerStatus::Completed | WorkerStatus::AwaitingVerify
+            );
+            (
+                success,
+                outcome.result.error.clone(),
+                Some(outcome.result.tool_count),
+                Some(outcome.result.turns),
+                outcome.result.summary.clone(),
+                outcome.result.model.clone(),
+            )
+        }
+        Err(error) => {
+            let error = error.to_string();
+            (false, Some(error.clone()), None, None, Some(error), None)
+        }
+    };
+    let status = RunUnitStatus {
+        id: unit.id.clone(),
+        title: unit.title,
+        status: if success { "done" } else { "failed" }.to_string(),
+        round: Some(round),
+        agent: Some("imp".to_string()),
+        model,
+        duration_secs: Some(duration_secs),
+        tool_count,
+        turns,
+        failure_summary: failure_summary.clone(),
+        error: error.clone(),
+    };
+    DirectUnitOutcome {
+        event: StreamEvent::UnitDone {
+            id: unit.id,
+            success,
+            duration_secs,
+            error,
+            total_tokens: None,
+            total_cost: None,
+            tool_count,
+            turns,
+            failure_summary,
+        },
+        status,
+    }
+}
+
+async fn run_native_imp_orchestration(
+    mana_dir: PathBuf,
+    run_args: NativeRunParams,
+    ctx: ToolContext,
+    run_store: Arc<std::sync::Mutex<ManaRunStore>>,
+    run_id: String,
+) -> std::result::Result<RunView, String> {
+    let started = Instant::now();
+    let runtime = runtime_info_for_run(&run_args, &ctx);
+    let stream_runtime = stream_runtime_info_for_run(&run_args, &ctx);
+    let core_target = core_target_from_native(&run_args.target);
+    let plan = mana_run_core::compute_run_plan(&mana_dir, &core_target, run_args.dry_run)
+        .map_err(|error| error.to_string())?;
+    let total_rounds = plan.waves.len();
+    let all_units: Vec<_> = plan
+        .waves
+        .iter()
+        .enumerate()
+        .flat_map(|(wave_index, wave)| {
+            wave.units.iter().map(move |unit| stream::UnitInfo {
+                id: unit.id.clone(),
+                title: unit.title.clone(),
+                round: wave_index + 1,
+            })
+        })
+        .collect();
+    let run_start = StreamEvent::RunStart {
+        parent_id: scope_from_target(&run_args.target),
+        total_units: all_units.len(),
+        total_rounds,
+        units: all_units,
+        runtime: Some(stream_runtime.clone()),
+    };
+    update_run_store_with_event(&run_store, &run_id, &run_start);
+
+    if run_args.dry_run {
+        let summary = RunSummary {
+            total_units: plan.total_units,
+            total_rounds,
+            duration_secs: started.elapsed().as_secs(),
+            ..RunSummary::default()
+        };
+        let view = RunView {
+            summary,
+            units: run_state_snapshot(&run_store, Some(&run_id))
+                .map(|state| state.units)
+                .unwrap_or_default(),
+            events: vec![run_start],
+            runtime: Some(runtime),
+        };
+        finish_run_in_store(&run_store, &run_id, &view);
+        return Ok(view);
+    }
+
+    let workspace_root = mana_workspace_root(&mana_dir, &ctx.cwd);
+    let mut events = vec![run_start];
+    let mut total_closed = 0usize;
+    let mut total_failed = 0usize;
+    let mut final_units = Vec::new();
+    let max_jobs = run_args.jobs.max(1) as usize;
+
+    for (wave_index, wave) in plan.waves.into_iter().enumerate() {
+        let round = wave_index + 1;
+        let round_start = StreamEvent::RoundStart {
+            round,
+            total_rounds,
+            unit_count: wave.units.len(),
+        };
+        update_run_store_with_event(&run_store, &run_id, &round_start);
+        events.push(round_start);
+
+        let mut success_count = 0usize;
+        let mut failed_count = 0usize;
+        let mut pending = wave.units.into_iter();
+        loop {
+            if ctx.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("native mana run cancelled".to_string());
+            }
+            let batch: Vec<_> = pending.by_ref().take(max_jobs).collect();
+            if batch.is_empty() {
+                break;
+            }
+            let mut handles = Vec::with_capacity(batch.len());
+            for unit in batch {
+                let unit_start = StreamEvent::UnitStart {
+                    id: unit.id.clone(),
+                    title: unit.title.clone(),
+                    round,
+                    file_overlaps: None,
+                    attempt: Some(unit.retry.attempt_number.saturating_add(1)),
+                    priority: Some(unit.priority),
+                };
+                update_run_store_with_event(&run_store, &run_id, &unit_start);
+                events.push(unit_start);
+                handles.push(tokio::spawn(run_direct_unit(
+                    unit,
+                    round,
+                    mana_dir.clone(),
+                    workspace_root.clone(),
+                    run_args.clone(),
+                    ctx.clone(),
+                )));
+            }
+            for handle in handles {
+                let outcome = handle
+                    .await
+                    .map_err(|error| format!("native mana worker task failed: {error}"))?;
+                let success = matches!(outcome.status.status.as_str(), "done");
+                if success {
+                    success_count += 1;
+                    total_closed += 1;
+                } else {
+                    failed_count += 1;
+                    total_failed += 1;
+                }
+                update_run_store_with_event(&run_store, &run_id, &outcome.event);
+                events.push(outcome.event);
+                final_units.push(outcome.status);
+            }
+            if failed_count > 0 && !run_args.keep_going {
+                break;
+            }
+        }
+        let round_end = StreamEvent::RoundEnd {
+            round,
+            success_count,
+            failed_count,
+        };
+        update_run_store_with_event(&run_store, &run_id, &round_end);
+        events.push(round_end);
+        if failed_count > 0 && !run_args.keep_going {
+            break;
+        }
+    }
+
+    let duration_secs = started.elapsed().as_secs();
+    let run_end = StreamEvent::RunEnd {
+        total_success: total_closed,
+        total_closed,
+        total_failed,
+        total_abandoned: 0,
+        total_awaiting_verify: 0,
+        total_skipped: plan.blocked.len(),
+        duration_secs,
+    };
+    update_run_store_with_event(&run_store, &run_id, &run_end);
+    events.push(run_end);
+
+    let summary = RunSummary {
+        total_units: final_units.len(),
+        total_rounds,
+        total_closed,
+        total_failed,
+        total_abandoned: 0,
+        total_awaiting_verify: 0,
+        total_skipped: plan.blocked.len(),
+        duration_secs,
+    };
+    let view = RunView {
+        summary,
+        units: final_units,
+        events,
+        runtime: Some(runtime),
+    };
+    finish_run_in_store(&run_store, &run_id, &view);
+    Ok(view)
+}
+
 fn spawn_background_run(
     mana_dir: std::path::PathBuf,
     run_args: NativeRunParams,
@@ -1370,24 +1719,19 @@ fn spawn_background_run(
             }
         });
 
-        let run_store_for_sink = run_store.clone();
-        let run_id_for_sink = run_id.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            mana::commands::run::run_with_stream_capture_and_sink(
-                &mana_dir,
-                run_args,
-                Some(Arc::new(move |event| {
-                    update_run_store_with_event(&run_store_for_sink, &run_id_for_sink, &event);
-                })),
-            )
-        })
+        let result = run_native_imp_orchestration(
+            mana_dir,
+            run_args,
+            ctx,
+            run_store.clone(),
+            run_id.clone(),
+        )
         .await;
 
         progress_task.abort();
 
         match result {
-            Ok(Ok(view)) => {
-                finish_run_in_store(&run_store, &run_id, &view);
+            Ok(view) => {
                 let summary = format!(
                     "mana orchestration: {scope} finished · {} done · {} failed",
                     view.summary.total_closed, view.summary.total_failed
@@ -1424,7 +1768,7 @@ fn spawn_background_run(
                     ui_clear.set_status("mana", None).await;
                 });
             }
-            Ok(Err(err)) => {
+            Err(err) => {
                 let message = format!("mana orchestration: {scope} failed: {err}");
                 fail_run_in_store(&run_store, &run_id, message.clone());
                 ui.set_status("mana", Some(&message)).await;
@@ -1435,21 +1779,6 @@ fn spawn_background_run(
                     let _ = command_tx
                         .send(crate::agent::AgentCommand::FollowUp(format!(
                             "Native mana orchestration failed for {scope}: {err}. Inspect with mana(action=\"run_state\") or mana(action=\"logs\", run_id=\"{run_id}\")."
-                        )))
-                        .await;
-                }
-            }
-            Err(join_err) => {
-                let message = format!("mana orchestration: {scope} task failed: {join_err}");
-                fail_run_in_store(&run_store, &run_id, message.clone());
-                ui.set_status("mana", Some(&message)).await;
-                ui.set_widget("mana", Some(mana_widget_lines(message.clone(), None)))
-                    .await;
-                ui.notify(&message, NotifyLevel::Error).await;
-                if !ui.has_ui() {
-                    let _ = command_tx
-                        .send(crate::agent::AgentCommand::FollowUp(format!(
-                            "Native mana orchestration background task failed for {scope}: {join_err}. Inspect with mana(action=\"run_state\") or mana(action=\"logs\", run_id=\"{run_id}\")."
                         )))
                         .await;
                 }
@@ -3245,9 +3574,10 @@ impl Tool for ManaTool {
                 Ok(text_output(text, json!({ "root": id })))
             }
             "run" => {
+                let requested_jobs = params["jobs"].as_u64().unwrap_or(4) as u32;
                 let run_params = NativeRunParams {
                     target: target_from_params(&params)?,
-                    jobs: params["jobs"].as_u64().unwrap_or(4) as u32,
+                    jobs: requested_jobs.max(1),
                     dry_run: params["dry_run"].as_bool().unwrap_or(false),
                     loop_mode: params["loop"].as_bool().unwrap_or(false),
                     keep_going: params["keep_going"].as_bool().unwrap_or(false),
@@ -3255,8 +3585,8 @@ impl Tool for ManaTool {
                     idle_timeout: params["idle_timeout"].as_u64().unwrap_or(5) as u32,
                     json_stream: true,
                     review: params["review"].as_bool().unwrap_or(false),
-                    run_model: None,
-                    run_thinking: None,
+                    run_model: ctx.config.model.clone(),
+                    run_thinking: thinking_to_run_string(ctx.config.thinking),
                 };
                 let target_ids = target_ids_from_run_target(&run_params.target);
                 if !target_ids.is_empty() {
@@ -3305,105 +3635,52 @@ impl Tool for ManaTool {
                 ctx.ui.set_status("mana", Some("mana: running")).await;
 
                 let run_store = self.run_store.clone();
-                let run_id_for_sink = run_id.clone();
-                let update_tx = ctx.update_tx.clone();
-                let ui_for_sink = ctx.ui.clone();
-                let scope_for_sink = scope.clone();
-                let last_ui_update = Arc::new(std::sync::Mutex::new(
-                    Instant::now() - Duration::from_secs(1),
-                ));
-                match mana::commands::run::run_with_stream_capture_and_sink(
-                    &mana_dir,
+                let view = match run_native_imp_orchestration(
+                    mana_dir.clone(),
                     run_params,
-                    Some(Arc::new(move |event| {
-                        update_run_store_with_event(&run_store, &run_id_for_sink, &event);
-                        let should_update_ui = last_ui_update
-                            .lock()
-                            .map(|last| last.elapsed() >= Duration::from_millis(250))
-                            .unwrap_or(true)
-                            || matches!(
-                                event,
-                                StreamEvent::RunStart { .. }
-                                    | StreamEvent::UnitStart { .. }
-                                    | StreamEvent::UnitDone { .. }
-                                    | StreamEvent::RunEnd { .. }
-                                    | StreamEvent::Error { .. }
-                            );
-                        if should_update_ui {
-                            if let Some(state) =
-                                run_state_snapshot(&run_store, Some(&run_id_for_sink))
-                            {
-                                let status = format!(
-                                    "mana {}: {} · {}/{} done · {} failed",
-                                    run_id_for_sink,
-                                    state.status,
-                                    state.summary.total_closed,
-                                    state.summary.total_units,
-                                    state.summary.total_failed
-                                );
-                                let ui = ui_for_sink.clone();
-                                let widget = mana_run_widget_lines(
-                                    &run_id_for_sink,
-                                    &scope_for_sink,
-                                    Some(&state),
-                                );
-                                tokio::spawn(async move {
-                                    ui.set_status("mana", Some(&status)).await;
-                                    ui.set_widget("mana", Some(widget)).await;
-                                });
-                            }
-                            if let Ok(mut last) = last_ui_update.lock() {
-                                *last = Instant::now();
-                            }
-                        }
-                        if let Some(line) = stream_event_line(&event) {
-                            let _ = update_tx.try_send(ToolUpdate {
-                                content: vec![imp_llm::ContentBlock::Text { text: line }],
-                                details: serde_json::to_value(&event)
-                                    .unwrap_or(serde_json::Value::Null),
-                            });
-                        }
-                    })),
-                ) {
-                    Ok(view) => {
-                        finish_run_in_store(&self.run_store, &run_id, &view);
-                        for line in run_summary_lines(&view) {
-                            send_update(
-                                &ctx,
-                                line,
-                                json!({"kind": "mana_run_view", "run_id": run_id, "scope": scope, "view": view}),
-                            );
-                        }
-                        let summary = format!(
-                            "mana finished · {} done · {} failed",
-                            view.summary.total_closed, view.summary.total_failed
-                        );
-                        ctx.ui
-                            .set_widget(
-                                "mana",
-                                Some(mana_widget_lines(summary.clone(), Some(scope.clone()))),
-                            )
-                            .await;
-                        ctx.ui.set_status("mana", Some(&summary)).await;
-                        Ok(ToolOutput {
-                            content: run_summary_lines(&view)
-                                .into_iter()
-                                .map(|text| imp_llm::ContentBlock::Text { text })
-                                .collect(),
-                            details: json!({
-                                "run_id": run_id,
-                                "scope": scope,
-                                "runtime": view.runtime.as_ref().and_then(|runtime| serde_json::to_value(runtime).ok()).map(normalize_runtime_value),
-                                "view": serde_json::to_value(&view).unwrap_or(serde_json::Value::Null)
-                            }),
-                            is_error: false,
-                        })
+                    ctx.clone(),
+                    run_store.clone(),
+                    run_id.clone(),
+                )
+                .await
+                {
+                    Ok(view) => view,
+                    Err(error) => {
+                        fail_run_in_store(&self.run_store, &run_id, error.clone());
+                        return Ok(ToolOutput::error(error));
                     }
-                    Err(e) => {
-                        fail_run_in_store(&self.run_store, &run_id, e.to_string());
-                        Ok(ToolOutput::error(e.to_string()))
-                    }
+                };
+                for line in run_summary_lines(&view) {
+                    send_update(
+                        &ctx,
+                        line,
+                        json!({"kind": "mana_run_view", "run_id": run_id, "scope": scope, "view": view}),
+                    );
                 }
+                let summary = format!(
+                    "mana finished · {} done · {} failed",
+                    view.summary.total_closed, view.summary.total_failed
+                );
+                ctx.ui
+                    .set_widget(
+                        "mana",
+                        Some(mana_widget_lines(summary.clone(), Some(scope.clone()))),
+                    )
+                    .await;
+                ctx.ui.set_status("mana", Some(&summary)).await;
+                Ok(ToolOutput {
+                    content: run_summary_lines(&view)
+                        .into_iter()
+                        .map(|text| imp_llm::ContentBlock::Text { text })
+                        .collect(),
+                    details: json!({
+                        "run_id": run_id,
+                        "scope": scope,
+                        "runtime": view.runtime.as_ref().and_then(|runtime| serde_json::to_value(runtime).ok()).map(normalize_runtime_value),
+                        "view": serde_json::to_value(&view).unwrap_or(serde_json::Value::Null)
+                    }),
+                    is_error: false,
+                })
             }
             other => Ok(ToolOutput::error(format!(
                 "Unknown action: {other}. Use: status, list, show, create, close, update, run, run_state, evaluate, claim, release, logs, agents, next, tree, reopen, verify, fail, delete, dep_add, dep_remove, fact_create, fact_verify, notes_append, decision_add, decision_resolve"
