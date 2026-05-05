@@ -8,6 +8,16 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 Use this section for changes that have landed on `main` after the 0.1.3 draft.
 
+### Added
+
+- Added GitHub as a `web` search/read provider and wired GitHub credential setup through app surfaces.
+- Added constrained `--print` worker controls for allowing/denying tools and write paths, plus JSON final output.
+
+### Changed
+
+- Prioritized current-project sessions in the session picker.
+- Improved native mana run responsiveness during direct run orchestration.
+
 ## [0.1.3] - Unreleased
 
 ### Added
