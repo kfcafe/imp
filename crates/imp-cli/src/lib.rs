@@ -1074,6 +1074,7 @@ fn search_provider_from_name(name: &str) -> Option<SearchProvider> {
         "exa" => Some(SearchProvider::Exa),
         "linkup" => Some(SearchProvider::Linkup),
         "perplexity" => Some(SearchProvider::Perplexity),
+        "github" => Some(SearchProvider::GitHub),
         _ => None,
     }
 }
@@ -1084,6 +1085,7 @@ fn search_provider_docs_url(provider: SearchProvider) -> &'static str {
         SearchProvider::Exa => "https://dashboard.exa.ai/api-keys",
         SearchProvider::Linkup => "https://app.linkup.so/api-keys",
         SearchProvider::Perplexity => "https://www.perplexity.ai/settings/api",
+        SearchProvider::GitHub => "https://github.com/settings/tokens",
     }
 }
 
