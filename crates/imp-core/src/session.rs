@@ -1011,7 +1011,7 @@ impl SessionManager {
                     })
                     .unwrap_or(0);
 
-                let message_count = session
+                let mut message_count = session
                     .entries
                     .iter()
                     .filter(|e| matches!(e, SessionEntry::Message { .. }))
@@ -1022,9 +1022,12 @@ impl SessionManager {
                     _ => None,
                 });
 
-                // Skip sessions with no messages — nothing to resume
                 if message_count == 0 {
-                    continue;
+                    message_count = session
+                        .entries
+                        .iter()
+                        .filter(|e| matches!(e, SessionEntry::Compaction { .. }))
+                        .count();
                 }
 
                 let name = session.name().map(str::to_string);
@@ -2124,6 +2127,23 @@ mod tests {
         assert!(sessions
             .iter()
             .any(|s| s.summary.as_deref() == Some("Second session summary")));
+    }
+
+    #[test]
+    fn session_list_includes_header_only_sessions() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join("sessions");
+        let cwd = tmp.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let mgr = SessionManager::new(&cwd, &session_dir).unwrap();
+        let id = mgr.session_id().unwrap();
+
+        let sessions = SessionManager::list(&session_dir).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, id);
+        assert_eq!(sessions[0].message_count, 0);
+        assert!(sessions[0].first_message.is_none());
     }
 
     #[test]

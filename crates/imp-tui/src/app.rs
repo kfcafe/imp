@@ -184,6 +184,9 @@ enum SecretsFlowState {
     },
 }
 
+const MAX_RUNTIME_SIGNALS_PER_TICK: usize = 64;
+const MAX_UI_REQUESTS_PER_TICK: usize = 16;
+
 #[derive(Debug)]
 enum RuntimeSignal {
     AgentEvent(AgentEvent),
@@ -855,8 +858,11 @@ impl App {
         let mut signals = Vec::new();
 
         if let Some(handle) = self.agent_handle.as_mut() {
-            while let Ok(event) = handle.event_rx.try_recv() {
-                signals.push(RuntimeSignal::AgentEvent(event));
+            while signals.len() < MAX_RUNTIME_SIGNALS_PER_TICK {
+                match handle.event_rx.try_recv() {
+                    Ok(event) => signals.push(RuntimeSignal::AgentEvent(event)),
+                    Err(_) => break,
+                }
             }
         }
 
@@ -953,8 +959,13 @@ impl App {
         }
 
         if let Some(rx) = self.ui_rx.as_mut() {
-            while let Ok(req) = rx.try_recv() {
-                signals.push(RuntimeSignal::UiRequest(req));
+            let remaining_budget = MAX_RUNTIME_SIGNALS_PER_TICK.saturating_sub(signals.len());
+            let ui_budget = remaining_budget.min(MAX_UI_REQUESTS_PER_TICK);
+            for _ in 0..ui_budget {
+                match rx.try_recv() {
+                    Ok(req) => signals.push(RuntimeSignal::UiRequest(req)),
+                    Err(_) => break,
+                }
             }
         }
 

@@ -957,6 +957,14 @@ fn line_to_plain_text(line: &Line<'_>) -> String {
 fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
     let mut lines = Vec::new();
 
+    let live_output = if !tc.streaming_output.is_empty() {
+        Some(tc.streaming_output.as_str())
+    } else if !tc.streaming_lines.is_empty() {
+        None
+    } else {
+        None
+    };
+
     let action = tc
         .details
         .get("action")
@@ -985,6 +993,7 @@ fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
             }
             "run" => {
                 push_mana_detail_line(&mut lines, "id", tc.details.get("id"));
+                push_mana_detail_line(&mut lines, "run_id", tc.details.get("run_id"));
                 push_mana_detail_line(&mut lines, "scope", tc.details.get("scope"));
                 push_mana_detail_line(&mut lines, "target", tc.details.get("target"));
                 push_mana_detail_line(&mut lines, "jobs", tc.details.get("jobs"));
@@ -1040,6 +1049,18 @@ fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
 
         if !lines.is_empty() {
             lines.push(String::new());
+        }
+    }
+
+    if live_output.is_some() || !tc.streaming_lines.is_empty() {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push("live output".to_string());
+        if let Some(output) = live_output {
+            lines.extend(output.lines().map(|line| format!("  {line}")));
+        } else {
+            lines.extend(tc.streaming_lines.iter().map(|line| format!("  {line}")));
         }
     }
 

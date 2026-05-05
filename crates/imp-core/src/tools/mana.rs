@@ -70,6 +70,19 @@ fn resolve_mana_dir(
     }
 }
 
+fn normalize_runtime_value(mut runtime: serde_json::Value) -> serde_json::Value {
+    if runtime
+        .get("direct_agent")
+        .and_then(serde_json::Value::as_str)
+        == Some("pi")
+    {
+        if let Some(map) = runtime.as_object_mut() {
+            map.insert("direct_agent".to_string(), json!("imp"));
+        }
+    }
+    runtime
+}
+
 fn json_output(value: &impl serde::Serialize) -> ToolOutput {
     match serde_json::to_string_pretty(value) {
         Ok(json) => ToolOutput {
@@ -189,7 +202,8 @@ impl NativeRunState {
                 self.summary.total_rounds = *total_rounds;
                 self.runtime = runtime
                     .as_ref()
-                    .and_then(|value| serde_json::to_value(value).ok());
+                    .and_then(|value| serde_json::to_value(value).ok())
+                    .map(normalize_runtime_value);
                 self.units = units
                     .iter()
                     .map(|info| RunUnitStatus {
@@ -218,7 +232,8 @@ impl NativeRunState {
                 if runtime.is_some() {
                     self.runtime = runtime
                         .as_ref()
-                        .and_then(|value| serde_json::to_value(value).ok());
+                        .and_then(|value| serde_json::to_value(value).ok())
+                        .map(normalize_runtime_value);
                 }
             }
             StreamEvent::RoundStart { total_rounds, .. } => {
@@ -309,7 +324,8 @@ impl NativeRunState {
         self.runtime = view
             .runtime
             .as_ref()
-            .and_then(|value| serde_json::to_value(value).ok());
+            .and_then(|value| serde_json::to_value(value).ok())
+            .map(normalize_runtime_value);
         self.status = "finished".to_string();
         self.error = None;
         self.finished_at_ms = Some(now);
@@ -3248,9 +3264,7 @@ impl Tool for ManaTool {
                         });
                     }
                 }
-                let background = params["background"]
-                    .as_bool()
-                    .unwrap_or(!run_params.dry_run);
+                let background = params["background"].as_bool().unwrap_or(true);
                 let scope = scope_from_target(&run_params.target);
                 let run_id = {
                     let mut store = self.run_store.lock().map_err(|_| {
@@ -3370,7 +3384,7 @@ impl Tool for ManaTool {
                             details: json!({
                                 "run_id": run_id,
                                 "scope": scope,
-                                "runtime": view.runtime,
+                                "runtime": view.runtime.as_ref().and_then(|runtime| serde_json::to_value(runtime).ok()).map(normalize_runtime_value),
                                 "view": serde_json::to_value(&view).unwrap_or(serde_json::Value::Null)
                             }),
                             is_error: false,
