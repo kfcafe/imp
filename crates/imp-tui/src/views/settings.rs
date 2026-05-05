@@ -293,7 +293,7 @@ impl SettingsState {
                     Some(SearchProvider::Tavily) => Some(SearchProvider::Exa),
                     Some(SearchProvider::Exa) => Some(SearchProvider::Linkup),
                     Some(SearchProvider::Linkup) => Some(SearchProvider::Perplexity),
-                    Some(SearchProvider::Perplexity) => None,
+                    Some(SearchProvider::Perplexity) | Some(SearchProvider::GitHub) => None,
                 };
             }
             SettingsField::TavilyApiKey => {}
@@ -406,7 +406,7 @@ impl SettingsState {
             SettingsField::WebSearchProvider => {
                 self.web_search_provider = match self.web_search_provider {
                     None => Some(SearchProvider::Perplexity),
-                    Some(SearchProvider::Tavily) => None,
+                    Some(SearchProvider::Tavily) | Some(SearchProvider::GitHub) => None,
                     Some(SearchProvider::Exa) => Some(SearchProvider::Tavily),
                     Some(SearchProvider::Linkup) => Some(SearchProvider::Exa),
                     Some(SearchProvider::Perplexity) => Some(SearchProvider::Linkup),
@@ -1211,6 +1211,7 @@ impl Widget for SettingsView<'_> {
                 Some(SearchProvider::Exa) => "exa",
                 Some(SearchProvider::Linkup) => "linkup",
                 Some(SearchProvider::Perplexity) => "perplexity",
+                Some(SearchProvider::GitHub) => "github",
             },
             "← →",
         );

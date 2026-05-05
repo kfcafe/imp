@@ -1564,7 +1564,12 @@ fn topic_guidance(topic: GuideTopic) -> (&'static str, Vec<&'static str>, Vec<&'
                 "Record decisions/notes when context should survive the turn.",
                 "Close only after the verify command or equivalent evidence passes.",
             ],
-            vec!["list status=in_progress", "show id=...", "update id=...", "template kind=task"],
+            vec![
+                "list status=in_progress",
+                "show id=...",
+                "update id=...",
+                "template kind=task",
+            ],
         ),
         GuideTopic::Task => (
             "A task is a worker-ready executable spec with clear scope, acceptance, files, and a verify gate.",
@@ -3250,6 +3255,8 @@ impl Tool for ManaTool {
                     idle_timeout: params["idle_timeout"].as_u64().unwrap_or(5) as u32,
                     json_stream: true,
                     review: params["review"].as_bool().unwrap_or(false),
+                    run_model: None,
+                    run_thinking: None,
                 };
                 let target_ids = target_ids_from_run_target(&run_params.target);
                 if !target_ids.is_empty() {
@@ -3323,7 +3330,9 @@ impl Tool for ManaTool {
                                     | StreamEvent::Error { .. }
                             );
                         if should_update_ui {
-                            if let Some(state) = run_state_snapshot(&run_store, Some(&run_id_for_sink)) {
+                            if let Some(state) =
+                                run_state_snapshot(&run_store, Some(&run_id_for_sink))
+                            {
                                 let status = format!(
                                     "mana {}: {} · {}/{} done · {} failed",
                                     run_id_for_sink,
@@ -4908,6 +4917,8 @@ mod tests {
                 idle_timeout: 5,
                 json_stream: true,
                 review: false,
+                run_model: None,
+                run_thinking: None,
             },
         );
         let finished_id = store.start_run(
@@ -4923,6 +4934,8 @@ mod tests {
                 idle_timeout: 5,
                 json_stream: true,
                 review: false,
+                run_model: None,
+                run_thinking: None,
             },
         );
         store.fail_run(&finished_id, "done".to_string());
@@ -4961,6 +4974,8 @@ mod tests {
                 idle_timeout: 5,
                 json_stream: true,
                 review: false,
+                run_model: None,
+                run_thinking: None,
             },
         );
         state.status = "finished".to_string();
@@ -5002,6 +5017,8 @@ mod tests {
                 idle_timeout: 5,
                 json_stream: true,
                 review: false,
+                run_model: None,
+                run_thinking: None,
             },
         );
         state.status = "failed".to_string();
@@ -5217,6 +5234,8 @@ mod tests {
             idle_timeout: 5,
             json_stream: true,
             review: false,
+            run_model: None,
+            run_thinking: None,
         }
     }
 
