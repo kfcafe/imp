@@ -5,6 +5,8 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use imp_core::format_error_for_display;
 use imp_core::tools::mana::ManaTool;
 use imp_core::tools::Tool;
@@ -753,6 +755,31 @@ impl BuildModeTask {
 }
 
 const IMPROVE_CHANGELOG_PATH: &str = ".imp/improve-changelog.md";
+const IMPROVE_SANDBOX_METADATA_PATH: &str = ".imp/improve-sandbox.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ImproveSandboxMetadata {
+    branch: String,
+    base_branch: String,
+    worktree: PathBuf,
+    changelog_path: PathBuf,
+    updated_at_unix_secs: u64,
+}
+
+impl From<&ImproveSandbox> for ImproveSandboxMetadata {
+    fn from(sandbox: &ImproveSandbox) -> Self {
+        Self {
+            branch: sandbox.branch.clone(),
+            base_branch: sandbox.base_branch.clone(),
+            worktree: sandbox.worktree.clone(),
+            changelog_path: sandbox.worktree.join(IMPROVE_CHANGELOG_PATH),
+            updated_at_unix_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or_default(),
+        }
+    }
+}
 
 fn improve_safe_mode_prompt(scope: &ManaUnitRef, turn: u32, budget: u32) -> String {
     let title = scope.title.trim();
@@ -1107,6 +1134,60 @@ fn create_improve_sandbox(cwd: &Path, scope: &ManaUnitRef) -> Result<ImproveSand
         base_branch,
         worktree,
     })
+}
+
+fn improve_metadata_file(cwd: &Path) -> Option<PathBuf> {
+    let repo_root = run_git(cwd, &["rev-parse", "--show-toplevel"]).ok()?;
+    Some(PathBuf::from(repo_root).join(IMPROVE_SANDBOX_METADATA_PATH))
+}
+
+fn write_improve_sandbox_metadata(cwd: &Path, sandbox: &ImproveSandbox) -> Result<(), String> {
+    let Some(path) = improve_metadata_file(cwd) else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create Improve metadata directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    let metadata = ImproveSandboxMetadata::from(sandbox);
+    let json = serde_json::to_string_pretty(&metadata)
+        .map_err(|err| format!("failed to encode Improve metadata: {err}"))?;
+    std::fs::write(&path, json)
+        .map_err(|err| format!("failed to write Improve metadata {}: {err}", path.display()))
+}
+
+fn read_improve_sandbox_metadata(cwd: &Path) -> Result<Option<ImproveSandbox>, String> {
+    let Some(path) = improve_metadata_file(cwd) else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read Improve metadata {}: {err}", path.display()))?;
+    let metadata: ImproveSandboxMetadata = serde_json::from_str(&raw)
+        .map_err(|err| format!("failed to parse Improve metadata {}: {err}", path.display()))?;
+    if !metadata.worktree.exists() {
+        return Err(format!(
+            "Improve metadata points to missing worktree {}",
+            metadata.worktree.display()
+        ));
+    }
+    if run_git(&metadata.worktree, &["rev-parse", "--is-inside-work-tree"]).is_err() {
+        return Err(format!(
+            "Improve metadata worktree is not a git worktree: {}",
+            metadata.worktree.display()
+        ));
+    }
+    Ok(Some(ImproveSandbox {
+        branch: metadata.branch,
+        base_branch: metadata.base_branch,
+        worktree: metadata.worktree,
+    }))
 }
 
 fn selected_read_file_path_from_tool(tc: Option<&DisplayToolCall>, cwd: &Path) -> Option<PathBuf> {
@@ -4136,7 +4217,24 @@ impl App {
         self.needs_redraw = true;
     }
 
-    fn active_status_text(&self) -> String {
+    fn current_improve_sandbox(&mut self) -> Option<ImproveSandbox> {
+        if let Some(sandbox) = self.improve_sandbox.clone() {
+            return Some(sandbox);
+        }
+        match read_improve_sandbox_metadata(&self.cwd) {
+            Ok(Some(sandbox)) => {
+                self.improve_sandbox = Some(sandbox.clone());
+                Some(sandbox)
+            }
+            Ok(None) => None,
+            Err(err) => {
+                self.push_system_msg(&format!("Stale Improve sandbox metadata: {err}"));
+                None
+            }
+        }
+    }
+
+    fn active_status_text(&mut self) -> String {
         let mut lines = Vec::new();
         lines.push("Status:".to_string());
         lines.push(format!("cwd: {}", self.cwd.display()));
@@ -4179,7 +4277,7 @@ impl App {
                 }
             ));
         }
-        if let Some(sandbox) = self.improve_sandbox.as_ref() {
+        if let Some(sandbox) = self.current_improve_sandbox() {
             lines.push(format!("improve branch: {}", sandbox.branch));
             lines.push(format!("improve worktree: {}", sandbox.worktree.display()));
             lines.push(format!("improve base: {}", sandbox.base_branch));
@@ -4223,7 +4321,7 @@ impl App {
         let confirmed = args
             .split_whitespace()
             .any(|arg| arg == "--confirm" || arg == "confirm");
-        let Some(sandbox) = self.improve_sandbox.clone() else {
+        let Some(sandbox) = self.current_improve_sandbox() else {
             self.push_system_msg("No active Improve sandbox to merge.");
             return;
         };
@@ -4289,7 +4387,7 @@ impl App {
     }
 
     fn clean_command(&mut self, args: &str) {
-        let Some(sandbox) = self.improve_sandbox.clone() else {
+        let Some(sandbox) = self.current_improve_sandbox() else {
             self.push_system_msg("Nothing to clean yet.");
             return;
         };
@@ -4315,6 +4413,9 @@ impl App {
         match command.output() {
             Ok(output) if output.status.success() => {
                 self.improve_sandbox = None;
+                if let Some(path) = improve_metadata_file(&self.cwd) {
+                    let _ = std::fs::remove_file(path);
+                }
                 self.push_system_msg(&format!(
                     "Removed Improve worktree {}. Branch {} was kept.",
                     sandbox.worktree.display(),
@@ -4351,6 +4452,9 @@ impl App {
         }
         match create_improve_sandbox(&self.cwd, scope) {
             Ok(sandbox) => {
+                if let Err(err) = write_improve_sandbox_metadata(&self.cwd, &sandbox) {
+                    self.push_system_msg(&format!("Improve sandbox metadata warning: {err}"));
+                }
                 self.push_system_msg(&format!(
                     "Improve sandbox ready: branch {} at {}. Review with `git -C {} diff {}...HEAD`.",
                     sandbox.branch,
