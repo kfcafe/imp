@@ -40,6 +40,7 @@ pub enum SettingsField {
     NotifyOnAgentComplete,
     ContinuePolicy,
     ImproveAutoTurnBudget,
+    LoopTurnBudget,
     WebSearchProvider,
     TavilyApiKey,
     ExaApiKey,
@@ -79,6 +80,7 @@ const GENERAL_FIELDS: &[SettingsField] = &[
     SettingsField::NotifyOnAgentComplete,
     SettingsField::ContinuePolicy,
     SettingsField::ImproveAutoTurnBudget,
+    SettingsField::LoopTurnBudget,
 ];
 
 const MODEL_FIELDS: &[SettingsField] = &[
@@ -148,6 +150,7 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::NotifyOnAgentComplete,
     SettingsField::ContinuePolicy,
     SettingsField::ImproveAutoTurnBudget,
+    SettingsField::LoopTurnBudget,
     SettingsField::WebSearchProvider,
     SettingsField::TavilyApiKey,
     SettingsField::ExaApiKey,
@@ -235,6 +238,7 @@ pub struct SettingsState {
     pub notify_on_agent_complete: bool,
     pub continue_policy: ContinuePolicy,
     pub improve_auto_turn_budget: u32,
+    pub loop_turn_budget: u32,
     pub web_search_provider: Option<SearchProvider>,
     pub mana_scope: ManaScopePreference,
     pub mana_auto_commit: bool,
@@ -342,6 +346,7 @@ impl SettingsState {
             notify_on_agent_complete: config.ui.notify_on_agent_complete,
             continue_policy: config.ui.continue_policy,
             improve_auto_turn_budget: config.ui.improve_auto_turn_budget,
+            loop_turn_budget: config.ui.loop_turn_budget,
             web_search_provider: config.web.search_provider,
             mana_scope: config.mana.scope,
             mana_auto_commit: config.mana.auto_commit,
@@ -499,6 +504,9 @@ impl SettingsState {
                 self.improve_auto_turn_budget =
                     self.improve_auto_turn_budget.saturating_add(1).min(100);
             }
+            SettingsField::LoopTurnBudget => {
+                self.loop_turn_budget = self.loop_turn_budget.saturating_add(1).min(100);
+            }
             SettingsField::WebSearchProvider => {
                 self.web_search_provider = match self.web_search_provider {
                     None => Some(SearchProvider::Tavily),
@@ -646,6 +654,9 @@ impl SettingsState {
                 self.improve_auto_turn_budget =
                     self.improve_auto_turn_budget.saturating_sub(1).max(1);
             }
+            SettingsField::LoopTurnBudget => {
+                self.loop_turn_budget = self.loop_turn_budget.saturating_sub(1).max(1);
+            }
             SettingsField::WebSearchProvider => {
                 self.web_search_provider = match self.web_search_provider {
                     None => Some(SearchProvider::Perplexity),
@@ -702,6 +713,10 @@ impl SettingsState {
             SettingsField::ImproveAutoTurnBudget => {
                 self.editing_number = true;
                 self.edit_buffer = self.improve_auto_turn_budget.to_string();
+            }
+            SettingsField::LoopTurnBudget => {
+                self.editing_number = true;
+                self.edit_buffer = self.loop_turn_budget.to_string();
             }
             SettingsField::ObservationMask => {
                 self.editing_number = true;
@@ -813,6 +828,11 @@ impl SettingsState {
                     self.improve_auto_turn_budget = v.clamp(1, 100);
                 }
             }
+            SettingsField::LoopTurnBudget => {
+                if let Ok(v) = self.edit_buffer.parse::<u32>() {
+                    self.loop_turn_budget = v.clamp(1, 100);
+                }
+            }
             SettingsField::ObservationMask => {
                 if let Ok(v) = self.edit_buffer.parse::<f64>() {
                     self.observation_mask = v.clamp(0.0, 1.0);
@@ -883,7 +903,7 @@ impl SettingsState {
             continue_policy: self.continue_policy,
             build_auto_turn_budget: config.ui.build_auto_turn_budget,
             improve_auto_turn_budget: self.improve_auto_turn_budget,
-            loop_turn_budget: config.ui.loop_turn_budget,
+            loop_turn_budget: self.loop_turn_budget,
         };
         config.web = imp_core::tools::web::types::WebConfig {
             search_provider: self.web_search_provider,
@@ -1579,6 +1599,26 @@ fn render_settings_field(
                 row,
                 field_index(field),
                 "Improve turns",
+                &value,
+                "← → / type",
+            );
+        }
+        SettingsField::LoopTurnBudget => {
+            let value =
+                if state.editing_number && state.current_field() == SettingsField::LoopTurnBudget {
+                    format!("{}▎", state.edit_buffer)
+                } else {
+                    state.loop_turn_budget.to_string()
+                };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Loop turns",
                 &value,
                 "← → / type",
             );
