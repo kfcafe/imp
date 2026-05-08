@@ -1136,6 +1136,31 @@ fn create_improve_sandbox(cwd: &Path, scope: &ManaUnitRef) -> Result<ImproveSand
     })
 }
 
+fn compact_git_label(cwd: &Path) -> Option<String> {
+    let branch = run_git(cwd, &["branch", "--show-current"]).ok()?;
+    let branch = if branch.trim().is_empty() {
+        run_git(cwd, &["rev-parse", "--short", "HEAD"]).ok()?
+    } else {
+        branch
+    };
+    let status = run_git(cwd, &["status", "--short"]).unwrap_or_default();
+    let dirty = status.lines().count();
+    let mut label = if dirty == 0 {
+        format!("git {branch}")
+    } else {
+        format!("git {branch} ±{dirty}")
+    };
+    if let Ok(counts) = run_git(cwd, &["rev-list", "--left-right", "--count", "HEAD...@{u}"]) {
+        let mut parts = counts.split_whitespace();
+        if let (Some(ahead), Some(behind)) = (parts.next(), parts.next()) {
+            if ahead != "0" || behind != "0" {
+                label.push_str(&format!(" ↑{ahead}↓{behind}"));
+            }
+        }
+    }
+    Some(label)
+}
+
 fn concise_git_status(cwd: &Path) -> Option<Vec<String>> {
     let branch = run_git(cwd, &["branch", "--show-current"]).ok()?;
     let branch = if branch.trim().is_empty() {
@@ -2773,7 +2798,8 @@ impl App {
                 .mana_run_label(self.active_mana_run_label())
                 .build_loop_label(self.build_loop_label())
                 .improve_status_label(self.improve_status_label())
-                .loop_label(self.loop_label());
+                .loop_label(self.loop_label())
+                .git_label(compact_git_label(&self.cwd));
             frame.render_widget(editor, editor_area);
         }
 
@@ -9974,6 +10000,22 @@ mod session_lifecycle {
             .as_deref()
             .unwrap()
             .contains("Improve mode autoresearch turn 1/1"));
+    }
+
+    #[test]
+    fn compact_git_label_shows_branch_and_dirty_count() {
+        let temp = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        std::fs::write(temp.path().join("changed.txt"), "dirty").unwrap();
+
+        let label = compact_git_label(temp.path()).unwrap();
+
+        assert!(label.starts_with("git "));
+        assert!(label.contains("±1"));
     }
 
     #[test]

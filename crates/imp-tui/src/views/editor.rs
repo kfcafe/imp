@@ -373,6 +373,7 @@ pub struct EditorView<'a> {
     build_loop_label: Option<String>,
     improve_status_label: Option<String>,
     loop_label: Option<String>,
+    git_label: Option<String>,
 }
 
 impl<'a> EditorView<'a> {
@@ -402,6 +403,7 @@ impl<'a> EditorView<'a> {
             build_loop_label: None,
             improve_status_label: None,
             loop_label: None,
+            git_label: None,
         }
     }
 
@@ -494,6 +496,11 @@ impl<'a> EditorView<'a> {
         self.loop_label = label;
         self
     }
+
+    pub fn git_label(mut self, label: Option<String>) -> Self {
+        self.git_label = label;
+        self
+    }
 }
 
 impl Widget for EditorView<'_> {
@@ -572,6 +579,9 @@ impl Widget for EditorView<'_> {
                 format_context_usage(self.current_context_tokens, self.context_window),
                 context_style,
             );
+        }
+        if let Some(git) = self.git_label.as_deref() {
+            push_part(git.to_string(), self.theme.muted_style());
         }
         if let Some(queue) = queue_label {
             push_part(queue, self.theme.warning_style());
