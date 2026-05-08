@@ -1136,6 +1136,41 @@ fn create_improve_sandbox(cwd: &Path, scope: &ManaUnitRef) -> Result<ImproveSand
     })
 }
 
+fn concise_git_status(cwd: &Path) -> Option<Vec<String>> {
+    let branch = run_git(cwd, &["branch", "--show-current"]).ok()?;
+    let branch = if branch.trim().is_empty() {
+        run_git(cwd, &["rev-parse", "--short", "HEAD"]).ok()?
+    } else {
+        branch
+    };
+    let mut lines = vec![format!("git: {branch}")];
+    if let Ok(upstream) = run_git(
+        cwd,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    ) {
+        if let Ok(counts) = run_git(cwd, &["rev-list", "--left-right", "--count", "HEAD...@{u}"]) {
+            let mut parts = counts.split_whitespace();
+            if let (Some(ahead), Some(behind)) = (parts.next(), parts.next()) {
+                lines.push(format!(
+                    "upstream: {upstream} (ahead {ahead}, behind {behind})"
+                ));
+            }
+        }
+    }
+    let status = run_git(cwd, &["status", "--short"]).unwrap_or_default();
+    if status.trim().is_empty() {
+        lines.push("working tree: clean".to_string());
+    } else {
+        let entries: Vec<&str> = status.lines().collect();
+        lines.push(format!("working tree: dirty ({} paths)", entries.len()));
+        lines.extend(entries.iter().take(8).map(|line| format!("  {line}")));
+        if entries.len() > 8 {
+            lines.push(format!("  … {} more", entries.len() - 8));
+        }
+    }
+    Some(lines)
+}
+
 fn improve_metadata_file(cwd: &Path) -> Option<PathBuf> {
     let repo_root = run_git(cwd, &["rev-parse", "--show-toplevel"]).ok()?;
     Some(PathBuf::from(repo_root).join(IMPROVE_SANDBOX_METADATA_PATH))
@@ -4280,6 +4315,9 @@ impl App {
         let mut lines = Vec::new();
         lines.push("Status:".to_string());
         lines.push(format!("cwd: {}", self.cwd.display()));
+        if let Some(git_lines) = concise_git_status(&self.cwd) {
+            lines.extend(git_lines);
+        }
         lines.push(format!("mode: {}", self.workflow_mode.display_name()));
         if self.is_streaming || self.agent_task.is_some() {
             lines.push("agent: running".to_string());
