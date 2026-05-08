@@ -1161,6 +1161,15 @@ fn write_improve_sandbox_metadata(cwd: &Path, sandbox: &ImproveSandbox) -> Resul
 }
 
 fn read_improve_sandbox_metadata(cwd: &Path) -> Result<Option<ImproveSandbox>, String> {
+    let Some(metadata) = read_improve_sandbox_metadata_file(cwd)? else {
+        return Ok(None);
+    };
+    validate_improve_sandbox_metadata(metadata)
+}
+
+fn read_improve_sandbox_metadata_file(
+    cwd: &Path,
+) -> Result<Option<ImproveSandboxMetadata>, String> {
     let Some(path) = improve_metadata_file(cwd) else {
         return Ok(None);
     };
@@ -1171,6 +1180,12 @@ fn read_improve_sandbox_metadata(cwd: &Path) -> Result<Option<ImproveSandbox>, S
         .map_err(|err| format!("failed to read Improve metadata {}: {err}", path.display()))?;
     let metadata: ImproveSandboxMetadata = serde_json::from_str(&raw)
         .map_err(|err| format!("failed to parse Improve metadata {}: {err}", path.display()))?;
+    Ok(Some(metadata))
+}
+
+fn validate_improve_sandbox_metadata(
+    metadata: ImproveSandboxMetadata,
+) -> Result<Option<ImproveSandbox>, String> {
     if !metadata.worktree.exists() {
         return Err(format!(
             "Improve metadata points to missing worktree {}",
@@ -4217,6 +4232,33 @@ impl App {
         self.needs_redraw = true;
     }
 
+    fn stale_improve_metadata_message(&self) -> Option<String> {
+        let metadata = match read_improve_sandbox_metadata_file(&self.cwd) {
+            Ok(Some(metadata)) => metadata,
+            Ok(None) => return None,
+            Err(err) => {
+                return Some(format!(
+                    "stale improve metadata: {err}\nnext: fix/remove {} or run /clean --force to forget stale metadata",
+                    improve_metadata_file(&self.cwd)
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| IMPROVE_SANDBOX_METADATA_PATH.to_string())
+                ));
+            }
+        };
+        match validate_improve_sandbox_metadata(metadata.clone()) {
+            Ok(Some(_)) => None,
+            Ok(None) => None,
+            Err(err) => Some(format!(
+                "stale improve metadata: {err}\nmetadata: {}\nbranch: {}\nworktree: {}\nnext: run /clean --force to forget stale metadata; no branch/worktree will be deleted",
+                improve_metadata_file(&self.cwd)
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| IMPROVE_SANDBOX_METADATA_PATH.to_string()),
+                metadata.branch,
+                metadata.worktree.display()
+            )),
+        }
+    }
+
     fn current_improve_sandbox(&mut self) -> Option<ImproveSandbox> {
         if let Some(sandbox) = self.improve_sandbox.clone() {
             return Some(sandbox);
@@ -4301,6 +4343,8 @@ impl App {
                     lines.extend(status.lines().take(10).map(|line| format!("  {line}")));
                 }
             }
+        } else if let Some(message) = self.stale_improve_metadata_message() {
+            lines.extend(message.lines().map(str::to_string));
         }
         if let Some(state) = self.loop_state.as_ref() {
             lines.push(format!("loop: {}/{}", state.completed_turns, state.budget));
@@ -4387,14 +4431,39 @@ impl App {
     }
 
     fn clean_command(&mut self, args: &str) {
-        let Some(sandbox) = self.current_improve_sandbox() else {
-            self.push_system_msg("Nothing to clean yet.");
-            return;
-        };
-        let status = run_git(&sandbox.worktree, &["status", "--short"]).unwrap_or_default();
         let force = args
             .split_whitespace()
             .any(|arg| arg == "--force" || arg == "force");
+        let Some(sandbox) = self.current_improve_sandbox() else {
+            if force {
+                if let Some(path) = improve_metadata_file(&self.cwd) {
+                    if path.exists() {
+                        match std::fs::remove_file(&path) {
+                            Ok(()) => self.push_system_msg(&format!(
+                                "Removed stale Improve metadata {}. No branch or worktree was deleted.",
+                                path.display()
+                            )),
+                            Err(err) => self.push_system_msg(&format!(
+                                "Failed to remove stale Improve metadata {}: {err}",
+                                path.display()
+                            )),
+                        }
+                    } else {
+                        self.push_system_msg("Nothing to clean yet.");
+                    }
+                } else {
+                    self.push_system_msg("Nothing to clean yet.");
+                }
+            } else if let Some(message) = self.stale_improve_metadata_message() {
+                self.push_system_msg(&format!(
+                    "{message}\nRun /clean --force to remove only the stale metadata file."
+                ));
+            } else {
+                self.push_system_msg("Nothing to clean yet.");
+            }
+            return;
+        };
+        let status = run_git(&sandbox.worktree, &["status", "--short"]).unwrap_or_default();
         if !status.trim().is_empty() && !force {
             self.push_system_msg(&format!(
                 "Improve sandbox is dirty; not cleaning without confirmation. Review `{}` then run `/clean --force` to remove worktree {}.\n{}",
