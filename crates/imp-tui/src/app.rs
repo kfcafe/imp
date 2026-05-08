@@ -4188,7 +4188,7 @@ impl App {
                 sandbox.worktree.join(IMPROVE_CHANGELOG_PATH).display()
             ));
             lines.push(format!(
-                "next: review changelog, then /improve merge (or /clean to discard)"
+                "next: review changelog, run /improve merge, then /improve merge --confirm (or /clean to discard)"
             ));
             if let Ok(status) = run_git(&sandbox.worktree, &["status", "--short"]) {
                 lines.push(format!(
@@ -4219,7 +4219,10 @@ impl App {
         self.push_system_msg(&status);
     }
 
-    fn improve_merge_command(&mut self) {
+    fn improve_merge_command(&mut self, args: &str) {
+        let confirmed = args
+            .split_whitespace()
+            .any(|arg| arg == "--confirm" || arg == "confirm");
         let Some(sandbox) = self.improve_sandbox.clone() else {
             self.push_system_msg("No active Improve sandbox to merge.");
             return;
@@ -4260,6 +4263,17 @@ impl App {
                 return;
             }
             _ => {}
+        }
+        if !confirmed {
+            self.push_system_msg(&format!(
+                "Improve merge plan:\n- Branch: {}\n- Worktree: {}\n- Changelog: {}\n- Target checkout: {}\n- Operation: git merge --no-ff {}\n\nReview the changelog, then run `/improve merge --confirm` to merge. No merge has been performed.",
+                sandbox.branch,
+                sandbox.worktree.display(),
+                changelog.display(),
+                self.cwd.display(),
+                sandbox.branch
+            ));
+            return;
         }
         match run_git(&self.cwd, &["merge", "--no-ff", &sandbox.branch]) {
             Ok(output) => {
@@ -5100,11 +5114,13 @@ impl App {
             "plan" => self.set_workflow_mode(WorkflowMode::Plan),
             "build" => self.set_workflow_mode(WorkflowMode::Build),
             "improve" => match args {
-                arg if matches!(arg, "merge" | "adopt" | "approve") => self.improve_merge_command(),
+                arg if matches!(arg, "merge" | "adopt" | "approve") => {
+                    self.improve_merge_command(args)
+                }
                 arg => self.set_improve_mode(arg.eq_ignore_ascii_case("safe")),
             },
             "improve-safe" => self.set_improve_mode(true),
-            "improve-merge" => self.improve_merge_command(),
+            "improve-merge" => self.improve_merge_command("merge"),
             "improve-help" => self.push_system_msg(
                 "Improve uses a new branch checked out in a separate worktree before making code changes. It never commits or merges without explicit approval. Use /improve safe for research-only evaluation and mana follow-ups.",
             ),
@@ -5258,7 +5274,8 @@ impl App {
                     "  /build      — switch to Build mode\n",
                     "  /improve    — improve in a sandbox branch/worktree\n",
                     "  /improve safe — research-only Improve mode\n",
-                    "  /improve merge — merge active Improve branch after reviewing changelog\n",
+                    "  /improve merge — show Improve merge plan\n",
+                    "  /improve merge --confirm — merge active Improve branch\n",
                     "  /status    — show active work status\n",
                     "  /loop <msg> — repeat a prompt until stopped/budgeted\n",
                     "  /clean     — clean active sandbox/artifacts safely\n",
