@@ -6,7 +6,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use imp_core::format_error_for_display;
+use imp_core::tools::mana::ManaTool;
+use imp_core::tools::Tool;
 use imp_core::ui::WidgetContent;
+use imp_core::{mana_run_summary, stop_mana_run, ManaRunSummary, ManaUnitRef, TurnManaReview};
+use mana_core::api;
+use mana_core::api::TreeNode;
+use mana_core::unit::Status;
 
 use imp_lua::loader::discover_extensions;
 use imp_lua::LuaRuntime;
@@ -30,11 +36,12 @@ use imp_llm::{
     truncate_chars_with_suffix, Cost, Message, Model, StreamEvent, ThinkingLevel, Usage,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::text::Line;
+use ratatui::style::Modifier;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
 use ratatui::Frame;
 
-use crate::animation::{spinner_frame, AnimationState};
+use crate::animation::{title_breather_frame, title_working_glyph, AnimationState};
 use crate::highlight::Highlighter;
 use crate::keybindings::{self, Action};
 use crate::selection::{
@@ -46,13 +53,14 @@ use crate::turn_tracker::TurnTracker;
 use crate::views::ask_bar::AskState;
 use crate::views::chat::{
     build_chat_render_data, build_click_map, build_text_surface_from_lines,
-    clamped_scroll_offset_for_total_lines, DisplayMessage, MessageRole, RenderedChatView,
+    clamped_scroll_offset_for_total_lines, scroll_offset_for_message_at_top, DisplayMessage,
+    MessageRole, RenderedChatView,
 };
 use crate::views::command_palette::{
     builtin_commands, merge_extension_commands, merge_skill_commands, CommandPaletteState,
     CommandPaletteView,
 };
-use crate::views::editor::{EditorState, EditorView};
+use crate::views::editor::{EditorState, EditorView, WorkflowMode};
 use crate::views::file_finder::{collect_project_files, FileFinderState, FileFinderView};
 use crate::views::login_picker::{login_providers, LoginPickerState, LoginPickerView};
 use crate::views::mana_navigator::{ManaNavigatorState, ManaNavigatorView};
@@ -63,10 +71,11 @@ use crate::views::session_picker::{SessionPickerState, SessionPickerView};
 use crate::views::settings::{SettingsState, SettingsView};
 use crate::views::sidebar::{
     build_detail_render_data, build_detail_text_surface_from_plain_lines, build_stream_lines,
-    sidebar_sub_areas, Sidebar, SidebarDetailRenderData, SidebarView,
+    sidebar_sub_areas, thinking_detail_render_data, Sidebar, SidebarDetailRenderData, SidebarView,
 };
 use crate::views::startup::{
-    summarize_inline, StartupAction, StartupPanelData, StartupPanelView, StartupSection,
+    action_block_height, summarize_inline, visible_section_count, StartupAction, StartupPanelData,
+    StartupPanelView, StartupSection,
 };
 use crate::views::status::StatusInfo;
 use crate::views::tools::DisplayToolCall;
@@ -119,6 +128,14 @@ pub enum UiMode {
 pub enum QueuedMessage {
     Steer(String),
     FollowUp(String),
+}
+
+impl QueuedMessage {
+    fn text(&self) -> &str {
+        match self {
+            QueuedMessage::Steer(text) | QueuedMessage::FollowUp(text) => text,
+        }
+    }
 }
 
 pub enum AskReply {
@@ -278,6 +295,8 @@ struct SidebarDetailCacheKey {
     width: u16,
     messages_epoch: u64,
     selected_tool_id_hash: u64,
+    thinking_hash: u64,
+    run_hash: u64,
     word_wrap: bool,
     tool_output_lines: usize,
     animation_level: imp_core::config::AnimationLevel,
@@ -295,6 +314,545 @@ struct StartupSurfaceData {
     panel: StartupPanelData,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct StartupSkillHit {
+    index: usize,
+    rect: Rect,
+}
+
+fn mana_run_summary_cache_key(run: &ManaRunSummary) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        run.run_id,
+        run.scope,
+        run.status,
+        run.total_units,
+        run.total_closed,
+        run.total_failed,
+        run.total_awaiting_verify,
+        run.latest.as_deref().unwrap_or(""),
+        run.logs.join("\n")
+    )
+}
+
+fn mana_run_detail_render_data(run: &ManaRunSummary, theme: &Theme) -> SidebarDetailRenderData {
+    let mut lines = vec![Line::from(vec![
+        Span::styled("╭─", theme.muted_style()),
+        Span::styled(
+            " mana run ",
+            theme.accent_style().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("─╮", theme.muted_style()),
+    ])];
+    let mut plain_lines = vec![
+        format!("run: {}", run.run_id),
+        format!("status: {}", run.status),
+        format!("scope: {}", run.scope),
+        format!(
+            "units: {} closed / {} total",
+            run.total_closed, run.total_units
+        ),
+        format!("failed: {}", run.total_failed),
+        format!("awaiting verify: {}", run.total_awaiting_verify),
+    ];
+    if !run.agents.is_empty() {
+        plain_lines.push("agents:".to_string());
+        for agent in run.agents.iter().take(8) {
+            plain_lines.push(format!(
+                "  {} {} · {} · {}",
+                agent.unit_id, agent.status, agent.action, agent.title
+            ));
+        }
+    }
+    if !run.agents.is_empty() {
+        plain_lines.push("agents:".to_string());
+        for agent in run.agents.iter().take(8) {
+            plain_lines.push(format!(
+                "  {} {} · {} · {}",
+                agent.unit_id, agent.status, agent.action, agent.title
+            ));
+        }
+    }
+    if !run.agents.is_empty() {
+        plain_lines.push("agents:".to_string());
+        for agent in run.agents.iter().take(8) {
+            plain_lines.push(format!(
+                "  {} {} · {} · {}",
+                agent.unit_id, agent.status, agent.action, agent.title
+            ));
+        }
+    }
+    let recent_logs = run.logs.iter().rev().take(12).collect::<Vec<_>>();
+    if recent_logs.is_empty() {
+        plain_lines.push("log: —".to_string());
+    } else {
+        plain_lines.push("log:".to_string());
+        for log in recent_logs.into_iter().rev() {
+            plain_lines.push(format!("  {log}"));
+        }
+    }
+    for (index, line) in plain_lines.iter().enumerate() {
+        let style = if index == 0 || index == 1 {
+            theme.accent_style()
+        } else if line == "log: —" || line.ends_with('—') {
+            theme.muted_style()
+        } else if line.starts_with("failed:") && !line.ends_with('0') {
+            theme.warning_style()
+        } else {
+            theme.style()
+        };
+        lines.push(Line::from(Span::styled(line.clone(), style)));
+    }
+    SidebarDetailRenderData { lines, plain_lines }
+}
+
+fn startup_skill_detail_render_data(
+    skill: &imp_core::resources::Skill,
+    theme: &Theme,
+) -> SidebarDetailRenderData {
+    let mut plain_lines = vec![
+        format!("skill: {}", skill.name),
+        format!("path: {}", skill.path.display()),
+    ];
+    if !skill.description.trim().is_empty() {
+        plain_lines.push(format!("description: {}", skill.description.trim()));
+    }
+    plain_lines.push(String::new());
+
+    match std::fs::read_to_string(&skill.path) {
+        Ok(content) => plain_lines.extend(content.lines().map(str::to_string)),
+        Err(err) => plain_lines.push(format!("Failed to read skill: {err}")),
+    }
+
+    let lines = plain_lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                Line::from(Span::styled(
+                    line.clone(),
+                    theme.accent_style().add_modifier(Modifier::BOLD),
+                ))
+            } else if index <= 2 && !line.is_empty() {
+                Line::from(Span::styled(line.clone(), theme.muted_style()))
+            } else {
+                Line::from(Span::raw(line.clone()))
+            }
+        })
+        .collect();
+
+    SidebarDetailRenderData { lines, plain_lines }
+}
+
+fn startup_skill_hits(area: Rect, panel: &StartupPanelData) -> Vec<StartupSkillHit> {
+    if area.width < 24 || area.height < 8 {
+        return Vec::new();
+    }
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let sections_area = if inner.height < 12 {
+        let action_height = 3.min(inner.height);
+        Rect {
+            y: inner.y + action_height,
+            height: inner.height.saturating_sub(action_height),
+            ..inner
+        }
+    } else {
+        let action_height = action_block_height(inner.width, panel.actions.len());
+        Rect {
+            y: inner.y + action_height,
+            height: inner.height.saturating_sub(action_height),
+            ..inner
+        }
+    };
+
+    startup_skill_hits_in_sections(sections_area, &panel.sections)
+}
+
+fn startup_skill_hits_in_sections(area: Rect, sections: &[StartupSection]) -> Vec<StartupSkillHit> {
+    if sections.is_empty() || area.height == 0 || area.width == 0 {
+        return Vec::new();
+    }
+
+    let visible_count = visible_section_count(area.width, area.height, sections.len());
+    let visible_sections = &sections[..visible_count];
+
+    if area.width >= 96 {
+        let column_width = area.width / 4;
+        let remainder = area.width % 4;
+        return visible_sections
+            .iter()
+            .enumerate()
+            .flat_map(|(index, section)| {
+                let x_offset = column_width * index as u16 + remainder.min(index as u16);
+                let width = column_width + u16::from((index as u16) < remainder);
+                let rect = Rect {
+                    x: area.x + x_offset,
+                    width,
+                    ..area
+                };
+                startup_skill_hits_in_section(rect, section)
+            })
+            .collect();
+    }
+
+    match visible_sections.len() {
+        0 => Vec::new(),
+        1 => startup_skill_hits_in_section(area, &visible_sections[0]),
+        2 => {
+            let rects = if area.width >= 90 {
+                split_horizontal(area, &[50, 50])
+            } else {
+                split_vertical(area, &[50, 50])
+            };
+            visible_sections
+                .iter()
+                .zip(rects)
+                .flat_map(|(section, rect)| startup_skill_hits_in_section(rect, section))
+                .collect()
+        }
+        3 => {
+            let rects = if area.width >= 120 {
+                split_horizontal(area, &[33, 34, 33])
+            } else if area.width >= 78 && area.height >= 12 {
+                let rows = split_vertical(area, &[50, 50]);
+                let top = split_horizontal(rows[0], &[50, 50]);
+                vec![top[0], top[1], rows[1]]
+            } else {
+                split_vertical(area, &[34, 33, 33])
+            };
+            visible_sections
+                .iter()
+                .zip(rects)
+                .flat_map(|(section, rect)| startup_skill_hits_in_section(rect, section))
+                .collect()
+        }
+        _ => {
+            let row_height = (area.height / visible_sections.len() as u16).max(3);
+            visible_sections
+                .iter()
+                .enumerate()
+                .flat_map(|(index, section)| {
+                    let rect = Rect {
+                        y: area.y + row_height * index as u16,
+                        height: row_height,
+                        ..area
+                    };
+                    startup_skill_hits_in_section(rect, section)
+                })
+                .collect()
+        }
+    }
+}
+
+fn startup_skill_hits_in_section(area: Rect, section: &StartupSection) -> Vec<StartupSkillHit> {
+    if section.title != "skills" || area.height < 3 || area.width < 12 {
+        return Vec::new();
+    }
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    section
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            line.strip_prefix("• ")
+                .is_some_and(|name| name != "none discovered")
+        })
+        .filter_map(|(index, _)| {
+            let y = inner.y + index as u16;
+            (y < inner.y + inner.height).then_some(StartupSkillHit {
+                index,
+                rect: Rect {
+                    y,
+                    height: 1,
+                    ..inner
+                },
+            })
+        })
+        .collect()
+}
+
+fn split_horizontal(area: Rect, percentages: &[u16]) -> Vec<Rect> {
+    let mut x = area.x;
+    let mut used = 0u16;
+    percentages
+        .iter()
+        .enumerate()
+        .map(|(index, pct)| {
+            let width = if index + 1 == percentages.len() {
+                area.width.saturating_sub(used)
+            } else {
+                area.width * *pct / 100
+            };
+            let rect = Rect { x, width, ..area };
+            x = x.saturating_add(width);
+            used = used.saturating_add(width);
+            rect
+        })
+        .collect()
+}
+
+fn split_vertical(area: Rect, percentages: &[u16]) -> Vec<Rect> {
+    let mut y = area.y;
+    let mut used = 0u16;
+    percentages
+        .iter()
+        .enumerate()
+        .map(|(index, pct)| {
+            let height = if index + 1 == percentages.len() {
+                area.height.saturating_sub(used)
+            } else {
+                area.height * *pct / 100
+            };
+            let rect = Rect { y, height, ..area };
+            y = y.saturating_add(height);
+            used = used.saturating_add(height);
+            rect
+        })
+        .collect()
+}
+
+fn is_build_team_intent(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "use a team"
+            | "build this with a team"
+            | "parallelize this"
+            | "run a team"
+            | "use workers"
+            | "run workers"
+            | "team build"
+            | "build with workers"
+    )
+}
+
+fn is_build_continue_intent(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "continue"
+            | "go"
+            | "build"
+            | "keep going"
+            | "finish"
+            | "finish this"
+            | "finish this task"
+            | "finish this epic"
+            | "complete this"
+            | "complete this epic"
+    )
+}
+
+fn first_open_child(node: &TreeNode) -> Option<&TreeNode> {
+    for child in &node.children {
+        if child.status == Status::Open {
+            return Some(child);
+        }
+        if let Some(descendant) = first_open_child(child) {
+            return Some(descendant);
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
+struct BuildModeBlockedTask {
+    id: String,
+    decisions: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+enum BuildModeSelection {
+    Task(BuildModeTask),
+    Blocked(BuildModeBlockedTask),
+}
+
+#[derive(Debug, Clone)]
+struct BuildModeTask {
+    id: String,
+    title: String,
+    description: Option<String>,
+    design: Option<String>,
+    acceptance: Option<String>,
+    notes: Option<String>,
+    verify_fast: Option<String>,
+    verify: Option<String>,
+    verify_timeout: Option<u64>,
+    paths: Vec<String>,
+    dependencies: Vec<String>,
+    requires: Vec<String>,
+    produces: Vec<String>,
+    decisions: Vec<String>,
+}
+
+impl BuildModeTask {
+    fn prompt(&self, scope: &ManaUnitRef) -> String {
+        let mut prompt = format!(
+            "Build mode: work on mana task {} — {} under active scope {} — {}. Stay within this task and the active mana scope. Do not expand scope or add unrelated features.",
+            self.id,
+            self.title,
+            scope.id,
+            scope.title.trim()
+        );
+        if let Some(description) = self.description.as_deref().filter(|s| !s.trim().is_empty()) {
+            push_prompt_section(&mut prompt, "Description", description.trim());
+        }
+        if let Some(design) = self.design.as_deref().filter(|s| !s.trim().is_empty()) {
+            push_prompt_section(&mut prompt, "Design", design.trim());
+        }
+        if let Some(acceptance) = self.acceptance.as_deref().filter(|s| !s.trim().is_empty()) {
+            push_prompt_section(&mut prompt, "Acceptance", acceptance.trim());
+        }
+        if !self.decisions.is_empty() {
+            push_prompt_section(
+                &mut prompt,
+                "Blocking decisions",
+                &self.decisions.join("\n"),
+            );
+        }
+        if !self.paths.is_empty() {
+            push_prompt_section(&mut prompt, "Relevant paths", &self.paths.join("\n"));
+        }
+        if !self.dependencies.is_empty() {
+            push_prompt_section(&mut prompt, "Dependencies", &self.dependencies.join(", "));
+        }
+        if !self.requires.is_empty() {
+            push_prompt_section(&mut prompt, "Requires", &self.requires.join("\n"));
+        }
+        if !self.produces.is_empty() {
+            push_prompt_section(&mut prompt, "Produces", &self.produces.join("\n"));
+        }
+        if let Some(verify_fast) = self.verify_fast.as_deref().filter(|s| !s.trim().is_empty()) {
+            push_prompt_section(&mut prompt, "Fast verify command", verify_fast.trim());
+        }
+        if let Some(verify) = self.verify.as_deref().filter(|s| !s.trim().is_empty()) {
+            push_prompt_section(&mut prompt, "Verify command", verify.trim());
+        }
+        if let Some(timeout) = self.verify_timeout {
+            push_prompt_section(&mut prompt, "Verify timeout", &format!("{timeout}s"));
+        }
+        if let Some(notes) = self.notes.as_deref().filter(|s| !s.trim().is_empty()) {
+            push_prompt_section(&mut prompt, "Recent notes", notes.trim());
+        }
+        prompt.push_str("\n\nWhen done, verify with the narrowest relevant check and update/close the mana task with evidence if appropriate.");
+        prompt
+    }
+}
+
+const IMPROVE_CHANGELOG_PATH: &str = ".imp/improve-changelog.md";
+
+fn improve_safe_mode_prompt(scope: &ManaUnitRef, turn: u32, budget: u32) -> String {
+    let title = scope.title.trim();
+    let scope_label = if title.is_empty() {
+        scope.id.clone()
+    } else {
+        format!("{} — {title}", scope.id)
+    };
+    format!(
+        "Improve mode autoresearch turn {turn}/{budget} for active mana scope {scope_label}.\n\n\
+Goal: independently improve the work graph and project understanding without surprising the user. Favor research, inspection, evaluation, critique, benchmarks, risk discovery, and actionable recommendations.\n\n\
+Rules:\n\
+- Stay within the active mana scope. Do not expand scope unless you create/propose an explicit follow-up under that scope.\n\
+- Prefer read-only investigation and narrow verification commands. Do not make broad code changes, destructive changes, dependency additions, migrations, commits, or deployment changes.\n\
+- If you find concrete follow-up work, create or update mana units with enough context for a later Build-mode worker.\n\
+- If a consequential product/architecture decision is required, record a blocking mana decision or ask one concise question; otherwise keep researching.\n\
+- At the end of this turn, summarize what you inspected, what you learned, and the next best improvement action."
+    )
+}
+
+fn improve_code_mode_prompt(
+    scope: &ManaUnitRef,
+    turn: u32,
+    budget: u32,
+    sandbox: &ImproveSandbox,
+) -> String {
+    let title = scope.title.trim();
+    let scope_label = if title.is_empty() {
+        scope.id.clone()
+    } else {
+        format!("{} — {title}", scope.id)
+    };
+    format!(
+        "Improve mode code-changing turn {turn}/{budget} for active mana scope {scope_label}.\n\n\
+Sandbox:\n\
+- Branch: {branch}\n\
+- Worktree: {worktree}\n\
+- Base: {base}\n\
+- Changelog: {changelog}\n\n\
+Goal: improve the project within the active mana scope. Research as needed, then make coherent code changes only inside the sandbox worktree.\n\n\
+Rules:\n\
+- Work only in the sandbox worktree path above. Do not edit files in the original checkout.\n\
+- Maintain `{changelog}` in the sandbox. Keep it useful for the user to review before `/improve merge`: summary, changes made, verification, risks/concerns, files changed, and merge notes.\n\
+- Stay within the active mana scope; create/update mana follow-ups for anything outside it.\n\
+- Run the narrowest useful verification in the sandbox.\n\
+- Do not merge, rebase, force-push, deploy, or change production resources.\n\
+- Do not commit unless the user explicitly asks.\n\
+- At the end of this turn, summarize changes, verification, and review commands such as `git -C {worktree} status` and `git -C {worktree} diff {base}...HEAD`." ,
+        branch = sandbox.branch,
+        worktree = sandbox.worktree.display(),
+        base = sandbox.base_branch,
+        changelog = IMPROVE_CHANGELOG_PATH,
+    )
+}
+
+fn push_prompt_section(prompt: &mut String, heading: &str, body: &str) {
+    if body.trim().is_empty() {
+        return;
+    }
+    prompt.push_str("\n\n");
+    prompt.push_str(heading);
+    prompt.push_str(":\n");
+    prompt.push_str(body.trim());
+}
+
+fn candidate_active_scope_from_review(review: &TurnManaReview) -> Option<ManaUnitRef> {
+    if let Some(anchor) = review.anchor_unit.as_ref() {
+        if is_scope_unit(&anchor.unit) {
+            return Some(anchor.unit.clone());
+        }
+    }
+
+    review
+        .touched_units
+        .iter()
+        .rev()
+        .find(|touched| is_scope_unit(&touched.unit))
+        .map(|touched| touched.unit.clone())
+}
+
+fn is_scope_unit(unit: &ManaUnitRef) -> bool {
+    unit.kind
+        .as_deref()
+        .is_some_and(|kind| matches!(kind.to_ascii_lowercase().as_str(), "epic"))
+}
+
+#[derive(Debug, Clone)]
+struct ImproveSandbox {
+    branch: String,
+    base_branch: String,
+    worktree: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct LoopState {
+    message: String,
+    completed_turns: u32,
+    budget: u32,
+}
+
 pub struct App {
     // Core
     pub running: bool,
@@ -310,6 +868,8 @@ pub struct App {
     lua_command_task: Option<tokio::task::JoinHandle<(String, Result<Option<String>, String>)>>,
     pub is_streaming: bool,
     pub message_queue: Vec<QueuedMessage>,
+    pending_agent_prompt: Option<String>,
+    pending_agent_cwd: Option<PathBuf>,
 
     // Session
     pub session: SessionManager,
@@ -323,6 +883,7 @@ pub struct App {
     // UI state
     pub mode: UiMode,
     pub scroll_offset: usize,
+    streaming_anchor_user_index: Option<usize>,
     pub auto_scroll: bool,
     pub tools_expanded: bool,
     /// Index into the flattened tool call list. `None` means inspector follows latest.
@@ -344,6 +905,15 @@ pub struct App {
     lua_command_ui: Option<Arc<dyn imp_core::ui::UserInterface>>,
     pub ask_state: Option<crate::views::ask_bar::AskState>,
     pub ask_reply: Option<AskReply>,
+    pub workflow_mode: WorkflowMode,
+    active_mana_scope: Option<ManaUnitRef>,
+    active_mana_run: Option<ManaRunSummary>,
+    build_auto_turns: u32,
+    last_build_auto_task_id: Option<String>,
+    improve_auto_turns: u32,
+    improve_safe_mode: bool,
+    improve_sandbox: Option<ImproveSandbox>,
+    loop_state: Option<LoopState>,
     secrets_flow: Option<SecretsFlowState>,
     login_task: Option<tokio::task::JoinHandle<LoginTaskExit>>,
 
@@ -360,6 +930,9 @@ pub struct App {
 
     /// Lua extension runtime (for command dispatch and hot-reload).
     pub lua_runtime: Option<Arc<Mutex<LuaRuntime>>>,
+
+    /// Startup skill selected for display in the inspector sidebar.
+    selected_startup_skill: Option<imp_core::resources::Skill>,
 
     // Sidebar
     pub sidebar: Sidebar,
@@ -393,6 +966,147 @@ pub struct App {
     pub theme: Theme,
     pub highlighter: Highlighter,
     pub model_registry: ModelRegistry,
+}
+
+fn slug_fragment(input: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for ch in input.chars().flat_map(|ch| ch.to_lowercase()) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_dash = false;
+        } else if !last_dash && !slug.is_empty() {
+            slug.push('-');
+            last_dash = true;
+        }
+        if slug.len() >= 40 {
+            break;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "scope".to_string()
+    } else {
+        slug
+    }
+}
+
+fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|err| format!("failed to run git {}: {err}", args.join(" ")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(format!("git {} failed: {detail}", args.join(" ")));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn create_improve_sandbox(cwd: &Path, scope: &ManaUnitRef) -> Result<ImproveSandbox, String> {
+    let repo_root = run_git(cwd, &["rev-parse", "--show-toplevel"])?;
+    let repo_root = PathBuf::from(repo_root);
+    let base_branch = run_git(&repo_root, &["branch", "--show-current"]).map(|branch| {
+        if branch.is_empty() {
+            "HEAD".to_string()
+        } else {
+            branch
+        }
+    })?;
+    let repo_name = repo_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("repo");
+    let slug = slug_fragment(&format!("{}-{}", scope.id, scope.title));
+    let branch = format!("imp/improve/{slug}");
+    let mut worktree = repo_root
+        .parent()
+        .unwrap_or_else(|| repo_root.as_path())
+        .join(format!("{repo_name}-improve-{slug}"));
+
+    let existing_worktrees = run_git(&repo_root, &["worktree", "list", "--porcelain"])?;
+    if existing_worktrees
+        .lines()
+        .any(|line| line == format!("branch refs/heads/{branch}"))
+    {
+        if let Some(path_line) = existing_worktrees
+            .lines()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .find(|window| window[1] == format!("branch refs/heads/{branch}"))
+            .and_then(|window| window[0].strip_prefix("worktree "))
+        {
+            return Ok(ImproveSandbox {
+                branch,
+                base_branch,
+                worktree: PathBuf::from(path_line),
+            });
+        }
+    }
+
+    if worktree.exists() {
+        for index in 2..100 {
+            let candidate = repo_root
+                .parent()
+                .unwrap_or_else(|| repo_root.as_path())
+                .join(format!("{repo_name}-improve-{slug}-{index}"));
+            if !candidate.exists() {
+                worktree = candidate;
+                break;
+            }
+        }
+    }
+
+    let branch_exists = Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .current_dir(&repo_root)
+        .status()
+        .map_err(|err| format!("failed to check branch {branch}: {err}"))?
+        .success();
+
+    if branch_exists {
+        run_git(
+            &repo_root,
+            &[
+                "worktree",
+                "add",
+                worktree
+                    .to_str()
+                    .ok_or_else(|| "worktree path is not valid UTF-8".to_string())?,
+                &branch,
+            ],
+        )?;
+    } else {
+        run_git(
+            &repo_root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &branch,
+                worktree
+                    .to_str()
+                    .ok_or_else(|| "worktree path is not valid UTF-8".to_string())?,
+                "HEAD",
+            ],
+        )?;
+    }
+
+    Ok(ImproveSandbox {
+        branch,
+        base_branch,
+        worktree,
+    })
 }
 
 fn selected_read_file_path_from_tool(tc: Option<&DisplayToolCall>, cwd: &Path) -> Option<PathBuf> {
@@ -637,6 +1351,8 @@ impl App {
             lua_command_task: None,
             is_streaming: false,
             message_queue: Vec::new(),
+            pending_agent_prompt: None,
+            pending_agent_cwd: None,
             session,
             config,
             model_name,
@@ -644,6 +1360,7 @@ impl App {
             context_window,
             mode: UiMode::Normal,
             scroll_offset: 0,
+            streaming_anchor_user_index: None,
             auto_scroll: true,
             tools_expanded: false,
             tool_focus: None,
@@ -662,6 +1379,15 @@ impl App {
             lua_command_ui: None,
             ask_state: None,
             ask_reply: None,
+            workflow_mode: WorkflowMode::Explore,
+            active_mana_scope: None,
+            active_mana_run: None,
+            build_auto_turns: 0,
+            last_build_auto_task_id: None,
+            improve_auto_turns: 0,
+            improve_safe_mode: false,
+            improve_sandbox: None,
+            loop_state: None,
             secrets_flow: None,
             login_task: None,
             accumulated_usage: Usage::default(),
@@ -671,6 +1397,7 @@ impl App {
             status_items: HashMap::new(),
             widgets: HashMap::new(),
             lua_runtime: None,
+            selected_startup_skill: None,
             sidebar: Sidebar::default(),
             active_pane: Pane::Chat,
             sidebar_list_rect: None,
@@ -764,7 +1491,11 @@ impl App {
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| "chat".to_string());
         let identity = if self.is_streaming || self.compaction_task.is_some() {
-            spinner_frame(self.tick)
+            if self.config.ui.animations == imp_core::config::AnimationLevel::None {
+                title_working_glyph()
+            } else {
+                title_breather_frame(self.tick)
+            }
         } else {
             "imp"
         };
@@ -798,6 +1529,8 @@ impl App {
                 terminal.draw(|frame| self.render(frame))?;
                 self.needs_redraw = false;
             }
+
+            self.start_pending_agent_after_redraw();
 
             let tick_rate = self.effective_tick_rate();
 
@@ -1034,6 +1767,7 @@ impl App {
     fn present_agent_failure(&mut self, error: String) {
         self.completed_turns_in_run = 0;
         self.is_streaming = false;
+        self.streaming_anchor_user_index = None;
         if let Some(last) = self.latest_streaming_message_mut() {
             last.is_streaming = false;
         }
@@ -1242,7 +1976,11 @@ impl App {
     }
 
     fn effective_tick_rate(&self) -> Duration {
-        if self.is_streaming || self.compaction_task.is_some() || self.drag_autoscroll.is_some() {
+        if self.is_streaming
+            || self.compaction_task.is_some()
+            || self.drag_autoscroll.is_some()
+            || self.pending_agent_prompt.is_some()
+        {
             Duration::from_millis(16)
         } else {
             Duration::from_millis(100)
@@ -1365,11 +2103,15 @@ impl App {
         &self,
         width: u16,
         selected_tc: Option<&DisplayToolCall>,
+        thinking: Option<&str>,
+        run: Option<&ManaRunSummary>,
     ) -> SidebarDetailCacheKey {
         SidebarDetailCacheKey {
             width,
             messages_epoch: self.chat_render_epoch,
             selected_tool_id_hash: stable_hash(&selected_tc.map(|tc| &tc.id)),
+            thinking_hash: stable_hash(&thinking),
+            run_hash: stable_hash(&run.map(mana_run_summary_cache_key)),
             word_wrap: self.config.ui.word_wrap,
             tool_output_lines: self.config.ui.tool_output_lines,
             animation_level: self.config.ui.animations,
@@ -1407,20 +2149,33 @@ impl App {
         &mut self,
         width: u16,
         selected_tc: Option<&DisplayToolCall>,
+        thinking: Option<&str>,
+        run: Option<&ManaRunSummary>,
     ) -> &SidebarDetailRenderData {
-        let key = self.sidebar_detail_cache_key(width, selected_tc);
+        let key = self.sidebar_detail_cache_key(width, selected_tc, thinking, run);
         let cache_hit = self
             .sidebar_detail_cache
             .as_ref()
             .is_some_and(|cache| cache.key == key);
         if !cache_hit {
-            let render = build_detail_render_data(
-                selected_tc,
-                &self.config.ui,
-                &self.highlighter,
-                &self.theme,
-                width as usize,
-            );
+            let render = if let Some(run) = run {
+                mana_run_detail_render_data(run, &self.theme)
+            } else if let Some(thinking) = thinking {
+                thinking_detail_render_data(
+                    thinking,
+                    &self.theme,
+                    width as usize,
+                    self.config.ui.word_wrap,
+                )
+            } else {
+                build_detail_render_data(
+                    selected_tc,
+                    &self.config.ui,
+                    &self.highlighter,
+                    &self.theme,
+                    width as usize,
+                )
+            };
             self.sidebar_detail_cache = Some(SidebarDetailCache { key, render });
         }
         &self
@@ -1430,9 +2185,63 @@ impl App {
             .render
     }
 
+    fn latest_thinking_trace(&self) -> Option<String> {
+        self.messages
+            .iter()
+            .rev()
+            .find_map(|message| {
+                message
+                    .thinking
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+            })
+            .map(str::to_owned)
+    }
+
+    fn startup_skills(&self) -> Vec<imp_core::resources::Skill> {
+        let user_config_dir = imp_core::config::Config::user_config_dir();
+        imp_core::resources::discover_skills(&self.cwd, &user_config_dir)
+    }
+
+    fn startup_skill_hits(&self, chat_area: Rect) -> Vec<StartupSkillHit> {
+        let startup = self.build_startup_surface();
+        startup_skill_hits(chat_area, &startup.panel)
+    }
+
+    fn select_startup_skill_at(&mut self, col: u16, row: u16) -> bool {
+        if !matches!(self.mode, UiMode::Normal) || !self.messages.is_empty() {
+            return false;
+        }
+
+        let Some(chat_area) = self.chat_surface.as_ref().map(|surface| surface.rect) else {
+            return false;
+        };
+
+        let Some(hit) = self
+            .startup_skill_hits(chat_area)
+            .into_iter()
+            .find(|hit| point_in_rect(col, row, Some(hit.rect)))
+        else {
+            return false;
+        };
+
+        let Some(skill) = self.startup_skills().into_iter().nth(hit.index) else {
+            return false;
+        };
+
+        self.selected_startup_skill = Some(skill);
+        self.sidebar.open = true;
+        self.sidebar.reset_detail_scroll();
+        self.sidebar_auto_follow = false;
+        self.tool_focus = None;
+        self.tool_focus_pinned = false;
+        self.sidebar_detail_cache = None;
+        true
+    }
+
     fn build_startup_surface(&self) -> StartupSurfaceData {
         let user_config_dir = imp_core::config::Config::user_config_dir();
-        let skills = imp_core::resources::discover_skills(&self.cwd, &user_config_dir);
+        let skills = self.startup_skills();
         let lua_extensions = discover_extensions(&user_config_dir, Some(&self.cwd));
         let repo_label = self
             .cwd
@@ -1541,16 +2350,10 @@ impl App {
         let skill_lines = if skills.is_empty() {
             vec!["• none discovered".to_string()]
         } else {
-            let mut lines = skills
+            skills
                 .iter()
-                .take(8)
                 .map(|skill| format!("• {}", skill.name))
-                .collect::<Vec<_>>();
-            let hidden = skills.len().saturating_sub(lines.len());
-            if hidden > 0 {
-                lines.push(format!("… +{hidden} more"));
-            }
-            lines
+                .collect::<Vec<_>>()
         };
 
         let extension_lines = vec![
@@ -1652,6 +2455,25 @@ impl App {
         };
         self.scroll_offset =
             clamped_scroll_offset_for_total_lines(total_chat_lines, chat_area, self.scroll_offset);
+        if self.auto_scroll {
+            if let Some(anchor_index) = self.streaming_anchor_user_index {
+                self.scroll_offset = scroll_offset_for_message_at_top(
+                    &self.messages,
+                    &self.theme,
+                    &self.highlighter,
+                    chat_area,
+                    anchor_index,
+                    self.tick,
+                    chat_tool_focus,
+                    self.config.ui.word_wrap,
+                    chat_tool_display,
+                    self.config.ui.thinking_lines,
+                    self.config.ui.show_timestamps,
+                    self.config.ui.animations,
+                    activity_state,
+                );
+            }
+        }
         if self.scroll_offset == 0 {
             self.auto_scroll = true;
         }
@@ -1673,7 +2495,12 @@ impl App {
                 StartupPanelView::new(&startup.panel, &self.theme),
                 chat_area,
             );
-            self.chat_surface = None;
+            self.chat_surface = Some(TextSurface::new(
+                SelectablePane::Chat,
+                chat_area,
+                Vec::new(),
+                0,
+            ));
         } else {
             let chat = RenderedChatView::new(&chat_lines).scroll(self.scroll_offset);
             frame.render_widget(chat, chat_area);
@@ -1683,6 +2510,10 @@ impl App {
                 chat_area,
                 self.scroll_offset,
             ));
+        }
+
+        if !matches!(self.mode, UiMode::Normal) || !self.messages.is_empty() {
+            self.selected_startup_skill = None;
         }
 
         // Sidebar
@@ -1695,19 +2526,38 @@ impl App {
                 } else {
                     None
                 };
-            let selected_index = self.tool_focus.or_else(|| {
-                (self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Inspector)
-                    .then(|| self.total_tool_calls().checked_sub(1))
-                    .flatten()
-            });
-            let detail_render = if matches!(
+            let selected_index = if self.selected_startup_skill.is_some() {
+                None
+            } else {
+                self.tool_focus.or_else(|| {
+                    (self.config.ui.sidebar_style == imp_core::config::SidebarStyle::Inspector)
+                        .then(|| self.total_tool_calls().checked_sub(1))
+                        .flatten()
+                })
+            };
+            let detail_render = if let Some(skill) = self.selected_startup_skill.as_ref() {
+                Some(startup_skill_detail_render_data(skill, &self.theme))
+            } else if matches!(
                 self.config.ui.sidebar_style,
                 imp_core::config::SidebarStyle::Split | imp_core::config::SidebarStyle::Inspector
             ) {
                 let selected_tc_owned = self.selected_tool_call();
+                let run = if selected_tc_owned.is_none() {
+                    self.active_mana_run.clone()
+                } else {
+                    None
+                };
+                let thinking = (selected_tc_owned.is_none() && run.is_none())
+                    .then(|| self.latest_thinking_trace())
+                    .flatten();
                 Some(
-                    self.cached_sidebar_detail_render(sub.1.width, selected_tc_owned.as_ref())
-                        .clone(),
+                    self.cached_sidebar_detail_render(
+                        sub.1.width,
+                        selected_tc_owned.as_ref(),
+                        thinking.as_deref(),
+                        run.as_ref(),
+                    )
+                    .clone(),
                 )
             } else {
                 None
@@ -1778,7 +2628,7 @@ impl App {
                 .turn_elapsed(status_info.turn_elapsed)
                 .extension_items(&status_info.extension_items, status_info.peek)
                 .streaming(self.is_streaming)
-                .queued(!self.message_queue.is_empty())
+                .queued(self.queued_message_preview(area.width))
                 .context_usage(
                     self.current_context_tokens,
                     self.context_window,
@@ -1786,7 +2636,13 @@ impl App {
                 )
                 .tick(self.tick)
                 .animation_level(self.config.ui.animations)
-                .activity_state(activity_state);
+                .activity_state(activity_state)
+                .workflow_mode(self.workflow_mode)
+                .mana_scope_label(self.active_mana_scope_label())
+                .mana_run_label(self.active_mana_run_label())
+                .build_loop_label(self.build_loop_label())
+                .improve_status_label(self.improve_status_label())
+                .loop_label(self.loop_label());
             frame.render_widget(editor, editor_area);
         }
 
@@ -2051,23 +2907,9 @@ impl App {
         match action {
             Some(Action::Submit) => {
                 if self.is_streaming {
-                    // Queue steering message
                     let text = self.editor.content().to_string();
                     if !text.trim().is_empty() {
-                        self.message_queue.push(QueuedMessage::Steer(text));
-                        self.editor.clear();
-                        // Send to agent
-                        if let Some(ref handle) = self.agent_handle {
-                            let _ = handle.command_tx.try_send(AgentCommand::Steer(
-                                self.message_queue
-                                    .last()
-                                    .map(|m| match m {
-                                        QueuedMessage::Steer(s) => s.clone(),
-                                        QueuedMessage::FollowUp(s) => s.clone(),
-                                    })
-                                    .unwrap_or_default(),
-                            ));
-                        }
+                        self.queue_streaming_message(QueuedMessage::Steer(text));
                     }
                 } else {
                     self.send_message();
@@ -2077,8 +2919,7 @@ impl App {
                 if self.is_streaming {
                     let text = self.editor.content().to_string();
                     if !text.trim().is_empty() {
-                        self.message_queue.push(QueuedMessage::FollowUp(text));
-                        self.editor.clear();
+                        self.queue_streaming_message(QueuedMessage::FollowUp(text));
                     }
                 }
             }
@@ -2972,6 +3813,11 @@ impl App {
                 }
 
                 self.active_pane = Pane::Chat;
+                if self.select_startup_skill_at(col, row) {
+                    self.clear_selection();
+                    return;
+                }
+
                 if let Some(chat_area) = self.chat_surface.as_ref().map(|surface| surface.rect) {
                     if let Some(tool_id) = self.tool_id_at_chat_row(row, chat_area) {
                         self.clear_selection();
@@ -3022,6 +3868,53 @@ impl App {
         }
     }
 
+    fn stop_active_work(&mut self) {
+        if self.is_streaming || self.agent_task.is_some() {
+            if let Some(ref handle) = self.agent_handle {
+                let _ = handle.command_tx.try_send(AgentCommand::Cancel);
+                handle
+                    .cancel_token
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(task) = self.agent_task.take() {
+                task.abort();
+            }
+            self.agent_handle = None;
+            self.is_streaming = false;
+            self.streaming_anchor_user_index = None;
+            if let Some(last) = self.latest_streaming_message_mut() {
+                last.is_streaming = false;
+            }
+        }
+
+        self.pending_agent_prompt = None;
+        self.pending_agent_cwd = None;
+        self.loop_state = None;
+        self.build_auto_turns = 0;
+        self.last_build_auto_task_id = None;
+        self.improve_auto_turns = 0;
+        self.improve_sandbox = None;
+        self.suppress_completion_notification = true;
+        if let Some(run_id) = self.active_mana_run.as_ref().map(|run| run.run_id.clone()) {
+            match stop_mana_run(&run_id) {
+                Ok(Some(summary)) => {
+                    self.active_mana_run = Some(summary);
+                    self.push_system_msg(&format!(
+                        "Stopped active mana run {run_id}. External workers may need manual cleanup."
+                    ));
+                }
+                Ok(None) => {
+                    self.push_system_msg(&format!("Active mana run {run_id} was not found."))
+                }
+                Err(err) => {
+                    self.push_system_msg(&format!("Could not stop mana run {run_id}: {err}"))
+                }
+            }
+        }
+
+        self.push_system_msg("Stopped active imp work.");
+    }
+
     fn handle_cancel(&mut self) {
         if !self.editor.is_empty() {
             // First Ctrl+C: clear editor
@@ -3046,6 +3939,7 @@ impl App {
             }
             self.suppress_completion_notification = true;
             self.is_streaming = false;
+            self.streaming_anchor_user_index = None;
             if let Some(last) = self.latest_streaming_message_mut() {
                 last.is_streaming = false;
             }
@@ -3061,7 +3955,552 @@ impl App {
 
     // ── Commands ────────────────────────────────────────────────
 
-    fn spawn_agent_for_prompt(&mut self, prompt: &str) -> Result<(), String> {
+    fn build_loop_label(&self) -> Option<String> {
+        if self.workflow_mode != WorkflowMode::Build {
+            return None;
+        }
+        match self.last_build_auto_task_id.as_deref() {
+            Some(task_id) => Some(format!("task {task_id}")),
+            None if self.active_mana_scope.is_some() => Some("ready".to_string()),
+            None => None,
+        }
+    }
+
+    fn improve_status_label(&self) -> Option<String> {
+        if self.workflow_mode != WorkflowMode::Improve || self.improve_safe_mode {
+            return None;
+        }
+        let sandbox = self.improve_sandbox.as_ref()?;
+        let dir = sandbox
+            .worktree
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_else(|| sandbox.worktree.to_str().unwrap_or("sandbox"));
+        let budget = self.config.ui.improve_auto_turn_budget.max(1);
+        Some(format!(
+            "imp is improving {dir} · turn {}/{} · /improve-help for review",
+            self.improve_auto_turns.min(budget),
+            budget
+        ))
+    }
+
+    fn loop_label(&self) -> Option<String> {
+        let state = self.loop_state.as_ref()?;
+        Some(format!(
+            "↻ loop {}/{}",
+            state.completed_turns.min(state.budget),
+            state.budget
+        ))
+    }
+
+    fn workflow_context_prompt(&self) -> Option<String> {
+        let mode = self.workflow_mode.display_name();
+        let mut context = format!("Workflow mode: {mode}.");
+        if self.workflow_mode == WorkflowMode::Improve {
+            if self.improve_safe_mode {
+                context.push_str(" Improve safe mode is bounded autoresearch, evaluation, critique, and mana follow-up creation; avoid code edits.");
+            } else if let Some(sandbox) = self.improve_sandbox.as_ref() {
+                context.push_str(&format!(
+                    " Improve mode may make code changes only in sandbox branch {} at {}. Do not edit the original checkout, commit, or merge without explicit approval.",
+                    sandbox.branch,
+                    sandbox.worktree.display()
+                ));
+            } else {
+                context.push_str(" Improve mode may create a sandbox branch/worktree for code changes; do not edit the original checkout, commit, or merge without explicit approval.");
+            }
+        }
+        if let Some(scope) = self.active_mana_scope.as_ref() {
+            let title = scope.title.trim();
+            if title.is_empty() {
+                context.push_str(&format!(" Active mana scope: {}.", scope.id));
+            } else {
+                context.push_str(&format!(" Active mana scope: {} — {}.", scope.id, title));
+            }
+        }
+        Some(context)
+    }
+
+    fn queue_build_mode_continuation_if_ready(&mut self) {
+        if self.workflow_mode != WorkflowMode::Build
+            || self.is_streaming
+            || self.pending_agent_prompt.is_some()
+        {
+            return;
+        }
+        if self.active_mana_scope.is_none() {
+            return;
+        }
+        let budget = self.config.ui.build_auto_turn_budget.max(1);
+        if self.build_auto_turns >= budget {
+            self.push_system_msg(&format!(
+                "Build mode paused after {budget} automatic turns. Send a message or switch modes to continue."
+            ));
+            return;
+        }
+        if let Some((task_id, build_prompt)) = self.next_build_mode_prompt() {
+            if self
+                .last_build_auto_task_id
+                .as_ref()
+                .is_some_and(|last_task_id| last_task_id == &task_id)
+            {
+                self.push_system_msg(&format!(
+                    "Build mode paused because mana task {task_id} is still open after the last automatic attempt. Close it, mark it blocked, or send a message to retry intentionally."
+                ));
+                return;
+            }
+            self.build_auto_turns += 1;
+            self.last_build_auto_task_id = Some(task_id.clone());
+            self.push_system_msg(&format!("Build mode: starting mana task {task_id}"));
+            self.pending_agent_prompt = Some(build_prompt);
+            self.pending_agent_cwd = None;
+            self.needs_redraw = true;
+        }
+    }
+
+    fn queue_improve_mode_continuation_if_ready(&mut self) {
+        if self.workflow_mode != WorkflowMode::Improve
+            || self.is_streaming
+            || self.pending_agent_prompt.is_some()
+        {
+            return;
+        }
+        let Some(scope) = self.active_mana_scope.clone() else {
+            self.push_system_msg("Improve mode needs an active mana scope. Use /scope <id> or read/create a mana epic first.");
+            return;
+        };
+        let budget = self.config.ui.improve_auto_turn_budget.max(1);
+        if self.improve_auto_turns >= budget {
+            self.push_system_msg(&format!(
+                "Improve mode paused after {budget} automatic turns. Send a message or switch modes to continue."
+            ));
+            return;
+        }
+
+        let prompt = if self.improve_safe_mode {
+            improve_safe_mode_prompt(&scope, self.improve_auto_turns + 1, budget)
+        } else {
+            let Some(sandbox) = self.ensure_improve_sandbox(&scope) else {
+                return;
+            };
+            improve_code_mode_prompt(&scope, self.improve_auto_turns + 1, budget, &sandbox)
+        };
+
+        self.improve_auto_turns += 1;
+        if self.improve_safe_mode {
+            self.push_system_msg(&format!(
+                "Improve safe: research turn {}/{} for scope {}",
+                self.improve_auto_turns, budget, scope.id
+            ));
+        } else if let Some(sandbox) = self.improve_sandbox.as_ref() {
+            self.push_system_msg(&format!(
+                "Improve mode: code turn {}/{} in branch {} at {}",
+                self.improve_auto_turns,
+                budget,
+                sandbox.branch,
+                sandbox.worktree.display()
+            ));
+        }
+        self.pending_agent_prompt = Some(prompt);
+        self.pending_agent_cwd = if self.improve_safe_mode {
+            None
+        } else {
+            self.improve_sandbox
+                .as_ref()
+                .map(|sandbox| sandbox.worktree.clone())
+        };
+        self.needs_redraw = true;
+    }
+
+    fn queue_loop_continuation_if_ready(&mut self) {
+        if self.is_streaming || self.pending_agent_prompt.is_some() {
+            return;
+        }
+        let Some(state) = self.loop_state.as_mut() else {
+            return;
+        };
+        if state.completed_turns >= state.budget {
+            let budget = state.budget;
+            self.loop_state = None;
+            self.push_system_msg(&format!(
+                "Loop paused after {budget} turns. Use /loop <message> to start again."
+            ));
+            return;
+        }
+        state.completed_turns += 1;
+        let message = state.message.clone();
+        let completed = state.completed_turns;
+        let budget = state.budget;
+        self.push_system_msg(&format!("Loop: turn {completed}/{budget}"));
+        self.pending_agent_prompt = Some(message);
+        self.pending_agent_cwd = None;
+        self.needs_redraw = true;
+    }
+
+    fn active_status_text(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push("Status:".to_string());
+        lines.push(format!("cwd: {}", self.cwd.display()));
+        lines.push(format!("mode: {}", self.workflow_mode.display_name()));
+        if self.is_streaming || self.agent_task.is_some() {
+            lines.push("agent: running".to_string());
+        } else if self.pending_agent_prompt.is_some() {
+            lines.push("agent: queued".to_string());
+        } else {
+            lines.push("agent: idle".to_string());
+        }
+        if let Some(scope) = self.active_mana_scope.as_ref() {
+            lines.push(format!("scope: {} — {}", scope.id, scope.title.trim()));
+        }
+        if let Some(run) = self.active_mana_run.as_ref() {
+            lines.push(format!(
+                "mana run: {} {} ({}/{}, failed {})",
+                run.run_id, run.status, run.total_closed, run.total_units, run.total_failed
+            ));
+        }
+        if self.workflow_mode == WorkflowMode::Build {
+            let budget = self.config.ui.build_auto_turn_budget.max(1);
+            lines.push(format!("build loop: {}/{}", self.build_auto_turns, budget));
+            if let Some(task_id) = self.last_build_auto_task_id.as_ref() {
+                lines.push(format!("last build task: {task_id}"));
+            }
+        }
+        if self.workflow_mode == WorkflowMode::Improve {
+            let budget = self.config.ui.improve_auto_turn_budget.max(1);
+            lines.push(format!(
+                "improve loop: {}/{}",
+                self.improve_auto_turns, budget
+            ));
+            lines.push(format!(
+                "improve mode: {}",
+                if self.improve_safe_mode {
+                    "safe"
+                } else {
+                    "sandbox"
+                }
+            ));
+        }
+        if let Some(sandbox) = self.improve_sandbox.as_ref() {
+            lines.push(format!("improve branch: {}", sandbox.branch));
+            lines.push(format!("improve worktree: {}", sandbox.worktree.display()));
+            lines.push(format!("improve base: {}", sandbox.base_branch));
+            lines.push(format!(
+                "improve changelog: {}",
+                sandbox.worktree.join(IMPROVE_CHANGELOG_PATH).display()
+            ));
+            lines.push(format!(
+                "next: review changelog, then /improve merge (or /clean to discard)"
+            ));
+            if let Ok(status) = run_git(&sandbox.worktree, &["status", "--short"]) {
+                lines.push(format!(
+                    "worktree status: {}",
+                    if status.trim().is_empty() {
+                        "clean"
+                    } else {
+                        "dirty"
+                    }
+                ));
+                if !status.trim().is_empty() {
+                    lines.extend(status.lines().take(10).map(|line| format!("  {line}")));
+                }
+            }
+        }
+        if let Some(state) = self.loop_state.as_ref() {
+            lines.push(format!("loop: {}/{}", state.completed_turns, state.budget));
+            lines.push(format!(
+                "loop message: {}",
+                single_line_preview(&state.message)
+            ));
+        }
+        lines.join("\n")
+    }
+
+    fn show_status_command(&mut self) {
+        let status = self.active_status_text();
+        self.push_system_msg(&status);
+    }
+
+    fn improve_merge_command(&mut self) {
+        let Some(sandbox) = self.improve_sandbox.clone() else {
+            self.push_system_msg("No active Improve sandbox to merge.");
+            return;
+        };
+        let changelog = sandbox.worktree.join(IMPROVE_CHANGELOG_PATH);
+        if !changelog.exists() {
+            self.push_system_msg(&format!(
+                "Refusing to merge: missing Improve changelog at {}. Review/complete the changelog first.",
+                changelog.display()
+            ));
+            return;
+        }
+        match run_git(&self.cwd, &["status", "--short"]) {
+            Ok(status) if !status.trim().is_empty() => {
+                self.push_system_msg(&format!(
+                    "Refusing to merge: current checkout is dirty. Commit/stash/revert first.\n{}",
+                    status
+                ));
+                return;
+            }
+            Err(err) => {
+                self.push_system_msg(&format!("Could not inspect current checkout: {err}"));
+                return;
+            }
+            _ => {}
+        }
+        match run_git(&sandbox.worktree, &["status", "--short"]) {
+            Ok(status) if !status.trim().is_empty() => {
+                self.push_system_msg(&format!(
+                    "Refusing to merge: Improve sandbox has uncommitted changes. Commit them in {} or clean/discard.\n{}",
+                    sandbox.worktree.display(),
+                    status
+                ));
+                return;
+            }
+            Err(err) => {
+                self.push_system_msg(&format!("Could not inspect Improve sandbox: {err}"));
+                return;
+            }
+            _ => {}
+        }
+        match run_git(&self.cwd, &["merge", "--no-ff", &sandbox.branch]) {
+            Ok(output) => {
+                self.push_system_msg(&format!(
+                    "Merged Improve branch {}. Changelog reviewed from {}.\n{}",
+                    sandbox.branch,
+                    changelog.display(),
+                    output
+                ));
+            }
+            Err(err) => self.push_system_msg(&format!("Improve merge failed: {err}")),
+        }
+    }
+
+    fn clean_command(&mut self, args: &str) {
+        let Some(sandbox) = self.improve_sandbox.clone() else {
+            self.push_system_msg("Nothing to clean yet.");
+            return;
+        };
+        let status = run_git(&sandbox.worktree, &["status", "--short"]).unwrap_or_default();
+        let force = args
+            .split_whitespace()
+            .any(|arg| arg == "--force" || arg == "force");
+        if !status.trim().is_empty() && !force {
+            self.push_system_msg(&format!(
+                "Improve sandbox is dirty; not cleaning without confirmation. Review `{}` then run `/clean --force` to remove worktree {}.\n{}",
+                sandbox.branch,
+                sandbox.worktree.display(),
+                status
+            ));
+            return;
+        }
+        let mut command = Command::new("git");
+        command.arg("worktree").arg("remove");
+        if force {
+            command.arg("--force");
+        }
+        command.arg(&sandbox.worktree).current_dir(&self.cwd);
+        match command.output() {
+            Ok(output) if output.status.success() => {
+                self.improve_sandbox = None;
+                self.push_system_msg(&format!(
+                    "Removed Improve worktree {}. Branch {} was kept.",
+                    sandbox.worktree.display(),
+                    sandbox.branch
+                ));
+            }
+            Ok(output) => {
+                let err = String::from_utf8_lossy(&output.stderr);
+                self.push_system_msg(&format!("Clean failed: {}", err.trim()));
+            }
+            Err(err) => self.push_system_msg(&format!("Clean failed: {err}")),
+        }
+    }
+
+    fn start_loop_command(&mut self, message: &str) {
+        let message = message.trim();
+        if message.is_empty() {
+            self.push_system_msg("Usage: /loop <message>");
+            return;
+        }
+        let budget = self.config.ui.loop_turn_budget.max(1);
+        self.loop_state = Some(LoopState {
+            message: message.to_string(),
+            completed_turns: 0,
+            budget,
+        });
+        self.push_system_msg(&format!("Loop started: {budget} turn budget."));
+        self.queue_loop_continuation_if_ready();
+    }
+
+    fn ensure_improve_sandbox(&mut self, scope: &ManaUnitRef) -> Option<ImproveSandbox> {
+        if let Some(sandbox) = self.improve_sandbox.clone() {
+            return Some(sandbox);
+        }
+        match create_improve_sandbox(&self.cwd, scope) {
+            Ok(sandbox) => {
+                self.push_system_msg(&format!(
+                    "Improve sandbox ready: branch {} at {}. Review with `git -C {} diff {}...HEAD`.",
+                    sandbox.branch,
+                    sandbox.worktree.display(),
+                    sandbox.worktree.display(),
+                    sandbox.base_branch
+                ));
+                self.improve_sandbox = Some(sandbox.clone());
+                Some(sandbox)
+            }
+            Err(err) => {
+                self.push_system_msg(&format!("Could not create Improve sandbox: {err}"));
+                None
+            }
+        }
+    }
+
+    fn try_launch_build_team(&mut self, text: &str) -> bool {
+        if self.workflow_mode != WorkflowMode::Build || !is_build_team_intent(text) {
+            return false;
+        }
+
+        let Some(scope) = self.active_mana_scope.clone() else {
+            self.push_system_msg("Build team needs an active mana scope. Use /scope <id> or read/create a mana epic first.");
+            return true;
+        };
+
+        match self.launch_mana_run_for_scope(&scope) {
+            Ok(run_id) => {
+                self.refresh_active_mana_run(&run_id);
+                self.push_system_msg(&format!(
+                    "Started mana team run {run_id} for scope {}.",
+                    scope.id
+                ));
+            }
+            Err(err) => {
+                self.push_system_msg(&format!("Could not start mana team run: {err}"));
+            }
+        }
+        true
+    }
+
+    fn launch_mana_run_for_scope(&self, scope: &ManaUnitRef) -> Result<String, String> {
+        let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
+        let (command_tx, _command_rx) = tokio::sync::mpsc::channel(16);
+        let ctx = imp_core::tools::ToolContext {
+            cwd: self.cwd.clone(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx,
+            command_tx,
+            ui: Arc::new(imp_core::ui::NullInterface),
+            file_cache: Arc::new(imp_core::tools::FileCache::new()),
+            checkpoint_state: Arc::new(imp_core::tools::CheckpointState::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(
+                imp_core::tools::FileTracker::default(),
+            )),
+            anchor_store: Arc::new(imp_core::tools::AnchorStore::new()),
+            lua_tool_loader: None,
+            mode: imp_core::config::AgentMode::Full,
+            read_max_lines: self.config.ui.read_max_lines,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(Default::default())),
+            config: Arc::new(self.config.clone()),
+            run_policy: Default::default(),
+        };
+
+        let output = futures::executor::block_on(ManaTool::default().execute(
+            "build_team_run",
+            serde_json::json!({ "action": "run", "id": scope.id }),
+            ctx,
+        ))
+        .map_err(|err: imp_core::error::Error| err.to_string())?;
+
+        if output.is_error {
+            return Err(output
+                .text_content()
+                .unwrap_or("mana run failed")
+                .to_string());
+        }
+        output.details["run_id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "mana run did not return run_id".to_string())
+    }
+
+    fn build_mode_prompt_for_text(&mut self, text: &str) -> Option<String> {
+        if self.workflow_mode != WorkflowMode::Build || !is_build_continue_intent(text) {
+            return None;
+        }
+
+        self.next_build_mode_prompt().map(|(_, prompt)| prompt)
+    }
+
+    fn next_build_mode_prompt(&mut self) -> Option<(String, String)> {
+        let Some(scope) = self.active_mana_scope.clone() else {
+            self.push_system_msg("Build mode needs an active mana scope. Use /scope <id> or read/create a mana epic first.");
+            return None;
+        };
+
+        match self.select_next_build_task(&scope.id) {
+            Ok(Some(BuildModeSelection::Task(task))) => {
+                let task_id = task.id.clone();
+                Some((task_id, task.prompt(&scope)))
+            }
+            Ok(Some(BuildModeSelection::Blocked(blocked))) => {
+                self.push_system_msg(&format!(
+                    "Build mode paused: mana task {} has unresolved decision(s): {}",
+                    blocked.id,
+                    blocked.decisions.join("; ")
+                ));
+                None
+            }
+            Ok(None) => {
+                self.push_system_msg(&format!(
+                    "No open child tasks found under active mana scope {}.",
+                    scope.id
+                ));
+                None
+            }
+            Err(err) => {
+                self.push_system_msg(&format!("Could not select next build task: {err}"));
+                None
+            }
+        }
+    }
+
+    fn select_next_build_task(
+        &self,
+        scope_id: &str,
+    ) -> std::result::Result<Option<BuildModeSelection>, String> {
+        let mana_dir = api::find_mana_dir(&self.cwd).map_err(|err| err.to_string())?;
+        let graph = api::get_tree(&mana_dir, scope_id).map_err(|err| err.to_string())?;
+        let Some(candidate) = first_open_child(&graph) else {
+            return Ok(None);
+        };
+        let unit = api::get_unit(&mana_dir, &candidate.id).map_err(|err| err.to_string())?;
+        if !unit.decisions.is_empty() {
+            return Ok(Some(BuildModeSelection::Blocked(BuildModeBlockedTask {
+                id: unit.id,
+                decisions: unit.decisions,
+            })));
+        }
+        Ok(Some(BuildModeSelection::Task(BuildModeTask {
+            id: unit.id,
+            title: unit.title,
+            description: unit.description,
+            design: unit.design,
+            acceptance: unit.acceptance,
+            notes: unit.notes,
+            verify_fast: unit.verify_fast,
+            verify: unit.verify,
+            verify_timeout: unit.verify_timeout,
+            paths: unit.paths,
+            dependencies: unit.dependencies,
+            requires: unit.requires,
+            produces: unit.produces,
+            decisions: unit.decisions,
+        })))
+    }
+
+    fn spawn_agent_for_prompt_in_cwd(
+        &mut self,
+        prompt: &str,
+        agent_cwd: PathBuf,
+    ) -> Result<(), String> {
         let auth_path = imp_core::storage::global_auth_path();
         let mut auth_store =
             AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
@@ -3101,9 +4540,9 @@ impl App {
 
         let requested_max_tokens = self.config.max_tokens;
 
-        let lua_cwd = self.cwd.clone();
+        let lua_cwd = agent_cwd.clone();
         let user_config_dir = imp_core::config::Config::user_config_dir();
-        let (mut agent, handle) = AgentBuilder::new(config, self.cwd.clone(), model, api_key)
+        let (mut agent, handle) = AgentBuilder::new(config, agent_cwd, model, api_key)
             .lua_tool_loader(move |policy, tools| {
                 imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools, policy);
             })
@@ -3148,6 +4587,10 @@ impl App {
         // Sanitize: strip unpaired tool_calls and orphaned tool_results
         imp_core::session::sanitize_messages(&mut messages);
         agent.messages = messages;
+
+        if let Some(workflow_context) = self.workflow_context_prompt() {
+            agent.messages.push(Message::user(workflow_context));
+        }
 
         let prompt = prompt.to_string();
         let task = tokio::spawn(async move { agent.run(prompt).await });
@@ -3235,6 +4678,49 @@ impl App {
         }
     }
 
+    fn queue_streaming_message(&mut self, message: QueuedMessage) {
+        if let Some(previous) = self.message_queue.pop() {
+            self.send_steering_message(previous.text().to_string());
+        }
+        self.message_queue.push(message);
+        self.editor.clear();
+        self.needs_redraw = true;
+    }
+
+    fn send_steering_message(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        self.messages.push(DisplayMessage {
+            role: MessageRole::User,
+            content: text.clone(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: false,
+            timestamp: imp_llm::now(),
+        });
+        self.invalidate_chat_render_cache();
+        let _ = self.session.append(SessionEntry::Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            parent_id: None,
+            message: imp_llm::Message::user(&text),
+        });
+        if let Some(ref handle) = self.agent_handle {
+            let _ = handle.command_tx.try_send(AgentCommand::Steer(text));
+        }
+    }
+
+    fn queued_message_preview(&self, terminal_width: u16) -> Option<String> {
+        let text = self.message_queue.first()?.text();
+        let max_chars = (terminal_width as usize / 2).max(8);
+        Some(truncate_chars_with_suffix(
+            &single_line_preview(text),
+            max_chars,
+            "…",
+        ))
+    }
+
     fn send_message(&mut self) {
         let text = self.editor.content().to_string();
         if text.trim().is_empty() {
@@ -3246,26 +4732,41 @@ impl App {
             self.editor.clear();
             return;
         }
-        // Check for slash commands
-        if let Some(cmd_text) = text.strip_prefix('/') {
-            let typed = cmd_text.trim();
-            // Resolve prefix: exact match first, then unique prefix match.
-            // Keep the original text for /skill:<name> so arguments survive.
-            let commands = self.slash_commands();
-            let cmd = if typed.starts_with("skill:") {
-                typed.to_string()
-            } else {
-                commands
-                    .iter()
-                    .find(|c| c.name == typed)
-                    .or_else(|| commands.iter().find(|c| c.name.starts_with(typed)))
-                    .map(|c| c.name.clone())
-                    .unwrap_or_else(|| typed.to_string())
-            };
-            self.execute_command(&cmd);
-            self.editor.push_history();
-            self.editor.clear();
-            return;
+        // Check for slash commands. Only a single-line, slash-prefixed input is
+        // treated as a command; pasted absolute paths or file contents can start
+        // with `/` and must still be sent to the agent as normal text.
+        if !text.contains('\n') {
+            if let Some(cmd_text) = text.strip_prefix('/') {
+                let typed = cmd_text.trim();
+                let canonical_typed = if typed.eq_ignore_ascii_case("improve safe") {
+                    "improve safe"
+                } else {
+                    typed
+                };
+                // Resolve prefix: exact match first, then unique prefix match.
+                // Keep the original text for /skill:<name> so arguments survive.
+                let commands = self.slash_commands();
+                let cmd = if canonical_typed == "improve safe" {
+                    canonical_typed.to_string()
+                } else if canonical_typed.starts_with("skill:") {
+                    canonical_typed.to_string()
+                } else {
+                    commands
+                        .iter()
+                        .find(|c| c.name == canonical_typed)
+                        .or_else(|| {
+                            commands
+                                .iter()
+                                .find(|c| c.name.starts_with(canonical_typed))
+                        })
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| canonical_typed.to_string())
+                };
+                self.execute_command(&cmd);
+                self.editor.push_history();
+                self.editor.clear();
+                return;
+            }
         }
 
         // Add user message to display
@@ -3276,6 +4777,7 @@ impl App {
             return;
         }
 
+        let user_message_index = self.messages.len();
         self.messages.push(DisplayMessage {
             role: MessageRole::User,
             content: text.clone(),
@@ -3308,6 +4810,7 @@ impl App {
         self.invalidate_chat_render_cache();
 
         self.is_streaming = true;
+        self.streaming_anchor_user_index = Some(user_message_index);
         self.completed_turns_in_run = 0;
         self.suppress_completion_notification = false;
         self.auto_scroll = true;
@@ -3318,8 +4821,30 @@ impl App {
         self.editor.push_history();
         self.editor.clear();
 
-        if let Err(error) = self.spawn_agent_for_prompt(&text) {
+        let mut agent_prompt = text.clone();
+        if self.try_launch_build_team(&text) {
+            return;
+        }
+        if let Some(build_prompt) = self.build_mode_prompt_for_text(&text) {
+            agent_prompt = build_prompt;
+        }
+        self.pending_agent_prompt = Some(agent_prompt);
+        self.pending_agent_cwd = None;
+        self.needs_redraw = true;
+    }
+
+    fn start_pending_agent_after_redraw(&mut self) {
+        let Some(text) = self.pending_agent_prompt.take() else {
+            return;
+        };
+        let agent_cwd = self
+            .pending_agent_cwd
+            .take()
+            .unwrap_or_else(|| self.cwd.clone());
+
+        if let Err(error) = self.spawn_agent_for_prompt_in_cwd(&text, agent_cwd) {
             self.is_streaming = false;
+            self.streaming_anchor_user_index = None;
             self.messages.pop();
             self.messages.push(DisplayMessage {
                 role: MessageRole::Error,
@@ -3331,6 +4856,7 @@ impl App {
                 timestamp: imp_llm::now(),
             });
             self.invalidate_chat_render_cache();
+            self.needs_redraw = true;
         }
     }
 
@@ -3356,8 +4882,167 @@ impl App {
         }
     }
 
+    fn active_mana_run_label(&self) -> Option<String> {
+        self.active_mana_run
+            .as_ref()
+            .map(|run| format!("run {} {}", run.run_id, run.status))
+    }
+
+    fn active_mana_scope_label(&self) -> Option<String> {
+        self.active_mana_scope.as_ref().map(|scope| {
+            let mut title = scope.title.trim().to_string();
+            const MAX_TITLE_CHARS: usize = 42;
+            if title.chars().count() > MAX_TITLE_CHARS {
+                title = title.chars().take(MAX_TITLE_CHARS).collect::<String>();
+                title.push('…');
+            }
+            if title.is_empty() {
+                format!("mana {}", scope.id)
+            } else {
+                format!("mana {} {}", scope.id, title)
+            }
+        })
+    }
+
+    fn set_active_mana_run(&mut self, id: &str) {
+        let id = id.trim();
+        if id.is_empty() {
+            let Some(active_id) = self.active_mana_run.as_ref().map(|run| run.run_id.clone())
+            else {
+                self.push_system_msg("Usage: /run <run-id> or /run clear");
+                return;
+            };
+            self.refresh_active_mana_run(&active_id);
+            return;
+        }
+        if id.eq_ignore_ascii_case("clear") || id.eq_ignore_ascii_case("none") {
+            self.active_mana_run = None;
+            self.push_system_msg("Active mana run cleared");
+            return;
+        }
+
+        self.refresh_active_mana_run(id);
+    }
+
+    fn refresh_active_mana_run(&mut self, id: &str) {
+        match mana_run_summary(id) {
+            Ok(Some(summary)) => {
+                self.push_system_msg(&format!(
+                    "Active mana run: {} {} ({}/{}, failed {})",
+                    summary.run_id,
+                    summary.status,
+                    summary.total_closed,
+                    summary.total_units,
+                    summary.total_failed
+                ));
+                self.active_mana_run = Some(summary);
+            }
+            Ok(None) => self.push_system_msg(&format!("Could not find mana run {id}")),
+            Err(err) => self.push_system_msg(&format!("Could not read mana run {id}: {err}")),
+        }
+    }
+
+    fn set_active_mana_scope(&mut self, id: &str) {
+        let id = id.trim();
+        if id.is_empty() {
+            self.push_system_msg("Usage: /scope <mana-id> or /scope clear");
+            return;
+        }
+        if id.eq_ignore_ascii_case("clear") || id.eq_ignore_ascii_case("none") {
+            self.active_mana_scope = None;
+            self.build_auto_turns = 0;
+            self.last_build_auto_task_id = None;
+            self.improve_auto_turns = 0;
+            self.improve_sandbox = None;
+            self.push_system_msg("Active mana scope cleared");
+            return;
+        }
+
+        match self.resolve_mana_scope(id) {
+            Ok(scope) => {
+                let label = if scope.title.trim().is_empty() {
+                    scope.id.clone()
+                } else {
+                    format!("{} {}", scope.id, scope.title.trim())
+                };
+                self.active_mana_scope = Some(scope);
+                self.build_auto_turns = 0;
+                self.last_build_auto_task_id = None;
+                self.improve_auto_turns = 0;
+                self.improve_sandbox = None;
+                self.push_system_msg(&format!("Active mana scope: {label}"));
+                self.queue_build_mode_continuation_if_ready();
+                self.queue_improve_mode_continuation_if_ready();
+            }
+            Err(err) => {
+                self.push_system_msg(&format!("Could not set mana scope {id}: {err}"));
+            }
+        }
+    }
+
+    fn resolve_mana_scope(&self, id: &str) -> std::result::Result<ManaUnitRef, String> {
+        let mana_dir = api::find_mana_dir(&self.cwd).map_err(|err| err.to_string())?;
+        let unit = api::get_unit(&mana_dir, id).map_err(|err| err.to_string())?;
+        Ok(ManaUnitRef::new(
+            &unit.id,
+            &unit.title,
+            Some(format!("{:?}", unit.kind)),
+        ))
+    }
+
+    fn maybe_update_active_mana_scope_from_review(&mut self, review: &TurnManaReview) {
+        let Some(scope) = candidate_active_scope_from_review(review) else {
+            return;
+        };
+
+        if self
+            .active_mana_scope
+            .as_ref()
+            .is_some_and(|active| active.id == scope.id)
+        {
+            return;
+        }
+
+        self.active_mana_scope = Some(scope);
+        self.build_auto_turns = 0;
+        self.last_build_auto_task_id = None;
+        self.improve_auto_turns = 0;
+        self.improve_sandbox = None;
+    }
+
+    fn set_workflow_mode(&mut self, mode: WorkflowMode) {
+        self.workflow_mode = mode;
+        self.build_auto_turns = 0;
+        self.last_build_auto_task_id = None;
+        self.improve_auto_turns = 0;
+        self.improve_sandbox = None;
+        self.improve_safe_mode = false;
+        self.push_system_msg(&format!("Workflow mode: {}", mode.display_name()));
+        self.queue_build_mode_continuation_if_ready();
+        self.queue_improve_mode_continuation_if_ready();
+    }
+
+    fn set_improve_mode(&mut self, safe: bool) {
+        self.workflow_mode = WorkflowMode::Improve;
+        self.build_auto_turns = 0;
+        self.last_build_auto_task_id = None;
+        self.improve_auto_turns = 0;
+        self.improve_sandbox = None;
+        self.improve_safe_mode = safe;
+        if safe {
+            self.push_system_msg("Workflow mode: Improve safe (research-only)");
+        } else {
+            self.push_system_msg("Workflow mode: Improve (sandbox branch/worktree)");
+        }
+        self.queue_improve_mode_continuation_if_ready();
+    }
+
     fn execute_command(&mut self, cmd: &str) {
-        match cmd.split_whitespace().next().unwrap_or("") {
+        let mut parts = cmd.splitn(2, char::is_whitespace);
+        let command = parts.next().unwrap_or("");
+        let args = parts.next().unwrap_or("").trim();
+
+        match command {
             "quit" | "q" => {
                 self.running = false;
             }
@@ -3411,6 +5096,24 @@ impl App {
   PageUp/Down   Scroll",
                 );
             }
+            "explore" => self.set_workflow_mode(WorkflowMode::Explore),
+            "plan" => self.set_workflow_mode(WorkflowMode::Plan),
+            "build" => self.set_workflow_mode(WorkflowMode::Build),
+            "improve" => match args {
+                arg if matches!(arg, "merge" | "adopt" | "approve") => self.improve_merge_command(),
+                arg => self.set_improve_mode(arg.eq_ignore_ascii_case("safe")),
+            },
+            "improve-safe" => self.set_improve_mode(true),
+            "improve-merge" => self.improve_merge_command(),
+            "improve-help" => self.push_system_msg(
+                "Improve uses a new branch checked out in a separate worktree before making code changes. It never commits or merges without explicit approval. Use /improve safe for research-only evaluation and mana follow-ups.",
+            ),
+            "status" => self.show_status_command(),
+            "clean" => self.clean_command(args),
+            "loop" => self.start_loop_command(args),
+            "scope" | "mana-scope" => self.set_active_mana_scope(args),
+            "run" => self.set_active_mana_run(args),
+            "stop" => self.stop_active_work(),
             "settings" => {
                 self.open_settings();
             }
@@ -3550,6 +5253,16 @@ impl App {
                     "Commands:\n",
                     "  /new        — start fresh session\n",
                     "  /model      — switch model\n",
+                    "  /mana [id]  — browse mana work graph\n",
+                    "  /scope <id> — set active mana scope\n",
+                    "  /build      — switch to Build mode\n",
+                    "  /improve    — improve in a sandbox branch/worktree\n",
+                    "  /improve safe — research-only Improve mode\n",
+                    "  /improve merge — merge active Improve branch after reviewing changelog\n",
+                    "  /status    — show active work status\n",
+                    "  /loop <msg> — repeat a prompt until stopped/budgeted\n",
+                    "  /clean     — clean active sandbox/artifacts safely\n",
+                    "  /stop       — stop active imp work\n",
                     "  /compact    — compress context\n",
                     "  /resume     — resume/search sessions\n",
                     "  /session    — legacy alias (defunct)\n",
@@ -3986,7 +5699,7 @@ impl App {
         self.invalidate_chat_render_cache();
 
         let task_command = command_label.clone();
-        let task = tokio::task::spawn_blocking(move || {
+        let run_lua_command = move || {
             let result = match runtime.lock() {
                 Ok(guard) => guard
                     .execute_command_with_context(&task_command, &args, Some(call_ctx))
@@ -3994,8 +5707,21 @@ impl App {
                 Err(_) => Err("Lua runtime lock poisoned".to_string()),
             };
             (task_command, result)
-        });
-        self.lua_command_task = Some(task);
+        };
+
+        if tokio::runtime::Handle::try_current().is_ok() {
+            self.lua_command_task = Some(tokio::task::spawn_blocking(run_lua_command));
+        } else {
+            let (command, result) = run_lua_command();
+            let signal = match result {
+                Ok(result) if lua_result_requests_restart(result.as_deref()) => {
+                    RuntimeSignal::LuaCommandRestartRequested { command, result }
+                }
+                Ok(result) => RuntimeSignal::LuaCommandCompleted { command, result },
+                Err(error) => RuntimeSignal::LuaCommandFailed { command, error },
+            };
+            self.handle_runtime_signal(signal);
+        }
         true
     }
 
@@ -4308,12 +6034,14 @@ impl App {
             }
             KeyCode::Tab => {
                 let replacement = if !state.options.is_empty() && !state.input_active {
-                    state.options.get(state.cursor).map(|opt| opt.label.clone())
+                    let cursor = state.cursor.min(state.options.len().saturating_sub(1));
+                    state.options.get(cursor).map(|opt| opt.label.clone())
                 } else {
                     None
                 };
                 if let Some(text) = replacement {
                     self.editor.set_content(&text);
+                    self.editor.move_end();
                     self.sync_ask_from_editor();
                 }
             }
@@ -4639,6 +6367,16 @@ impl App {
             KeyCode::Down => {
                 if let UiMode::Settings(ref mut state) = self.mode {
                     state.move_down();
+                }
+            }
+            KeyCode::Tab => {
+                if let UiMode::Settings(ref mut state) = self.mode {
+                    state.switch_tab_forward();
+                }
+            }
+            KeyCode::BackTab => {
+                if let UiMode::Settings(ref mut state) = self.mode {
+                    state.switch_tab_backward();
                 }
             }
             KeyCode::Left => {
@@ -5632,6 +7370,7 @@ impl App {
                 self.accumulated_cost.input += cost.input;
                 self.accumulated_cost.output += cost.output;
                 self.is_streaming = false;
+                self.streaming_anchor_user_index = None;
 
                 // Mark last streaming message as done
                 if let Some(last) = self.latest_streaming_message_mut() {
@@ -5639,20 +7378,20 @@ impl App {
                 }
                 self.invalidate_chat_render_cache();
 
-                // Process follow-up messages
-                let follow_ups: Vec<_> = self
-                    .message_queue
-                    .drain(..)
-                    .filter_map(|m| match m {
-                        QueuedMessage::FollowUp(text) => Some(text),
-                        _ => None,
-                    })
-                    .collect();
-                for text in follow_ups {
+                // Process queued messages. Follow-ups become visible user turns
+                // and start the next agent run; steering messages that were still
+                // queued at turn end are also surfaced and sent as the next prompt.
+                let queued: Vec<_> = self.message_queue.drain(..).collect();
+                for message in queued {
+                    let text = message.text().to_string();
                     self.editor.set_content(&text);
                     self.send_message();
                 }
                 self.llm_thought_segment_started_at = None;
+                self.queue_build_mode_continuation_if_ready();
+                self.queue_improve_mode_continuation_if_ready();
+                self.queue_loop_continuation_if_ready();
+                self.maybe_notify_agent_completion();
             }
             AgentEvent::MessageDelta { delta } => {
                 // Keep the current default compact: the main transcript shows
@@ -5703,10 +7442,6 @@ impl App {
                     }
                 }
                 self.invalidate_chat_render_cache();
-                // Auto-scroll to bottom
-                if self.auto_scroll {
-                    self.scroll_offset = 0;
-                }
             }
             AgentEvent::ToolExecutionStart {
                 tool_call_id,
@@ -5770,9 +7505,6 @@ impl App {
                     }
                 }
                 self.invalidate_chat_render_cache();
-                if self.auto_scroll {
-                    self.scroll_offset = 0;
-                }
             }
             AgentEvent::ToolExecutionEnd {
                 tool_call_id,
@@ -5839,8 +7571,9 @@ impl App {
             AgentEvent::TurnEnd {
                 index,
                 message,
-                mana_review: _,
+                mana_review,
             } => {
+                self.maybe_update_active_mana_scope_from_review(&mana_review);
                 self.completed_turns_in_run += 1;
                 // Update context tracking from this turn's usage
                 if let Some(ref usage) = message.usage {
@@ -5868,6 +7601,7 @@ impl App {
                 self.completed_turns_in_run = 0;
                 // Stop streaming — errors can be terminal (no AgentEnd follows)
                 self.is_streaming = false;
+                self.streaming_anchor_user_index = None;
                 if let Some(last) = self.latest_streaming_message_mut() {
                     last.is_streaming = false;
                 }
@@ -5957,6 +7691,10 @@ fn expand_prompt_path(path: &str, cwd: &Path) -> PathBuf {
     } else {
         cwd.join(path)
     }
+}
+
+fn single_line_preview(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -6120,12 +7858,24 @@ mod session_lifecycle {
     }
 
     #[test]
-    fn terminal_title_replaces_imp_with_spinner_while_streaming() {
+    fn terminal_title_uses_breather_while_streaming() {
         let mut app = make_app();
         app.session.set_name("my chat");
         app.is_streaming = true;
         app.tick = 0;
-        assert_eq!(app.terminal_title(), "⠋ — my chat");
+        assert_eq!(app.terminal_title(), "· — my chat");
+        app.tick = 36;
+        assert_eq!(app.terminal_title(), "● — my chat");
+    }
+
+    #[test]
+    fn terminal_title_uses_static_working_glyph_when_animations_are_off() {
+        let mut app = make_app();
+        app.config.ui.animations = imp_core::config::AnimationLevel::None;
+        app.session.set_name("my chat");
+        app.is_streaming = true;
+        app.tick = 36;
+        assert_eq!(app.terminal_title(), "• — my chat");
     }
 
     #[test]
@@ -6166,6 +7916,46 @@ mod session_lifecycle {
     }
 
     #[test]
+    fn ask_tab_replacement_moves_editor_and_ask_cursors_to_end() {
+        use crate::views::ask_bar::{AskOption, AskState};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use tokio::sync::oneshot;
+
+        let mut app = make_app();
+        let (tx, _rx) = oneshot::channel();
+        app.begin_ask(
+            AskState::with_placeholder(
+                "Choose".to_string(),
+                String::new(),
+                vec![AskOption {
+                    label: "éclair".to_string(),
+                    description: None,
+                    checked: false,
+                }],
+                false,
+                String::new(),
+            ),
+            AskReply::Select(tx),
+        );
+        app.editor.cursor = usize::MAX;
+        if let Some(state) = app.ask_state.as_mut() {
+            state.cursor = usize::MAX;
+            state.input_active = false;
+        }
+
+        app.handle_ask_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+
+        assert_eq!(app.editor.content(), "éclair");
+        assert_eq!(app.editor.cursor, "éclair".len());
+        assert!(app.editor.content().is_char_boundary(app.editor.cursor));
+        let state = app.ask_state.as_ref().expect("ask still active");
+        assert_eq!(state.input, "éclair");
+        assert_eq!(state.input_cursor, "éclair".len());
+        assert_eq!(state.editor_cursor, "éclair".len());
+        assert!(state.input_active);
+    }
+
+    #[test]
     fn tui_integration_app_new_persistent_session() {
         let tmp = TempDir::new().unwrap();
         let app = make_persistent_app(&tmp);
@@ -6191,10 +7981,46 @@ mod session_lifecycle {
         assert_eq!(messages.len(), 1);
         assert!(messages[0].is_user());
 
-        // Display should have user msg + error (agent spawn fails without auth)
+        // Display should have user msg + streaming placeholder; agent startup is deferred until
+        // after the next redraw so the user's message can echo immediately.
         assert!(app.messages.len() >= 2);
         assert_eq!(app.messages[0].role, MessageRole::User);
         assert_eq!(app.messages[0].content, "hello world");
+        assert_eq!(app.messages[1].role, MessageRole::Assistant);
+        assert!(app.messages[1].is_streaming);
+    }
+
+    #[test]
+    fn send_message_defers_agent_start_until_after_echo_redraw() {
+        let tmp = TempDir::new().unwrap();
+        let mut app = make_persistent_app(&tmp);
+
+        app.editor.set_content("echo first");
+        app.send_message();
+
+        assert_eq!(app.messages[0].role, MessageRole::User);
+        assert_eq!(app.messages[0].content, "echo first");
+        assert_eq!(app.messages[1].role, MessageRole::Assistant);
+        assert!(app.messages[1].is_streaming);
+        assert!(app.agent_task.is_none());
+        assert!(app.agent_handle.is_none());
+        assert_eq!(app.pending_agent_prompt.as_deref(), Some("echo first"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_agent_start_reports_error_after_deferred_start() {
+        let tmp = TempDir::new().unwrap();
+        let mut app = make_persistent_app(&tmp);
+
+        app.editor.set_content("start later");
+        app.send_message();
+        app.start_pending_agent_after_redraw();
+
+        assert!(app.pending_agent_prompt.is_none());
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.role == MessageRole::Error));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6978,6 +8804,19 @@ mod session_lifecycle {
         assert!(app.editor.is_empty());
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tui_integration_multiline_slash_paste_is_sent_as_prompt() {
+        let mut app = make_app();
+        let pasted = "/Users/asher/example.rs\nfn main() {}";
+
+        app.editor.set_content(pasted);
+        app.send_message();
+
+        assert_eq!(app.messages[0].role, MessageRole::User);
+        assert_eq!(app.messages[0].content, pasted);
+        assert!(app.editor.is_empty());
+    }
+
     // ── 4. Session reload on restart ────────────────────────────
 
     #[test]
@@ -7185,6 +9024,69 @@ mod session_lifecycle {
         assert!(!app.sidebar.open);
         assert_eq!(app.active_pane, Pane::Chat);
         assert!(app.selection.is_some());
+    }
+
+    #[test]
+    fn mouse_click_on_homepage_skill_opens_skill_in_inspector() {
+        let tmp = TempDir::new().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", tmp.path());
+        std::env::remove_var("USERPROFILE");
+        let cwd = tmp.path().join("project");
+        std::fs::create_dir_all(cwd.join(".imp/skills/rust")).unwrap();
+        std::fs::write(
+            cwd.join(".imp/skills/rust/SKILL.md"),
+            "---\ndescription: Rust conventions\n---\n\n# Rust\n\nUse result types.",
+        )
+        .unwrap();
+        let mut app = make_app_with_session(SessionManager::in_memory(), cwd);
+        app.config.ui.sidebar_style = imp_core::config::SidebarStyle::Inspector;
+        app.chat_surface = Some(TextSurface::new(
+            SelectablePane::Chat,
+            Rect::new(0, 0, 160, 30),
+            Vec::new(),
+            0,
+        ));
+
+        let rust_index = app
+            .startup_skills()
+            .iter()
+            .position(|skill| skill.name == "rust")
+            .expect("rust skill discovered");
+        let hit = app
+            .startup_skill_hits(Rect::new(0, 0, 160, 30))
+            .into_iter()
+            .find(|hit| hit.index == rust_index)
+            .expect("rust skill visible");
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: hit.rect.x,
+            row: hit.rect.y,
+            modifiers: KeyModifiers::empty(),
+        });
+
+        assert!(app.sidebar.open);
+        let detail = startup_skill_detail_render_data(
+            app.selected_startup_skill.as_ref().expect("skill selected"),
+            &app.theme,
+        );
+        assert!(detail.plain_lines.iter().any(|line| line == "# Rust"));
+        assert!(detail
+            .plain_lines
+            .iter()
+            .any(|line| line == "Use result types."));
+
+        if let Some(previous_home) = previous_home {
+            std::env::set_var("HOME", previous_home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(previous_userprofile) = previous_userprofile {
+            std::env::set_var("USERPROFILE", previous_userprofile);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
     }
 
     #[test]
@@ -7762,6 +9664,136 @@ mod session_lifecycle {
         assert_eq!(app.accumulated_usage.input_tokens, 500_000);
         assert_eq!(app.accumulated_usage.output_tokens, 25_000);
         assert_eq!(app.accumulated_cost.total, 3.0);
+    }
+
+    #[test]
+    fn improve_mode_prompt_sets_research_guardrails() {
+        let scope = ManaUnitRef::new("364", "Improve imp", Some("epic".into()));
+
+        let prompt = improve_safe_mode_prompt(&scope, 2, 5);
+
+        assert!(prompt.contains("Improve mode autoresearch turn 2/5"));
+        assert!(prompt.contains("active mana scope 364"));
+        assert!(prompt.contains("Prefer read-only investigation"));
+        assert!(prompt.contains("create or update mana units"));
+        assert!(prompt.contains("Do not make broad code changes"));
+    }
+
+    #[test]
+    fn improve_mode_queues_bounded_autoresearch_turns() {
+        let mut app = make_app();
+        app.config.ui.improve_auto_turn_budget = 1;
+        app.workflow_mode = WorkflowMode::Improve;
+        app.improve_safe_mode = true;
+        app.active_mana_scope = Some(ManaUnitRef::new("364", "Improve imp", Some("epic".into())));
+
+        app.queue_improve_mode_continuation_if_ready();
+
+        assert_eq!(app.improve_auto_turns, 1);
+        let prompt = app.pending_agent_prompt.as_deref().unwrap();
+        assert!(prompt.contains("Improve mode autoresearch turn 1/1"));
+
+        app.pending_agent_prompt = None;
+        app.pending_agent_cwd = None;
+        app.queue_improve_mode_continuation_if_ready();
+
+        assert_eq!(app.improve_auto_turns, 1);
+        assert!(app.pending_agent_prompt.is_none());
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Improve mode paused after 1")));
+    }
+
+    #[test]
+    fn improve_mode_queues_sandbox_cwd_for_code_turns() {
+        let mut app = make_app();
+        app.config.ui.improve_auto_turn_budget = 1;
+        app.workflow_mode = WorkflowMode::Improve;
+        app.active_mana_scope = Some(ManaUnitRef::new("364", "Improve imp", Some("epic".into())));
+        app.improve_sandbox = Some(ImproveSandbox {
+            branch: "imp/improve/364-improve-imp".into(),
+            base_branch: "nightly".into(),
+            worktree: PathBuf::from("/tmp/imp-improve-364"),
+        });
+
+        app.queue_improve_mode_continuation_if_ready();
+
+        assert_eq!(
+            app.pending_agent_cwd.as_deref(),
+            Some(Path::new("/tmp/imp-improve-364"))
+        );
+        assert!(app
+            .pending_agent_prompt
+            .as_deref()
+            .unwrap()
+            .contains("Improve mode code-changing turn 1/1"));
+    }
+
+    #[test]
+    fn improve_safe_mode_keeps_original_cwd_for_agent_turns() {
+        let mut app = make_app();
+        app.config.ui.improve_auto_turn_budget = 1;
+        app.workflow_mode = WorkflowMode::Improve;
+        app.improve_safe_mode = true;
+        app.active_mana_scope = Some(ManaUnitRef::new("364", "Improve imp", Some("epic".into())));
+
+        app.queue_improve_mode_continuation_if_ready();
+
+        assert!(app.pending_agent_cwd.is_none());
+        assert!(app
+            .pending_agent_prompt
+            .as_deref()
+            .unwrap()
+            .contains("Improve mode autoresearch turn 1/1"));
+    }
+
+    #[test]
+    fn loop_command_queues_prompt_and_shows_label() {
+        let mut app = make_app();
+        app.config.ui.loop_turn_budget = 3;
+
+        app.start_loop_command("keep going");
+
+        assert_eq!(app.pending_agent_prompt.as_deref(), Some("keep going"));
+        assert_eq!(app.loop_label().as_deref(), Some("↻ loop 1/3"));
+    }
+
+    #[test]
+    fn status_text_includes_active_loop() {
+        let mut app = make_app();
+        app.loop_state = Some(LoopState {
+            message: "keep going".into(),
+            completed_turns: 2,
+            budget: 3,
+        });
+
+        let status = app.active_status_text();
+
+        assert!(status.contains("loop: 2/3"));
+        assert!(status.contains("loop message: keep going"));
+    }
+
+    #[test]
+    fn improve_status_label_shows_sandbox_without_safe_mode() {
+        let mut app = make_app();
+        app.workflow_mode = WorkflowMode::Improve;
+        app.config.ui.improve_auto_turn_budget = 5;
+        app.improve_auto_turns = 2;
+        app.improve_sandbox = Some(ImproveSandbox {
+            branch: "imp/improve/364-improve-imp".into(),
+            base_branch: "nightly".into(),
+            worktree: PathBuf::from("/tmp/imp-improve-364"),
+        });
+
+        let label = app.improve_status_label().unwrap();
+
+        assert!(label.contains("imp is improving imp-improve-364"));
+        assert!(label.contains("turn 2/5"));
+        assert!(label.contains("/improve-help"));
+
+        app.improve_safe_mode = true;
+        assert!(app.improve_status_label().is_none());
     }
 
     #[test]

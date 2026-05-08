@@ -66,6 +66,58 @@ pub fn merge_skill_commands(
 pub fn builtin_commands() -> Vec<SlashCommand> {
     vec![
         SlashCommand {
+            name: "explore".into(),
+            description: "Switch workflow mode to Explore".into(),
+        },
+        SlashCommand {
+            name: "plan".into(),
+            description: "Switch workflow mode to Plan".into(),
+        },
+        SlashCommand {
+            name: "build".into(),
+            description: "Switch workflow mode to Build".into(),
+        },
+        SlashCommand {
+            name: "improve".into(),
+            description: "Switch workflow mode to Improve in a sandbox branch/worktree".into(),
+        },
+        SlashCommand {
+            name: "improve-safe".into(),
+            description: "Switch workflow mode to research-only Improve".into(),
+        },
+        SlashCommand {
+            name: "improve-merge".into(),
+            description: "Merge active Improve branch after reviewing changelog".into(),
+        },
+        SlashCommand {
+            name: "improve-help".into(),
+            description: "Explain Improve autoresearch guardrails".into(),
+        },
+        SlashCommand {
+            name: "status".into(),
+            description: "Show active imp work status".into(),
+        },
+        SlashCommand {
+            name: "clean".into(),
+            description: "Clean active sandbox/artifacts safely".into(),
+        },
+        SlashCommand {
+            name: "loop".into(),
+            description: "Loop a prompt (/loop <message>)".into(),
+        },
+        SlashCommand {
+            name: "run".into(),
+            description: "Set active mana run (/run <id>, /run clear)".into(),
+        },
+        SlashCommand {
+            name: "stop".into(),
+            description: "Stop active imp work".into(),
+        },
+        SlashCommand {
+            name: "scope".into(),
+            description: "Set active mana scope (/scope <id>, /scope clear)".into(),
+        },
+        SlashCommand {
             name: "model".into(),
             description: "Select model".into(),
         },

@@ -363,6 +363,86 @@ pub struct AllowedCommandSecret {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ManaScopePreference {
+    #[default]
+    Project,
+    Root,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManaRunConfig {
+    /// Whether native mana runs should return immediately by default.
+    #[serde(default = "default_enabled")]
+    pub background: bool,
+    /// Number of units to run in parallel by default.
+    #[serde(default = "default_mana_run_jobs")]
+    pub max_workers: u32,
+    /// Continue running other ready units after one unit fails.
+    #[serde(default)]
+    pub continue_after_failure: bool,
+    /// Review or evaluate units after a native run completes.
+    #[serde(default)]
+    pub review_after_run: bool,
+}
+
+impl Default for ManaRunConfig {
+    fn default() -> Self {
+        Self {
+            background: true,
+            max_workers: 4,
+            continue_after_failure: false,
+            review_after_run: false,
+        }
+    }
+}
+
+impl ManaRunConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+fn default_mana_run_jobs() -> u32 {
+    4
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManaConfig {
+    /// Default mana graph selection for native mana calls.
+    #[serde(default)]
+    pub scope: ManaScopePreference,
+    /// Whether successful mana close operations should auto-commit mana changes.
+    #[serde(default)]
+    pub auto_commit: bool,
+    /// Whether mana should close completed parent units after closing a child.
+    #[serde(default = "default_true")]
+    pub auto_close_parent: bool,
+    /// Default verify timeout, in seconds, for close/create/verify flows.
+    #[serde(default)]
+    pub verify_timeout: Option<u64>,
+    /// Native mana run defaults.
+    #[serde(default, skip_serializing_if = "ManaRunConfig::is_default")]
+    pub run: ManaRunConfig,
+}
+
+impl Default for ManaConfig {
+    fn default() -> Self {
+        Self {
+            scope: ManaScopePreference::Project,
+            auto_commit: false,
+            auto_close_parent: true,
+            verify_timeout: None,
+            run: ManaRunConfig::default(),
+        }
+    }
+}
+
 /// Top-level configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -428,6 +508,10 @@ pub struct Config {
     /// Web tool settings.
     #[serde(default)]
     pub web: WebConfig,
+
+    /// Mana tool settings.
+    #[serde(default)]
+    pub mana: ManaConfig,
 
     /// Shipped Lua extension runtime policy.
     #[serde(default)]
@@ -607,6 +691,21 @@ pub struct UiConfig {
     /// Default: disabled.
     #[serde(default)]
     pub continue_policy: ContinuePolicy,
+
+    /// Maximum number of automatic Build-mode task turns before pausing.
+    /// Default: 20.
+    #[serde(default = "default_build_auto_turn_budget")]
+    pub build_auto_turn_budget: u32,
+
+    /// Maximum number of automatic Improve-mode research turns before pausing.
+    /// Default: 5.
+    #[serde(default = "default_improve_auto_turn_budget")]
+    pub improve_auto_turn_budget: u32,
+
+    /// Maximum number of `/loop` automatic turns before pausing.
+    /// Default: 10.
+    #[serde(default = "default_loop_turn_budget")]
+    pub loop_turn_budget: u32,
 }
 
 fn default_tool_output_lines() -> usize {
@@ -633,6 +732,15 @@ fn default_mouse_scroll_lines() -> usize {
 fn default_keyboard_scroll_lines() -> usize {
     20
 }
+fn default_build_auto_turn_budget() -> u32 {
+    20
+}
+fn default_improve_auto_turn_budget() -> u32 {
+    5
+}
+fn default_loop_turn_budget() -> u32 {
+    10
+}
 
 impl Default for UiConfig {
     fn default() -> Self {
@@ -658,6 +766,9 @@ impl Default for UiConfig {
             show_context_usage: true,
             notify_on_agent_complete: true,
             continue_policy: ContinuePolicy::Disabled,
+            build_auto_turn_budget: default_build_auto_turn_budget(),
+            improve_auto_turn_budget: default_improve_auto_turn_budget(),
+            loop_turn_budget: default_loop_turn_budget(),
         }
     }
 }
@@ -869,6 +980,9 @@ impl Config {
         }
         if other.web != WebConfig::default() {
             self.web = other.web;
+        }
+        if other.mana != ManaConfig::default() {
+            self.mana = other.mana;
         }
         if other.lua != LuaConfig::default() {
             self.lua = other.lua;

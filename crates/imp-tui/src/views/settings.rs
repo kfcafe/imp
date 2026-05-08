@@ -1,6 +1,6 @@
 use imp_core::config::{
-    AnimationLevel, ChatToolDisplay, Config, ContextConfig, ContinuePolicy, SidebarStyle,
-    ToolOutputDisplay,
+    AnimationLevel, ChatToolDisplay, Config, ContextConfig, ContinuePolicy, ManaConfig,
+    ManaRunConfig, ManaScopePreference, SidebarStyle, ToolOutputDisplay,
 };
 use imp_core::tools::web::types::SearchProvider;
 use imp_llm::auth::AuthStore;
@@ -39,11 +39,90 @@ pub enum SettingsField {
     ShowContextUsage,
     NotifyOnAgentComplete,
     ContinuePolicy,
+    ImproveAutoTurnBudget,
     WebSearchProvider,
     TavilyApiKey,
     ExaApiKey,
+    ManaScope,
+    ManaAutoCommit,
+    ManaAutoCloseParent,
+    ManaVerifyTimeout,
+    ManaRunBackground,
+    ManaMaxWorkers,
+    ManaReviewAfterRun,
+    ManaContinueAfterFailure,
     Save,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    General,
+    Model,
+    Ui,
+    Security,
+    Web,
+    Mana,
+}
+
+const SETTINGS_TABS: &[SettingsTab] = &[
+    SettingsTab::General,
+    SettingsTab::Model,
+    SettingsTab::Ui,
+    SettingsTab::Security,
+    SettingsTab::Web,
+    SettingsTab::Mana,
+];
+
+const GENERAL_FIELDS: &[SettingsField] = &[
+    SettingsField::Theme,
+    SettingsField::MaxTurns,
+    SettingsField::NotifyOnAgentComplete,
+    SettingsField::ContinuePolicy,
+    SettingsField::ImproveAutoTurnBudget,
+];
+
+const MODEL_FIELDS: &[SettingsField] = &[
+    SettingsField::Model,
+    SettingsField::ChosenModels,
+    SettingsField::ThinkingLevel,
+    SettingsField::MaxTokens,
+    SettingsField::ObservationMask,
+];
+
+const UI_FIELDS: &[SettingsField] = &[
+    SettingsField::ReadMaxLines,
+    SettingsField::SidebarWidth,
+    SettingsField::WordWrap,
+    SettingsField::Animations,
+    SettingsField::AutoOpenSidebar,
+    SettingsField::SidebarAutoOpenWidth,
+    SettingsField::ThinkingLines,
+    SettingsField::StreamingLines,
+    SettingsField::MouseScrollLines,
+    SettingsField::KeyboardScrollLines,
+    SettingsField::ShowTimestamps,
+    SettingsField::ShowCost,
+    SettingsField::ShowContextUsage,
+];
+
+const SECURITY_FIELDS: &[SettingsField] = &[];
+
+const WEB_FIELDS: &[SettingsField] = &[
+    SettingsField::WebSearchProvider,
+    SettingsField::TavilyApiKey,
+    SettingsField::ExaApiKey,
+];
+
+const MANA_FIELDS: &[SettingsField] = &[
+    SettingsField::ManaScope,
+    SettingsField::ManaAutoCommit,
+    SettingsField::ManaAutoCloseParent,
+    SettingsField::ManaVerifyTimeout,
+    SettingsField::ManaRunBackground,
+    SettingsField::ManaMaxWorkers,
+    SettingsField::ManaReviewAfterRun,
+    SettingsField::ManaContinueAfterFailure,
+];
 
 const FIELDS: &[SettingsField] = &[
     SettingsField::Model,
@@ -68,11 +147,52 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::ShowContextUsage,
     SettingsField::NotifyOnAgentComplete,
     SettingsField::ContinuePolicy,
+    SettingsField::ImproveAutoTurnBudget,
     SettingsField::WebSearchProvider,
     SettingsField::TavilyApiKey,
     SettingsField::ExaApiKey,
+    SettingsField::ManaScope,
+    SettingsField::ManaAutoCommit,
+    SettingsField::ManaAutoCloseParent,
+    SettingsField::ManaVerifyTimeout,
+    SettingsField::ManaRunBackground,
+    SettingsField::ManaMaxWorkers,
+    SettingsField::ManaReviewAfterRun,
+    SettingsField::ManaContinueAfterFailure,
     SettingsField::Save,
 ];
+
+impl SettingsTab {
+    fn label(self) -> &'static str {
+        match self {
+            SettingsTab::General => "General",
+            SettingsTab::Model => "Model",
+            SettingsTab::Ui => "UI",
+            SettingsTab::Security => "Security",
+            SettingsTab::Web => "Web",
+            SettingsTab::Mana => "Mana",
+        }
+    }
+
+    fn fields(self) -> &'static [SettingsField] {
+        match self {
+            SettingsTab::General => GENERAL_FIELDS,
+            SettingsTab::Model => MODEL_FIELDS,
+            SettingsTab::Ui => UI_FIELDS,
+            SettingsTab::Security => SECURITY_FIELDS,
+            SettingsTab::Web => WEB_FIELDS,
+            SettingsTab::Mana => MANA_FIELDS,
+        }
+    }
+
+    fn empty_message(self) -> Option<&'static str> {
+        match self {
+            SettingsTab::Security => Some("Security ask/act thresholds are coming soon."),
+            SettingsTab::Mana => None,
+            _ => None,
+        }
+    }
+}
 
 fn field_index(field: SettingsField) -> usize {
     FIELDS
@@ -85,6 +205,7 @@ fn field_index(field: SettingsField) -> usize {
 #[derive(Debug, Clone)]
 pub struct SettingsState {
     pub selected: usize,
+    pub tab: SettingsTab,
     pub model: String,
     pub model_options: Vec<String>,
     pub chosen_models: Vec<String>,
@@ -113,7 +234,16 @@ pub struct SettingsState {
     pub show_context_usage: bool,
     pub notify_on_agent_complete: bool,
     pub continue_policy: ContinuePolicy,
+    pub improve_auto_turn_budget: u32,
     pub web_search_provider: Option<SearchProvider>,
+    pub mana_scope: ManaScopePreference,
+    pub mana_auto_commit: bool,
+    pub mana_auto_close_parent: bool,
+    pub mana_verify_timeout: u64,
+    pub mana_run_background: bool,
+    pub mana_max_workers: u32,
+    pub mana_review_after_run: bool,
+    pub mana_continue_after_failure: bool,
     pub tavily_api_key: String,
     pub exa_api_key: String,
     pub tavily_configured: bool,
@@ -125,7 +255,53 @@ pub struct SettingsState {
 
 impl SettingsState {
     fn normalized_selected(&self) -> usize {
-        self.selected.min(FIELDS.len().saturating_sub(1))
+        field_index(self.current_field())
+    }
+
+    fn selected_tab_index(&self) -> usize {
+        SETTINGS_TABS
+            .iter()
+            .position(|candidate| *candidate == self.tab)
+            .unwrap_or(0)
+    }
+
+    fn visible_fields(&self) -> &'static [SettingsField] {
+        self.tab.fields()
+    }
+
+    fn visible_selection(&self) -> Vec<SettingsField> {
+        let mut fields = self.visible_fields().to_vec();
+        fields.push(SettingsField::Save);
+        fields
+    }
+
+    pub fn switch_tab_forward(&mut self) {
+        self.commit_edit();
+        let next = (self.selected_tab_index() + 1) % SETTINGS_TABS.len();
+        self.tab = SETTINGS_TABS[next];
+        self.selected = field_index(
+            self.visible_fields()
+                .first()
+                .copied()
+                .unwrap_or(SettingsField::Save),
+        );
+    }
+
+    pub fn switch_tab_backward(&mut self) {
+        self.commit_edit();
+        let idx = self.selected_tab_index();
+        let prev = if idx == 0 {
+            SETTINGS_TABS.len() - 1
+        } else {
+            idx - 1
+        };
+        self.tab = SETTINGS_TABS[prev];
+        self.selected = field_index(
+            self.visible_fields()
+                .first()
+                .copied()
+                .unwrap_or(SettingsField::Save),
+        );
     }
 
     pub fn new(
@@ -135,7 +311,8 @@ impl SettingsState {
         auth_store: &AuthStore,
     ) -> Self {
         Self {
-            selected: 0,
+            selected: field_index(SettingsField::Theme),
+            tab: SettingsTab::General,
             model: model_name.to_string(),
             model_options: models.iter().map(|m| m.id.clone()).collect(),
             chosen_models: config.enabled_models.clone().unwrap_or_default(),
@@ -164,7 +341,16 @@ impl SettingsState {
             show_context_usage: config.ui.show_context_usage,
             notify_on_agent_complete: config.ui.notify_on_agent_complete,
             continue_policy: config.ui.continue_policy,
+            improve_auto_turn_budget: config.ui.improve_auto_turn_budget,
             web_search_provider: config.web.search_provider,
+            mana_scope: config.mana.scope,
+            mana_auto_commit: config.mana.auto_commit,
+            mana_auto_close_parent: config.mana.auto_close_parent,
+            mana_verify_timeout: config.mana.verify_timeout.unwrap_or(0),
+            mana_run_background: config.mana.run.background,
+            mana_max_workers: config.mana.run.max_workers,
+            mana_review_after_run: config.mana.run.review_after_run,
+            mana_continue_after_failure: config.mana.run.continue_after_failure,
             tavily_api_key: String::new(),
             exa_api_key: String::new(),
             tavily_configured: auth_store.stored.contains_key("tavily")
@@ -178,20 +364,42 @@ impl SettingsState {
     }
 
     pub fn current_field(&self) -> SettingsField {
-        FIELDS[self.normalized_selected()]
+        let selected = FIELDS
+            .get(self.selected)
+            .copied()
+            .unwrap_or(SettingsField::Save);
+        if selected == SettingsField::Save || self.visible_fields().contains(&selected) {
+            return selected;
+        }
+        self.visible_fields()
+            .first()
+            .copied()
+            .unwrap_or(SettingsField::Save)
     }
 
     pub fn move_up(&mut self) {
         self.commit_edit();
-        if self.selected > 0 {
-            self.selected -= 1;
+        let fields = self.visible_selection();
+        let current = self.current_field();
+        let pos = fields
+            .iter()
+            .position(|field| *field == current)
+            .unwrap_or(0);
+        if pos > 0 {
+            self.selected = field_index(fields[pos - 1]);
         }
     }
 
     pub fn move_down(&mut self) {
         self.commit_edit();
-        if self.selected + 1 < FIELDS.len() {
-            self.selected += 1;
+        let fields = self.visible_selection();
+        let current = self.current_field();
+        let pos = fields
+            .iter()
+            .position(|field| *field == current)
+            .unwrap_or(0);
+        if pos + 1 < fields.len() {
+            self.selected = field_index(fields[pos + 1]);
         }
     }
 
@@ -287,6 +495,10 @@ impl SettingsState {
                     ContinuePolicy::Aggressive => ContinuePolicy::Disabled,
                 };
             }
+            SettingsField::ImproveAutoTurnBudget => {
+                self.improve_auto_turn_budget =
+                    self.improve_auto_turn_budget.saturating_add(1).min(100);
+            }
             SettingsField::WebSearchProvider => {
                 self.web_search_provider = match self.web_search_provider {
                     None => Some(SearchProvider::Tavily),
@@ -295,6 +507,33 @@ impl SettingsState {
                     Some(SearchProvider::Linkup) => Some(SearchProvider::Perplexity),
                     Some(SearchProvider::Perplexity) | Some(SearchProvider::GitHub) => None,
                 };
+            }
+            SettingsField::ManaScope => {
+                self.mana_scope = match self.mana_scope {
+                    ManaScopePreference::Project => ManaScopePreference::Root,
+                    ManaScopePreference::Root => ManaScopePreference::Project,
+                };
+            }
+            SettingsField::ManaAutoCommit => {
+                self.mana_auto_commit = !self.mana_auto_commit;
+            }
+            SettingsField::ManaAutoCloseParent => {
+                self.mana_auto_close_parent = !self.mana_auto_close_parent;
+            }
+            SettingsField::ManaVerifyTimeout => {
+                self.mana_verify_timeout = self.mana_verify_timeout.saturating_add(30).min(3600);
+            }
+            SettingsField::ManaRunBackground => {
+                self.mana_run_background = !self.mana_run_background;
+            }
+            SettingsField::ManaMaxWorkers => {
+                self.mana_max_workers = self.mana_max_workers.saturating_add(1).min(32);
+            }
+            SettingsField::ManaReviewAfterRun => {
+                self.mana_review_after_run = !self.mana_review_after_run;
+            }
+            SettingsField::ManaContinueAfterFailure => {
+                self.mana_continue_after_failure = !self.mana_continue_after_failure;
             }
             SettingsField::TavilyApiKey => {}
             SettingsField::ExaApiKey => {}
@@ -403,6 +642,10 @@ impl SettingsState {
                     ContinuePolicy::Aggressive => ContinuePolicy::Balanced,
                 };
             }
+            SettingsField::ImproveAutoTurnBudget => {
+                self.improve_auto_turn_budget =
+                    self.improve_auto_turn_budget.saturating_sub(1).max(1);
+            }
             SettingsField::WebSearchProvider => {
                 self.web_search_provider = match self.web_search_provider {
                     None => Some(SearchProvider::Perplexity),
@@ -411,6 +654,33 @@ impl SettingsState {
                     Some(SearchProvider::Linkup) => Some(SearchProvider::Exa),
                     Some(SearchProvider::Perplexity) => Some(SearchProvider::Linkup),
                 };
+            }
+            SettingsField::ManaScope => {
+                self.mana_scope = match self.mana_scope {
+                    ManaScopePreference::Project => ManaScopePreference::Root,
+                    ManaScopePreference::Root => ManaScopePreference::Project,
+                };
+            }
+            SettingsField::ManaAutoCommit => {
+                self.mana_auto_commit = !self.mana_auto_commit;
+            }
+            SettingsField::ManaAutoCloseParent => {
+                self.mana_auto_close_parent = !self.mana_auto_close_parent;
+            }
+            SettingsField::ManaVerifyTimeout => {
+                self.mana_verify_timeout = self.mana_verify_timeout.saturating_sub(30);
+            }
+            SettingsField::ManaRunBackground => {
+                self.mana_run_background = !self.mana_run_background;
+            }
+            SettingsField::ManaMaxWorkers => {
+                self.mana_max_workers = self.mana_max_workers.saturating_sub(1).max(1);
+            }
+            SettingsField::ManaReviewAfterRun => {
+                self.mana_review_after_run = !self.mana_review_after_run;
+            }
+            SettingsField::ManaContinueAfterFailure => {
+                self.mana_continue_after_failure = !self.mana_continue_after_failure;
             }
             SettingsField::TavilyApiKey => {}
             SettingsField::ExaApiKey => {}
@@ -429,6 +699,10 @@ impl SettingsState {
                 self.editing_number = true;
                 self.edit_buffer = self.max_turns.to_string();
             }
+            SettingsField::ImproveAutoTurnBudget => {
+                self.editing_number = true;
+                self.edit_buffer = self.improve_auto_turn_budget.to_string();
+            }
             SettingsField::ObservationMask => {
                 self.editing_number = true;
                 self.edit_buffer = format!("{:.2}", self.observation_mask);
@@ -436,6 +710,14 @@ impl SettingsState {
             SettingsField::ReadMaxLines => {
                 self.editing_number = true;
                 self.edit_buffer = self.read_max_lines.to_string();
+            }
+            SettingsField::ManaVerifyTimeout => {
+                self.editing_number = true;
+                self.edit_buffer = self.mana_verify_timeout.to_string();
+            }
+            SettingsField::ManaMaxWorkers => {
+                self.editing_number = true;
+                self.edit_buffer = self.mana_max_workers.to_string();
             }
             SettingsField::SidebarWidth => {
                 self.editing_number = true;
@@ -526,6 +808,11 @@ impl SettingsState {
                     self.max_turns = v.max(1);
                 }
             }
+            SettingsField::ImproveAutoTurnBudget => {
+                if let Ok(v) = self.edit_buffer.parse::<u32>() {
+                    self.improve_auto_turn_budget = v.clamp(1, 100);
+                }
+            }
             SettingsField::ObservationMask => {
                 if let Ok(v) = self.edit_buffer.parse::<f64>() {
                     self.observation_mask = v.clamp(0.0, 1.0);
@@ -534,6 +821,16 @@ impl SettingsState {
             SettingsField::ReadMaxLines => {
                 if let Ok(v) = self.edit_buffer.parse::<usize>() {
                     self.read_max_lines = v;
+                }
+            }
+            SettingsField::ManaVerifyTimeout => {
+                if let Ok(v) = self.edit_buffer.parse::<u64>() {
+                    self.mana_verify_timeout = v.min(3600);
+                }
+            }
+            SettingsField::ManaMaxWorkers => {
+                if let Ok(v) = self.edit_buffer.parse::<u32>() {
+                    self.mana_max_workers = v.clamp(1, 32);
                 }
             }
             SettingsField::SidebarWidth => {
@@ -584,9 +881,24 @@ impl SettingsState {
             show_context_usage: self.show_context_usage,
             notify_on_agent_complete: self.notify_on_agent_complete,
             continue_policy: self.continue_policy,
+            build_auto_turn_budget: config.ui.build_auto_turn_budget,
+            improve_auto_turn_budget: self.improve_auto_turn_budget,
+            loop_turn_budget: config.ui.loop_turn_budget,
         };
         config.web = imp_core::tools::web::types::WebConfig {
             search_provider: self.web_search_provider,
+        };
+        config.mana = ManaConfig {
+            scope: self.mana_scope,
+            auto_commit: self.mana_auto_commit,
+            auto_close_parent: self.mana_auto_close_parent,
+            verify_timeout: (self.mana_verify_timeout > 0).then_some(self.mana_verify_timeout),
+            run: ManaRunConfig {
+                background: self.mana_run_background,
+                max_workers: self.mana_max_workers.max(1),
+                continue_after_failure: self.mana_continue_after_failure,
+                review_after_run: self.mana_review_after_run,
+            },
         };
     }
     fn model_is_chosen(&self, model_id: &str) -> bool {
@@ -664,53 +976,26 @@ fn animation_label(level: AnimationLevel) -> &'static str {
 
 enum SettingsRow {
     Header,
-    Field(usize),
+    Tabs,
+    Field(SettingsField),
+    EmptyMessage,
     Save,
 }
 
-fn visit_settings_rows(mut visit: impl FnMut(SettingsRow, u16)) {
+fn visit_settings_rows(state: &SettingsState, mut visit: impl FnMut(SettingsRow, u16)) {
     let mut row: u16 = 0;
     visit(SettingsRow::Header, row);
     row += 2;
+    visit(SettingsRow::Tabs, row);
+    row += 2;
 
-    let sections: &[&[SettingsField]] = &[
-        &[
-            SettingsField::Model,
-            SettingsField::ChosenModels,
-            SettingsField::Theme,
-            SettingsField::ThinkingLevel,
-            SettingsField::MaxTokens,
-            SettingsField::MaxTurns,
-        ],
-        &[SettingsField::ObservationMask],
-        &[
-            SettingsField::ReadMaxLines,
-            SettingsField::SidebarWidth,
-            SettingsField::WordWrap,
-            SettingsField::Animations,
-            SettingsField::AutoOpenSidebar,
-            SettingsField::SidebarAutoOpenWidth,
-            SettingsField::ThinkingLines,
-            SettingsField::StreamingLines,
-            SettingsField::MouseScrollLines,
-            SettingsField::KeyboardScrollLines,
-            SettingsField::ShowTimestamps,
-            SettingsField::ShowCost,
-            SettingsField::ShowContextUsage,
-            SettingsField::NotifyOnAgentComplete,
-            SettingsField::ContinuePolicy,
-            SettingsField::WebSearchProvider,
-            SettingsField::TavilyApiKey,
-            SettingsField::ExaApiKey,
-        ],
-    ];
-
-    for (section_idx, section) in sections.iter().enumerate() {
-        if section_idx > 0 {
-            row += 1;
-        }
-        for field in *section {
-            visit(SettingsRow::Field(field_index(*field)), row);
+    let fields = state.visible_fields();
+    if fields.is_empty() {
+        visit(SettingsRow::EmptyMessage, row);
+        row += 1;
+    } else {
+        for field in fields {
+            visit(SettingsRow::Field(*field), row);
             row += 1;
         }
     }
@@ -719,36 +1004,36 @@ fn visit_settings_rows(mut visit: impl FnMut(SettingsRow, u16)) {
     visit(SettingsRow::Save, row);
 }
 
-fn total_settings_rows() -> u16 {
+fn total_settings_rows(state: &SettingsState) -> u16 {
     let mut total = 0;
-    visit_settings_rows(|_, row| {
+    visit_settings_rows(state, |_, row| {
         total = row.saturating_add(1);
     });
     total
 }
 
-fn selected_settings_row(selected: usize) -> u16 {
-    let selected = selected.min(FIELDS.len().saturating_sub(1));
+fn selected_settings_row(state: &SettingsState) -> u16 {
+    let selected = state.current_field();
     let mut selected_row = 0;
-    visit_settings_rows(|entry, row| match entry {
-        SettingsRow::Field(field_idx) if field_idx == selected => selected_row = row,
-        SettingsRow::Save if selected == FIELDS.len().saturating_sub(1) => selected_row = row,
+    visit_settings_rows(state, |entry, row| match entry {
+        SettingsRow::Field(field) if field == selected => selected_row = row,
+        SettingsRow::Save if selected == SettingsField::Save => selected_row = row,
         _ => {}
     });
     selected_row
 }
 
-fn settings_scroll_offset(selected: usize, visible_rows: u16) -> u16 {
+fn settings_scroll_offset(state: &SettingsState, visible_rows: u16) -> u16 {
     if visible_rows == 0 {
         return 0;
     }
 
-    let total_rows = total_settings_rows();
+    let total_rows = total_settings_rows(state);
     if total_rows <= visible_rows {
         return 0;
     }
 
-    let selected_row = selected_settings_row(selected);
+    let selected_row = selected_settings_row(state);
     let desired = selected_row.saturating_sub(visible_rows.saturating_sub(1));
     desired.min(total_rows.saturating_sub(visible_rows))
 }
@@ -798,497 +1083,41 @@ impl Widget for SettingsView<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let total_rows = total_settings_rows();
-        let scroll_offset = settings_scroll_offset(self.state.normalized_selected(), inner.height);
+        let total_rows = total_settings_rows(self.state);
+        let scroll_offset = settings_scroll_offset(self.state, inner.height);
 
         let mut row: u16 = 0;
 
-        let header = Line::from(Span::styled(
-            "  ↑/↓ move  ←/→ change  Enter edit  Esc close",
-            self.theme.muted_style(),
-        ));
-        if let Some(y) = scrolled_screen_y(inner, row, scroll_offset) {
-            buf.set_line(inner.x, y, &header, inner.width);
-        }
-        row += 2;
+        render_settings_header(self.state, self.theme, buf, inner, scroll_offset, &mut row);
+        render_settings_tabs(self.state, self.theme, buf, inner, scroll_offset, &mut row);
 
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::Model),
-            "Model",
-            &self.state.model,
-            "← →",
-        );
-
-        let chosen_hint = if self.state.model_is_chosen(&self.state.model) {
-            "← → toggle current"
-        } else {
-            "← → add current"
-        };
-        let chosen_summary = self.state.chosen_models_summary();
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            1,
-            "Chosen models",
-            &chosen_summary,
-            chosen_hint,
-        );
-
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::Theme),
-            "Color theme",
-            &self.state.theme_name,
-            "← → (UI colors)",
-        );
-
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::ThinkingLevel),
-            "Thinking level",
-            thinking_label(self.state.thinking_level),
-            "← →",
-        );
-
-        let max_tokens_val = if self.state.editing_number
-            && self.state.current_field() == SettingsField::MaxTokens
-        {
-            format!("{}▎", self.state.edit_buffer)
-        } else {
-            self.state.max_tokens.to_string()
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::MaxTokens),
-            "Max tokens",
-            &max_tokens_val,
-            "← → / type",
-        );
-
-        let max_turns_val =
-            if self.state.editing_number && self.state.current_field() == SettingsField::MaxTurns {
-                format!("{}▎", self.state.edit_buffer)
-            } else {
-                self.state.max_turns.to_string()
-            };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::MaxTurns),
-            "Max turns",
-            &max_turns_val,
-            "← → / type",
-        );
-
-        row += 1;
-
-        let obs_val = if self.state.editing_number
-            && self.state.current_field() == SettingsField::ObservationMask
-        {
-            format!("{}▎", self.state.edit_buffer)
-        } else {
-            format!("{:.0}%", self.state.observation_mask * 100.0)
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::ObservationMask),
-            "Observation mask",
-            &obs_val,
-            "← →",
-        );
-
-        row += 1;
-
-        let rml_val = if self.state.editing_number
-            && self.state.current_field() == SettingsField::ReadMaxLines
-        {
-            format!("{}▎", self.state.edit_buffer)
-        } else {
-            self.state.read_max_lines.to_string()
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::ReadMaxLines),
-            "Read max lines",
-            &rml_val,
-            "← → / type (0 = no limit)",
-        );
-
-        let sw_val = if self.state.editing_number
-            && self.state.current_field() == SettingsField::SidebarWidth
-        {
-            format!("{}▎", self.state.edit_buffer)
-        } else {
-            format!("{}%", self.state.sidebar_width)
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::SidebarWidth),
-            "Inspector width",
-            &sw_val,
-            "← → / type",
-        );
-
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::WordWrap),
-            "Word wrap",
-            if self.state.word_wrap { "on" } else { "off" },
-            "← →",
-        );
-
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::Animations),
-            "Animations",
-            animation_label(self.state.animations),
-            "← →",
-        );
-
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::AutoOpenSidebar),
-            "Auto-open sidebar",
-            if self.state.auto_open_sidebar {
-                "on"
-            } else {
-                "off"
-            },
-            "← →",
-        );
-
-        let sao_val = if self.state.editing_number
-            && self.state.current_field() == SettingsField::SidebarAutoOpenWidth
-        {
-            format!("{}▎", self.state.edit_buffer)
-        } else {
-            self.state.sidebar_auto_open_width.to_string()
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::SidebarAutoOpenWidth),
-            "Auto-open width",
-            &sao_val,
-            "← → / type",
-        );
-
-        let thinking_lines_val = if self.state.editing_number
-            && self.state.current_field() == SettingsField::ThinkingLines
-        {
-            format!("{}▎", self.state.edit_buffer)
-        } else {
-            self.state.thinking_lines.to_string()
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::ThinkingLines),
-            "Thinking lines",
-            &thinking_lines_val,
-            "← → / type",
-        );
-
-        let streaming_lines_val = if self.state.editing_number
-            && self.state.current_field() == SettingsField::StreamingLines
-        {
-            format!("{}▎", self.state.edit_buffer)
-        } else {
-            self.state.streaming_lines.to_string()
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::StreamingLines),
-            "Streaming lines",
-            &streaming_lines_val,
-            "← → / type",
-        );
-
-        let mouse_scroll_val = if self.state.editing_number
-            && self.state.current_field() == SettingsField::MouseScrollLines
-        {
-            format!("{}▎", self.state.edit_buffer)
-        } else {
-            self.state.mouse_scroll_lines.to_string()
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::MouseScrollLines),
-            "Mouse scroll",
-            &mouse_scroll_val,
-            "← → / type",
-        );
-
-        let keyboard_scroll_val = if self.state.editing_number
-            && self.state.current_field() == SettingsField::KeyboardScrollLines
-        {
-            format!("{}▎", self.state.edit_buffer)
-        } else {
-            self.state.keyboard_scroll_lines.to_string()
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::KeyboardScrollLines),
-            "Keyboard scroll",
-            &keyboard_scroll_val,
-            "← → / type",
-        );
-
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::ShowTimestamps),
-            "Show timestamps",
-            if self.state.show_timestamps {
-                "on"
-            } else {
-                "off"
-            },
-            "← →",
-        );
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::ShowCost),
-            "Show cost",
-            if self.state.show_cost { "on" } else { "off" },
-            "← →",
-        );
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::ShowContextUsage),
-            "Show context",
-            if self.state.show_context_usage {
-                "on"
-            } else {
-                "off"
-            },
-            "← →",
-        );
-
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::NotifyOnAgentComplete),
-            "Bell on done",
-            if self.state.notify_on_agent_complete {
-                "on"
-            } else {
-                "off"
-            },
-            "← →",
-        );
-
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::ContinuePolicy),
-            "Auto-continue",
-            match self.state.continue_policy {
-                ContinuePolicy::Disabled => "disabled",
-                ContinuePolicy::Conservative => "conservative",
-                ContinuePolicy::Balanced => "balanced",
-                ContinuePolicy::Aggressive => "aggressive",
-            },
-            "← →",
-        );
-
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::WebSearchProvider),
-            "Web provider",
-            match self.state.web_search_provider {
-                None => "auto",
-                Some(SearchProvider::Tavily) => "tavily",
-                Some(SearchProvider::Exa) => "exa",
-                Some(SearchProvider::Linkup) => "linkup",
-                Some(SearchProvider::Perplexity) => "perplexity",
-                Some(SearchProvider::GitHub) => "github",
-            },
-            "← →",
-        );
-
-        let tavily_val = if self.state.tavily_api_key.is_empty() {
-            if self.state.tavily_configured {
-                "configured (press Enter to replace)".to_string()
-            } else {
-                "not set".to_string()
+        if self.state.visible_fields().is_empty() {
+            if let Some(message) = self.state.tab.empty_message() {
+                if let Some(y) = scrolled_screen_y(inner, row, scroll_offset) {
+                    let line = Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(message, self.theme.muted_style()),
+                    ]);
+                    buf.set_line(inner.x, y, &line, inner.width);
+                }
+                row += 1;
             }
         } else {
-            format!(
-                "{}▎",
-                "•".repeat(self.state.tavily_api_key.chars().count().max(1))
-            )
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::TavilyApiKey),
-            "Tavily API key",
-            &tavily_val,
-            "Enter to edit",
-        );
-
-        let exa_val = if self.state.exa_api_key.is_empty() {
-            if self.state.exa_configured {
-                "configured (press Enter to replace)".to_string()
-            } else {
-                "not set".to_string()
+            for field in self.state.visible_fields() {
+                render_settings_field(
+                    self.state,
+                    self.theme,
+                    buf,
+                    inner,
+                    scroll_offset,
+                    &mut row,
+                    *field,
+                );
             }
-        } else {
-            format!(
-                "{}▎",
-                "•".repeat(self.state.exa_api_key.chars().count().max(1))
-            )
-        };
-        render_field(
-            self.state,
-            self.theme,
-            buf,
-            inner,
-            scroll_offset,
-            &mut row,
-            field_index(SettingsField::ExaApiKey),
-            "Exa API key",
-            &exa_val,
-            "Enter to edit",
-        );
-        row += 1;
-
-        if let Some(y) = scrolled_screen_y(inner, row, scroll_offset) {
-            let is_save = self.state.normalized_selected() == FIELDS.len() - 1;
-            let save_style = if is_save {
-                Style::default()
-                    .fg(self.theme.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                self.theme.muted_style()
-            };
-            let marker = if is_save { "▸ " } else { "  " };
-            let dirty_hint = if self.state.dirty {
-                " (unsaved changes)"
-            } else {
-                ""
-            };
-            let line = Line::from(vec![
-                Span::styled(marker, self.theme.accent_style()),
-                Span::styled("[ Save to config.toml ]", save_style),
-                Span::styled(dirty_hint, self.theme.warning_style()),
-            ]);
-            buf.set_line(inner.x, y, &line, inner.width);
         }
+
+        row += 1;
+        render_save_row(self.state, self.theme, buf, inner, scroll_offset, row);
 
         if scroll_offset > 0 {
             let hint = Line::from(Span::styled("↑ more", self.theme.muted_style()));
@@ -1300,6 +1129,697 @@ impl Widget for SettingsView<'_> {
             buf.set_line(inner.x + inner.width.saturating_sub(7), y, &hint, 7);
         }
     }
+}
+
+fn render_settings_header(
+    state: &SettingsState,
+    theme: &Theme,
+    buf: &mut Buffer,
+    inner: Rect,
+    scroll_offset: u16,
+    row: &mut u16,
+) {
+    let header = Line::from(Span::styled(
+        "  Tab switch  ↑/↓ move  ←/→ change  Enter edit  Esc close",
+        theme.muted_style(),
+    ));
+    if let Some(y) = scrolled_screen_y(inner, *row, scroll_offset) {
+        buf.set_line(inner.x, y, &header, inner.width);
+    }
+    *row += 2;
+
+    let _ = state;
+}
+
+fn render_settings_tabs(
+    state: &SettingsState,
+    theme: &Theme,
+    buf: &mut Buffer,
+    inner: Rect,
+    scroll_offset: u16,
+    row: &mut u16,
+) {
+    let mut spans = vec![Span::raw("  ")];
+    for (idx, tab) in SETTINGS_TABS.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled("  ", theme.muted_style()));
+        }
+        let label = format!(" {} ", tab.label());
+        if *tab == state.tab {
+            spans.push(Span::styled(
+                label,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            ));
+        } else {
+            spans.push(Span::styled(label, theme.muted_style()));
+        }
+    }
+
+    if let Some(y) = scrolled_screen_y(inner, *row, scroll_offset) {
+        buf.set_line(inner.x, y, &Line::from(spans), inner.width);
+    }
+    *row += 2;
+}
+
+fn render_settings_field(
+    state: &SettingsState,
+    theme: &Theme,
+    buf: &mut Buffer,
+    inner: Rect,
+    scroll_offset: u16,
+    row: &mut u16,
+    field: SettingsField,
+) {
+    match field {
+        SettingsField::Model => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(SettingsField::Model),
+            "Model",
+            &state.model,
+            "← →",
+        ),
+        SettingsField::ChosenModels => {
+            let chosen_hint = if state.model_is_chosen(&state.model) {
+                "← → toggle current"
+            } else {
+                "← → add current"
+            };
+            let chosen_summary = state.chosen_models_summary();
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(SettingsField::ChosenModels),
+                "Chosen models",
+                &chosen_summary,
+                chosen_hint,
+            );
+        }
+        SettingsField::Theme => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(SettingsField::Theme),
+            "Color theme",
+            &state.theme_name,
+            "← → (UI colors)",
+        ),
+        SettingsField::ThinkingLevel => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(SettingsField::ThinkingLevel),
+            "Thinking level",
+            thinking_label(state.thinking_level),
+            "← →",
+        ),
+        SettingsField::MaxTokens => {
+            let value = if state.editing_number && state.current_field() == SettingsField::MaxTokens
+            {
+                format!("{}▎", state.edit_buffer)
+            } else {
+                state.max_tokens.to_string()
+            };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Max tokens",
+                &value,
+                "← → / type",
+            );
+        }
+        SettingsField::MaxTurns => {
+            let value = if state.editing_number && state.current_field() == SettingsField::MaxTurns
+            {
+                format!("{}▎", state.edit_buffer)
+            } else {
+                state.max_turns.to_string()
+            };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Max turns",
+                &value,
+                "← → / type",
+            );
+        }
+        SettingsField::ObservationMask => {
+            let value = if state.editing_number
+                && state.current_field() == SettingsField::ObservationMask
+            {
+                format!("{}▎", state.edit_buffer)
+            } else {
+                format!("{:.0}%", state.observation_mask * 100.0)
+            };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Observation mask",
+                &value,
+                "← →",
+            );
+        }
+        SettingsField::ReadMaxLines => {
+            let value =
+                if state.editing_number && state.current_field() == SettingsField::ReadMaxLines {
+                    format!("{}▎", state.edit_buffer)
+                } else {
+                    state.read_max_lines.to_string()
+                };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Read max lines",
+                &value,
+                "← → / type (0 = no limit)",
+            );
+        }
+        SettingsField::SidebarWidth => {
+            let value =
+                if state.editing_number && state.current_field() == SettingsField::SidebarWidth {
+                    format!("{}▎", state.edit_buffer)
+                } else {
+                    format!("{}%", state.sidebar_width)
+                };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Inspector width",
+                &value,
+                "← → / type",
+            );
+        }
+        SettingsField::WordWrap => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Word wrap",
+            if state.word_wrap { "on" } else { "off" },
+            "← →",
+        ),
+        SettingsField::Animations => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Animations",
+            animation_label(state.animations),
+            "← →",
+        ),
+        SettingsField::AutoOpenSidebar => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Auto-open sidebar",
+            if state.auto_open_sidebar { "on" } else { "off" },
+            "← →",
+        ),
+        SettingsField::SidebarAutoOpenWidth => {
+            let value = if state.editing_number
+                && state.current_field() == SettingsField::SidebarAutoOpenWidth
+            {
+                format!("{}▎", state.edit_buffer)
+            } else {
+                state.sidebar_auto_open_width.to_string()
+            };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Auto-open width",
+                &value,
+                "← → / type",
+            );
+        }
+        SettingsField::ThinkingLines => {
+            let value =
+                if state.editing_number && state.current_field() == SettingsField::ThinkingLines {
+                    format!("{}▎", state.edit_buffer)
+                } else {
+                    state.thinking_lines.to_string()
+                };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Thinking lines",
+                &value,
+                "← → / type",
+            );
+        }
+        SettingsField::StreamingLines => {
+            let value =
+                if state.editing_number && state.current_field() == SettingsField::StreamingLines {
+                    format!("{}▎", state.edit_buffer)
+                } else {
+                    state.streaming_lines.to_string()
+                };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Streaming lines",
+                &value,
+                "← → / type",
+            );
+        }
+        SettingsField::MouseScrollLines => {
+            let value = if state.editing_number
+                && state.current_field() == SettingsField::MouseScrollLines
+            {
+                format!("{}▎", state.edit_buffer)
+            } else {
+                state.mouse_scroll_lines.to_string()
+            };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Mouse scroll",
+                &value,
+                "← → / type",
+            );
+        }
+        SettingsField::KeyboardScrollLines => {
+            let value = if state.editing_number
+                && state.current_field() == SettingsField::KeyboardScrollLines
+            {
+                format!("{}▎", state.edit_buffer)
+            } else {
+                state.keyboard_scroll_lines.to_string()
+            };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Keyboard scroll",
+                &value,
+                "← → / type",
+            );
+        }
+        SettingsField::ShowTimestamps => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Show timestamps",
+            if state.show_timestamps { "on" } else { "off" },
+            "← →",
+        ),
+        SettingsField::ShowCost => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Show cost",
+            if state.show_cost { "on" } else { "off" },
+            "← →",
+        ),
+        SettingsField::ShowContextUsage => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Show context",
+            if state.show_context_usage {
+                "on"
+            } else {
+                "off"
+            },
+            "← →",
+        ),
+        SettingsField::NotifyOnAgentComplete => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Bell on done",
+            if state.notify_on_agent_complete {
+                "on"
+            } else {
+                "off"
+            },
+            "← →",
+        ),
+        SettingsField::ContinuePolicy => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Looping",
+            match state.continue_policy {
+                ContinuePolicy::Disabled => "off",
+                ContinuePolicy::Conservative => "conservative",
+                ContinuePolicy::Balanced => "balanced",
+                ContinuePolicy::Aggressive => "aggressive",
+            },
+            "← →",
+        ),
+        SettingsField::ImproveAutoTurnBudget => {
+            let value = if state.editing_number
+                && state.current_field() == SettingsField::ImproveAutoTurnBudget
+            {
+                format!("{}▎", state.edit_buffer)
+            } else {
+                state.improve_auto_turn_budget.to_string()
+            };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Improve turns",
+                &value,
+                "← → / type",
+            );
+        }
+        SettingsField::WebSearchProvider => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Web provider",
+            match state.web_search_provider {
+                None => "auto",
+                Some(SearchProvider::Tavily) => "tavily",
+                Some(SearchProvider::Exa) => "exa",
+                Some(SearchProvider::Linkup) => "linkup",
+                Some(SearchProvider::Perplexity) => "perplexity",
+                Some(SearchProvider::GitHub) => "github",
+            },
+            "← →",
+        ),
+        SettingsField::ManaScope => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Default scope",
+            match state.mana_scope {
+                ManaScopePreference::Project => "project",
+                ManaScopePreference::Root => "root",
+            },
+            "← →",
+        ),
+        SettingsField::ManaAutoCommit => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Commit on close",
+            if state.mana_auto_commit { "on" } else { "off" },
+            "← →",
+        ),
+        SettingsField::ManaAutoCloseParent => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Auto-close parent",
+            if state.mana_auto_close_parent {
+                "on"
+            } else {
+                "off"
+            },
+            "← →",
+        ),
+        SettingsField::ManaVerifyTimeout => {
+            let value = if state.editing_number
+                && state.current_field() == SettingsField::ManaVerifyTimeout
+            {
+                format!("{}▎", state.edit_buffer)
+            } else if state.mana_verify_timeout == 0 {
+                "default".to_string()
+            } else {
+                format!("{}s", state.mana_verify_timeout)
+            };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Verify timeout",
+                &value,
+                "← → / type (0 = default)",
+            );
+        }
+        SettingsField::ManaRunBackground => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Run in background",
+            if state.mana_run_background {
+                "on"
+            } else {
+                "off"
+            },
+            "← →",
+        ),
+        SettingsField::ManaMaxWorkers => {
+            let value =
+                if state.editing_number && state.current_field() == SettingsField::ManaMaxWorkers {
+                    format!("{}▎", state.edit_buffer)
+                } else {
+                    state.mana_max_workers.to_string()
+                };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Max workers",
+                &value,
+                "← → / type",
+            );
+        }
+        SettingsField::ManaReviewAfterRun => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Review after run",
+            if state.mana_review_after_run {
+                "on"
+            } else {
+                "off"
+            },
+            "← →",
+        ),
+        SettingsField::ManaContinueAfterFailure => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Continue after failure",
+            if state.mana_continue_after_failure {
+                "on"
+            } else {
+                "off"
+            },
+            "← →",
+        ),
+        SettingsField::TavilyApiKey => {
+            let value = if state.tavily_api_key.is_empty() {
+                if state.tavily_configured {
+                    "configured (press Enter to replace)".to_string()
+                } else {
+                    "not set".to_string()
+                }
+            } else {
+                format!(
+                    "{}▎",
+                    "•".repeat(state.tavily_api_key.chars().count().max(1))
+                )
+            };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Tavily API key",
+                &value,
+                "Enter to edit",
+            );
+        }
+        SettingsField::ExaApiKey => {
+            let value = if state.exa_api_key.is_empty() {
+                if state.exa_configured {
+                    "configured (press Enter to replace)".to_string()
+                } else {
+                    "not set".to_string()
+                }
+            } else {
+                format!("{}▎", "•".repeat(state.exa_api_key.chars().count().max(1)))
+            };
+            render_field(
+                state,
+                theme,
+                buf,
+                inner,
+                scroll_offset,
+                row,
+                field_index(field),
+                "Exa API key",
+                &value,
+                "Enter to edit",
+            );
+        }
+        SettingsField::Save => {}
+    }
+}
+
+fn render_save_row(
+    state: &SettingsState,
+    theme: &Theme,
+    buf: &mut Buffer,
+    inner: Rect,
+    scroll_offset: u16,
+    row: u16,
+) {
+    let Some(y) = scrolled_screen_y(inner, row, scroll_offset) else {
+        return;
+    };
+    let is_save = state.current_field() == SettingsField::Save;
+    let save_style = if is_save {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        theme.muted_style()
+    };
+    let marker = if is_save { "▸ " } else { "  " };
+    let dirty_hint = if state.dirty {
+        " (unsaved changes)"
+    } else {
+        ""
+    };
+    let line = Line::from(vec![
+        Span::styled(marker, theme.accent_style()),
+        Span::styled("[ Save to config.toml ]", save_style),
+        Span::styled(dirty_hint, theme.warning_style()),
+    ]);
+    buf.set_line(inner.x, y, &line, inner.width);
 }
 
 /// Render one settings field row.
@@ -1375,9 +1895,17 @@ mod tests {
 
     #[test]
     fn save_field_scrolls_into_view_on_short_panels() {
-        assert_eq!(selected_settings_row(FIELDS.len() - 1), 30);
-        assert_eq!(total_settings_rows(), 31);
-        assert_eq!(settings_scroll_offset(FIELDS.len() - 1, 10), 21);
+        let registry = ModelRegistry::with_builtins();
+        let models = registry.list().to_vec();
+        let auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
+        let config = Config::default();
+        let mut state = SettingsState::new(&config, &models[0].id, &models, &auth_store);
+        state.tab = SettingsTab::Ui;
+        state.selected = field_index(SettingsField::Save);
+
+        assert_eq!(selected_settings_row(&state), 18);
+        assert_eq!(total_settings_rows(&state), 19);
+        assert_eq!(settings_scroll_offset(&state, 10), 9);
     }
 
     #[test]
@@ -1406,9 +1934,18 @@ mod tests {
 
     #[test]
     fn top_fields_do_not_scroll_when_visible() {
-        assert_eq!(selected_settings_row(0), 2);
-        assert_eq!(settings_scroll_offset(0, 10), 0);
-        assert_eq!(settings_scroll_offset(5, 10), 0);
+        let registry = ModelRegistry::with_builtins();
+        let models = registry.list().to_vec();
+        let auth_store = AuthStore::new(std::path::PathBuf::from("/tmp/auth.json"));
+        let config = Config::default();
+        let mut state = SettingsState::new(&config, &models[0].id, &models, &auth_store);
+
+        assert_eq!(selected_settings_row(&state), 4);
+        assert_eq!(settings_scroll_offset(&state, 10), 0);
+
+        state.move_down();
+        assert_eq!(selected_settings_row(&state), 5);
+        assert_eq!(settings_scroll_offset(&state, 10), 0);
     }
 
     #[test]
@@ -1445,7 +1982,8 @@ mod tests {
         let mut config = Config::default();
         let mut state = SettingsState::new(&config, &models[0].id, &models, &auth_store);
 
-        state.selected = 1;
+        state.tab = SettingsTab::Model;
+        state.selected = field_index(SettingsField::ChosenModels);
         state.cycle_forward();
         assert_eq!(state.chosen_models, vec![models[0].id.clone()]);
 

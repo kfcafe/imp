@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::animation::{activity_label, format_elapsed, ActivitySurface, AnimationState};
+use crate::animation::{
+    activity_label, format_elapsed, queued_glyph, ActivitySurface, AnimationState,
+};
 use imp_core::config::AnimationLevel;
 use imp_llm::ThinkingLevel;
 use ratatui::buffer::Buffer;
@@ -12,6 +14,34 @@ use ratatui::widgets::{Block, Borders, Widget};
 use unicode_width::UnicodeWidthChar;
 
 use crate::theme::Theme;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowMode {
+    Explore,
+    Plan,
+    Build,
+    Improve,
+}
+
+impl WorkflowMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            WorkflowMode::Explore => "EXPLORE",
+            WorkflowMode::Plan => "PLAN",
+            WorkflowMode::Build => "BUILD",
+            WorkflowMode::Improve => "IMPROVE",
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            WorkflowMode::Explore => "Explore",
+            WorkflowMode::Plan => "Plan",
+            WorkflowMode::Build => "Build",
+            WorkflowMode::Improve => "Improve",
+        }
+    }
+}
 
 /// Multi-line editor state with cursor management.
 #[derive(Debug, Clone)]
@@ -327,7 +357,7 @@ pub struct EditorView<'a> {
     cwd: &'a str,
     session_name: &'a str,
     is_streaming: bool,
-    has_queued: bool,
+    queued_preview: Option<String>,
     current_context_tokens: u32,
     context_window: u32,
     show_context_usage: bool,
@@ -337,6 +367,12 @@ pub struct EditorView<'a> {
     tick: u64,
     animation_level: AnimationLevel,
     activity_state: AnimationState,
+    workflow_mode: WorkflowMode,
+    mana_scope_label: Option<String>,
+    mana_run_label: Option<String>,
+    build_loop_label: Option<String>,
+    improve_status_label: Option<String>,
+    loop_label: Option<String>,
 }
 
 impl<'a> EditorView<'a> {
@@ -350,7 +386,7 @@ impl<'a> EditorView<'a> {
             cwd: "",
             session_name: "",
             is_streaming: false,
-            has_queued: false,
+            queued_preview: None,
             current_context_tokens: 0,
             context_window: 0,
             show_context_usage: true,
@@ -360,6 +396,12 @@ impl<'a> EditorView<'a> {
             tick: 0,
             animation_level: AnimationLevel::Minimal,
             activity_state: AnimationState::Idle,
+            workflow_mode: WorkflowMode::Explore,
+            mana_scope_label: None,
+            mana_run_label: None,
+            build_loop_label: None,
+            improve_status_label: None,
+            loop_label: None,
         }
     }
 
@@ -396,8 +438,8 @@ impl<'a> EditorView<'a> {
         self
     }
 
-    pub fn queued(mut self, has_queued: bool) -> Self {
-        self.has_queued = has_queued;
+    pub fn queued(mut self, preview: Option<String>) -> Self {
+        self.queued_preview = preview;
         self
     }
 
@@ -422,6 +464,36 @@ impl<'a> EditorView<'a> {
         self.activity_state = state;
         self
     }
+
+    pub fn workflow_mode(mut self, mode: WorkflowMode) -> Self {
+        self.workflow_mode = mode;
+        self
+    }
+
+    pub fn mana_scope_label(mut self, label: Option<String>) -> Self {
+        self.mana_scope_label = label;
+        self
+    }
+
+    pub fn mana_run_label(mut self, label: Option<String>) -> Self {
+        self.mana_run_label = label;
+        self
+    }
+
+    pub fn build_loop_label(mut self, label: Option<String>) -> Self {
+        self.build_loop_label = label;
+        self
+    }
+
+    pub fn improve_status_label(mut self, label: Option<String>) -> Self {
+        self.improve_status_label = label;
+        self
+    }
+
+    pub fn loop_label(mut self, label: Option<String>) -> Self {
+        self.loop_label = label;
+        self
+    }
 }
 
 impl Widget for EditorView<'_> {
@@ -430,24 +502,25 @@ impl Widget for EditorView<'_> {
             return;
         }
 
-        let prompt_activity_state = if self.has_queued {
+        let prompt_activity_state = if self.queued_preview.is_some() {
             AnimationState::Queued
         } else {
             self.activity_state
         };
 
-        let border_style = superbar_border_style(
-            self.theme,
-            self.thinking_level,
-            prompt_activity_state,
-            self.tick,
-            self.animation_level,
-        );
+        let border_style = superbar_border_style(self.theme, self.thinking_level);
 
         let top_left = build_identity_label(self.cwd, self.session_name, area.width);
         let top_right = build_top_right_label(self.turn_elapsed, self.theme);
-        let bottom_left =
-            build_bottom_left_label(prompt_activity_state, self.tick, self.animation_level);
+        let bottom_left = build_bottom_left_label(
+            prompt_activity_state,
+            self.tick,
+            self.animation_level,
+            self.workflow_mode,
+            self.mana_scope_label.as_deref(),
+            self.mana_run_label.as_deref(),
+            self.build_loop_label.as_deref(),
+        );
         let activity =
             editor_activity_label(prompt_activity_state, self.tick, self.animation_level);
 
@@ -503,6 +576,9 @@ impl Widget for EditorView<'_> {
         if let Some(queue) = queue_label {
             push_part(queue, self.theme.warning_style());
         }
+        if let Some(loop_label) = self.loop_label.as_deref() {
+            push_part(loop_label.to_string(), self.theme.warning_style());
+        }
         if !activity.is_empty() {
             push_part(activity, self.theme.muted_style());
         }
@@ -518,32 +594,64 @@ impl Widget for EditorView<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
+        let mut content_inner = inner;
+        if let Some(status) = self.improve_status_label.as_deref() {
+            if inner.height > 1 {
+                let status_y = content_inner.y;
+                buf.set_line(
+                    content_inner.x,
+                    status_y,
+                    &Line::from(Span::styled(status.to_string(), self.theme.accent_style())),
+                    content_inner.width,
+                );
+                content_inner.y = content_inner.y.saturating_add(1);
+                content_inner.height = content_inner.height.saturating_sub(1);
+            }
+        }
+        if let Some(preview) = self.queued_preview.as_deref() {
+            if inner.height > 1 {
+                let queue_y = inner.y + inner.height - 1;
+                let label = format!("{} queued {}", queued_glyph(), preview);
+                buf.set_line(
+                    inner.x,
+                    queue_y,
+                    &Line::from(Span::styled(label, self.theme.warning_style())),
+                    inner.width,
+                );
+                content_inner.height = content_inner.height.saturating_sub(1);
+            }
+        }
+
         // Render editor content using wrapped visual lines so auto-grow and cursor math stay aligned.
-        let lines = editor_display_lines(&self.state.content, inner.width, self.summarize_paste)
-            .into_iter()
-            .skip(self.state.scroll_offset)
-            .take(inner.height as usize)
-            .collect::<Vec<_>>();
+        let lines = editor_display_lines(
+            &self.state.content,
+            content_inner.width,
+            self.summarize_paste,
+        )
+        .into_iter()
+        .skip(self.state.scroll_offset)
+        .take(content_inner.height as usize)
+        .collect::<Vec<_>>();
 
         for (idx, line) in lines.iter().enumerate() {
-            if idx >= inner.height as usize {
+            if idx >= content_inner.height as usize {
                 break;
             }
             buf.set_line(
-                inner.x,
-                inner.y + idx as u16,
+                content_inner.x,
+                content_inner.y + idx as u16,
                 &Line::raw(line.clone()),
-                inner.width,
+                content_inner.width,
             );
         }
 
         // Placeholder text when empty and not streaming
-        if self.state.content.is_empty() && !self.is_streaming {
+        if self.state.content.is_empty() && !self.is_streaming && content_inner.height > 0 {
             let placeholder =
                 "Ask anything… ⇧↵ newline  @file attach context  / palette  ! or : shell  :cd cwd";
             buf.set_string(
-                inner.x,
-                inner.y,
+                content_inner.x,
+                content_inner.y,
                 placeholder,
                 Style::default().fg(Color::DarkGray),
             );
@@ -587,13 +695,30 @@ fn build_bottom_left_label(
     activity_state: AnimationState,
     tick: u64,
     animation_level: AnimationLevel,
+    workflow_mode: WorkflowMode,
+    mana_scope_label: Option<&str>,
+    mana_run_label: Option<&str>,
+    build_loop_label: Option<&str>,
 ) -> Vec<Span<'static>> {
-    let label = editor_activity_label(activity_state, tick, animation_level);
-    if label.is_empty() {
-        Vec::new()
-    } else {
-        vec![Span::raw(label)]
+    let mut spans = vec![Span::raw(workflow_mode.label())];
+    if let Some(scope) = mana_scope_label.filter(|scope| !scope.trim().is_empty()) {
+        spans.push(Span::raw(" · "));
+        spans.push(Span::raw(scope.to_string()));
     }
+    if let Some(run) = mana_run_label.filter(|label| !label.trim().is_empty()) {
+        spans.push(Span::raw(" · "));
+        spans.push(Span::raw(run.to_string()));
+    }
+    if let Some(loop_state) = build_loop_label.filter(|label| !label.trim().is_empty()) {
+        spans.push(Span::raw(" · "));
+        spans.push(Span::raw(loop_state.to_string()));
+    }
+    let label = editor_activity_label(activity_state, tick, animation_level);
+    if !label.is_empty() {
+        spans.push(Span::raw(" · "));
+        spans.push(Span::raw(label));
+    }
+    spans
 }
 
 fn editor_activity_label(
@@ -612,86 +737,8 @@ fn editor_activity_label(
     }
 }
 
-fn superbar_border_style(
-    theme: &Theme,
-    thinking_level: ThinkingLevel,
-    activity_state: AnimationState,
-    tick: u64,
-    animation_level: AnimationLevel,
-) -> Style {
-    let color = superbar_border_color(theme, thinking_level, activity_state, tick, animation_level);
-    let mut style = Style::default().fg(color);
-    if superbar_border_is_animated(activity_state, animation_level) {
-        style = style.add_modifier(ratatui::style::Modifier::BOLD);
-    }
-    style
-}
-
-fn superbar_border_is_animated(
-    activity_state: AnimationState,
-    animation_level: AnimationLevel,
-) -> bool {
-    if animation_level == AnimationLevel::None {
-        return false;
-    }
-
-    !matches!(
-        activity_state,
-        AnimationState::Idle | AnimationState::Thinking | AnimationState::WaitingForResponse
-    )
-}
-
-fn superbar_border_color(
-    theme: &Theme,
-    thinking_level: ThinkingLevel,
-    activity_state: AnimationState,
-    tick: u64,
-    animation_level: AnimationLevel,
-) -> Color {
-    let base = theme.thinking_border_color(thinking_level);
-    if !superbar_border_is_animated(activity_state, animation_level) {
-        return base;
-    }
-
-    let target = match activity_state {
-        AnimationState::Idle => base,
-        AnimationState::WaitingForResponse => theme.muted,
-        AnimationState::Thinking => theme.accent,
-        AnimationState::ExecutingTools { .. } => theme.warning,
-        AnimationState::Streaming => theme.success,
-        AnimationState::Queued => theme.warning,
-    };
-
-    let pulse = match animation_level {
-        AnimationLevel::None => 0.0,
-        AnimationLevel::Minimal => {
-            const PULSE: [f32; 4] = [0.10, 0.22, 0.34, 0.22];
-            PULSE[(tick / 4) as usize % PULSE.len()]
-        }
-        AnimationLevel::Spinner => {
-            const PULSE: [f32; 6] = [0.16, 0.32, 0.50, 0.68, 0.50, 0.32];
-            PULSE[(tick / 2) as usize % PULSE.len()]
-        }
-    };
-
-    mix_color(base, target, pulse)
-}
-
-fn mix_color(base: Color, target: Color, amount: f32) -> Color {
-    let amount = amount.clamp(0.0, 1.0);
-    match (base, target) {
-        (Color::Rgb(br, bg, bb), Color::Rgb(tr, tg, tb)) => Color::Rgb(
-            mix_channel(br, tr, amount),
-            mix_channel(bg, tg, amount),
-            mix_channel(bb, tb, amount),
-        ),
-        _ if amount >= 0.5 => target,
-        _ => base,
-    }
-}
-
-fn mix_channel(base: u8, target: u8, amount: f32) -> u8 {
-    (base as f32 + (target as f32 - base as f32) * amount).round() as u8
+fn superbar_border_style(theme: &Theme, thinking_level: ThinkingLevel) -> Style {
+    Style::default().fg(theme.thinking_border_color(thinking_level))
 }
 
 fn abbreviate_home(path: &str) -> String {
@@ -1063,11 +1110,19 @@ mod tests {
             AnimationState::ExecutingTools { active_tools: 2 },
             0,
             AnimationLevel::Minimal,
+            WorkflowMode::Build,
+            Some("364 Test scope"),
+            Some("run run-1 running"),
+            Some("task 364.1"),
         );
         let text: String = rendered
             .into_iter()
             .map(|span| span.content.into_owned())
             .collect();
+        assert!(text.contains("BUILD"));
+        assert!(text.contains("364 Test scope"));
+        assert!(text.contains("run run-1 running"));
+        assert!(text.contains("task 364.1"));
         assert!(text.contains("working"));
     }
 
@@ -1084,54 +1139,32 @@ mod tests {
 
     #[test]
     fn bottom_left_label_hides_thinking_state() {
-        let rendered =
-            build_bottom_left_label(AnimationState::Thinking, 0, AnimationLevel::Minimal);
-        assert!(rendered.is_empty());
-    }
-
-    #[test]
-    fn superbar_border_color_stays_base_when_idle() {
-        let theme = Theme::default();
-        let color = superbar_border_color(
-            &theme,
-            ThinkingLevel::Medium,
-            AnimationState::Idle,
-            0,
-            AnimationLevel::Spinner,
-        );
-        assert_eq!(color, theme.thinking_border_color(ThinkingLevel::Medium));
-    }
-
-    #[test]
-    fn superbar_border_color_stays_base_when_thinking() {
-        let theme = Theme::default();
-        let color = superbar_border_color(
-            &theme,
-            ThinkingLevel::Medium,
+        let rendered = build_bottom_left_label(
             AnimationState::Thinking,
-            6,
-            AnimationLevel::Spinner,
+            0,
+            AnimationLevel::Minimal,
+            WorkflowMode::Explore,
+            None,
+            None,
+            None,
         );
-        assert_eq!(color, theme.thinking_border_color(ThinkingLevel::Medium));
+        let text: String = rendered
+            .into_iter()
+            .map(|span| span.content.into_owned())
+            .collect();
+        assert_eq!(text, "EXPLORE");
     }
 
     #[test]
-    fn superbar_border_color_pulses_when_active() {
+    fn superbar_border_style_stays_static_when_active() {
         let theme = Theme::default();
-        let early = superbar_border_color(
-            &theme,
-            ThinkingLevel::Medium,
-            AnimationState::ExecutingTools { active_tools: 1 },
-            0,
-            AnimationLevel::Spinner,
+        let idle = superbar_border_style(&theme, ThinkingLevel::Medium);
+        let active = superbar_border_style(&theme, ThinkingLevel::Medium);
+        assert_eq!(idle, active);
+        assert_eq!(
+            idle.fg,
+            Some(theme.thinking_border_color(ThinkingLevel::Medium))
         );
-        let peak = superbar_border_color(
-            &theme,
-            ThinkingLevel::Medium,
-            AnimationState::ExecutingTools { active_tools: 1 },
-            6,
-            AnimationLevel::Spinner,
-        );
-        assert_ne!(early, peak);
+        assert!(!idle.add_modifier.contains(ratatui::style::Modifier::BOLD));
     }
 }
