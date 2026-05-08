@@ -55,6 +55,7 @@ use crate::views::command_palette::{
 use crate::views::editor::{EditorState, EditorView};
 use crate::views::file_finder::{collect_project_files, FileFinderState, FileFinderView};
 use crate::views::login_picker::{login_providers, LoginPickerState, LoginPickerView};
+use crate::views::mana_navigator::{ManaNavigatorState, ManaNavigatorView};
 use crate::views::model_selector::{ModelSelection, ModelSelectorState, ModelSelectorView};
 use crate::views::personality::{PersonalityScope, PersonalityState, PersonalityView};
 use crate::views::secrets_picker::{secret_providers, SecretsPickerState, SecretsPickerView};
@@ -105,6 +106,7 @@ pub enum UiMode {
     CommandPalette(CommandPaletteState),
     FileFinder(FileFinderState),
     LoginPicker(LoginPickerState),
+    ManaNavigator(ManaNavigatorState),
     SecretsPicker(SecretsPickerState),
     TreeView(TreeViewState),
     Settings(SettingsState),
@@ -1554,7 +1556,7 @@ impl App {
         let extension_lines = vec![
             format!("• lua: {lua_extension_summary}"),
             "• commands: /command".to_string(),
-            "• shell: /new, /model, /resume, /settings, /personality, /setup".to_string(),
+            "• shell: /new, /model, /mana, /resume, /settings, /personality, /setup".to_string(),
             format!("• mode: {mode}"),
         ];
 
@@ -1834,6 +1836,11 @@ impl App {
                 let view = SecretsPickerView::new(state, &self.theme);
                 frame.render_widget(view, overlay_area);
             }
+            UiMode::ManaNavigator(state) => {
+                let mana_area = centered_rect(88, 86, area);
+                let view = ManaNavigatorView::new(state, &self.theme);
+                frame.render_widget(view, mana_area);
+            }
             UiMode::TreeView(state) => {
                 let tree_area = centered_rect(80, 80, area);
                 let view = TreeView::new(state, &self.theme);
@@ -1986,6 +1993,7 @@ impl App {
             | UiMode::FileFinder(_)
             | UiMode::LoginPicker(_)
             | UiMode::SecretsPicker(_) => self.handle_overlay_key(key),
+            UiMode::ManaNavigator(_) => self.handle_mana_navigator_key(key),
             UiMode::Personality(_) => self.handle_personality_key(key),
             UiMode::TreeView(_) => self.handle_tree_key(key),
             UiMode::Settings(_) => self.handle_settings_key(key),
@@ -2348,6 +2356,40 @@ impl App {
             _ => {
                 self.mode = old_mode;
             }
+        }
+    }
+
+    fn handle_mana_navigator_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Tab => {
+                self.mode = UiMode::Normal;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let UiMode::ManaNavigator(ref mut state) = self.mode {
+                    state.move_up();
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let UiMode::ManaNavigator(ref mut state) = self.mode {
+                    state.move_down();
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                if let UiMode::ManaNavigator(ref mut state) = self.mode {
+                    state.collapse_selected();
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                if let UiMode::ManaNavigator(ref mut state) = self.mode {
+                    state.expand_selected();
+                }
+            }
+            KeyCode::Enter => {
+                if let UiMode::ManaNavigator(ref mut state) = self.mode {
+                    state.toggle_selected();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -3324,6 +3366,9 @@ impl App {
             }
             "tree" => {
                 self.open_tree_view();
+            }
+            "mana" => {
+                self.open_mana_navigator(if args.is_empty() { None } else { Some(args) });
             }
             "new" => {
                 self.messages.clear();
@@ -5187,6 +5232,10 @@ impl App {
         self.mode = UiMode::FileFinder(FileFinderState::new(files));
     }
 
+    fn open_mana_navigator(&mut self, initial_id: Option<&str>) {
+        self.mode = UiMode::ManaNavigator(ManaNavigatorState::load(&self.cwd, initial_id));
+    }
+
     fn open_tree_view(&mut self) {
         let tree = self.session.get_tree();
         let flat = flatten_tree(&tree, 0);
@@ -6299,6 +6348,19 @@ mod session_lifecycle {
         let msgs = reopened.get_messages();
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].is_user());
+    }
+
+    #[test]
+    fn tui_integration_slash_mana_opens_navigator() {
+        let mut app = make_app();
+        app.execute_command("mana");
+        assert!(matches!(app.mode, UiMode::ManaNavigator(_)));
+    }
+
+    #[test]
+    fn command_palette_includes_mana_command() {
+        let commands = builtin_commands();
+        assert!(commands.iter().any(|cmd| cmd.name == "mana"));
     }
 
     // ── 3. Slash commands ───────────────────────────────────────

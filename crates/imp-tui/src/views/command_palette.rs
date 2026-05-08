@@ -74,6 +74,10 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
             description: "Open settings".into(),
         },
         SlashCommand {
+            name: "mana".into(),
+            description: "Open mana work graph navigator".into(),
+        },
+        SlashCommand {
             name: "tree".into(),
             description: "Session tree view".into(),
         },
