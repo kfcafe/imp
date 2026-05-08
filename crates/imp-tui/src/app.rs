@@ -3581,6 +3581,11 @@ impl App {
     }
 
     fn scroll_chat_down(&mut self, lines: usize) {
+        if self.streaming_anchor_user_index.is_some() {
+            self.streaming_anchor_user_index = None;
+            self.auto_scroll = false;
+        }
+
         self.scroll_offset = self.scroll_offset.saturating_sub(lines);
         if self.scroll_offset == 0 {
             self.auto_scroll = true;
@@ -9415,6 +9420,22 @@ mod session_lifecycle {
             .unwrap();
         assert_eq!(app.scroll_offset, 0);
         assert!(app.auto_scroll);
+    }
+
+    #[test]
+    fn scrolling_down_releases_streaming_prompt_anchor() {
+        let mut app = make_app();
+        let lines = app.config.ui.keyboard_scroll_lines;
+        app.streaming_anchor_user_index = Some(0);
+        app.auto_scroll = true;
+        app.scroll_offset = lines * 2;
+
+        app.handle_normal_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::empty()))
+            .unwrap();
+
+        assert_eq!(app.streaming_anchor_user_index, None);
+        assert_eq!(app.scroll_offset, lines);
+        assert!(!app.auto_scroll);
     }
 
     #[test]
