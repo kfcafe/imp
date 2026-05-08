@@ -4,6 +4,7 @@ pub mod command_palette;
 pub mod editor;
 pub mod file_finder;
 pub mod login_picker;
+pub mod mana_navigator;
 pub mod model_selector;
 pub mod personality;
 pub mod secrets_picker;
