@@ -364,11 +364,36 @@ impl Agent {
                         }
                     }
                     Err(e) => {
+                        let had_partial_output =
+                            !ordered_content.is_empty() || !tool_calls.is_empty();
                         let error = match &e {
                             imp_llm::Error::Stream(message) => {
-                                format!("Provider stream failed after partial output: {message}")
+                                if had_partial_output {
+                                    format!(
+                                        "Provider stream failed after partial output: {message}"
+                                    )
+                                } else {
+                                    format!("Provider stream failed before output: {message}")
+                                }
                             }
-                            _ => e.to_string(),
+                            imp_llm::Error::Http(http_error) if http_error.is_decode() => {
+                                if had_partial_output {
+                                    format!(
+                                        "Provider response body decode failed after partial output; not retrying to avoid duplicated tool output: {http_error}"
+                                    )
+                                } else {
+                                    format!(
+                                        "Provider response body decode failed before output after retry attempts were exhausted: {http_error}"
+                                    )
+                                }
+                            }
+                            _ => {
+                                if had_partial_output {
+                                    format!("Provider stream failed after partial output: {e}")
+                                } else {
+                                    e.to_string()
+                                }
+                            }
                         };
                         self.emit(AgentEvent::Error {
                             error: error.clone(),
