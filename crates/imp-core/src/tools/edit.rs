@@ -19,42 +19,42 @@ impl Tool for EditTool {
         "Edit File"
     }
     fn description(&self) -> &str {
-        "Canonical edit tool. Edit a file with exact find/replace, anchored range replacement, or a validated multi-edit transaction via edits[]."
+        "Edit files by exact replacement, anchored range, or edits[] transaction."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Path for single-file exact/anchored edits, or default path for transaction edits. Per-edit path may override this inside edits[]." },
-                "old_text": { "type": "string", "description": "Text to replace for exact/fuzzy single-edit mode" },
-                "new_text": { "type": "string", "description": "Replacement text for exact/fuzzy and anchored edit modes" },
+                "path": { "type": "string", "description": "File path or default edits[] path" },
+                "old_text": { "type": "string", "description": "Text to replace" },
+                "new_text": { "type": "string", "description": "Replacement text" },
                 "dry_run": {
                     "type": "boolean",
-                    "description": "Return the diff and metadata without writing the file"
+                    "description": "Dry run; return diff only"
                 },
                 "expected_occurrences": {
                     "type": "integer",
-                    "description": "Require this many exact old_text matches before editing; useful with 1 to prevent ambiguous replacements"
+                    "description": "Required exact old_text match count"
                 },
                 "replace_all": {
                     "type": "boolean",
-                    "description": "Replace all exact old_text matches instead of only the first match"
+                    "description": "Replace all exact matches"
                 },
                 "anchor_start": {
                     "type": "string",
-                    "description": "Start anchor emitted by read with anchors=true for anchored range replacement"
+                    "description": "Start anchor from read(anchors=true)"
                 },
                 "anchor_end": {
                     "type": "string",
-                    "description": "Optional end anchor emitted by read with anchors=true. Defaults to anchorStart."
+                    "description": "Optional end anchor"
                 },
                 "edits": {
                     "type": "array",
-                    "description": "Validated transaction edits handled by the canonical edit tool. Each edit supports old_text, new_text, and optional path for multi-file transactions.",
+                    "description": "Transactional edits[]",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "path": { "type": "string", "description": "Optional per-edit path for multi-file transactions" },
+                            "path": { "type": "string", "description": "Per-edit path" },
                             "old_text": { "type": "string" },
                             "new_text": { "type": "string" }
                         },
