@@ -439,13 +439,21 @@ fn highlight_code_lines(
         .enumerate()
         .map(|(idx, line)| {
             let mut spans = vec![Span::styled(
-                format!("{:>4} │ ", idx + 1),
+                compact_line_number_prefix(idx + 1),
                 theme.muted_style(),
             )];
             spans.extend(line.spans);
             Line::from(spans)
         })
         .collect()
+}
+
+fn compact_line_number_prefix(line_number: usize) -> String {
+    if line_number <= 999 {
+        format!("{line_number:>3}│")
+    } else {
+        format!("{line_number}│")
+    }
 }
 
 fn styled_diff_line(line: &str, theme: &Theme, is_error: bool) -> Line<'static> {

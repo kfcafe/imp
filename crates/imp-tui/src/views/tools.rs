@@ -7,7 +7,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use serde_json::Value;
 
-use crate::animation::spinner_frame;
 use crate::theme::Theme;
 
 fn abbreviate_home_path(path: &str) -> String {
@@ -103,19 +102,10 @@ impl DisplayToolCall {
         focused: bool,
         animation_level: AnimationLevel,
     ) -> Line<'static> {
+        let _ = tick;
+        let _ = animation_level;
         let is_running = self.output.is_none() && !self.is_error;
-        let icon = if self.is_error {
-            "✗".to_string()
-        } else if is_running {
-            match animation_level {
-                AnimationLevel::None => "•".to_string(),
-                AnimationLevel::Spinner | AnimationLevel::Minimal => {
-                    spinner_frame(tick).to_string()
-                }
-            }
-        } else {
-            "✓".to_string()
-        };
+        let icon = if self.is_error { "✗" } else { "✓" };
         let icon_style = if self.is_error {
             theme.error_style()
         } else if is_running {
@@ -136,16 +126,16 @@ impl DisplayToolCall {
             Span::raw(" ")
         };
 
-        let mut spans = vec![
-            focus_span,
-            Span::styled(format!(" {icon} "), icon_style),
-            Span::styled(
-                self.name.clone(),
-                Style::default()
-                    .fg(theme.tool_name)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ];
+        let mut spans = vec![focus_span];
+        if !is_running {
+            spans.push(Span::styled(format!(" {icon} "), icon_style));
+        }
+        spans.push(Span::styled(
+            self.name.clone(),
+            Style::default()
+                .fg(theme.tool_name)
+                .add_modifier(Modifier::BOLD),
+        ));
 
         if !self.args_summary.is_empty() {
             spans.push(Span::raw(" "));
