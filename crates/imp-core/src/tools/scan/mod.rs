@@ -77,7 +77,7 @@ impl Tool for ScanTool {
     }
 
     fn description(&self) -> &str {
-        "Analyze code structure with tree-sitter. Use before broad text search when you need symbols, definitions, file skeletons/outlines, or coherent code blocks; extract exact blocks with file:line, file:start-end, or file#symbol."
+        "Code structure search/extraction with tree-sitter."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -87,43 +87,43 @@ impl Tool for ScanTool {
                 "action": {
                     "type": "string",
                     "enum": ["directory", "files", "extract", "search", "tests", "related", "references", "impact"],
-                    "description": "Operation: 'directory' outlines a directory, 'files' outlines specific files, 'extract' returns exact code blocks, 'search' finds symbols/concepts, 'tests' discovers likely relevant tests, 'related' returns nearby context, 'references' finds lexical/structural usages, and 'impact' summarizes likely affected files/tests."
+                    "description": "Scan operation"
                 },
                 "directory": {
                     "type": "string",
-                    "description": "Directory to structurally scan. Defaults to the current workspace."
+                    "description": "Directory; defaults to cwd"
                 },
                 "files": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Files to outline for action='files'."
+                    "description": "Files for action=files"
                 },
                 "targets": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Extraction targets for action='extract' and code targets for action='tests'/'related': file#symbol, file:start-end, or file:line. Examples: src/lib.rs#Agent, src/lib.rs:40-80, src/lib.rs:42."
+                    "description": "Targets: file#symbol, file:start-end, or file:line"
                 },
                 "query": {
                     "type": "string",
-                    "description": "Search query for action='search'."
+                    "description": "Search query"
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["symbol", "text", "concept"],
-                    "description": "Search mode for action='search'. Defaults to 'concept'."
+                    "description": "Search mode; default concept"
                 },
                 "preset": {
                     "type": "string",
                     "enum": ["definition", "edit_context", "module_context", "test_context"],
-                    "description": "Optional extraction preset for action='extract'. Defaults to exact definition-style extraction."
+                    "description": "Extraction preset"
                 },
                 "target": {
                     "type": "string",
-                    "description": "Single target for action='tests', 'related', 'references', or 'impact'."
+                    "description": "Single target"
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum results for search/test/reference discovery. Defaults to 10 for search/tests and 25 for references/impact."
+                    "description": "Max results"
                 }
             },
             "required": ["action"]

@@ -36,7 +36,7 @@ impl Tool for WorktreeTool {
     }
 
     fn description(&self) -> &str {
-        "Git worktree inspection and lifecycle operations."
+        "Git worktree list/add/remove."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -46,31 +46,31 @@ impl Tool for WorktreeTool {
                 "action": {
                     "type": "string",
                     "enum": ["list", "add", "remove"],
-                    "description": "Worktree operation to perform"
+                    "description": "Worktree action"
                 },
                 "path": {
                     "type": "string",
-                    "description": "Optional repo or worktree path to run from; defaults to the session cwd"
+                    "description": "Repo/worktree path"
                 },
                 "worktree_path": {
                     "type": "string",
-                    "description": "For add/remove: worktree path to create or remove"
+                    "description": "Worktree path"
                 },
                 "branch": {
                     "type": "string",
-                    "description": "For add: branch to create; for remove with delete_branch=true: branch to delete explicitly"
+                    "description": "Branch name"
                 },
                 "start_point": {
                     "type": "string",
-                    "description": "For add: optional starting ref (defaults to HEAD)"
+                    "description": "Starting ref"
                 },
                 "force": {
                     "type": "boolean",
-                    "description": "For remove: pass --force to git worktree remove and -D to branch deletion"
+                    "description": "Force remove"
                 },
                 "delete_branch": {
                     "type": "boolean",
-                    "description": "For remove: also delete the associated branch; requires explicit branch"
+                    "description": "Also delete branch"
                 }
             },
             "required": ["action"]
