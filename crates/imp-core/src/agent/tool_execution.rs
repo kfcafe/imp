@@ -4,7 +4,9 @@ use std::time::Instant;
 use futures::future::join_all;
 use tokio::sync::mpsc;
 
-use crate::agent::{Agent, AgentEvent, RecoveryCheckpointKind, TimingStage};
+use crate::agent::{
+    Agent, AgentEvent, RecoveryCheckpointKind, TimingStage, ToolExecutionMode, ToolPlan, ToolRisk,
+};
 use crate::guardrails::{self, GuardrailLevel};
 use crate::hooks::HookEvent;
 
@@ -15,48 +17,83 @@ use super::{
 };
 
 impl Agent {
-    /// Execute tool calls from a single assistant message.
-    pub(super) async fn execute_tools(
+    pub(super) fn plan_tools(&self, calls: Vec<(String, String, serde_json::Value)>) -> ToolPlan {
+        let calls = calls
+            .into_iter()
+            .enumerate()
+            .map(|(index, (id, name, args))| {
+                let risk = if self.tools.get(&name).is_some_and(|tool| tool.is_readonly()) {
+                    ToolRisk::ReadOnly
+                } else if matches!(name.as_str(), "bash" | "git" | "mana") {
+                    ToolRisk::ExternalSideEffect
+                } else {
+                    ToolRisk::Mutable
+                };
+                let retry_safe = matches!(risk, ToolRisk::ReadOnly);
+                super::PlannedToolCall {
+                    index,
+                    id,
+                    name,
+                    args,
+                    risk,
+                    retry_safe,
+                }
+            })
+            .collect();
+
+        ToolPlan {
+            mode: ToolExecutionMode::ParallelReadonlyThenSequentialMutable,
+            calls,
+        }
+    }
+
+    pub(super) async fn execute_tool_plan(
         &self,
         turn: u32,
         turn_started_at: Instant,
-        calls: Vec<(String, String, serde_json::Value)>,
+        plan: ToolPlan,
         cancel_token: Arc<std::sync::atomic::AtomicBool>,
     ) -> Vec<imp_llm::ToolResultMessage> {
         let mut readonly = Vec::new();
         let mut mutable = Vec::new();
 
-        for (index, (id, name, args)) in calls.into_iter().enumerate() {
-            if self.tools.get(&name).is_some_and(|tool| tool.is_readonly()) {
-                readonly.push((index, id, name, args));
-            } else {
-                mutable.push((index, id, name, args));
+        for call in plan.calls {
+            match call.risk {
+                ToolRisk::ReadOnly => readonly.push(call),
+                ToolRisk::Mutable | ToolRisk::ExternalSideEffect => mutable.push(call),
             }
         }
 
-        let mut results = join_all(readonly.into_iter().map(|(index, id, name, args)| {
+        let mut results = join_all(readonly.into_iter().map(|call| {
             let cancel_token = Arc::clone(&cancel_token);
             async move {
                 let result = self
-                    .execute_one_tool(&id, &name, args, cancel_token, turn, turn_started_at)
+                    .execute_one_tool(
+                        &call.id,
+                        &call.name,
+                        call.args,
+                        cancel_token,
+                        turn,
+                        turn_started_at,
+                    )
                     .await;
-                (index, result)
+                (call.index, result)
             }
         }))
         .await;
 
-        for (index, id, name, args) in mutable {
+        for call in mutable {
             let result = self
                 .execute_one_tool(
-                    &id,
-                    &name,
-                    args,
+                    &call.id,
+                    &call.name,
+                    call.args,
                     Arc::clone(&cancel_token),
                     turn,
                     turn_started_at,
                 )
                 .await;
-            results.push((index, result));
+            results.push((call.index, result));
         }
 
         results.sort_by_key(|(index, _)| *index);

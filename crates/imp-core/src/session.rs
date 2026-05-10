@@ -947,6 +947,30 @@ impl SessionManager {
         })
     }
 
+    /// Return all persisted recovery checkpoints in session order.
+    pub fn recovery_checkpoints(&self) -> Vec<RecoveryCheckpoint> {
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let SessionEntry::Custom {
+                    custom_type, data, ..
+                } = entry
+                else {
+                    return None;
+                };
+                if custom_type != RECOVERY_CHECKPOINT_CUSTOM_TYPE {
+                    return None;
+                }
+                serde_json::from_value(data.clone()).ok()
+            })
+            .collect()
+    }
+
+    /// Build a recovery ledger from persisted recovery checkpoint entries.
+    pub fn recovery_ledger(&self) -> crate::agent::RecoveryLedger {
+        crate::agent::RecoveryLedger::from_checkpoints(self.recovery_checkpoints())
+    }
+
     /// Get all entries.
     pub fn entries(&self) -> &[SessionEntry] {
         &self.entries
@@ -2458,5 +2482,31 @@ mod recovery_ledger_tests {
         let encoded = serde_json::to_string(data).unwrap();
         assert!(!encoded.contains("oldText"));
         assert!(!encoded.contains("newText"));
+    }
+
+    #[test]
+    fn recovery_checkpoints_round_trip_into_ledger() {
+        let mut session = SessionManager::in_memory();
+        let checkpoint = RecoveryCheckpoint {
+            version: 1,
+            turn: 7,
+            kind: RecoveryCheckpointKind::ToolPlanCreated,
+            tool_call_id: Some("call_789".to_string()),
+            tool_name: Some("read".to_string()),
+            args_hash: Some("hash789".to_string()),
+            success: Some(true),
+            error_class: None,
+            timestamp: 100,
+        };
+
+        session.append_recovery_checkpoint(checkpoint).unwrap();
+
+        let checkpoints = session.recovery_checkpoints();
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].tool_call_id.as_deref(), Some("call_789"));
+
+        let reconciliation = session.recovery_ledger().reconcile_turn(7);
+        assert_eq!(reconciliation.retryable_incomplete_tools.len(), 1);
+        assert!(reconciliation.unsafe_incomplete_tools.is_empty());
     }
 }

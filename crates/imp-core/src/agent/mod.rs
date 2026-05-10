@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use imp_llm::{AssistantMessage, ContentBlock, Message, Model, StopReason, ThinkingLevel, Usage};
+use imp_llm::{
+    AssistantMessage, ContentBlock, Message, Model, StopReason as LlmStopReason, ThinkingLevel,
+    Usage,
+};
 #[cfg(test)]
 use imp_llm::{Context, RequestOptions, StreamEvent};
 use tokio::sync::mpsc;
@@ -21,12 +24,22 @@ use crate::roles::Role;
 use crate::tools::{LuaToolLoader, ToolRegistry};
 
 mod events;
+mod loop_policy;
+mod loop_state;
 mod mana_loop;
+mod recovery;
 mod run_loop;
 mod tool_execution;
 
 pub use events::{
     AgentEvent, RecoveryCheckpoint, RecoveryCheckpointKind, TimingEvent, TimingStage,
+};
+pub use loop_state::{
+    ContinueReason, LoopDecision, PlannedToolCall, RunFinalStatus, StopReason, ToolExecutionMode,
+    ToolPlan, ToolRisk, TurnPhase, TurnState,
+};
+pub use recovery::{
+    IncompleteToolRecovery, IncompleteToolState, RecoveryLedger, RecoveryReconciliation,
 };
 
 /// Commands sent to the agent (from UI or orchestrator).
@@ -40,8 +53,7 @@ pub enum AgentCommand {
 mod turn_assessment;
 
 use turn_assessment::{
-    ContinueReason, ContinueRecommendation, ManaEvidence, NextAction, NextActionStopReason,
-    PostTurnAssessment, RuntimeEvidence, TextFallbackEvidence,
+    ContinueRecommendation, ManaEvidence, PostTurnAssessment, RuntimeEvidence, TextFallbackEvidence,
 };
 pub use turn_assessment::{NextActionAssessment, NextActionDebugView};
 
@@ -53,7 +65,6 @@ pub struct Agent {
     pub messages: Vec<Message>,
     pub system_prompt: String,
     pub cwd: PathBuf,
-    pub max_turns: u32,
     pub max_tokens: Option<u32>,
     pub role: Option<Role>,
     pub hooks: HookRunner,
@@ -92,6 +103,8 @@ pub struct Agent {
     pub read_max_lines: usize,
     /// Cache options for LLM requests.
     pub cache_options: imp_llm::CacheOptions,
+    /// In-memory recovery checkpoints for this run. Session persistence can seed this ledger later.
+    pub recovery_ledger: Arc<std::sync::Mutex<RecoveryLedger>>,
     /// Tracks identical consecutive tool calls to detect loops.
     last_tool_call: std::sync::Arc<std::sync::Mutex<Option<RepeatedToolCallState>>>,
     /// Prevent repeated self-nudges for mana externalization in a single run.
@@ -161,7 +174,6 @@ impl Agent {
             messages: Vec::new(),
             system_prompt: String::new(),
             cwd,
-            max_turns: 50,
             max_tokens: None,
             role: None,
             hooks,
@@ -188,6 +200,7 @@ impl Agent {
                 extended_ttl: false,
                 global_scope: false,
             },
+            recovery_ledger: Arc::new(std::sync::Mutex::new(RecoveryLedger::new())),
             last_tool_call: Arc::new(std::sync::Mutex::new(None)),
             queued_mana_externalization_nudge: false,
             continue_policy: ContinuePolicy::Disabled,
@@ -287,27 +300,20 @@ impl Agent {
         }
     }
 
-    fn enqueue_next_action(
-        &mut self,
-        queued_follow_ups: &mut std::collections::VecDeque<String>,
-        next_action: NextAction,
-    ) {
-        match next_action {
-            NextAction::Continue { prompt, reason } => {
-                match reason {
-                    ContinueReason::ExternalizationNeeded => {
-                        self.queued_mana_externalization_nudge = true;
-                    }
-                    ContinueReason::HighConfidenceVisibleNextStep => {
-                        self.queued_confidence_continue_nudge = true;
-                    }
-                    ContinueReason::ExecutionDebt => {
-                        self.queued_execution_debt_follow_up = true;
-                    }
-                }
-                queued_follow_ups.push_back(prompt);
+    fn mark_continue_reason(&mut self, reason: ContinueReason) {
+        match reason {
+            ContinueReason::ExternalizationNeeded => {
+                self.queued_mana_externalization_nudge = true;
             }
-            NextAction::Stop { .. } => {}
+            ContinueReason::HighConfidenceVisibleNextStep => {
+                self.queued_confidence_continue_nudge = true;
+            }
+            ContinueReason::ExecutionDebt => {
+                self.queued_execution_debt_follow_up = true;
+            }
+            ContinueReason::ToolResultsNeedInterpretation
+            | ContinueReason::QueuedUserFollowUp
+            | ContinueReason::RecoveryContinuation => {}
         }
     }
 
@@ -377,7 +383,10 @@ impl Agent {
         let _ = self.event_tx.send(AgentEvent::Timing { timing }).await;
     }
 
-    async fn emit_recovery_checkpoint(&self, checkpoint: RecoveryCheckpoint) {
+    pub async fn emit_recovery_checkpoint(&self, checkpoint: RecoveryCheckpoint) {
+        if let Ok(mut ledger) = self.recovery_ledger.lock() {
+            ledger.record(checkpoint.clone());
+        }
         let _ = self
             .event_tx
             .send(AgentEvent::RecoveryCheckpoint { checkpoint })
@@ -764,7 +773,7 @@ fn tool_results_indicate_repeated_action(tool_results: &[imp_llm::ToolResultMess
 fn tool_results_indicate_execution_blocker(
     tool_results: &[imp_llm::ToolResultMessage],
     mode: AgentMode,
-) -> Option<NextActionStopReason> {
+) -> Option<StopReason> {
     if !matches!(
         mode,
         AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker
@@ -782,11 +791,11 @@ fn tool_results_indicate_execution_blocker(
         if action == Some("verify")
             && result.details.get("passed").and_then(|v| v.as_bool()) == Some(false)
         {
-            return Some(NextActionStopReason::ExecutionBlocked);
+            return Some(StopReason::ExecutionBlocked);
         }
 
         if result.tool_name == "ask_user" && !result.is_error {
-            return Some(NextActionStopReason::UserBlocker);
+            return Some(StopReason::UserBlocker);
         }
 
         if result.tool_name == "bash" || result.tool_name == "shell" {
@@ -809,13 +818,13 @@ fn tool_results_indicate_execution_blocker(
             if looks_like_check
                 && (timed_out || cancelled || exit_code.is_some_and(|code| code != 0))
             {
-                return Some(NextActionStopReason::ExecutionBlocked);
+                return Some(StopReason::ExecutionBlocked);
             }
 
             if saw_edit_like_success
                 && (timed_out || cancelled || exit_code.is_some_and(|code| code != 0))
             {
-                return Some(NextActionStopReason::ExecutionBlocked);
+                return Some(StopReason::ExecutionBlocked);
             }
         }
     }
@@ -947,12 +956,9 @@ fn tool_results_indicate_work_completed(
     saw_edit_like_success && saw_successful_check
 }
 
-fn mana_review_stop_reason(
-    mana_review: &TurnManaReview,
-    mode: AgentMode,
-) -> Option<NextActionStopReason> {
+fn mana_review_stop_reason(mana_review: &TurnManaReview, mode: AgentMode) -> Option<StopReason> {
     match mana_review.state {
-        ManaReviewState::NeedsDecision => Some(NextActionStopReason::UserBlocker),
+        ManaReviewState::NeedsDecision => Some(StopReason::UserBlocker),
         ManaReviewState::Changed if matches!(mode, AgentMode::Planner) => {
             if !mana_review.proposed_children.is_empty()
                 || !mana_review.touched_units.is_empty()
@@ -960,7 +966,7 @@ fn mana_review_stop_reason(
                 || !mana_review.notes_appended.is_empty()
                 || !mana_review.decision_events.is_empty()
             {
-                Some(NextActionStopReason::DecompositionCompleted)
+                Some(StopReason::DecompositionCompleted)
             } else {
                 None
             }
@@ -969,10 +975,7 @@ fn mana_review_stop_reason(
     }
 }
 
-fn planner_stop_reason(
-    message: &AssistantMessage,
-    mode: AgentMode,
-) -> Option<NextActionStopReason> {
+fn planner_stop_reason(message: &AssistantMessage, mode: AgentMode) -> Option<StopReason> {
     if !matches!(mode, AgentMode::Planner) {
         return None;
     }
@@ -980,10 +983,7 @@ fn planner_stop_reason(
     classify_stop_reason_from_text(message, true)
 }
 
-fn execution_stop_reason(
-    message: &AssistantMessage,
-    mode: AgentMode,
-) -> Option<NextActionStopReason> {
+fn execution_stop_reason(message: &AssistantMessage, mode: AgentMode) -> Option<StopReason> {
     if !matches!(
         mode,
         AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker
@@ -992,9 +992,7 @@ fn execution_stop_reason(
     }
 
     match classify_stop_reason_from_text(message, false) {
-        Some(
-            reason @ (NextActionStopReason::UserBlocker | NextActionStopReason::WorkCompleted),
-        ) => Some(reason),
+        Some(reason @ (StopReason::UserBlocker | StopReason::WorkCompleted)) => Some(reason),
         _ => None,
     }
 }
@@ -1002,7 +1000,7 @@ fn execution_stop_reason(
 fn classify_stop_reason_from_text(
     message: &AssistantMessage,
     planner_mode: bool,
-) -> Option<NextActionStopReason> {
+) -> Option<StopReason> {
     let text = assistant_message_text(message);
     if text.trim().is_empty() {
         return None;
@@ -1022,7 +1020,7 @@ fn classify_stop_reason_from_text(
     .iter()
     .any(|needle| lower.contains(needle));
     if blocker_signal {
-        return Some(NextActionStopReason::UserBlocker);
+        return Some(StopReason::UserBlocker);
     }
 
     if planner_mode {
@@ -1037,7 +1035,7 @@ fn classify_stop_reason_from_text(
         .iter()
         .any(|needle| lower.contains(needle));
         if decomposition_complete_signal {
-            return Some(NextActionStopReason::DecompositionCompleted);
+            return Some(StopReason::DecompositionCompleted);
         }
     } else {
         let work_complete_signal = [
@@ -1052,7 +1050,7 @@ fn classify_stop_reason_from_text(
         .iter()
         .any(|needle| lower.contains(needle));
         if work_complete_signal {
-            return Some(NextActionStopReason::WorkCompleted);
+            return Some(StopReason::WorkCompleted);
         }
     }
 
@@ -1067,9 +1065,9 @@ fn build_assistant_message(
     usage: Option<Usage>,
 ) -> AssistantMessage {
     let stop_reason = if tool_calls.is_empty() {
-        StopReason::EndTurn
+        LlmStopReason::EndTurn
     } else {
-        StopReason::ToolUse
+        LlmStopReason::ToolUse
     };
 
     AssistantMessage {
@@ -1180,6 +1178,7 @@ fn mana_skill_follow_up_hint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::turn_assessment::NextAction;
     use std::pin::Pin;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -1302,7 +1301,7 @@ mod tests {
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
                     }),
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: LlmStopReason::EndTurn,
                     timestamp: 1000,
                 },
             },
@@ -1338,7 +1337,7 @@ mod tests {
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
                     }),
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: LlmStopReason::ToolUse,
                     timestamp: 1000,
                 },
             },
@@ -1377,7 +1376,7 @@ mod tests {
                     cache_read_tokens: 0,
                     cache_write_tokens: 0,
                 }),
-                stop_reason: StopReason::ToolUse,
+                stop_reason: LlmStopReason::ToolUse,
                 timestamp: 1000,
             },
         });
@@ -1397,7 +1396,7 @@ mod tests {
                 arguments: args,
             }],
             usage: None,
-            stop_reason: StopReason::ToolUse,
+            stop_reason: LlmStopReason::ToolUse,
             timestamp: imp_llm::now(),
         })
     }
@@ -1718,7 +1717,7 @@ mod tests {
                     text: "Verify failed.".to_string(),
                 }],
                 usage: None,
-                stop_reason: StopReason::EndTurn,
+                stop_reason: LlmStopReason::EndTurn,
                 timestamp: 0,
             },
             &[imp_llm::ToolResultMessage {
@@ -1860,7 +1859,7 @@ mod tests {
                             cache_read_tokens: 0,
                             cache_write_tokens: 0,
                         }),
-                        stop_reason: StopReason::ToolUse,
+                        stop_reason: LlmStopReason::ToolUse,
                         timestamp: 1000,
                     },
                 },
@@ -1903,18 +1902,18 @@ mod tests {
         let assessment = PostTurnAssessment {
             runtime: RuntimeEvidence {
                 repeated_action: false,
-                execution_stop_reason: Some(NextActionStopReason::ExecutionBlocked),
+                execution_stop_reason: Some(StopReason::ExecutionBlocked),
                 work_completed: true,
                 execution_debt: false,
                 execution_evidence: false,
                 planning_only_progress: false,
             },
             mana: ManaEvidence {
-                stop_reason: Some(NextActionStopReason::DecompositionCompleted),
+                stop_reason: Some(StopReason::DecompositionCompleted),
             },
             text_fallback: TextFallbackEvidence {
-                planner_stop_reason: Some(NextActionStopReason::DecompositionCompleted),
-                execution_stop_reason: Some(NextActionStopReason::WorkCompleted),
+                planner_stop_reason: Some(StopReason::DecompositionCompleted),
+                execution_stop_reason: Some(StopReason::WorkCompleted),
             },
             continue_recommendation: Some(ContinueRecommendation {
                 prompt: "continue".to_string(),
@@ -1925,7 +1924,7 @@ mod tests {
         assert_eq!(
             assessment.into_next_action(),
             NextAction::Stop {
-                reason: NextActionStopReason::ExecutionBlocked,
+                reason: StopReason::ExecutionBlocked,
             }
         );
     }
@@ -2059,7 +2058,7 @@ mod tests {
 
         assert_eq!(
             tool_results_indicate_execution_blocker(&[result], AgentMode::Full),
-            Some(NextActionStopReason::ExecutionBlocked)
+            Some(StopReason::ExecutionBlocked)
         );
     }
 
@@ -2078,7 +2077,7 @@ mod tests {
 
         assert_eq!(
             tool_results_indicate_execution_blocker(&[result], AgentMode::Full),
-            Some(NextActionStopReason::UserBlocker)
+            Some(StopReason::UserBlocker)
         );
     }
 
@@ -2160,7 +2159,7 @@ mod tests {
 
         assert_eq!(
             mana_review_stop_reason(&review, AgentMode::Planner),
-            Some(NextActionStopReason::UserBlocker)
+            Some(StopReason::UserBlocker)
         );
     }
 
@@ -2195,7 +2194,7 @@ mod tests {
 
         assert_eq!(
             mana_review_stop_reason(&review, AgentMode::Planner),
-            Some(NextActionStopReason::DecompositionCompleted)
+            Some(StopReason::DecompositionCompleted)
         );
     }
 
@@ -2293,7 +2292,7 @@ mod tests {
                             cache_read_tokens: 0,
                             cache_write_tokens: 0,
                         }),
-                        stop_reason: StopReason::ToolUse,
+                        stop_reason: LlmStopReason::ToolUse,
                         timestamp: 1000,
                     },
                 },
@@ -2361,7 +2360,7 @@ mod tests {
                             cache_read_tokens: 0,
                             cache_write_tokens: 0,
                         }),
-                        stop_reason: StopReason::ToolUse,
+                        stop_reason: LlmStopReason::ToolUse,
                         timestamp: 1000,
                     },
                 },
@@ -2535,11 +2534,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn single_text_turn_with_max_turns_one_and_no_tools_exits_cleanly() {
+    async fn single_text_turn_with_no_tools_exits_cleanly() {
         let provider = Arc::new(MockProvider::new(vec![text_response("SMOKE_OK", 50, 10)]));
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.max_turns = 1;
         agent.mode = AgentMode::Worker;
         agent.has_mana_basics_skill = true;
         agent.tools.retain(|_| false);
@@ -2620,7 +2618,7 @@ mod tests {
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
                     }),
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: LlmStopReason::EndTurn,
                     timestamp: 1000,
                 },
             }),
@@ -2678,7 +2676,7 @@ mod tests {
                             cache_read_tokens: 0,
                             cache_write_tokens: 0,
                         }),
-                        stop_reason: StopReason::EndTurn,
+                        stop_reason: LlmStopReason::EndTurn,
                         timestamp: 1000,
                     },
                 }),
@@ -3344,11 +3342,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn single_text_turn_with_max_turns_one_exits_cleanly() {
+    async fn single_text_turn_exits_cleanly() {
         let provider = Arc::new(MockProvider::new(vec![text_response("SMOKE_OK", 50, 10)]));
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.max_turns = 1;
 
         let events_task = tokio::spawn(collect_events(handle));
         let result = agent.run("Reply once and stop".to_string()).await;
@@ -3364,58 +3361,6 @@ mod tests {
             e,
             AgentEvent::Error { error } if error.contains("Max turns exceeded")
         )));
-    }
-
-    // ── Test 5: Max turns exceeded ─────────────────────────────────
-
-    #[tokio::test]
-    async fn agent_max_turns_exceeded() {
-        // Each turn will call a tool, forcing the loop to continue
-        let responses: Vec<Vec<StreamEvent>> = (0..5)
-            .map(|i| {
-                tool_call_response(
-                    &format!("call_{i}"),
-                    "echo",
-                    serde_json::json!({"text": format!("turn {i}")}),
-                    50,
-                    10,
-                )
-            })
-            .collect();
-
-        let provider = Arc::new(MockProvider::new(responses));
-        let model = test_model(provider);
-        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.tools.register(Arc::new(EchoTool));
-        agent.max_turns = 3; // Will exceed after 3 turns (0, 1, 2)
-
-        let events_task = tokio::spawn(collect_events(handle));
-        let result = agent.run("Loop forever".to_string()).await;
-        drop(agent);
-
-        assert!(matches!(result, Err(crate::error::Error::MaxTurns(3))));
-
-        let events = events_task.await.unwrap();
-
-        // Should have error event about max turns
-        let has_error = events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::Error { error } if error.contains("Max turns")));
-        assert!(has_error);
-
-        // Should still have AgentEnd
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
-
-        // Verify usage accumulated for the 3 turns that did execute
-        if let Some(AgentEvent::AgentEnd { usage, .. }) = events
-            .iter()
-            .find(|e| matches!(e, AgentEvent::AgentEnd { .. }))
-        {
-            assert_eq!(usage.input_tokens, 150); // 3 * 50
-            assert_eq!(usage.output_tokens, 30); // 3 * 10
-        }
     }
 
     // ── Test 6: Unknown tool → error result → model self-corrects ──
@@ -3756,7 +3701,7 @@ mod tests {
 
         let events = events_task.await.unwrap();
 
-        if let Some(AgentEvent::AgentEnd { usage, cost }) = events
+        if let Some(AgentEvent::AgentEnd { usage, cost, .. }) = events
             .iter()
             .find(|e| matches!(e, AgentEvent::AgentEnd { .. }))
         {
@@ -4112,7 +4057,7 @@ mod integration {
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
                     }),
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: LlmStopReason::EndTurn,
                     timestamp: 1000,
                 },
             },
@@ -4148,7 +4093,7 @@ mod integration {
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
                     }),
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: LlmStopReason::ToolUse,
                     timestamp: 1000,
                 },
             },

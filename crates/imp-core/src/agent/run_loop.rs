@@ -7,17 +7,50 @@ use imp_llm::{
     Usage,
 };
 
-use crate::agent::{Agent, AgentCommand, AgentEvent, RecoveryCheckpointKind, TimingStage};
+use crate::agent::{
+    Agent, AgentCommand, AgentEvent, LoopDecision, RecoveryCheckpointKind, RunFinalStatus,
+    StopReason as AgentStopReason, TimingStage, TurnPhase, TurnState,
+};
 use crate::error::Result;
 use crate::hooks::HookEvent;
 use crate::ui::NotifyLevel;
 
 use super::{
     build_assistant_message, clone_model, mana_skill_follow_up_hint, push_stream_text_block,
-    push_stream_thinking_block, record_mana_mutation_results, NextAction, NextActionStopReason,
+    push_stream_thinking_block, record_mana_mutation_results,
 };
 
 impl Agent {
+    pub(super) async fn reconcile_recovery_before_turn(
+        &self,
+        turn: u32,
+    ) -> Option<super::RecoveryReconciliation> {
+        let reconciliation = self
+            .recovery_ledger
+            .lock()
+            .ok()
+            .and_then(|ledger| ledger.reconcile_latest_finished_turn())?;
+
+        // Only a previous turn can block the next turn. The current turn has no
+        // side effects yet, and same-turn reconciliation happens after tool
+        // execution checkpoints are recorded.
+        if reconciliation.turn >= turn {
+            return None;
+        }
+
+        if !reconciliation.is_safe_to_continue() {
+            self.emit(AgentEvent::Error {
+                error: format!(
+                    "Recovery blocked before turn {turn}: {} incomplete non-retryable tool side effect(s)",
+                    reconciliation.unsafe_incomplete_tools.len()
+                ),
+            })
+            .await;
+        }
+
+        Some(reconciliation)
+    }
+
     /// Run the agent loop with an initial prompt.
     pub async fn run(&mut self, prompt: String) -> Result<()> {
         self.emit(AgentEvent::AgentStart {
@@ -36,6 +69,7 @@ impl Agent {
         let mut turn: u32 = 0;
         let mut total_usage = Usage::default();
         let mut cancelled = false;
+        let mut final_status: Option<RunFinalStatus> = None;
         let mut queued_follow_ups: std::collections::VecDeque<String> =
             std::collections::VecDeque::new();
         let mut queued_pre_turn_follow_ups: std::collections::VecDeque<String> =
@@ -53,22 +87,25 @@ impl Agent {
         }
 
         loop {
-            if turn >= self.max_turns {
-                self.emit(AgentEvent::Error {
-                    error: format!("Max turns exceeded ({})", self.max_turns),
-                })
-                .await;
-                let cost = total_usage.cost(&self.model.meta.pricing);
-                self.emit(AgentEvent::AgentEnd {
-                    usage: total_usage,
-                    cost,
-                })
-                .await;
-                return Err(crate::error::Error::MaxTurns(self.max_turns));
+            let mut turn_state = TurnState::new(turn);
+            turn_state.enter(TurnPhase::ReceiveCommands);
+
+            if let Some(reconciliation) = self.reconcile_recovery_before_turn(turn).await {
+                if !reconciliation.is_safe_to_continue() {
+                    let unsafe_count = reconciliation.unsafe_incomplete_tools.len();
+                    final_status = Some(RunFinalStatus::Blocked {
+                        reason: AgentStopReason::ExecutionBlocked,
+                        message: format!(
+                            "recovery requires user review: {unsafe_count} incomplete non-retryable tool side effect(s)"
+                        ),
+                    });
+                    break;
+                }
             }
 
             if turn > 0 {
                 if let Some(follow_up) = queued_pre_turn_follow_ups.pop_front() {
+                    turn_state.record_continue(super::ContinueReason::QueuedUserFollowUp);
                     self.messages.push(Message::user(&follow_up));
                 }
             }
@@ -93,11 +130,13 @@ impl Agent {
                 break;
             }
 
+            turn_state.enter(TurnPhase::PreTurn);
             self.emit(AgentEvent::TurnStart { index: turn }).await;
             if let Ok(mut review) = self.turn_mana_review.lock() {
                 review.begin_turn(turn);
             }
             let turn_started_at = Instant::now();
+            turn_state.enter(TurnPhase::BuildContext);
             self.emit_timing(
                 turn,
                 TimingStage::ContextAssemblyStart,
@@ -175,6 +214,7 @@ impl Agent {
             }
 
             // Stream the LLM response with retry on transient startup failures.
+            turn_state.enter(TurnPhase::SampleModel);
             let llm_request_started_at = Instant::now();
             self.emit_recovery_checkpoint(Self::recovery_checkpoint(
                 turn,
@@ -344,6 +384,7 @@ impl Agent {
                                     timestamp: imp_llm::now(),
                                 };
                                 self.messages.push(Message::Assistant(err_msg.clone()));
+                                turn_state.enter(TurnPhase::RecordObservations);
                                 let mana_review = self.finish_turn_mana_review(turn);
                                 self.emit(AgentEvent::TurnEnd {
                                     index: turn,
@@ -355,6 +396,9 @@ impl Agent {
                                 self.emit(AgentEvent::AgentEnd {
                                     usage: total_usage,
                                     cost,
+                                    status: RunFinalStatus::Failed {
+                                        message: "stream error".to_string(),
+                                    },
                                 })
                                 .await;
                                 return Err(crate::error::Error::Llm(imp_llm::Error::Provider(
@@ -403,6 +447,9 @@ impl Agent {
                         self.emit(AgentEvent::AgentEnd {
                             usage: total_usage,
                             cost,
+                            status: RunFinalStatus::Failed {
+                                message: error.clone(),
+                            },
                         })
                         .await;
                         return Err(e.into());
@@ -445,6 +492,9 @@ impl Agent {
                     self.emit(AgentEvent::AgentEnd {
                         usage: total_usage,
                         cost,
+                        status: RunFinalStatus::Failed {
+                            message: error.clone(),
+                        },
                     })
                     .await;
                     return Err(crate::error::Error::Llm(imp_llm::Error::Stream(error)));
@@ -452,6 +502,17 @@ impl Agent {
                 None => build_assistant_message(&ordered_content, &tool_calls, None),
             };
 
+            turn_state.enter(TurnPhase::FinalizeAssistantMessage);
+            self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+                turn,
+                RecoveryCheckpointKind::AssistantMessageFinalized,
+                None,
+                None,
+                None,
+                Some(true),
+                None,
+            ))
+            .await;
             self.messages.push(Message::Assistant(msg.clone()));
 
             if tool_calls.is_empty() {
@@ -471,6 +532,7 @@ impl Agent {
                     None,
                 )
                 .await;
+                turn_state.enter(TurnPhase::AssessTurn);
                 let assessment_started_at = Instant::now();
                 let assessment = self.assess_post_turn(&msg, &[], false, &mana_review);
                 self.emit_timing_with_details(
@@ -488,10 +550,21 @@ impl Agent {
                     assessment: assessment.debug_view(),
                 })
                 .await;
-                let next_action = assessment.into_next_action();
-                self.enqueue_next_action(&mut queued_follow_ups, next_action);
+                turn_state.enter(TurnPhase::DecideNext);
+                let decision = self.loop_decision_after_turn(&assessment);
+                match decision {
+                    LoopDecision::Continue { prompt, reason } => {
+                        self.mark_continue_reason(reason);
+                        turn_state.record_continue(reason);
+                        queued_follow_ups.push_back(prompt);
+                    }
+                    LoopDecision::Finish { status } => {
+                        final_status = Some(status);
+                    }
+                }
 
                 if let Some(follow_up) = queued_follow_ups.pop_front() {
+                    turn_state.record_continue(super::ContinueReason::QueuedUserFollowUp);
                     self.messages.push(Message::user(&follow_up));
                     turn += 1;
                     continue;
@@ -500,9 +573,27 @@ impl Agent {
             }
 
             // Execute tool calls
-            let results = self
-                .execute_tools(turn, turn_started_at, tool_calls, cancel_token)
+            turn_state.enter(TurnPhase::PlanTools);
+            let tool_plan = self.plan_tools(tool_calls);
+            turn_state.record_tool_plan(tool_plan.len());
+            for call in &tool_plan.calls {
+                self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+                    turn,
+                    RecoveryCheckpointKind::ToolPlanCreated,
+                    Some(call.id.clone()),
+                    Some(call.name.clone()),
+                    Some(Self::tool_args_hash(&call.args)),
+                    Some(call.retry_safe),
+                    None,
+                ))
                 .await;
+            }
+            turn_state.enter(TurnPhase::ExecuteTools);
+            let results = self
+                .execute_tool_plan(turn, turn_started_at, tool_plan, cancel_token)
+                .await;
+            turn_state.record_tool_results(results.len());
+            turn_state.enter(TurnPhase::RecordObservations);
 
             for result in &results {
                 self.emit_recovery_checkpoint(Self::recovery_checkpoint(
@@ -534,6 +625,7 @@ impl Agent {
                 None,
             )
             .await;
+            turn_state.enter(TurnPhase::AssessTurn);
             let assessment_started_at = Instant::now();
             let assessment = self.assess_post_turn(&msg, &results, true, &mana_review);
             self.emit_timing_with_details(
@@ -551,14 +643,27 @@ impl Agent {
                 assessment: assessment.debug_view(),
             })
             .await;
-            let next_action = assessment.into_next_action();
+            turn_state.enter(TurnPhase::DecideNext);
+            let decision = self.loop_decision_after_turn(&assessment);
             let should_stop_after_tool_turn = matches!(
-                next_action,
-                NextAction::Stop {
-                    reason: NextActionStopReason::RepeatedAction,
+                decision,
+                LoopDecision::Finish {
+                    status: RunFinalStatus::Blocked {
+                        reason: AgentStopReason::RepeatedAction,
+                        ..
+                    }
                 }
             );
-            self.enqueue_next_action(&mut queued_follow_ups, next_action);
+            match decision {
+                LoopDecision::Continue { prompt, reason } => {
+                    self.mark_continue_reason(reason);
+                    turn_state.record_continue(reason);
+                    queued_follow_ups.push_back(prompt);
+                }
+                LoopDecision::Finish { status } => {
+                    final_status = Some(status);
+                }
+            }
 
             if let Some(follow_up) = queued_follow_ups.pop_front() {
                 self.messages.push(Message::user(&follow_up));
@@ -568,6 +673,7 @@ impl Agent {
                 break;
             }
 
+            turn_state.record_continue(super::ContinueReason::ToolResultsNeedInterpretation);
             turn += 1;
         }
 
@@ -575,6 +681,13 @@ impl Agent {
         self.emit(AgentEvent::AgentEnd {
             usage: total_usage,
             cost,
+            status: if cancelled {
+                RunFinalStatus::Cancelled
+            } else {
+                final_status.unwrap_or_else(|| {
+                    RunFinalStatus::from_stop_reason(AgentStopReason::NoAutomaticFollowUp)
+                })
+            },
         })
         .await;
 
