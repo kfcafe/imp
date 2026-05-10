@@ -32,7 +32,7 @@ impl Tool for GitTool {
     }
 
     fn description(&self) -> &str {
-        "Local git operations for status, diff, log, commit, and restore."
+        "Local git status, diff, log, stage, commit, restore."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -50,58 +50,62 @@ impl Tool for GitTool {
                         "commit",
                         "restore"
                     ],
-                    "description": "Git operation to perform"
+                    "description": "Git action"
                 },
                 "path": {
                     "type": "string",
-                    "description": "Optional repo or worktree path to run from; defaults to the session cwd"
+                    "description": "Repo/worktree path"
                 },
                 "files": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Optional file paths for diff/log/stage/restore"
+                    "description": "File paths"
                 },
                 "all_changes": {
                     "type": "boolean",
-                    "description": "For stage: stage all changes with git add -A"
+                    "description": "Stage all changes"
                 },
                 "cached": {
                     "type": "boolean",
-                    "description": "For diff: compare staged changes instead of working tree"
+                    "description": "Diff staged changes"
                 },
                 "base": {
                     "type": "string",
-                    "description": "For diff: base ref; when set without head, compares base..HEAD"
+                    "description": "Diff base ref"
                 },
                 "head": {
                     "type": "string",
-                    "description": "For diff: head ref when comparing two refs"
+                    "description": "Diff head ref"
                 },
                 "ref1": {
                     "type": "string",
-                    "description": "For merge_base: first ref"
+                    "description": "First ref"
                 },
                 "ref2": {
                     "type": "string",
-                    "description": "For merge_base: second ref"
+                    "description": "Second ref"
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 100,
-                    "description": "For log: maximum number of entries to show (default 10)"
+                    "description": "Log limit"
                 },
                 "message": {
                     "type": "string",
-                    "description": "For commit: commit message"
+                    "description": "Commit message"
                 },
                 "allow_empty": {
                     "type": "boolean",
-                    "description": "For commit: allow an empty commit"
+                    "description": "Allow empty commit"
+                },
+                "preserve_index": {
+                    "type": "boolean",
+                    "description": "For file-targeted commits, preserve the existing index by committing via a temporary index (default true)"
                 },
                 "source": {
                     "type": "string",
-                    "description": "For restore: optional source ref (defaults to index/HEAD behavior)"
+                    "description": "Restore source ref"
                 }
             },
             "required": ["action"]
@@ -565,9 +569,24 @@ async fn commit_action(
         .or_else(|| params.get("allowEmpty"))
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
+    let files = parse_string_array(params, "files")?;
+    let preserve_index = params
+        .get("preserve_index")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+
+    if !files.is_empty() && preserve_index {
+        return targeted_commit_action(cwd, repo_root, message, allow_empty, &files).await;
+    }
+
     let mut args = vec!["commit".to_string(), "-m".to_string(), message.to_string()];
     if allow_empty {
         args.push("--allow-empty".to_string());
+    }
+    if !files.is_empty() {
+        args.push("--only".to_string());
+        args.push("--".to_string());
+        args.extend(files.iter().cloned());
     }
 
     let output = run_git_owned(cwd, args).await?;
@@ -603,6 +622,163 @@ async fn commit_action(
         }),
         is_error: false,
     })
+}
+
+async fn targeted_commit_action(
+    cwd: &Path,
+    repo_root: &Path,
+    message: &str,
+    allow_empty: bool,
+    files: &[String],
+) -> Result<ToolOutput> {
+    let diff_output = run_git_owned(
+        cwd,
+        ["diff", "--quiet", "HEAD", "--"]
+            .into_iter()
+            .map(str::to_string)
+            .chain(files.iter().cloned())
+            .collect(),
+    )
+    .await?;
+    if diff_output.status.success() && !allow_empty {
+        return Ok(ToolOutput::error(format!(
+            "No changes to commit for targeted path(s): {}",
+            files.join(", ")
+        )));
+    }
+
+    let index_path = std::env::temp_dir().join(format!(
+        "imp-git-targeted-index-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let index = index_path.to_string_lossy().to_string();
+
+    let read_tree = run_git_with_env(cwd, ["read-tree", "HEAD"], Some((&index, repo_root))).await?;
+    if !read_tree.status.success() {
+        cleanup_temp_index(&index_path);
+        return Ok(git_failure("git read-tree failed", &read_tree));
+    }
+
+    let mut add_args = vec!["add".to_string(), "--".to_string()];
+    add_args.extend(files.iter().cloned());
+    let add = run_git_owned_with_env(cwd, add_args, Some((&index, repo_root))).await?;
+    if !add.status.success() {
+        cleanup_temp_index(&index_path);
+        return Ok(git_failure("git add failed for targeted commit", &add));
+    }
+
+    let write_tree = run_git_with_env(cwd, ["write-tree"], Some((&index, repo_root))).await?;
+    if !write_tree.status.success() {
+        cleanup_temp_index(&index_path);
+        return Ok(git_failure("git write-tree failed", &write_tree));
+    }
+    let tree = stdout_trimmed(&write_tree);
+
+    if !allow_empty {
+        let head_tree = run_git(cwd, ["rev-parse", "HEAD^{tree}"]).await?;
+        if !head_tree.status.success() {
+            cleanup_temp_index(&index_path);
+            return Ok(git_failure("git rev-parse HEAD tree failed", &head_tree));
+        }
+        if stdout_trimmed(&head_tree) == tree {
+            cleanup_temp_index(&index_path);
+            return Ok(ToolOutput::error(format!(
+                "No changes to commit for targeted path(s): {}",
+                files.join(", ")
+            )));
+        }
+    }
+
+    let commit_tree = run_git_owned(
+        cwd,
+        vec![
+            "commit-tree".to_string(),
+            tree,
+            "-p".to_string(),
+            "HEAD".to_string(),
+            "-m".to_string(),
+            message.to_string(),
+        ],
+    )
+    .await?;
+    if !commit_tree.status.success() {
+        cleanup_temp_index(&index_path);
+        return Ok(git_failure("git commit-tree failed", &commit_tree));
+    }
+    let new_head = stdout_trimmed(&commit_tree);
+
+    let update_ref = run_git_owned(
+        cwd,
+        vec![
+            "update-ref".to_string(),
+            "-m".to_string(),
+            format!("commit: {message}"),
+            "HEAD".to_string(),
+            new_head.clone(),
+        ],
+    )
+    .await?;
+    cleanup_temp_index(&index_path);
+    if !update_ref.status.success() {
+        return Ok(git_failure("git update-ref failed", &update_ref));
+    }
+
+    let mut reset_args = vec![
+        "reset".to_string(),
+        "-q".to_string(),
+        "HEAD".to_string(),
+        "--".to_string(),
+    ];
+    reset_args.extend(files.iter().cloned());
+    let reset_index = run_git_owned(cwd, reset_args).await?;
+    if !reset_index.status.success() {
+        return Ok(git_failure("git reset failed after targeted commit", &reset_index));
+    }
+
+    let head = head_sha_short(cwd)
+        .await
+        .unwrap_or_else(|| "unknown".to_string());
+    let parent = head_parent_sha_short(cwd).await;
+    let summary = format!(
+        "Committed {head}: {message}\nIncluded targeted path(s): {}\nPreserved existing index and unrelated worktree changes.",
+        files.join(", ")
+    );
+
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text {
+            text: summary.clone(),
+        }],
+        details: json!({
+            "action": "commit",
+            "repo_root": repo_root.display().to_string(),
+            "message": message,
+            "allow_empty": allow_empty,
+            "files": files,
+            "preserve_index": true,
+            "head": head,
+            "parent": parent,
+            "recovery": {
+                "commit": head,
+                "parent": parent,
+            },
+            "summary": summary,
+        }),
+        is_error: false,
+    })
+}
+
+fn cleanup_temp_index(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let lock = path.with_extension("lock");
+    let _ = std::fs::remove_file(lock);
+}
+
+fn unique_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
 }
 
 async fn restore_action(
@@ -731,6 +907,38 @@ async fn run_git_owned(cwd: &Path, args: Vec<String>) -> std::io::Result<std::pr
     run_git(cwd, args).await
 }
 
+async fn run_git_with_env<I, S>(
+    cwd: &Path,
+    args: I,
+    temp_index: Option<(&str, &Path)>,
+) -> std::io::Result<std::process::Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some((index, work_tree)) = temp_index {
+        command
+            .env("GIT_INDEX_FILE", index)
+            .env("GIT_WORK_TREE", work_tree);
+    }
+    command.output().await
+}
+
+async fn run_git_owned_with_env(
+    cwd: &Path,
+    args: Vec<String>,
+    temp_index: Option<(&str, &Path)>,
+) -> std::io::Result<std::process::Output> {
+    run_git_with_env(cwd, args, temp_index).await
+}
+
 fn stdout_lossy(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).replace('\r', "")
 }
@@ -835,6 +1043,24 @@ mod tests {
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
         }
+    }
+
+    fn run_git_output(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|e| panic!("git {:?} failed to execute: {e}", args));
+        assert!(
+            output.status.success(),
+            "git {:?} in {} failed (exit {:?}):\nstdout: {}\nstderr: {}",
+            args,
+            dir.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
@@ -1001,6 +1227,81 @@ mod tests {
         assert!(!result.is_error);
         assert_eq!(result.details["allow_empty"], json!(true));
         assert!(extract_text(&result).contains("empty commit"));
+    }
+
+    #[tokio::test]
+    async fn targeted_commit_preserves_existing_index_and_unrelated_worktree() {
+        let dir = setup_repo();
+        fs::write(dir.path().join("target.txt"), "target base\n").unwrap();
+        fs::write(dir.path().join("staged.txt"), "staged base\n").unwrap();
+        fs::write(dir.path().join("dirty.txt"), "dirty base\n").unwrap();
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "add fixtures"]);
+
+        fs::write(dir.path().join("target.txt"), "target changed\n").unwrap();
+        fs::write(dir.path().join("staged.txt"), "staged changed\n").unwrap();
+        fs::write(dir.path().join("dirty.txt"), "dirty changed\n").unwrap();
+        run_git(dir.path(), &["add", "staged.txt"]);
+
+        let tool = GitTool;
+        let result = tool
+            .execute(
+                "c-targeted-commit",
+                json!({
+                    "action": "commit",
+                    "message": "update target only",
+                    "files": ["target.txt"]
+                }),
+                test_ctx(dir.path(), AgentMode::Worker),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error, "{}", extract_text(&result));
+        assert_eq!(result.details["preserve_index"], json!(true));
+        assert!(extract_text(&result).contains("Included targeted path"));
+
+        let committed_files = run_git_output(
+            dir.path(),
+            &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+        );
+        assert_eq!(committed_files, "target.txt");
+
+        let status = run_git_output(dir.path(), &["status", "--porcelain=v1"]);
+        assert!(
+            status.lines().any(|line| line == "M  staged.txt"),
+            "{status}"
+        );
+        assert!(
+            !status.lines().any(|line| line.ends_with("target.txt")),
+            "{status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn targeted_commit_rejects_noop_paths() {
+        let dir = setup_repo();
+        let tool = GitTool;
+
+        let result = tool
+            .execute(
+                "c-targeted-noop",
+                json!({
+                    "action": "commit",
+                    "message": "noop target",
+                    "files": ["note.txt"]
+                }),
+                test_ctx(dir.path(), AgentMode::Worker),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(extract_text(&result).contains("No changes to commit"));
+        assert_eq!(
+            run_git_output(dir.path(), &["rev-list", "--count", "HEAD"]),
+            "1"
+        );
     }
 
     #[tokio::test]
