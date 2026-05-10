@@ -8,7 +8,7 @@ This file adds project-specific guidance for work inside `imp/`.
 
 Today, `imp` is the agent engine and native worker/runtime in the Tower repo.
 
-For future-facing architecture work, the naming direction is:
+For future-facing architecture work, use this vocabulary:
 - `mana` = platform
 - `imp` = agent + default human-facing environment on mana
 - `runtime` = live execution layer
@@ -17,67 +17,38 @@ For future-facing architecture work, the naming direction is:
 - `action` = preferred system behavior term
 - `task` = preferred work term
 
-Use that vocabulary in new architecture docs and migration plans.
-Do not mechanically rewrite older docs or code names when they still describe current repo reality more accurately.
+Use the vocabulary in new architecture docs and migration plans, but do not mechanically rewrite older docs or code when current names are more accurate.
 
 ## Project focus
 
-Prioritize work that improves:
-- agent quality
-- runtime boundaries
-- context assembly
-- policy enforcement
-- tool behavior
-- embedding/hostability
-- extension seams
-- structured outcomes back into mana
+Prioritize work that improves agent quality, runtime boundaries, context assembly, policy enforcement, tool behavior, embedding/hostability, extension seams, and structured outcomes back into mana.
 
-## Current extension reality
+## Extension reality
 
-Current shipped extension support is Lua.
-Treat TypeScript extensions as the preferred future direction, but do not describe them as already shipped unless the repo actually implements them.
+Current shipped extension support is Lua. Treat TypeScript extensions as the preferred future direction, but do not describe them as already shipped unless the repo implements them.
 
-## Ownership heuristics
+## Ownership boundaries
 
-Put work in `imp/` when it is about:
-- agent behavior
-- runtime execution
-- context assembly
-- tool registration or tool UX
-- provider/model integration
-- session behavior
-- policy enforcement during execution
-- agent-facing interfaces
-- embedding surfaces for apps built on mana
+Put work in `imp/` when it concerns agent behavior, runtime execution, context assembly, tool registration/UX, provider/model integration, session behavior, execution policy, agent-facing interfaces, or embedding surfaces for apps built on mana.
 
-Escalate to root architecture work when the change affects:
-- the mana/imp split
-- runtime vs graph boundaries
-- extension system contracts
-- cross-app platform APIs
-- naming and ontology used across Tower
+Escalate to root architecture work when a change affects the mana/imp split, runtime vs graph boundaries, extension contracts, cross-app platform APIs, or Tower-wide naming/ontology.
 
-## Module organization guidance
+## Module organization
 
-Prefer local `AGENTS.md` files over crate READMEs for instructions that should shape future agent work.
-Use them to define ownership boundaries, extraction plans, naming conventions, and review rules close to the code they govern.
+Prefer local `AGENTS.md` files over crate READMEs for future agent instructions.
 
 When decomposing large files, preserve behavior first:
-- split by responsibility, not by arbitrary line count
-- keep public API churn minimal unless the current API is the problem
+- split by responsibility, not line count
+- keep public API churn minimal unless the API is the problem
 - move tests with the behavior they protect when practical
 - avoid mixing mechanical moves with semantic changes
 - run the narrowest crate-level check after each extraction
 
 Current high-priority decomposition targets:
-- `crates/imp-tui/src/app.rs`: split app state, event loop, runtime signals, auth/secrets flow, render caches, and agent event handling
-- `crates/imp-core/src/agent.rs`: split turn loop, tool execution, next-action assessment, retry handling, and mode/policy enforcement
-- `crates/imp-cli/src/lib.rs`: split args, auth/setup, headless worker mode, RPC mode, chat shell, and import/install helpers
-- `crates/imp-core/src/tools/mana.rs`: split schema/action dispatch, native run orchestration, run-state persistence, rendering, and policy
-
-## Agent-local install workflow
-
-For this workspace, prefer `uu install --default` when the user asks to install the current `imp` build locally. This matches the source-install path and avoids guessing a `cargo install` target.
+- `crates/imp-tui/src/app.rs`: app state, event loop, runtime signals, auth/secrets flow, render caches, agent event handling
+- `crates/imp-core/src/agent.rs`: turn loop, tool execution, next-action assessment, retry handling, mode/policy enforcement
+- `crates/imp-cli/src/lib.rs`: args, auth/setup, headless worker mode, RPC mode, chat shell, import/install helpers
+- `crates/imp-core/src/tools/mana.rs`: schema/action dispatch, native run orchestration, run-state persistence, rendering, policy
 
 ## Useful docs
 
