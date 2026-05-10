@@ -8,8 +8,6 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use imp_core::format_error_for_display;
-use imp_core::tools::mana::ManaTool;
-use imp_core::tools::Tool;
 use imp_core::ui::WidgetContent;
 use imp_core::{mana_run_summary, stop_mana_run, ManaRunSummary, ManaUnitRef, TurnManaReview};
 use mana_core::api;

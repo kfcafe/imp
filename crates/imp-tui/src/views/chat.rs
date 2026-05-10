@@ -519,6 +519,64 @@ pub fn clamped_scroll_offset_for_total_lines(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn scroll_offset_for_message_at_top(
+    messages: &[DisplayMessage],
+    theme: &Theme,
+    highlighter: &Highlighter,
+    chat_area: Rect,
+    message_index: usize,
+    tick: u64,
+    tool_focus: Option<usize>,
+    word_wrap: bool,
+    chat_tool_display: ChatToolDisplay,
+    thinking_lines: usize,
+    show_timestamps: bool,
+    animation_level: AnimationLevel,
+    activity_state: AnimationState,
+) -> usize {
+    if message_index >= messages.len() {
+        return 0;
+    }
+
+    let total_lines = build_chat_render_data(
+        messages,
+        theme,
+        highlighter,
+        chat_area.width as usize,
+        tick,
+        tool_focus,
+        word_wrap,
+        chat_tool_display,
+        thinking_lines,
+        show_timestamps,
+        animation_level,
+        activity_state,
+    )
+    .lines
+    .len();
+    let anchor_line = build_chat_render_data(
+        &messages[..message_index],
+        theme,
+        highlighter,
+        chat_area.width as usize,
+        tick,
+        tool_focus,
+        word_wrap,
+        chat_tool_display,
+        thinking_lines,
+        show_timestamps,
+        animation_level,
+        activity_state,
+    )
+    .lines
+    .len();
+
+    let visible_height = chat_area.height as usize;
+    let offset = total_lines.saturating_sub(visible_height + anchor_line);
+    clamp_scroll_offset_to_view(total_lines, visible_height, offset)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn clamped_scroll_offset(
     messages: &[DisplayMessage],
     theme: &Theme,

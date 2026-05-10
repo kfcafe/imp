@@ -277,7 +277,7 @@ fn render_section_line(line: &str, theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(line.to_string(), theme.muted_style()))
 }
 
-fn action_block_height(width: u16, action_count: usize) -> u16 {
+pub fn action_block_height(width: u16, action_count: usize) -> u16 {
     if action_count == 0 {
         return 0;
     }
@@ -289,7 +289,7 @@ fn action_block_height(width: u16, action_count: usize) -> u16 {
     }
 }
 
-fn visible_section_count(width: u16, height: u16, total: usize) -> usize {
+pub fn visible_section_count(width: u16, height: u16, total: usize) -> usize {
     if total == 0 {
         return 0;
     }
