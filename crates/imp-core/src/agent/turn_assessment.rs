@@ -1,3 +1,5 @@
+use super::{ContinueReason, StopReason};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum NextAction {
     Continue {
@@ -9,48 +11,7 @@ pub(super) enum NextAction {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ContinueReason {
-    ExternalizationNeeded,
-    HighConfidenceVisibleNextStep,
-    ExecutionDebt,
-}
-
-impl ContinueReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::ExternalizationNeeded => "externalization_needed",
-            Self::HighConfidenceVisibleNextStep => "high_confidence_visible_next_step",
-            Self::ExecutionDebt => "execution_debt",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum NextActionStopReason {
-    NoAutomaticFollowUp,
-    NoProgress,
-    RepeatedAction,
-    UserBlocker,
-    ExecutionBlocked,
-    DecompositionCompleted,
-    WorkCompleted,
-}
-
-impl NextActionStopReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::NoAutomaticFollowUp => "no_automatic_follow_up",
-            Self::NoProgress => "no_progress",
-            Self::RepeatedAction => "repeated_action",
-            Self::UserBlocker => "user_blocker",
-            Self::ExecutionBlocked => "execution_blocked",
-            Self::DecompositionCompleted => "decomposition_completed",
-            Self::WorkCompleted => "work_completed",
-        }
-    }
-}
-
+pub(super) type NextActionStopReason = StopReason;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RuntimeEvidence {
     pub(super) repeated_action: bool,

@@ -54,6 +54,8 @@ pub struct TimingEvent {
 pub enum RecoveryCheckpointKind {
     ProviderRequestStart,
     AssistantToolCallObserved,
+    AssistantMessageFinalized,
+    ToolPlanCreated,
     ToolExecutionStart,
     ToolExecutionEnd,
     ToolResultAddedToContext,
@@ -65,6 +67,8 @@ impl RecoveryCheckpointKind {
         match self {
             Self::ProviderRequestStart => "provider_request_start",
             Self::AssistantToolCallObserved => "assistant_tool_call_observed",
+            Self::AssistantMessageFinalized => "assistant_message_finalized",
+            Self::ToolPlanCreated => "tool_plan_created",
             Self::ToolExecutionStart => "tool_execution_start",
             Self::ToolExecutionEnd => "tool_execution_end",
             Self::ToolResultAddedToContext => "tool_result_added_to_context",
@@ -96,6 +100,7 @@ pub enum AgentEvent {
     AgentEnd {
         usage: Usage,
         cost: Cost,
+        status: crate::agent::RunFinalStatus,
     },
     TurnStart {
         index: u32,

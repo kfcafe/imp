@@ -2206,7 +2206,7 @@ fn print_headless_human_event(
                 eprintln!("{}", format_timing_event(timing));
             }
         }
-        AgentEvent::AgentEnd { usage, cost } => {
+        AgentEvent::AgentEnd { usage, cost, .. } => {
             eprintln!(
                 "\n[tokens: ↑{} ↓{} | cost: ${:.4}]",
                 usage.input_tokens, usage.output_tokens, cost.total
@@ -2223,7 +2223,7 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
         AgentEvent::AgentStart { model, timestamp } => {
             json!({ "type": "agent_start", "model": model, "timestamp": timestamp })
         }
-        AgentEvent::AgentEnd { usage, cost } => {
+        AgentEvent::AgentEnd { usage, cost, .. } => {
             json!({ "type": "agent_end", "usage": usage, "cost": cost })
         }
         AgentEvent::TurnStart { index } => json!({ "type": "turn_start", "index": index }),
@@ -2872,7 +2872,7 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             "model": model,
             "timestamp": timestamp,
         }),
-        AgentEvent::AgentEnd { usage, cost } => json!({
+        AgentEvent::AgentEnd { usage, cost, .. } => json!({
             "type": "agent_end",
             "usage": usage,
             "cost": cost,
@@ -3239,7 +3239,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                     eprintln!("{}", format_timing_event(&timing));
                 }
             }
-            AgentEvent::AgentEnd { usage, cost } => {
+            AgentEvent::AgentEnd { usage, cost, .. } => {
                 if json_output {
                     json_outcome.usage = Some(PrintUsage {
                         input_tokens: usage.input_tokens,
@@ -4407,7 +4407,7 @@ async fn run_chat_prompt(
                     eprintln!("{}", format_timing_event(&timing));
                 }
             }
-            AgentEvent::AgentEnd { usage: _, cost } => {
+            AgentEvent::AgentEnd { usage: _, cost, .. } => {
                 clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
                 eprintln!("{}", turn_summary.summary_line(cost.total));
                 break;
@@ -4696,9 +4696,6 @@ async fn run_interactive(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(ref thinking) = cli.thinking {
             runner.app_mut().thinking_level = parse_thinking_level(thinking);
-        }
-        if cli.max_turns.is_some() {
-            runner.app_mut().max_turns_override = cli.max_turns;
         }
 
         runner.run_guarded().await.map_err(Into::into)
@@ -5661,7 +5658,13 @@ mod tests {
             cache_write: 0.0001875,
             total: 0.0107175,
         };
-        let event = AgentEvent::AgentEnd { usage, cost };
+        let event = AgentEvent::AgentEnd {
+            usage,
+            cost,
+            status: imp_core::agent::RunFinalStatus::Done {
+                reason: imp_core::agent::StopReason::WorkCompleted,
+            },
+        };
         let json = rpc_agent_event_to_json(&event);
         assert_eq!(json["type"], "agent_end");
         assert_eq!(json["input_tokens"], 1000);

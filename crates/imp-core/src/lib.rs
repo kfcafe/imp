@@ -16,6 +16,7 @@ pub mod import;
 pub mod learning;
 pub mod mana_prompt_context;
 pub mod mana_review;
+pub mod mana_run_state;
 pub mod mana_worker;
 pub mod memory;
 pub mod personality;
@@ -40,7 +41,8 @@ pub use imp_llm::{
     CancellationMode, ContinuationMode, PersistentSessionMode, ResumabilityMode,
     TransportCapabilities,
 };
-pub use mana_review::{ManaReviewState, TurnManaReview};
+pub use mana_review::{ManaReviewState, ManaReviewUnitKind, ManaUnitRef, TurnManaReview};
+pub use mana_run_state::{mana_run_summary, stop_mana_run, ManaRunSummary};
 pub use sdk::*;
 
 // Re-export imp-llm for downstream crates
