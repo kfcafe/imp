@@ -1267,7 +1267,6 @@ role = "assistant"
                 tools: None,
                 readonly: false,
                 instructions: None,
-                max_turns: None,
             },
         );
 
@@ -1282,7 +1281,6 @@ role = "assistant"
                         tools: None,
                         readonly: true,
                         instructions: None,
-                        max_turns: None,
                     },
                 );
                 m

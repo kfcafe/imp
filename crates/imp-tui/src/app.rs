@@ -13,8 +13,6 @@ use imp_core::tools::Tool;
 use imp_core::ui::WidgetContent;
 use imp_core::{mana_run_summary, stop_mana_run, ManaRunSummary, ManaUnitRef, TurnManaReview};
 use mana_core::api;
-use mana_core::api::TreeNode;
-use mana_core::unit::Status;
 
 use imp_lua::loader::discover_extensions;
 use imp_lua::LuaRuntime;
@@ -626,134 +624,6 @@ fn split_vertical(area: Rect, percentages: &[u16]) -> Vec<Rect> {
         .collect()
 }
 
-fn is_build_team_intent(text: &str) -> bool {
-    let normalized = text.trim().to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "use a team"
-            | "build this with a team"
-            | "parallelize this"
-            | "run a team"
-            | "use workers"
-            | "run workers"
-            | "team build"
-            | "build with workers"
-    )
-}
-
-fn is_build_continue_intent(text: &str) -> bool {
-    let normalized = text.trim().to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "continue"
-            | "go"
-            | "build"
-            | "keep going"
-            | "finish"
-            | "finish this"
-            | "finish this task"
-            | "finish this epic"
-            | "complete this"
-            | "complete this epic"
-    )
-}
-
-fn first_open_child(node: &TreeNode) -> Option<&TreeNode> {
-    for child in &node.children {
-        if child.status == Status::Open {
-            return Some(child);
-        }
-        if let Some(descendant) = first_open_child(child) {
-            return Some(descendant);
-        }
-    }
-    None
-}
-
-#[derive(Debug, Clone)]
-struct BuildModeBlockedTask {
-    id: String,
-    decisions: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-enum BuildModeSelection {
-    Task(BuildModeTask),
-    Blocked(BuildModeBlockedTask),
-}
-
-#[derive(Debug, Clone)]
-struct BuildModeTask {
-    id: String,
-    title: String,
-    description: Option<String>,
-    design: Option<String>,
-    acceptance: Option<String>,
-    notes: Option<String>,
-    verify_fast: Option<String>,
-    verify: Option<String>,
-    verify_timeout: Option<u64>,
-    paths: Vec<String>,
-    dependencies: Vec<String>,
-    requires: Vec<String>,
-    produces: Vec<String>,
-    decisions: Vec<String>,
-}
-
-impl BuildModeTask {
-    fn prompt(&self, scope: &ManaUnitRef) -> String {
-        let mut prompt = format!(
-            "Build mode: work on mana task {} — {} under active scope {} — {}. Stay within this task and the active mana scope. Do not expand scope or add unrelated features.",
-            self.id,
-            self.title,
-            scope.id,
-            scope.title.trim()
-        );
-        if let Some(description) = self.description.as_deref().filter(|s| !s.trim().is_empty()) {
-            push_prompt_section(&mut prompt, "Description", description.trim());
-        }
-        if let Some(design) = self.design.as_deref().filter(|s| !s.trim().is_empty()) {
-            push_prompt_section(&mut prompt, "Design", design.trim());
-        }
-        if let Some(acceptance) = self.acceptance.as_deref().filter(|s| !s.trim().is_empty()) {
-            push_prompt_section(&mut prompt, "Acceptance", acceptance.trim());
-        }
-        if !self.decisions.is_empty() {
-            push_prompt_section(
-                &mut prompt,
-                "Blocking decisions",
-                &self.decisions.join("\n"),
-            );
-        }
-        if !self.paths.is_empty() {
-            push_prompt_section(&mut prompt, "Relevant paths", &self.paths.join("\n"));
-        }
-        if !self.dependencies.is_empty() {
-            push_prompt_section(&mut prompt, "Dependencies", &self.dependencies.join(", "));
-        }
-        if !self.requires.is_empty() {
-            push_prompt_section(&mut prompt, "Requires", &self.requires.join("\n"));
-        }
-        if !self.produces.is_empty() {
-            push_prompt_section(&mut prompt, "Produces", &self.produces.join("\n"));
-        }
-        if let Some(verify_fast) = self.verify_fast.as_deref().filter(|s| !s.trim().is_empty()) {
-            push_prompt_section(&mut prompt, "Fast verify command", verify_fast.trim());
-        }
-        if let Some(verify) = self.verify.as_deref().filter(|s| !s.trim().is_empty()) {
-            push_prompt_section(&mut prompt, "Verify command", verify.trim());
-        }
-        if let Some(timeout) = self.verify_timeout {
-            push_prompt_section(&mut prompt, "Verify timeout", &format!("{timeout}s"));
-        }
-        if let Some(notes) = self.notes.as_deref().filter(|s| !s.trim().is_empty()) {
-            push_prompt_section(&mut prompt, "Recent notes", notes.trim());
-        }
-        prompt.push_str("\n\nWhen done, verify with the narrowest relevant check and update/close the mana task with evidence if appropriate.");
-        prompt
-    }
-}
-
 const IMPROVE_CHANGELOG_PATH: &str = ".imp/improve-changelog.md";
 const IMPROVE_SANDBOX_METADATA_PATH: &str = ".imp/improve-sandbox.json";
 
@@ -833,16 +703,6 @@ Rules:\n\
         base = sandbox.base_branch,
         changelog = IMPROVE_CHANGELOG_PATH,
     )
-}
-
-fn push_prompt_section(prompt: &mut String, heading: &str, body: &str) {
-    if body.trim().is_empty() {
-        return;
-    }
-    prompt.push_str("\n\n");
-    prompt.push_str(heading);
-    prompt.push_str(":\n");
-    prompt.push_str(body.trim());
 }
 
 fn candidate_active_scope_from_review(review: &TurnManaReview) -> Option<ManaUnitRef> {
@@ -925,7 +785,6 @@ pub struct App {
     last_terminal_title: Option<String>,
     pub last_esc: Option<Instant>,
     pub tick: u64,
-    pub max_turns_override: Option<u32>,
     completed_turns_in_run: u32,
     suppress_completion_notification: bool,
     pub ui_rx: Option<tokio::sync::mpsc::Receiver<crate::tui_interface::UiRequest>>,
@@ -935,8 +794,6 @@ pub struct App {
     pub workflow_mode: WorkflowMode,
     active_mana_scope: Option<ManaUnitRef>,
     active_mana_run: Option<ManaRunSummary>,
-    build_auto_turns: u32,
-    last_build_auto_task_id: Option<String>,
     improve_auto_turns: u32,
     improve_safe_mode: bool,
     improve_sandbox: Option<ImproveSandbox>,
@@ -1528,18 +1385,15 @@ impl App {
             last_terminal_title: None,
             last_esc: None,
             tick: 0,
-            max_turns_override: None,
             completed_turns_in_run: 0,
             suppress_completion_notification: false,
             ui_rx: None,
             lua_command_ui: None,
             ask_state: None,
             ask_reply: None,
-            workflow_mode: WorkflowMode::Explore,
+            workflow_mode: WorkflowMode::Normal,
             active_mana_scope: None,
             active_mana_run: None,
-            build_auto_turns: 0,
-            last_build_auto_task_id: None,
             improve_auto_turns: 0,
             improve_safe_mode: false,
             improve_sandbox: None,
@@ -2796,7 +2650,6 @@ impl App {
                 .workflow_mode(self.workflow_mode)
                 .mana_scope_label(self.active_mana_scope_label())
                 .mana_run_label(self.active_mana_run_label())
-                .build_loop_label(self.build_loop_label())
                 .improve_status_label(self.improve_status_label())
                 .loop_label(self.loop_label())
                 .git_label(compact_git_label(&self.cwd));
@@ -3739,13 +3592,8 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: String) {
-        for ch in text.chars() {
-            match ch {
-                '\n' => self.editor.insert_newline(),
-                '\r' => {}
-                c => self.editor.insert_char(c),
-            }
-        }
+        let text = text.replace('\r', "");
+        self.editor.insert_paste(&text);
         if self.ask_state.is_some() {
             self.sync_ask_from_editor();
         }
@@ -4052,8 +3900,6 @@ impl App {
         self.pending_agent_prompt = None;
         self.pending_agent_cwd = None;
         self.loop_state = None;
-        self.build_auto_turns = 0;
-        self.last_build_auto_task_id = None;
         self.improve_auto_turns = 0;
         self.improve_sandbox = None;
         self.suppress_completion_notification = true;
@@ -4117,17 +3963,6 @@ impl App {
 
     // ── Commands ────────────────────────────────────────────────
 
-    fn build_loop_label(&self) -> Option<String> {
-        if self.workflow_mode != WorkflowMode::Build {
-            return None;
-        }
-        match self.last_build_auto_task_id.as_deref() {
-            Some(task_id) => Some(format!("task {task_id}")),
-            None if self.active_mana_scope.is_some() => Some("ready".to_string()),
-            None => None,
-        }
-    }
-
     fn improve_status_label(&self) -> Option<String> {
         if self.workflow_mode != WorkflowMode::Improve || self.improve_safe_mode {
             return None;
@@ -4156,8 +3991,7 @@ impl App {
     }
 
     fn workflow_context_prompt(&self) -> Option<String> {
-        let mode = self.workflow_mode.display_name();
-        let mut context = format!("Workflow mode: {mode}.");
+        let mut context = String::new();
         if self.workflow_mode == WorkflowMode::Improve {
             if self.improve_safe_mode {
                 context.push_str(" Improve safe mode is bounded autoresearch, evaluation, critique, and mana follow-up creation; avoid code edits.");
@@ -4172,6 +4006,9 @@ impl App {
             }
         }
         if let Some(scope) = self.active_mana_scope.as_ref() {
+            if !context.is_empty() {
+                context.push(' ');
+            }
             let title = scope.title.trim();
             if title.is_empty() {
                 context.push_str(&format!(" Active mana scope: {}.", scope.id));
@@ -4179,43 +4016,10 @@ impl App {
                 context.push_str(&format!(" Active mana scope: {} — {}.", scope.id, title));
             }
         }
-        Some(context)
-    }
-
-    fn queue_build_mode_continuation_if_ready(&mut self) {
-        if self.workflow_mode != WorkflowMode::Build
-            || self.is_streaming
-            || self.pending_agent_prompt.is_some()
-        {
-            return;
-        }
-        if self.active_mana_scope.is_none() {
-            return;
-        }
-        let budget = self.config.ui.build_auto_turn_budget.max(1);
-        if self.build_auto_turns >= budget {
-            self.push_system_msg(&format!(
-                "Build mode paused after {budget} automatic turns. Send a message or switch modes to continue."
-            ));
-            return;
-        }
-        if let Some((task_id, build_prompt)) = self.next_build_mode_prompt() {
-            if self
-                .last_build_auto_task_id
-                .as_ref()
-                .is_some_and(|last_task_id| last_task_id == &task_id)
-            {
-                self.push_system_msg(&format!(
-                    "Build mode paused because mana task {task_id} is still open after the last automatic attempt. Close it, mark it blocked, or send a message to retry intentionally."
-                ));
-                return;
-            }
-            self.build_auto_turns += 1;
-            self.last_build_auto_task_id = Some(task_id.clone());
-            self.push_system_msg(&format!("Build mode: starting mana task {task_id}"));
-            self.pending_agent_prompt = Some(build_prompt);
-            self.pending_agent_cwd = None;
-            self.needs_redraw = true;
+        if context.is_empty() {
+            None
+        } else {
+            Some(context)
         }
     }
 
@@ -4365,13 +4169,6 @@ impl App {
                 "mana run: {} {} ({}/{}, failed {})",
                 run.run_id, run.status, run.total_closed, run.total_units, run.total_failed
             ));
-        }
-        if self.workflow_mode == WorkflowMode::Build {
-            let budget = self.config.ui.build_auto_turn_budget.max(1);
-            lines.push(format!("build loop: {}/{}", self.build_auto_turns, budget));
-            if let Some(task_id) = self.last_build_auto_task_id.as_ref() {
-                lines.push(format!("last build task: {task_id}"));
-            }
         }
         if self.workflow_mode == WorkflowMode::Improve {
             let budget = self.config.ui.improve_auto_turn_budget.max(1);
@@ -4610,148 +4407,6 @@ impl App {
         }
     }
 
-    fn try_launch_build_team(&mut self, text: &str) -> bool {
-        if self.workflow_mode != WorkflowMode::Build || !is_build_team_intent(text) {
-            return false;
-        }
-
-        let Some(scope) = self.active_mana_scope.clone() else {
-            self.push_system_msg("Build team needs an active mana scope. Use /scope <id> or read/create a mana epic first.");
-            return true;
-        };
-
-        match self.launch_mana_run_for_scope(&scope) {
-            Ok(run_id) => {
-                self.refresh_active_mana_run(&run_id);
-                self.push_system_msg(&format!(
-                    "Started mana team run {run_id} for scope {}.",
-                    scope.id
-                ));
-            }
-            Err(err) => {
-                self.push_system_msg(&format!("Could not start mana team run: {err}"));
-            }
-        }
-        true
-    }
-
-    fn launch_mana_run_for_scope(&self, scope: &ManaUnitRef) -> Result<String, String> {
-        let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
-        let (command_tx, _command_rx) = tokio::sync::mpsc::channel(16);
-        let ctx = imp_core::tools::ToolContext {
-            cwd: self.cwd.clone(),
-            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            update_tx,
-            command_tx,
-            ui: Arc::new(imp_core::ui::NullInterface),
-            file_cache: Arc::new(imp_core::tools::FileCache::new()),
-            checkpoint_state: Arc::new(imp_core::tools::CheckpointState::new()),
-            file_tracker: Arc::new(std::sync::Mutex::new(
-                imp_core::tools::FileTracker::default(),
-            )),
-            anchor_store: Arc::new(imp_core::tools::AnchorStore::new()),
-            lua_tool_loader: None,
-            mode: imp_core::config::AgentMode::Full,
-            read_max_lines: self.config.ui.read_max_lines,
-            turn_mana_review: Arc::new(std::sync::Mutex::new(Default::default())),
-            config: Arc::new(self.config.clone()),
-            run_policy: Default::default(),
-        };
-
-        let output = futures::executor::block_on(ManaTool::default().execute(
-            "build_team_run",
-            serde_json::json!({ "action": "run", "id": scope.id }),
-            ctx,
-        ))
-        .map_err(|err: imp_core::error::Error| err.to_string())?;
-
-        if output.is_error {
-            return Err(output
-                .text_content()
-                .unwrap_or("mana run failed")
-                .to_string());
-        }
-        output.details["run_id"]
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| "mana run did not return run_id".to_string())
-    }
-
-    fn build_mode_prompt_for_text(&mut self, text: &str) -> Option<String> {
-        if self.workflow_mode != WorkflowMode::Build || !is_build_continue_intent(text) {
-            return None;
-        }
-
-        self.next_build_mode_prompt().map(|(_, prompt)| prompt)
-    }
-
-    fn next_build_mode_prompt(&mut self) -> Option<(String, String)> {
-        let Some(scope) = self.active_mana_scope.clone() else {
-            self.push_system_msg("Build mode needs an active mana scope. Use /scope <id> or read/create a mana epic first.");
-            return None;
-        };
-
-        match self.select_next_build_task(&scope.id) {
-            Ok(Some(BuildModeSelection::Task(task))) => {
-                let task_id = task.id.clone();
-                Some((task_id, task.prompt(&scope)))
-            }
-            Ok(Some(BuildModeSelection::Blocked(blocked))) => {
-                self.push_system_msg(&format!(
-                    "Build mode paused: mana task {} has unresolved decision(s): {}",
-                    blocked.id,
-                    blocked.decisions.join("; ")
-                ));
-                None
-            }
-            Ok(None) => {
-                self.push_system_msg(&format!(
-                    "No open child tasks found under active mana scope {}.",
-                    scope.id
-                ));
-                None
-            }
-            Err(err) => {
-                self.push_system_msg(&format!("Could not select next build task: {err}"));
-                None
-            }
-        }
-    }
-
-    fn select_next_build_task(
-        &self,
-        scope_id: &str,
-    ) -> std::result::Result<Option<BuildModeSelection>, String> {
-        let mana_dir = api::find_mana_dir(&self.cwd).map_err(|err| err.to_string())?;
-        let graph = api::get_tree(&mana_dir, scope_id).map_err(|err| err.to_string())?;
-        let Some(candidate) = first_open_child(&graph) else {
-            return Ok(None);
-        };
-        let unit = api::get_unit(&mana_dir, &candidate.id).map_err(|err| err.to_string())?;
-        if !unit.decisions.is_empty() {
-            return Ok(Some(BuildModeSelection::Blocked(BuildModeBlockedTask {
-                id: unit.id,
-                decisions: unit.decisions,
-            })));
-        }
-        Ok(Some(BuildModeSelection::Task(BuildModeTask {
-            id: unit.id,
-            title: unit.title,
-            description: unit.description,
-            design: unit.design,
-            acceptance: unit.acceptance,
-            notes: unit.notes,
-            verify_fast: unit.verify_fast,
-            verify: unit.verify,
-            verify_timeout: unit.verify_timeout,
-            paths: unit.paths,
-            dependencies: unit.dependencies,
-            requires: unit.requires,
-            produces: unit.produces,
-            decisions: unit.decisions,
-        })))
-    }
-
     fn spawn_agent_for_prompt_in_cwd(
         &mut self,
         prompt: &str,
@@ -4812,10 +4467,6 @@ impl App {
         self.lua_command_ui = Some(tui_ui);
         self.ui_rx = Some(ui_rx);
 
-        // Apply max_turns override from CLI
-        if let Some(max_turns) = self.max_turns_override {
-            agent.max_turns = max_turns;
-        }
         if let Some(max_tokens) = requested_max_tokens {
             agent.max_tokens = Some(max_tokens);
         }
@@ -4909,6 +4560,7 @@ impl App {
             Err(error) => self.push_error_msg(&format!("cd failed: {error}")),
         }
     }
+
 
     fn run_shell_command(&mut self, command: &str) {
         if command.is_empty() {
@@ -5077,13 +4729,7 @@ impl App {
         self.editor.push_history();
         self.editor.clear();
 
-        let mut agent_prompt = text.clone();
-        if self.try_launch_build_team(&text) {
-            return;
-        }
-        if let Some(build_prompt) = self.build_mode_prompt_for_text(&text) {
-            agent_prompt = build_prompt;
-        }
+        let agent_prompt = text.clone();
         self.pending_agent_prompt = Some(agent_prompt);
         self.pending_agent_cwd = None;
         self.needs_redraw = true;
@@ -5206,8 +4852,6 @@ impl App {
         }
         if id.eq_ignore_ascii_case("clear") || id.eq_ignore_ascii_case("none") {
             self.active_mana_scope = None;
-            self.build_auto_turns = 0;
-            self.last_build_auto_task_id = None;
             self.improve_auto_turns = 0;
             self.improve_sandbox = None;
             self.push_system_msg("Active mana scope cleared");
@@ -5222,12 +4866,9 @@ impl App {
                     format!("{} {}", scope.id, scope.title.trim())
                 };
                 self.active_mana_scope = Some(scope);
-                self.build_auto_turns = 0;
-                self.last_build_auto_task_id = None;
                 self.improve_auto_turns = 0;
                 self.improve_sandbox = None;
                 self.push_system_msg(&format!("Active mana scope: {label}"));
-                self.queue_build_mode_continuation_if_ready();
                 self.queue_improve_mode_continuation_if_ready();
             }
             Err(err) => {
@@ -5260,28 +4901,12 @@ impl App {
         }
 
         self.active_mana_scope = Some(scope);
-        self.build_auto_turns = 0;
-        self.last_build_auto_task_id = None;
         self.improve_auto_turns = 0;
         self.improve_sandbox = None;
-    }
-
-    fn set_workflow_mode(&mut self, mode: WorkflowMode) {
-        self.workflow_mode = mode;
-        self.build_auto_turns = 0;
-        self.last_build_auto_task_id = None;
-        self.improve_auto_turns = 0;
-        self.improve_sandbox = None;
-        self.improve_safe_mode = false;
-        self.push_system_msg(&format!("Workflow mode: {}", mode.display_name()));
-        self.queue_build_mode_continuation_if_ready();
-        self.queue_improve_mode_continuation_if_ready();
     }
 
     fn set_improve_mode(&mut self, safe: bool) {
         self.workflow_mode = WorkflowMode::Improve;
-        self.build_auto_turns = 0;
-        self.last_build_auto_task_id = None;
         self.improve_auto_turns = 0;
         self.improve_sandbox = None;
         self.improve_safe_mode = safe;
@@ -5352,9 +4977,6 @@ impl App {
   PageUp/Down   Scroll",
                 );
             }
-            "explore" => self.set_workflow_mode(WorkflowMode::Explore),
-            "plan" => self.set_workflow_mode(WorkflowMode::Plan),
-            "build" => self.set_workflow_mode(WorkflowMode::Build),
             "improve" => match args {
                 arg if matches!(arg, "merge" | "adopt" | "approve") => {
                     self.improve_merge_command(args)
@@ -5513,7 +5135,7 @@ impl App {
                     "  /model      — switch model\n",
                     "  /mana [id]  — browse mana work graph\n",
                     "  /scope <id> — set active mana scope\n",
-                    "  /build      — switch to Build mode\n",
+
                     "  /improve    — improve in a sandbox branch/worktree\n",
                     "  /improve safe — research-only Improve mode\n",
                     "  /improve merge — show Improve merge plan\n",
@@ -7647,7 +7269,6 @@ impl App {
                     self.send_message();
                 }
                 self.llm_thought_segment_started_at = None;
-                self.queue_build_mode_continuation_if_ready();
                 self.queue_improve_mode_continuation_if_ready();
                 self.queue_loop_continuation_if_ready();
                 self.maybe_notify_agent_completion();
@@ -8123,7 +7744,7 @@ mod session_lifecycle {
         app.is_streaming = true;
         app.tick = 0;
         assert_eq!(app.terminal_title(), "· — my chat");
-        app.tick = 36;
+        app.tick = 18;
         assert_eq!(app.terminal_title(), "● — my chat");
     }
 
@@ -9932,6 +9553,9 @@ mod session_lifecycle {
                 cache_read: 0.0,
                 cache_write: 0.0,
                 total: 3.0,
+            },
+            status: imp_core::agent::RunFinalStatus::Done {
+                reason: imp_core::agent::StopReason::WorkCompleted,
             },
         });
 

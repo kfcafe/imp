@@ -2747,6 +2747,7 @@ dependencies = [
  "imp-core",
  "imp-llm",
  "imp-lua",
+ "mana-core",
  "ratatui",
  "serde",
  "serde_json",

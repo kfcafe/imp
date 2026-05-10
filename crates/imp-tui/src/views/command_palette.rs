@@ -66,18 +66,6 @@ pub fn merge_skill_commands(
 pub fn builtin_commands() -> Vec<SlashCommand> {
     vec![
         SlashCommand {
-            name: "explore".into(),
-            description: "Switch workflow mode to Explore".into(),
-        },
-        SlashCommand {
-            name: "plan".into(),
-            description: "Switch workflow mode to Plan".into(),
-        },
-        SlashCommand {
-            name: "build".into(),
-            description: "Switch workflow mode to Build".into(),
-        },
-        SlashCommand {
             name: "improve".into(),
             description: "Switch workflow mode to Improve in a sandbox branch/worktree".into(),
         },

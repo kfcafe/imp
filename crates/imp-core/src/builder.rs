@@ -166,11 +166,6 @@ impl AgentBuilder {
             agent.thinking_level = thinking;
         }
 
-        // Wire max turns from config
-        if let Some(max_turns) = self.config.max_turns {
-            agent.max_turns = max_turns;
-        }
-
         // Wire max output tokens from config
         if let Some(max_tokens) = self.config.max_tokens {
             agent.max_tokens = Some(max_tokens);
@@ -179,13 +174,10 @@ impl AgentBuilder {
         // Wire context thresholds from config
         agent.context_config = self.config.context.clone();
 
-        // Wire role overrides (role can further override thinking/max_turns)
+        // Wire role overrides.
         if let Some(ref role) = self.role {
             if let Some(thinking) = role.thinking_level {
                 agent.thinking_level = thinking;
-            }
-            if let Some(max_turns) = role.max_turns {
-                agent.max_turns = max_turns;
             }
             agent.role = Some(role.clone());
         }
@@ -397,21 +389,6 @@ mod tests {
             },
             provider: Arc::new(MockProvider),
         }
-    }
-
-    #[test]
-    fn builder_applies_config_max_turns() {
-        let config = Config {
-            max_turns: Some(42),
-            ..Default::default()
-        };
-
-        let (agent, _handle) =
-            AgentBuilder::new(config, PathBuf::from("/tmp"), test_model(), "key".into())
-                .build()
-                .unwrap();
-
-        assert_eq!(agent.max_turns, 42);
     }
 
     #[test]

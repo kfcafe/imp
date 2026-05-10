@@ -17,27 +17,21 @@ use crate::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowMode {
-    Explore,
-    Plan,
-    Build,
+    Normal,
     Improve,
 }
 
 impl WorkflowMode {
     pub fn label(self) -> &'static str {
         match self {
-            WorkflowMode::Explore => "EXPLORE",
-            WorkflowMode::Plan => "PLAN",
-            WorkflowMode::Build => "BUILD",
+            WorkflowMode::Normal => "",
             WorkflowMode::Improve => "IMPROVE",
         }
     }
 
     pub fn display_name(self) -> &'static str {
         match self {
-            WorkflowMode::Explore => "Explore",
-            WorkflowMode::Plan => "Plan",
-            WorkflowMode::Build => "Build",
+            WorkflowMode::Normal => "Normal",
             WorkflowMode::Improve => "Improve",
         }
     }
@@ -53,6 +47,7 @@ pub struct EditorState {
     pub history: Vec<String>,
     pub history_idx: Option<usize>,
     pub scroll_offset: usize,
+    paste_ranges: Vec<std::ops::Range<usize>>,
 }
 
 impl EditorState {
@@ -73,20 +68,37 @@ impl EditorState {
             history: Vec::new(),
             history_idx: None,
             scroll_offset: 0,
+            paste_ranges: Vec::new(),
         }
     }
 
     pub fn insert_char(&mut self, c: char) {
         self.normalize_cursor();
+        let at = self.cursor;
         self.content.insert(self.cursor, c);
         self.cursor += c.len_utf8();
+        self.record_insert(at, c.len_utf8());
         self.update_position();
     }
 
     pub fn insert_newline(&mut self) {
         self.normalize_cursor();
+        let at = self.cursor;
         self.content.insert(self.cursor, '\n');
         self.cursor += 1;
+        self.record_insert(at, 1);
+        self.update_position();
+    }
+
+    pub fn insert_paste(&mut self, text: &str) {
+        self.normalize_cursor();
+        let start = self.cursor;
+        self.content.insert_str(self.cursor, text);
+        self.cursor += text.len();
+        self.record_insert(start, text.len());
+        if crate::views::chat::pasted_block_summary(text).is_some() {
+            self.paste_ranges.push(start..self.cursor);
+        }
         self.update_position();
     }
 
@@ -95,6 +107,7 @@ impl EditorState {
         if self.cursor > 0 {
             let prev = prev_char_boundary(&self.content, self.cursor);
             self.content.drain(prev..self.cursor);
+            self.record_delete(prev..self.cursor);
             self.cursor = prev;
             self.update_position();
         }
@@ -105,6 +118,7 @@ impl EditorState {
         if self.cursor < self.content.len() {
             let next = next_char_boundary(&self.content, self.cursor);
             self.content.drain(self.cursor..next);
+            self.record_delete(self.cursor..next);
             self.update_position();
         }
     }
@@ -211,6 +225,7 @@ impl EditorState {
         let start = self.cursor;
         self.move_word_left();
         self.content.drain(self.cursor..start);
+        self.record_delete(self.cursor..start);
         self.update_position();
     }
 
@@ -221,6 +236,7 @@ impl EditorState {
             before.rfind('\n').map(|p| p + 1).unwrap_or(0)
         };
         self.content.drain(line_start..self.cursor);
+        self.record_delete(line_start..self.cursor);
         self.cursor = line_start;
         self.update_position();
     }
@@ -232,23 +248,52 @@ impl EditorState {
             self.cursor + after.find('\n').unwrap_or(after.len())
         };
         self.content.drain(self.cursor..line_end);
+        self.record_delete(self.cursor..line_end);
         self.update_position();
     }
 
     pub fn clear(&mut self) {
         self.content.clear();
+        self.paste_ranges.clear();
         self.cursor = 0;
         self.update_position();
     }
 
     pub fn set_content(&mut self, text: &str) {
         self.content = text.to_string();
+        self.paste_ranges.clear();
         self.cursor = self.content.len();
         self.update_position();
     }
 
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    fn record_insert(&mut self, at: usize, len: usize) {
+        for range in &mut self.paste_ranges {
+            if range.start >= at {
+                range.start += len;
+                range.end += len;
+            } else if range.end > at {
+                range.end += len;
+            }
+        }
+    }
+
+    fn record_delete(&mut self, deleted: std::ops::Range<usize>) {
+        let len = deleted.end.saturating_sub(deleted.start);
+        self.paste_ranges.retain_mut(|range| {
+            let overlaps = range.start < deleted.end && range.end > deleted.start;
+            if overlaps {
+                return false;
+            }
+            if range.start >= deleted.end {
+                range.start = range.start.saturating_sub(len);
+                range.end = range.end.saturating_sub(len);
+            }
+            true
+        });
     }
 
     pub fn is_empty(&self) -> bool {
@@ -260,9 +305,14 @@ impl EditorState {
     }
 
     pub fn visual_line_count_with_summary(&self, inner_width: u16, summarize_paste: bool) -> usize {
-        editor_display_lines(&self.content, inner_width, summarize_paste)
-            .len()
-            .max(1)
+        editor_display_lines(
+            &self.content,
+            &self.paste_ranges,
+            inner_width,
+            summarize_paste,
+        )
+        .len()
+        .max(1)
     }
 
     pub fn visual_line_count(&self, inner_width: u16) -> usize {
@@ -367,7 +417,7 @@ pub struct EditorView<'a> {
     tick: u64,
     animation_level: AnimationLevel,
     activity_state: AnimationState,
-    workflow_mode: WorkflowMode,
+    _workflow_mode: WorkflowMode,
     mana_scope_label: Option<String>,
     mana_run_label: Option<String>,
     build_loop_label: Option<String>,
@@ -397,7 +447,7 @@ impl<'a> EditorView<'a> {
             tick: 0,
             animation_level: AnimationLevel::Minimal,
             activity_state: AnimationState::Idle,
-            workflow_mode: WorkflowMode::Explore,
+            _workflow_mode: WorkflowMode::Normal,
             mana_scope_label: None,
             mana_run_label: None,
             build_loop_label: None,
@@ -468,7 +518,7 @@ impl<'a> EditorView<'a> {
     }
 
     pub fn workflow_mode(mut self, mode: WorkflowMode) -> Self {
-        self.workflow_mode = mode;
+        self._workflow_mode = mode;
         self
     }
 
@@ -520,10 +570,7 @@ impl Widget for EditorView<'_> {
         let top_left = build_identity_label(self.cwd, self.session_name, area.width);
         let top_right = build_top_right_label(self.turn_elapsed, self.theme);
         let bottom_left = build_bottom_left_label(
-            prompt_activity_state,
-            self.tick,
-            self.animation_level,
-            self.workflow_mode,
+            self._workflow_mode,
             self.mana_scope_label.as_deref(),
             self.mana_run_label.as_deref(),
             self.build_loop_label.as_deref(),
@@ -635,6 +682,7 @@ impl Widget for EditorView<'_> {
         // Render editor content using wrapped visual lines so auto-grow and cursor math stay aligned.
         let lines = editor_display_lines(
             &self.state.content,
+            &self.state.paste_ranges,
             content_inner.width,
             self.summarize_paste,
         )
@@ -671,14 +719,75 @@ impl Widget for EditorView<'_> {
 
 // --- Helpers ---
 
-fn editor_display_lines(text: &str, inner_width: u16, summarize_paste: bool) -> Vec<String> {
-    if summarize_paste {
-        if let Some(summary) = crate::views::chat::pasted_block_summary(text) {
-            return wrapped_lines_for_width(&summary, inner_width);
-        }
+fn editor_display_lines(
+    text: &str,
+    paste_ranges: &[std::ops::Range<usize>],
+    inner_width: u16,
+    summarize_paste: bool,
+) -> Vec<String> {
+    if !summarize_paste || paste_ranges.is_empty() {
+        return wrapped_lines_for_width(text, inner_width);
     }
 
-    wrapped_lines_for_width(text, inner_width)
+    let mut display = String::new();
+    let mut cursor = 0usize;
+    let mut ranges = paste_ranges
+        .iter()
+        .filter(|range| {
+            range.start < range.end
+                && range.end <= text.len()
+                && text.is_char_boundary(range.start)
+                && text.is_char_boundary(range.end)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|range| range.start);
+
+    for range in ranges {
+        if range.start < cursor {
+            continue;
+        }
+        display.push_str(&text[cursor..range.start]);
+        let pasted = &text[range.clone()];
+        if let Some(summary) = pasted_inline_summary(pasted) {
+            display.push_str(&summary);
+        } else {
+            display.push_str(pasted);
+        }
+        cursor = range.end;
+    }
+    display.push_str(&text[cursor..]);
+
+    wrapped_lines_for_width(&display, inner_width)
+}
+
+fn pasted_inline_summary(text: &str) -> Option<String> {
+    crate::views::chat::pasted_block_summary(text)?;
+    let first = text.lines().find(|line| !line.trim().is_empty())?.trim();
+    let preview = truncate_display_width(first, 48);
+    let extra_lines = text.lines().count().saturating_sub(1);
+    Some(format!("[{preview} + {extra_lines} lines]"))
+}
+
+fn truncate_display_width(text: &str, max_width: usize) -> String {
+    if display_width(text) <= max_width {
+        return text.to_string();
+    }
+
+    let suffix = "…";
+    let target = max_width.saturating_sub(display_width(suffix));
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_width = char_display_width(ch);
+        if width + ch_width > target {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out.push_str(suffix);
+    out
 }
 
 fn build_identity_label(cwd: &str, session_name: &str, area_width: u16) -> Vec<Span<'static>> {
@@ -702,17 +811,13 @@ fn build_top_right_label(turn_elapsed: Option<Duration>, theme: &Theme) -> Vec<S
 }
 
 fn build_bottom_left_label(
-    activity_state: AnimationState,
-    tick: u64,
-    animation_level: AnimationLevel,
-    workflow_mode: WorkflowMode,
+    _workflow_mode: WorkflowMode,
     mana_scope_label: Option<&str>,
     mana_run_label: Option<&str>,
     build_loop_label: Option<&str>,
 ) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::raw(workflow_mode.label())];
+    let mut spans = Vec::new();
     if let Some(scope) = mana_scope_label.filter(|scope| !scope.trim().is_empty()) {
-        spans.push(Span::raw(" · "));
         spans.push(Span::raw(scope.to_string()));
     }
     if let Some(run) = mana_run_label.filter(|label| !label.trim().is_empty()) {
@@ -722,11 +827,6 @@ fn build_bottom_left_label(
     if let Some(loop_state) = build_loop_label.filter(|label| !label.trim().is_empty()) {
         spans.push(Span::raw(" · "));
         spans.push(Span::raw(loop_state.to_string()));
-    }
-    let label = editor_activity_label(activity_state, tick, animation_level);
-    if !label.is_empty() {
-        spans.push(Span::raw(" · "));
-        spans.push(Span::raw(label));
     }
     spans
 }
@@ -1037,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn visual_line_count_with_paste_summary_uses_summary_height() {
+    fn typed_long_code_is_not_summarized() {
         let mut editor = EditorState::new();
         editor.set_content(
             &(1..=25)
@@ -1046,7 +1146,33 @@ mod tests {
                 .join("\n"),
         );
 
-        assert_eq!(editor.visual_line_count_with_summary(80, true), 1);
+        assert_eq!(editor.visual_line_count_with_summary(80, true), 25);
+    }
+
+    #[test]
+    fn pasted_code_summary_preserves_surrounding_prompt_text() {
+        let mut editor = EditorState::new();
+        editor.set_content("please inspect:\n");
+        editor.insert_paste(
+            &(1..=5)
+                .map(|i| format!("fn example_{i}() {{}}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        editor.insert_newline();
+        editor.insert_char('t');
+        editor.insert_char('h');
+        editor.insert_char('x');
+
+        assert_eq!(
+            editor_display_lines(&editor.content, &editor.paste_ranges, 80, true),
+            vec![
+                "please inspect:".to_string(),
+                "[fn example_1() {} + 4 lines]".to_string(),
+                "thx".to_string(),
+            ]
+        );
+        assert!(editor.content().contains("fn example_5() {}"));
     }
 
     #[test]
@@ -1115,25 +1241,21 @@ mod tests {
     }
 
     #[test]
-    fn bottom_left_label_uses_live_run_state() {
+    fn bottom_left_label_uses_live_run_state_without_activity() {
         let rendered = build_bottom_left_label(
-            AnimationState::ExecutingTools { active_tools: 2 },
-            0,
-            AnimationLevel::Minimal,
-            WorkflowMode::Build,
+            WorkflowMode::Normal,
             Some("364 Test scope"),
             Some("run run-1 running"),
-            Some("task 364.1"),
+            None,
         );
         let text: String = rendered
             .into_iter()
             .map(|span| span.content.into_owned())
             .collect();
-        assert!(text.contains("BUILD"));
+        assert!(!text.contains("BUILD"));
         assert!(text.contains("364 Test scope"));
         assert!(text.contains("run run-1 running"));
-        assert!(text.contains("task 364.1"));
-        assert!(text.contains("working"));
+        assert!(!text.contains("working"));
     }
 
     #[test]
@@ -1149,15 +1271,7 @@ mod tests {
 
     #[test]
     fn bottom_left_label_hides_thinking_state() {
-        let rendered = build_bottom_left_label(
-            AnimationState::Thinking,
-            0,
-            AnimationLevel::Minimal,
-            WorkflowMode::Explore,
-            None,
-            None,
-            None,
-        );
+        let rendered = build_bottom_left_label(WorkflowMode::Normal, None, None, None);
         let text: String = rendered
             .into_iter()
             .map(|span| span.content.into_owned())

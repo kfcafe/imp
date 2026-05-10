@@ -4015,6 +4015,7 @@ mod tests {
             .map(|i| mana_core::index::IndexEntry {
                 id: format!("330.{i}"),
                 title: format!("Task {i}"),
+                handle: None,
                 status: mana_core::unit::Status::Open,
                 priority: 1,
                 parent: Some("330".to_string()),

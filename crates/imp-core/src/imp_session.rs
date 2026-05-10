@@ -352,19 +352,11 @@ impl ImpSession {
 
         if options.no_tools {
             agent.thinking_level = config.thinking.unwrap_or(ThinkingLevel::Off);
-            if let Some(max_turns) = options.max_turns.or(config.max_turns) {
-                agent.max_turns = max_turns;
-            }
             if let Some(max_tokens) = options.max_tokens.or(config.max_tokens) {
                 agent.max_tokens = Some(max_tokens);
             }
-        } else {
-            if let Some(max_turns) = options.max_turns {
-                agent.max_turns = max_turns;
-            }
-            if let Some(max_tokens) = options.max_tokens {
-                agent.max_tokens = Some(max_tokens);
-            }
+        } else if let Some(max_tokens) = options.max_tokens {
+            agent.max_tokens = Some(max_tokens);
         }
         if let Some(ui) = &options.ui {
             agent.ui = Arc::clone(ui);
