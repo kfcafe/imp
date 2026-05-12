@@ -765,7 +765,7 @@ struct ImproveSandbox {
 struct LoopState {
     message: String,
     completed_turns: u32,
-    budget: u32,
+    budget: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -4251,11 +4251,10 @@ impl App {
 
     fn loop_label(&self) -> Option<String> {
         let state = self.loop_state.as_ref()?;
-        Some(format!(
-            "↻ loop {}/{}",
-            state.completed_turns.min(state.budget),
-            state.budget
-        ))
+        Some(match state.budget {
+            Some(budget) => format!("↻ loop {}/{}", state.completed_turns.min(budget), budget),
+            None => format!("↻ loop {}", state.completed_turns),
+        })
     }
 
     fn workflow_context_prompt(&self) -> Option<String> {
@@ -4352,21 +4351,24 @@ impl App {
         let Some(state) = self.loop_state.as_mut() else {
             return;
         };
-        if state.completed_turns >= state.budget {
-            let budget = state.budget;
-            self.loop_state = None;
-            self.push_system_msg(&format!(
-                "Loop paused after {budget} turns. Use /loop <message> to start again."
-            ));
-            return;
+        if let Some(budget) = state.budget {
+            if state.completed_turns >= budget {
+                self.loop_state = None;
+                self.push_system_msg(&format!(
+                    "Loop paused after {budget} turns. Use /loop <message> to start again."
+                ));
+                return;
+            }
         }
         state.completed_turns += 1;
         let message = state.message.clone();
         let completed = state.completed_turns;
         let budget = state.budget;
-        self.push_system_msg(&format!("Loop: turn {completed}/{budget}"));
-        self.pending_agent_prompt = Some(message);
-        self.pending_agent_cwd = None;
+        match budget {
+            Some(budget) => self.push_system_msg(&format!("Loop: turn {completed}/{budget}")),
+            None => self.push_system_msg(&format!("Loop: turn {completed}")),
+        }
+        self.enqueue_visible_agent_turn(message);
         self.needs_redraw = true;
     }
 
@@ -4481,7 +4483,10 @@ impl App {
             lines.extend(message.lines().map(str::to_string));
         }
         if let Some(state) = self.loop_state.as_ref() {
-            lines.push(format!("loop: {}/{}", state.completed_turns, state.budget));
+            match state.budget {
+                Some(budget) => lines.push(format!("loop: {}/{}", state.completed_turns, budget)),
+                None => lines.push(format!("loop: {}", state.completed_turns)),
+            }
             lines.push(format!(
                 "loop message: {}",
                 single_line_preview(&state.message)
@@ -4639,13 +4644,17 @@ impl App {
             self.push_system_msg("Usage: /loop <message>");
             return;
         }
-        let budget = self.config.ui.loop_turn_budget.max(1);
+        let budget =
+            (self.config.ui.loop_turn_budget > 0).then_some(self.config.ui.loop_turn_budget);
         self.loop_state = Some(LoopState {
             message: message.to_string(),
             completed_turns: 0,
             budget,
         });
-        self.push_system_msg(&format!("Loop started: {budget} turn budget."));
+        match budget {
+            Some(budget) => self.push_system_msg(&format!("Loop started: {budget} turn budget.")),
+            None => self.push_system_msg("Loop started: no turn budget."),
+        }
         self.queue_loop_continuation_if_ready();
     }
 
@@ -4915,6 +4924,47 @@ impl App {
         ))
     }
 
+    fn enqueue_visible_agent_turn(&mut self, text: String) {
+        let user_message_index = self.messages.len();
+        self.messages.push(DisplayMessage {
+            role: MessageRole::User,
+            content: text.clone(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: false,
+            timestamp: imp_llm::now(),
+        });
+        self.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: true,
+            timestamp: imp_llm::now(),
+        });
+        self.invalidate_chat_render_cache();
+
+        let _ = self.session.append(SessionEntry::Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            parent_id: None,
+            message: imp_llm::Message::user(&text),
+        });
+
+        self.is_streaming = true;
+        self.streaming_anchor_user_index = Some(user_message_index);
+        self.completed_turns_in_run = 0;
+        self.suppress_completion_notification = false;
+        self.auto_scroll = true;
+        self.scroll_offset = 0;
+        self.tool_focus = None;
+        self.tool_focus_pinned = false;
+        self.sidebar_auto_follow = true;
+        self.pending_agent_prompt = Some(text);
+        self.pending_agent_cwd = None;
+    }
+
     fn send_message(&mut self) {
         let text = self.editor.content().to_string();
         if text.trim().is_empty() {
@@ -4963,7 +5013,6 @@ impl App {
             }
         }
 
-        // Add user message to display
         if self.compaction_task.is_some() || self.lua_command_task.is_some() {
             self.push_system_msg(
                 "A background slash command is running; wait for it to finish before sending a new prompt.",
@@ -4971,53 +5020,10 @@ impl App {
             return;
         }
 
-        let user_message_index = self.messages.len();
-        self.messages.push(DisplayMessage {
-            role: MessageRole::User,
-            content: text.clone(),
-            thinking: None,
-            tool_calls: Vec::new(),
-            assistant_blocks: Vec::new(),
-            is_streaming: false,
-            timestamp: imp_llm::now(),
-        });
-        self.invalidate_chat_render_cache();
-
-        // Persist to session
-        let msg_id = uuid::Uuid::new_v4().to_string();
-        let _ = self.session.append(SessionEntry::Message {
-            id: msg_id,
-            parent_id: None,
-            message: imp_llm::Message::user(&text),
-        });
-
-        // Add streaming placeholder for assistant response
-        self.messages.push(DisplayMessage {
-            role: MessageRole::Assistant,
-            content: String::new(),
-            thinking: None,
-            tool_calls: Vec::new(),
-            assistant_blocks: Vec::new(),
-            is_streaming: true,
-            timestamp: imp_llm::now(),
-        });
-        self.invalidate_chat_render_cache();
-
-        self.is_streaming = true;
-        self.streaming_anchor_user_index = Some(user_message_index);
-        self.completed_turns_in_run = 0;
-        self.suppress_completion_notification = false;
-        self.auto_scroll = true;
-        self.scroll_offset = 0;
-        self.tool_focus = None;
-        self.tool_focus_pinned = false;
-        self.sidebar_auto_follow = true;
+        // Add user message, assistant placeholder, and session entry before deferring agent start.
+        self.enqueue_visible_agent_turn(text.clone());
         self.editor.push_history();
         self.editor.clear();
-
-        let agent_prompt = text.clone();
-        self.pending_agent_prompt = Some(agent_prompt);
-        self.pending_agent_cwd = None;
         self.needs_redraw = true;
     }
 
@@ -7975,6 +7981,23 @@ mod session_lifecycle {
     }
 
     #[test]
+    fn loop_command_defaults_to_unbounded_budget() {
+        let mut app = make_app();
+        app.config.ui.loop_turn_budget = 0;
+
+        app.start_loop_command("keep going");
+
+        assert_eq!(app.pending_agent_prompt.as_deref(), Some("keep going"));
+        assert_eq!(app.loop_label().as_deref(), Some("↻ loop 1"));
+        let last_user = app.messages.len() - 2;
+        let last_assistant = app.messages.len() - 1;
+        assert_eq!(app.messages[last_user].role, MessageRole::User);
+        assert_eq!(app.messages[last_user].content, "keep going");
+        assert_eq!(app.messages[last_assistant].role, MessageRole::Assistant);
+        assert!(app.messages[last_assistant].is_streaming);
+    }
+
+    #[test]
     fn filtered_model_options_includes_chatgpt_oauth_only_models() {
         let registry = ModelRegistry::with_builtins();
         let tmp = tempfile::tempdir().unwrap();
@@ -10120,6 +10143,12 @@ mod session_lifecycle {
 
         assert_eq!(app.pending_agent_prompt.as_deref(), Some("keep going"));
         assert_eq!(app.loop_label().as_deref(), Some("↻ loop 1/3"));
+        let last_user = app.messages.len() - 2;
+        let last_assistant = app.messages.len() - 1;
+        assert_eq!(app.messages[last_user].role, MessageRole::User);
+        assert_eq!(app.messages[last_user].content, "keep going");
+        assert_eq!(app.messages[last_assistant].role, MessageRole::Assistant);
+        assert!(app.messages[last_assistant].is_streaming);
     }
 
     #[test]
@@ -10128,7 +10157,7 @@ mod session_lifecycle {
         app.loop_state = Some(LoopState {
             message: "keep going".into(),
             completed_turns: 2,
-            budget: 3,
+            budget: Some(3),
         });
 
         let status = app.active_status_text();
