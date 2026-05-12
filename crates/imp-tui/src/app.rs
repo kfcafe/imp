@@ -373,6 +373,9 @@ struct SidebarDetailCache {
 struct StartupSurfaceMetadata {
     skills: Vec<imp_core::resources::Skill>,
     lua_extension_names: Vec<String>,
+    provider_id: String,
+    provider_auth_ready: bool,
+    web_summary: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1695,7 +1698,12 @@ impl App {
             .map(|m| m.context_window)
             .unwrap_or(200_000);
         let (runtime_signal_tx, runtime_signal_rx) = tokio::sync::mpsc::channel(256);
-        let startup_surface_metadata = Self::load_startup_surface_metadata(&cwd);
+        let startup_surface_metadata = Self::load_startup_surface_metadata(
+            &cwd,
+            &config,
+            &model_registry,
+            &model_name,
+        );
 
         Self {
             running: true,
@@ -2745,14 +2753,43 @@ impl App {
         true
     }
 
-    fn load_startup_surface_metadata(cwd: &Path) -> StartupSurfaceMetadata {
+    fn load_startup_surface_metadata(
+        cwd: &Path,
+        config: &imp_core::config::Config,
+        model_registry: &ModelRegistry,
+        model_name: &str,
+    ) -> StartupSurfaceMetadata {
         let user_config_dir = imp_core::config::Config::user_config_dir();
+        let auth_path = imp_core::storage::global_auth_path();
+        let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
+        let provider_meta = model_registry.resolve_meta(model_name, None);
+        let provider_id = provider_meta
+            .as_ref()
+            .map(|meta| meta.provider.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let provider_auth_ready = auth_store.has_credentials(&provider_id);
+        let web_summary = config
+            .web
+            .search_provider
+            .map(|provider| {
+                let status = if auth_store.has_credentials(provider.name()) {
+                    "ready"
+                } else {
+                    "needs key"
+                };
+                format!("{} ({status})", provider.name())
+            })
+            .unwrap_or_else(|| "disabled".to_string());
+
         StartupSurfaceMetadata {
             skills: imp_core::resources::discover_skills(cwd, &user_config_dir),
             lua_extension_names: discover_extensions(&user_config_dir, Some(cwd))
                 .into_iter()
                 .map(|ext| ext.name)
                 .collect(),
+            provider_id,
+            provider_auth_ready,
+            web_summary,
         }
     }
 
@@ -2770,31 +2807,13 @@ impl App {
             self.startup_surface_metadata.lua_extension_names.clone(),
             3,
         );
-        let auth_path = imp_core::storage::global_auth_path();
-        let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
-        let provider_meta = self.current_model_meta_for_persistence();
-        let provider_id = provider_meta
-            .as_ref()
-            .map(|meta| meta.provider.as_str())
-            .unwrap_or("unknown");
-        let provider_auth = if auth_store.has_credentials(provider_id) {
+        let provider_id = self.startup_surface_metadata.provider_id.as_str();
+        let provider_auth = if self.startup_surface_metadata.provider_auth_ready {
             "ready"
         } else {
             "needs auth"
         };
-        let web_summary = self
-            .config
-            .web
-            .search_provider
-            .map(|provider| {
-                let status = if auth_store.has_credentials(provider.name()) {
-                    "ready"
-                } else {
-                    "needs key"
-                };
-                format!("{} ({status})", provider.name())
-            })
-            .unwrap_or_else(|| "disabled".to_string());
+        let web_summary = self.startup_surface_metadata.web_summary.clone();
         let mode = format!("{:?}", self.config.mode).to_lowercase();
         let session_name = self
             .session
@@ -9751,14 +9770,20 @@ mod session_lifecycle {
             "---\nname: first\ndescription: one\n---\n",
         )
         .unwrap();
-        let metadata = App::load_startup_surface_metadata(&cwd);
+        let app = make_app_with_session(SessionManager::in_memory(), cwd.clone());
+        let metadata = App::load_startup_surface_metadata(
+            &cwd,
+            &app.config,
+            &app.model_registry,
+            &app.model_name,
+        );
         std::fs::create_dir_all(cwd.join(".imp/skills/second")).unwrap();
         std::fs::write(
             cwd.join(".imp/skills/second/SKILL.md"),
             "---\nname: second\ndescription: two\n---\n",
         )
         .unwrap();
-        let mut app = make_app_with_session(SessionManager::in_memory(), cwd);
+        let mut app = app;
         app.startup_surface_metadata = metadata;
 
         let skills = app.startup_skills();
