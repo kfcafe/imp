@@ -812,6 +812,13 @@ struct TuiTrace {
     path: PathBuf,
 }
 
+#[derive(Debug)]
+struct StartupSkillDetailCache {
+    skill_path: PathBuf,
+    theme: ThemeKind,
+    render: SidebarDetailRenderData,
+}
+
 impl TuiTrace {
     fn from_env() -> Option<Self> {
         std::env::var_os("IMP_TUI_TRACE")
@@ -912,6 +919,7 @@ pub struct App {
     current_oauth_display_info: Option<imp_llm::auth::OAuthDisplayInfo>,
     current_oauth_display_info_model: String,
     git_label_cache: Option<GitLabelCache>,
+    startup_skill_detail_cache: Option<StartupSkillDetailCache>,
 
     // Extension state
     pub status_items: HashMap<String, String>,
@@ -1744,6 +1752,7 @@ impl App {
             current_oauth_display_info: None,
             current_oauth_display_info_model: String::new(),
             git_label_cache: None,
+            startup_skill_detail_cache: None,
             status_items: HashMap::new(),
             widgets: HashMap::new(),
             lua_runtime: None,
@@ -2872,6 +2881,26 @@ impl App {
         }
     }
 
+    fn startup_skill_detail_render(
+        &mut self,
+        skill: &imp_core::resources::Skill,
+    ) -> SidebarDetailRenderData {
+        let theme = self.theme_kind();
+        if let Some(cache) = self.startup_skill_detail_cache.as_ref() {
+            if cache.skill_path == skill.path && cache.theme == theme {
+                return cache.render.clone();
+            }
+        }
+
+        let render = startup_skill_detail_render_data(skill, &self.theme);
+        self.startup_skill_detail_cache = Some(StartupSkillDetailCache {
+            skill_path: skill.path.clone(),
+            theme,
+            render: render.clone(),
+        });
+        render
+    }
+
     fn render(&mut self, frame: &mut Frame) {
         self.refresh_render_caches();
         let area = frame.area();
@@ -3021,8 +3050,8 @@ impl App {
                         .flatten()
                 })
             };
-            let detail_render = if let Some(skill) = self.selected_startup_skill.as_ref() {
-                Some(startup_skill_detail_render_data(skill, &self.theme))
+            let detail_render = if let Some(skill) = self.selected_startup_skill.clone() {
+                Some(self.startup_skill_detail_render(&skill))
             } else if matches!(
                 self.config.ui.sidebar_style,
                 imp_core::config::SidebarStyle::Split | imp_core::config::SidebarStyle::Inspector
@@ -9677,6 +9706,26 @@ mod session_lifecycle {
         assert!(!app.sidebar.open);
         assert_eq!(app.active_pane, Pane::Chat);
         assert!(app.selection.is_some());
+    }
+
+    #[test]
+    fn startup_skill_detail_render_reuses_cache() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("SKILL.md");
+        std::fs::write(&path, "# Skill\nfirst").unwrap();
+        let skill = imp_core::resources::Skill {
+            name: "test".into(),
+            description: String::new(),
+            path: path.clone(),
+        };
+        let mut app = make_app();
+
+        let first = app.startup_skill_detail_render(&skill);
+        std::fs::write(&path, "# Skill\nsecond").unwrap();
+        let second = app.startup_skill_detail_render(&skill);
+
+        assert!(first.plain_lines.iter().any(|line| line == "first"));
+        assert_eq!(first.plain_lines, second.plain_lines);
     }
 
     #[test]
