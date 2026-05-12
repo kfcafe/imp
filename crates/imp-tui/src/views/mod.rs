@@ -2,7 +2,6 @@ pub mod ask_bar;
 pub mod chat;
 pub mod command_palette;
 pub mod editor;
-pub mod file_finder;
 pub mod login_picker;
 pub mod mana_navigator;
 pub mod model_selector;

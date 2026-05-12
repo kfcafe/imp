@@ -40,6 +40,7 @@ use ratatui::widgets::Clear;
 use ratatui::Frame;
 
 use crate::animation::{title_breather_frame, title_working_glyph, AnimationState};
+use crate::event_source::TerminalEventSource;
 use crate::highlight::Highlighter;
 use crate::keybindings::{self, Action};
 use crate::selection::{
@@ -59,7 +60,6 @@ use crate::views::command_palette::{
     CommandPaletteView,
 };
 use crate::views::editor::{EditorState, EditorView, WorkflowMode};
-use crate::views::file_finder::{collect_project_files, FileFinderState, FileFinderView};
 use crate::views::login_picker::{login_providers, LoginPickerState, LoginPickerView};
 use crate::views::mana_navigator::{ManaNavigatorState, ManaNavigatorView};
 use crate::views::model_selector::{ModelSelection, ModelSelectorState, ModelSelectorView};
@@ -111,7 +111,6 @@ pub enum UiMode {
     Normal,
     ModelSelector(ModelSelectorState),
     CommandPalette(CommandPaletteState),
-    FileFinder(FileFinderState),
     LoginPicker(LoginPickerState),
     ManaNavigator(ManaNavigatorState),
     SecretsPicker(SecretsPickerState),
@@ -204,6 +203,8 @@ enum SecretsFlowState {
 const MAX_RUNTIME_SIGNALS_PER_TICK: usize = 64;
 const MAX_UI_REQUESTS_PER_TICK: usize = 16;
 const MAX_TERMINAL_EVENTS_PER_TICK: usize = 32;
+const ACTIVE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const IDLE_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 enum RuntimeSignal {
@@ -1541,50 +1542,79 @@ impl App {
         Ok(())
     }
 
+    fn sync_window_title_if_needed(&mut self) {
+        if self.is_streaming || self.compaction_task.is_some() {
+            self.sync_window_title();
+        }
+    }
+
+    async fn render_if_dirty(
+        &mut self,
+        terminal: &mut InteractiveTerminal,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.sync_window_title();
+        if self.needs_redraw {
+            terminal.draw(|frame| self.render(frame))?;
+            self.needs_redraw = false;
+            self.start_pending_agent_after_redraw();
+        }
+        Ok(())
+    }
+
+    async fn drain_terminal_events(
+        &mut self,
+        rx: &mut tokio::sync::mpsc::Receiver<Event>,
+        first: Event,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.handle_terminal_event(first)?;
+        for _ in 1..MAX_TERMINAL_EVENTS_PER_TICK {
+            match rx.try_recv() {
+                Ok(event) => self.handle_terminal_event(event)?,
+                Err(_) => break,
+            }
+            if !self.running {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     async fn event_loop(
         &mut self,
         terminal: &mut InteractiveTerminal,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_input_source, mut terminal_events) = TerminalEventSource::spawn();
+        let mut frame_tick = tokio::time::interval(ACTIVE_FRAME_INTERVAL);
+        frame_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut idle_tick = tokio::time::interval(IDLE_FRAME_INTERVAL);
+        idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        self.render_if_dirty(terminal).await?;
+
         loop {
-            self.sync_window_title();
-            // Render
-            if self.needs_redraw {
-                terminal.draw(|frame| self.render(frame))?;
-                self.needs_redraw = false;
-            }
-
-            self.start_pending_agent_after_redraw();
-
-            let tick_rate = self.effective_tick_rate();
-
-            // Poll for terminal events with adaptive timeout. Drain a bounded batch of
-            // already-ready input before rendering again so fast typing/pastes do not
-            // queue behind one full redraw per character.
-            if crossterm::event::poll(tick_rate)? {
-                for index in 0..MAX_TERMINAL_EVENTS_PER_TICK {
-                    let event = crossterm::event::read()?;
-                    self.handle_terminal_event(event)?;
-                    if !self.running {
-                        break;
-                    }
-                    if index + 1 >= MAX_TERMINAL_EVENTS_PER_TICK
-                        || !crossterm::event::poll(Duration::ZERO)?
-                    {
+            tokio::select! {
+                event = terminal_events.recv() => {
+                    if let Some(event) = event {
+                        self.drain_terminal_events(&mut terminal_events, event).await?;
+                    } else {
                         break;
                     }
                 }
+                _ = frame_tick.tick() => {
+                    self.tick = self.tick.wrapping_add(1);
+                    self.maybe_autoscroll_selection();
+                    if self.is_streaming || self.compaction_task.is_some() || self.drag_autoscroll.is_some() {
+                        self.sync_window_title_if_needed();
+                        self.needs_redraw = true;
+                    }
+                }
+                _ = idle_tick.tick() => {
+                    self.pump_runtime_signals().await;
+                }
             }
 
-            // Drain agent events and UI requests (non-blocking)
             self.pump_runtime_signals().await;
-
-            // Tick + periodic redraw for streaming/spinner
-            self.tick = self.tick.wrapping_add(1);
-            self.maybe_autoscroll_selection();
-            if self.is_streaming || self.compaction_task.is_some() {
-                self.sync_window_title();
-                self.needs_redraw = true;
-            }
+            self.render_if_dirty(terminal).await?;
 
             if !self.running {
                 break;
@@ -2012,18 +2042,6 @@ impl App {
     fn theme_kind(&self) -> ThemeKind {
         ThemeKind {
             is_light: self.theme.bg == Theme::light().bg,
-        }
-    }
-
-    fn effective_tick_rate(&self) -> Duration {
-        if self.is_streaming
-            || self.compaction_task.is_some()
-            || self.drag_autoscroll.is_some()
-            || self.pending_agent_prompt.is_some()
-        {
-            Duration::from_millis(16)
-        } else {
-            Duration::from_millis(100)
         }
     }
 
@@ -2719,11 +2737,6 @@ impl App {
                 let view = CommandPaletteView::new(state, &self.theme);
                 frame.render_widget(view, palette_area);
             }
-            UiMode::FileFinder(state) => {
-                let finder_area = command_dropdown_area(editor_area, 12);
-                let view = FileFinderView::new(state, &self.theme);
-                frame.render_widget(view, finder_area);
-            }
             UiMode::LoginPicker(state) => {
                 let overlay_area = centered_rect(60, 40, area);
                 let view = LoginPickerView::new(state, &self.theme);
@@ -2927,7 +2940,6 @@ impl App {
             UiMode::Normal => self.handle_normal_key(key)?,
             UiMode::ModelSelector(_)
             | UiMode::CommandPalette(_)
-            | UiMode::FileFinder(_)
             | UiMode::LoginPicker(_)
             | UiMode::SecretsPicker(_) => self.handle_overlay_key(key),
             UiMode::ManaNavigator(_) => self.handle_mana_navigator_key(key),
@@ -3086,10 +3098,6 @@ impl App {
                     }
                 }
             }
-            Some(Action::InsertChar('@')) => {
-                self.editor.insert_char('@');
-                self.open_file_finder();
-            }
             Some(Action::InsertChar('/')) if self.editor.is_empty() && !self.is_streaming => {
                 self.editor.insert_char('/');
                 self.mode = UiMode::CommandPalette(CommandPaletteState::new(self.slash_commands()));
@@ -3187,7 +3195,6 @@ impl App {
             Some(Action::OverlayUp) => match &mut self.mode {
                 UiMode::ModelSelector(s) => s.move_up(),
                 UiMode::CommandPalette(s) => s.move_up(),
-                UiMode::FileFinder(s) => s.move_up(),
                 UiMode::LoginPicker(s) => s.move_up(),
                 UiMode::SecretsPicker(s) => s.move_up(),
                 _ => {}
@@ -3195,7 +3202,6 @@ impl App {
             Some(Action::OverlayDown) => match &mut self.mode {
                 UiMode::ModelSelector(s) => s.move_down(),
                 UiMode::CommandPalette(s) => s.move_down(),
-                UiMode::FileFinder(s) => s.move_down(),
                 UiMode::LoginPicker(s) => s.move_down(),
                 UiMode::SecretsPicker(s) => s.move_down(),
                 _ => {}
@@ -3206,7 +3212,6 @@ impl App {
                     s.push_filter(c);
                     self.editor.insert_char(c);
                 }
-                UiMode::FileFinder(s) => s.push_filter(c),
                 _ => {}
             },
             Some(Action::OverlayBackspace) => match &mut self.mode {
@@ -3219,7 +3224,6 @@ impl App {
                         self.mode = UiMode::Normal;
                     }
                 }
-                UiMode::FileFinder(s) => s.pop_filter(),
                 _ => {}
             },
             Some(Action::OverlaySelect) => {
@@ -3255,14 +3259,6 @@ impl App {
                 if let Some(cmd) = state.selected_command() {
                     self.editor.clear();
                     self.execute_command(&cmd.name.clone());
-                }
-            }
-            UiMode::FileFinder(state) => {
-                if let Some(file) = state.selected_file() {
-                    self.editor.insert_char(' ');
-                    for c in file.chars() {
-                        self.editor.insert_char(c);
-                    }
                 }
             }
             UiMode::LoginPicker(state) => {
@@ -7044,11 +7040,6 @@ impl App {
         self.mode = UiMode::ModelSelector(ModelSelectorState::new(models, current_model));
     }
 
-    fn open_file_finder(&mut self) {
-        let files = collect_project_files(&self.cwd, 5000);
-        self.mode = UiMode::FileFinder(FileFinderState::new(files));
-    }
-
     fn open_mana_navigator(&mut self, initial_id: Option<&str>) {
         self.mode = UiMode::ManaNavigator(ManaNavigatorState::load(&self.cwd, initial_id));
     }
@@ -8333,6 +8324,17 @@ mod session_lifecycle {
         let after_render = render_status_to_string(&after, 120);
         assert_eq!(after.context_percent, 0.0);
         assert!(after_render.contains("0%"));
+    }
+
+    #[test]
+    fn at_sign_is_plain_text_input() {
+        let mut app = make_app();
+
+        app.handle_normal_key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::empty()))
+            .unwrap();
+
+        assert_eq!(app.editor.content(), "@");
+        assert!(matches!(app.mode, UiMode::Normal));
     }
 
     #[test]

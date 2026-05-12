@@ -1,5 +1,6 @@
 pub mod animation;
 pub mod app;
+pub mod event_source;
 pub mod highlight;
 pub mod interactive;
 pub mod keybindings;
