@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
 use std::hash::Hasher;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -248,6 +250,8 @@ const MAX_TERMINAL_EVENTS_PER_TICK: usize = 32;
 const MAX_RUNTIME_SIGNAL_BATCH: usize = 256;
 const ACTIVE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const IDLE_FRAME_INTERVAL: Duration = Duration::from_millis(100);
+const SLOW_TUI_EVENT_THRESHOLD: Duration = Duration::from_millis(16);
+const SLOW_TUI_RENDER_THRESHOLD: Duration = Duration::from_millis(33);
 
 #[derive(Debug)]
 enum RuntimeSignal {
@@ -803,6 +807,30 @@ struct GitLabelCache {
     label: Option<String>,
 }
 
+#[derive(Debug)]
+struct TuiTrace {
+    path: PathBuf,
+}
+
+impl TuiTrace {
+    fn from_env() -> Option<Self> {
+        std::env::var_os("IMP_TUI_TRACE")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .map(|path| Self { path })
+    }
+
+    fn log(&self, message: impl AsRef<str>) {
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            let _ = writeln!(file, "{} {}", imp_llm::now(), message.as_ref());
+        }
+    }
+}
+
 pub struct App {
     // Core
     pub running: bool,
@@ -872,6 +900,7 @@ pub struct App {
     clean_task: Option<tokio::task::JoinHandle<()>>,
     runtime_signal_tx: tokio::sync::mpsc::Sender<RuntimeSignal>,
     runtime_signal_rx: tokio::sync::mpsc::Receiver<RuntimeSignal>,
+    tui_trace: Option<TuiTrace>,
 
     // Accumulated stats
     pub accumulated_usage: Usage,
@@ -1390,7 +1419,11 @@ fn render_status_text(
                 Ok(status) => {
                     lines.push(format!(
                         "worktree status: {}",
-                        if status.trim().is_empty() { "clean" } else { "dirty" }
+                        if status.trim().is_empty() {
+                            "clean"
+                        } else {
+                            "dirty"
+                        }
                     ));
                     if !status.trim().is_empty() {
                         lines.extend(status.lines().take(10).map(|line| format!("  {line}")));
@@ -1703,6 +1736,7 @@ impl App {
             clean_task: None,
             runtime_signal_tx,
             runtime_signal_rx,
+            tui_trace: TuiTrace::from_env(),
             accumulated_usage: Usage::default(),
             accumulated_cost: Cost::default(),
             current_context_tokens: 0,
@@ -1846,7 +1880,12 @@ impl App {
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.sync_window_title();
         if self.needs_redraw {
+            let started = Instant::now();
             terminal.draw(|frame| self.render(frame))?;
+            let elapsed = started.elapsed();
+            if elapsed >= SLOW_TUI_RENDER_THRESHOLD {
+                self.trace_tui(format!("slow_render duration_ms={}", elapsed.as_millis()));
+            }
             self.needs_redraw = false;
             self.start_pending_agent_after_redraw();
         }
@@ -1858,15 +1897,28 @@ impl App {
         rx: &mut tokio::sync::mpsc::Receiver<Event>,
         first: Event,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let started = Instant::now();
+        let mut count = 1usize;
         self.handle_terminal_event(first)?;
         for _ in 1..MAX_TERMINAL_EVENTS_PER_TICK {
             match rx.try_recv() {
-                Ok(event) => self.handle_terminal_event(event)?,
+                Ok(event) => {
+                    count += 1;
+                    self.handle_terminal_event(event)?;
+                }
                 Err(_) => break,
             }
             if !self.running {
                 break;
             }
+        }
+        let elapsed = started.elapsed();
+        if count > 1 || elapsed >= SLOW_TUI_EVENT_THRESHOLD {
+            self.trace_tui(format!(
+                "terminal_batch count={} duration_ms={}",
+                count,
+                elapsed.as_millis()
+            ));
         }
         Ok(())
     }
@@ -1921,16 +1973,35 @@ impl App {
         Ok(())
     }
 
+    fn trace_tui(&self, message: impl AsRef<str>) {
+        if let Some(trace) = &self.tui_trace {
+            trace.log(message);
+        }
+    }
+
     fn drain_runtime_signal_batch(&mut self, first: RuntimeSignal) {
+        let started = Instant::now();
+        let mut count = 1usize;
         self.handle_runtime_signal(first);
         for _ in 1..MAX_RUNTIME_SIGNAL_BATCH {
             match self.runtime_signal_rx.try_recv() {
-                Ok(signal) => self.handle_runtime_signal(signal),
+                Ok(signal) => {
+                    count += 1;
+                    self.handle_runtime_signal(signal);
+                }
                 Err(_) => break,
             }
             if !self.running {
                 break;
             }
+        }
+        let elapsed = started.elapsed();
+        if count > 1 || elapsed >= SLOW_TUI_EVENT_THRESHOLD {
+            self.trace_tui(format!(
+                "runtime_signal_batch count={} duration_ms={}",
+                count,
+                elapsed.as_millis()
+            ));
         }
     }
 
@@ -4768,9 +4839,9 @@ impl App {
             .await
             {
                 Ok(result) => RuntimeSignal::StatusCommandFinished(result),
-                Err(error) => RuntimeSignal::StatusCommandFailed(format!(
-                    "Status task failure: {error}"
-                )),
+                Err(error) => {
+                    RuntimeSignal::StatusCommandFailed(format!("Status task failure: {error}"))
+                }
             };
             let _ = signal_tx.send(signal).await;
         }));
@@ -4856,16 +4927,15 @@ impl App {
         };
         self.push_system_msg(initial_message);
         self.clean_task = Some(tokio::spawn(async move {
-            let signal = match tokio::task::spawn_blocking(move || {
-                run_clean_command(&cwd, &sandbox, force)
-            })
-            .await
-            {
-                Ok(result) => RuntimeSignal::CleanCommandFinished(result),
-                Err(error) => {
-                    RuntimeSignal::CleanCommandFailed(format!("Clean task failure: {error}"))
-                }
-            };
+            let signal =
+                match tokio::task::spawn_blocking(move || run_clean_command(&cwd, &sandbox, force))
+                    .await
+                {
+                    Ok(result) => RuntimeSignal::CleanCommandFinished(result),
+                    Err(error) => {
+                        RuntimeSignal::CleanCommandFailed(format!("Clean task failure: {error}"))
+                    }
+                };
             let _ = signal_tx.send(signal).await;
         }));
     }
@@ -10152,6 +10222,34 @@ mod session_lifecycle {
     }
 
     #[test]
+    fn tui_trace_from_env_reads_path() {
+        let previous = std::env::var_os("IMP_TUI_TRACE");
+        unsafe {
+            std::env::set_var("IMP_TUI_TRACE", "/tmp/imp-tui-test.log");
+        }
+        assert_eq!(TuiTrace::from_env().unwrap().path, PathBuf::from("/tmp/imp-tui-test.log"));
+        unsafe {
+            if let Some(previous) = previous {
+                std::env::set_var("IMP_TUI_TRACE", previous);
+            } else {
+                std::env::remove_var("IMP_TUI_TRACE");
+            }
+        }
+    }
+
+    #[test]
+    fn tui_trace_writes_log_lines() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("trace.log");
+        let trace = TuiTrace { path: path.clone() };
+
+        trace.log("slow_render duration_ms=40");
+
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("slow_render duration_ms=40"));
+    }
+
+    #[test]
     fn runtime_signal_batch_drains_bursty_agent_events_before_render() {
         let mut app = make_app();
         app.is_streaming = true;
@@ -10190,12 +10288,8 @@ mod session_lifecycle {
         app.is_streaming = true;
         let activity = app.current_activity_state();
 
-        let chat_key = app.chat_render_cache_key(
-            80,
-            None,
-            app.config.ui.chat_tool_display,
-            activity,
-        );
+        let chat_key =
+            app.chat_render_cache_key(80, None, app.config.ui.chat_tool_display, activity);
         let sidebar_key = app.sidebar_stream_cache_key(40);
         app.tick = app.tick.wrapping_add(1);
 
@@ -10437,7 +10531,10 @@ mod session_lifecycle {
         app.improve_merge_command("");
 
         assert!(app.improve_merge_task.is_some());
-        assert_eq!(app.messages.last().unwrap().content, "Loading Improve merge plan…");
+        assert_eq!(
+            app.messages.last().unwrap().content,
+            "Loading Improve merge plan…"
+        );
     }
 
     #[tokio::test]
