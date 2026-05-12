@@ -369,6 +369,12 @@ struct SidebarDetailCache {
     render: SidebarDetailRenderData,
 }
 
+#[derive(Debug, Clone, Default)]
+struct StartupSurfaceMetadata {
+    skills: Vec<imp_core::resources::Skill>,
+    lua_extension_names: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct StartupSurfaceData {
     panel: StartupPanelData,
@@ -920,6 +926,7 @@ pub struct App {
     current_oauth_display_info_model: String,
     git_label_cache: Option<GitLabelCache>,
     startup_skill_detail_cache: Option<StartupSkillDetailCache>,
+    startup_surface_metadata: StartupSurfaceMetadata,
 
     // Extension state
     pub status_items: HashMap<String, String>,
@@ -1686,6 +1693,7 @@ impl App {
             .map(|m| m.context_window)
             .unwrap_or(200_000);
         let (runtime_signal_tx, runtime_signal_rx) = tokio::sync::mpsc::channel(256);
+        let startup_surface_metadata = Self::load_startup_surface_metadata(&cwd);
 
         Self {
             running: true,
@@ -1753,6 +1761,7 @@ impl App {
             current_oauth_display_info_model: String::new(),
             git_label_cache: None,
             startup_skill_detail_cache: None,
+            startup_surface_metadata,
             status_items: HashMap::new(),
             widgets: HashMap::new(),
             lua_runtime: None,
@@ -2693,8 +2702,7 @@ impl App {
     }
 
     fn startup_skills(&self) -> Vec<imp_core::resources::Skill> {
-        let user_config_dir = imp_core::config::Config::user_config_dir();
-        imp_core::resources::discover_skills(&self.cwd, &user_config_dir)
+        self.startup_surface_metadata.skills.clone()
     }
 
     fn startup_skill_hits(&self, chat_area: Rect) -> Vec<StartupSkillHit> {
@@ -2733,10 +2741,19 @@ impl App {
         true
     }
 
-    fn build_startup_surface(&self) -> StartupSurfaceData {
+    fn load_startup_surface_metadata(cwd: &Path) -> StartupSurfaceMetadata {
         let user_config_dir = imp_core::config::Config::user_config_dir();
+        StartupSurfaceMetadata {
+            skills: imp_core::resources::discover_skills(cwd, &user_config_dir),
+            lua_extension_names: discover_extensions(&user_config_dir, Some(cwd))
+                .into_iter()
+                .map(|ext| ext.name)
+                .collect(),
+        }
+    }
+
+    fn build_startup_surface(&self) -> StartupSurfaceData {
         let skills = self.startup_skills();
-        let lua_extensions = discover_extensions(&user_config_dir, Some(&self.cwd));
         let repo_label = self
             .cwd
             .file_name()
@@ -2745,20 +2762,10 @@ impl App {
             .unwrap_or("this project")
             .to_string();
 
-        let lua_extension_summary = match &self.lua_runtime {
-            Some(runtime) => match runtime.lock() {
-                Ok(_) => summarize_inline(
-                    lua_extensions.iter().map(|ext| ext.name.clone()).collect(),
-                    3,
-                ),
-                Err(_) => "unavailable (runtime lock error)".to_string(),
-            },
-            None => summarize_inline(
-                lua_extensions.iter().map(|ext| ext.name.clone()).collect(),
-                3,
-            ),
-        };
-
+        let lua_extension_summary = summarize_inline(
+            self.startup_surface_metadata.lua_extension_names.clone(),
+            3,
+        );
         let auth_path = imp_core::storage::global_auth_path();
         let auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
         let provider_meta = self.current_model_meta_for_persistence();
@@ -6023,10 +6030,10 @@ impl App {
     }
 
     fn skill_summaries(&self) -> Vec<(String, String)> {
-        let user_config_dir = Config::user_config_dir();
-        imp_core::resources::discover_skills(&self.cwd, &user_config_dir)
-            .into_iter()
-            .map(|skill| (skill.name, skill.description))
+        self.startup_surface_metadata
+            .skills
+            .iter()
+            .map(|skill| (skill.name.clone(), skill.description.clone()))
             .collect()
     }
 
@@ -6045,10 +6052,12 @@ impl App {
             return false;
         }
 
-        let user_config_dir = Config::user_config_dir();
-        let Some(skill) = imp_core::resources::discover_skills(&self.cwd, &user_config_dir)
-            .into_iter()
+        let Some(skill) = self
+            .startup_surface_metadata
+            .skills
+            .iter()
             .find(|skill| skill.name == skill_name)
+            .cloned()
         else {
             return false;
         };
@@ -9706,6 +9715,32 @@ mod session_lifecycle {
         assert!(!app.sidebar.open);
         assert_eq!(app.active_pane, Pane::Chat);
         assert!(app.selection.is_some());
+    }
+
+    #[test]
+    fn startup_surface_uses_cached_skill_metadata() {
+        let temp = TempDir::new().unwrap();
+        let cwd = temp.path().join("project");
+        std::fs::create_dir_all(cwd.join(".imp/skills/first")).unwrap();
+        std::fs::write(
+            cwd.join(".imp/skills/first/SKILL.md"),
+            "---\nname: first\ndescription: one\n---\n",
+        )
+        .unwrap();
+        let metadata = App::load_startup_surface_metadata(&cwd);
+        std::fs::create_dir_all(cwd.join(".imp/skills/second")).unwrap();
+        std::fs::write(
+            cwd.join(".imp/skills/second/SKILL.md"),
+            "---\nname: second\ndescription: two\n---\n",
+        )
+        .unwrap();
+        let mut app = make_app_with_session(SessionManager::in_memory(), cwd);
+        app.startup_surface_metadata = metadata;
+
+        let skills = app.startup_skills();
+
+        assert!(skills.iter().any(|skill| skill.name == "first"));
+        assert!(!skills.iter().any(|skill| skill.name == "second"));
     }
 
     #[test]
