@@ -733,7 +733,10 @@ async fn targeted_commit_action(
     reset_args.extend(files.iter().cloned());
     let reset_index = run_git_owned(cwd, reset_args).await?;
     if !reset_index.status.success() {
-        return Ok(git_failure("git reset failed after targeted commit", &reset_index));
+        return Ok(git_failure(
+            "git reset failed after targeted commit",
+            &reset_index,
+        ));
     }
 
     let head = head_sha_short(cwd)
