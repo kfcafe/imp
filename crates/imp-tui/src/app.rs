@@ -242,9 +242,10 @@ enum SecretsFlowState {
     },
 }
 
-const MAX_RUNTIME_SIGNALS_PER_TICK: usize = 64;
+const MAX_RUNTIME_SIGNALS_PER_TICK: usize = 256;
 const MAX_UI_REQUESTS_PER_TICK: usize = 16;
 const MAX_TERMINAL_EVENTS_PER_TICK: usize = 32;
+const MAX_RUNTIME_SIGNAL_BATCH: usize = 256;
 const ACTIVE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const IDLE_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -1893,7 +1894,7 @@ impl App {
                 }
                 signal = self.runtime_signal_rx.recv() => {
                     if let Some(signal) = signal {
-                        self.handle_runtime_signal(signal);
+                        self.drain_runtime_signal_batch(signal);
                     }
                 }
                 _ = frame_tick.tick() => {
@@ -1918,6 +1919,19 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn drain_runtime_signal_batch(&mut self, first: RuntimeSignal) {
+        self.handle_runtime_signal(first);
+        for _ in 1..MAX_RUNTIME_SIGNAL_BATCH {
+            match self.runtime_signal_rx.try_recv() {
+                Ok(signal) => self.handle_runtime_signal(signal),
+                Err(_) => break,
+            }
+            if !self.running {
+                break;
+            }
+        }
     }
 
     fn handle_terminal_event(&mut self, event: Event) -> Result<(), Box<dyn std::error::Error>> {
@@ -10135,6 +10149,30 @@ mod session_lifecycle {
         assert_eq!(click_map[0].1, "tc-1");
         assert_eq!(click_map[1].1, "tc-2");
         assert_eq!(click_map[1].0, click_map[0].0 + 1);
+    }
+
+    #[test]
+    fn runtime_signal_batch_drains_bursty_agent_events_before_render() {
+        let mut app = make_app();
+        app.is_streaming = true;
+        for index in 0..3 {
+            app.runtime_signal_tx
+                .try_send(RuntimeSignal::AgentEvent(AgentEvent::MessageDelta {
+                    delta: StreamEvent::TextDelta {
+                        text: format!("{index}"),
+                    },
+                }))
+                .unwrap();
+        }
+
+        app.enqueue_visible_agent_turn("prompt".into());
+        app.drain_runtime_signal_batch(RuntimeSignal::AgentEvent(AgentEvent::AgentStart {
+            model: app.model_name.clone(),
+            timestamp: imp_llm::now(),
+        }));
+
+        assert_eq!(app.messages.last().unwrap().content, "012");
+        assert!(app.runtime_signal_rx.try_recv().is_err());
     }
 
     #[test]
