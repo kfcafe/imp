@@ -23,6 +23,7 @@ use crate::policy::RunPolicy;
 use crate::roles::Role;
 use crate::run_evidence::{RunEventWriter, RunIndexRecord};
 use crate::tools::{LuaToolLoader, ToolRegistry};
+use crate::workflow::WorkflowContract;
 
 mod events;
 mod loop_policy;
@@ -122,6 +123,8 @@ pub struct Agent {
     pub config: Arc<Config>,
     /// Per-run tool/write policy layered on top of AgentMode.
     pub run_policy: RunPolicy,
+    /// Lightweight workflow contract for this agent run. Initially informational; future runtime layers use it for policy, verification, and evidence.
+    pub workflow_contract: WorkflowContract,
 
     /// JSONL event writer for the current run evidence artifact.
     run_event_writer: Arc<std::sync::Mutex<Option<RunEventWriter>>>,
@@ -179,7 +182,7 @@ impl Agent {
             tools: ToolRegistry::new(),
             messages: Vec::new(),
             system_prompt: String::new(),
-            cwd,
+            cwd: cwd.clone(),
             max_tokens: None,
             role: None,
             hooks,
@@ -215,7 +218,9 @@ impl Agent {
             turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
             config: Arc::new(Config::default()),
             run_policy: RunPolicy::default(),
-
+            workflow_contract: WorkflowContract::implicit_from(
+                crate::workflow::ImplicitWorkflowContractInput::prompt("").cwd(&cwd),
+            ),
             run_event_writer: Arc::new(std::sync::Mutex::new(None)),
             run_index_record: Arc::new(std::sync::Mutex::new(None)),
             lua_tool_loader: None,
