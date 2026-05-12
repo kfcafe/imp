@@ -192,11 +192,45 @@ impl ManaNavigatorState {
     }
 
     pub fn scroll_detail_up(&mut self) {
-        self.detail_scroll = self.detail_scroll.saturating_sub(1);
+        self.scroll_detail_up_by(1);
     }
 
     pub fn scroll_detail_down(&mut self) {
-        self.detail_scroll = self.detail_scroll.saturating_add(1);
+        self.scroll_detail_down_by(1);
+    }
+
+    pub fn scroll_detail_up_by(&mut self, lines: usize) {
+        self.detail_scroll = self.detail_scroll.saturating_sub(lines);
+    }
+
+    pub fn scroll_detail_down_by(&mut self, lines: usize) {
+        self.detail_scroll = self.detail_scroll.saturating_add(lines);
+    }
+
+    pub fn select_visible_index(&mut self, index: usize) {
+        let visible = self.visible_node_ids();
+        if let Some(id) = visible.get(index) {
+            self.selected_id = Some(id.clone());
+            self.refresh_detail();
+        }
+    }
+
+    pub fn select_visible_row(&mut self, row: usize, height: usize) {
+        let selected_idx = self.selected_visible_index().unwrap_or(0);
+        let scroll = selected_idx.saturating_sub(height.saturating_sub(1));
+        self.select_visible_index(scroll + row);
+    }
+
+    pub fn move_up_by(&mut self, lines: usize) {
+        for _ in 0..lines.max(1) {
+            self.move_up();
+        }
+    }
+
+    pub fn move_down_by(&mut self, lines: usize) {
+        for _ in 0..lines.max(1) {
+            self.move_down();
+        }
     }
 
     fn select_first_visible(&mut self) {

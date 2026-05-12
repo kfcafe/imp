@@ -203,6 +203,7 @@ enum SecretsFlowState {
 
 const MAX_RUNTIME_SIGNALS_PER_TICK: usize = 64;
 const MAX_UI_REQUESTS_PER_TICK: usize = 16;
+const MAX_TERMINAL_EVENTS_PER_TICK: usize = 32;
 
 #[derive(Debug)]
 enum RuntimeSignal {
@@ -1556,23 +1557,21 @@ impl App {
 
             let tick_rate = self.effective_tick_rate();
 
-            // Poll for terminal events with adaptive timeout
+            // Poll for terminal events with adaptive timeout. Drain a bounded batch of
+            // already-ready input before rendering again so fast typing/pastes do not
+            // queue behind one full redraw per character.
             if crossterm::event::poll(tick_rate)? {
-                let event = crossterm::event::read()?;
-                match event {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        self.handle_key(key)?;
+                for index in 0..MAX_TERMINAL_EVENTS_PER_TICK {
+                    let event = crossterm::event::read()?;
+                    self.handle_terminal_event(event)?;
+                    if !self.running {
+                        break;
                     }
-                    Event::Paste(text) => {
-                        self.handle_paste(text);
+                    if index + 1 >= MAX_TERMINAL_EVENTS_PER_TICK
+                        || !crossterm::event::poll(Duration::ZERO)?
+                    {
+                        break;
                     }
-                    Event::Mouse(mouse) => {
-                        self.handle_mouse(mouse);
-                    }
-                    Event::Resize(_, _) => {
-                        self.needs_redraw = true;
-                    }
-                    _ => {}
                 }
             }
 
@@ -1592,6 +1591,25 @@ impl App {
             }
         }
 
+        Ok(())
+    }
+
+    fn handle_terminal_event(&mut self, event: Event) -> Result<(), Box<dyn std::error::Error>> {
+        match event {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                self.handle_key(key)?;
+            }
+            Event::Paste(text) => {
+                self.handle_paste(text);
+            }
+            Event::Mouse(mouse) => {
+                self.handle_mouse(mouse);
+            }
+            Event::Resize(_, _) => {
+                self.needs_redraw = true;
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -3840,8 +3858,75 @@ impl App {
         }
     }
 
+    fn handle_mana_navigator_mouse(&mut self, mouse: &crossterm::event::MouseEvent) -> bool {
+        let UiMode::ManaNavigator(ref mut state) = self.mode else {
+            return false;
+        };
+
+        let terminal_area = Rect {
+            x: 0,
+            y: 0,
+            width: crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80),
+            height: crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24),
+        };
+        let mana_area = centered_rect(88, 86, terminal_area);
+        if !point_in_rect(mouse.column, mouse.row, Some(mana_area)) {
+            return true;
+        }
+
+        let inner = Rect {
+            x: mana_area.x.saturating_add(1),
+            y: mana_area.y.saturating_add(1),
+            width: mana_area.width.saturating_sub(2),
+            height: mana_area.height.saturating_sub(2),
+        };
+        if inner.height == 0 || inner.width == 0 {
+            return true;
+        }
+        let content = Rect {
+            x: inner.x,
+            y: inner.y.saturating_add(1),
+            width: inner.width,
+            height: inner.height.saturating_sub(1),
+        };
+        let split_x = if content.width >= 90 {
+            content.x + (content.width * 52 / 100)
+        } else {
+            content.x + content.width
+        };
+        let in_detail = content.width >= 90 && mouse.column >= split_x;
+        let in_tree = mouse.column < split_x;
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                if in_detail {
+                    state.scroll_detail_up_by(self.config.ui.mouse_scroll_lines);
+                } else {
+                    state.move_up_by(self.config.ui.mouse_scroll_lines);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if in_detail {
+                    state.scroll_detail_down_by(self.config.ui.mouse_scroll_lines);
+                } else {
+                    state.move_down_by(self.config.ui.mouse_scroll_lines);
+                }
+            }
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) if in_tree => {
+                let row = mouse.row.saturating_sub(content.y) as usize;
+                state.select_visible_row(row, content.height as usize);
+            }
+            _ => {}
+        }
+        true
+    }
+
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         self.needs_redraw = true;
+
+        if self.handle_mana_navigator_mouse(&mouse) {
+            return;
+        }
 
         // Session picker intercepts scroll events
         if matches!(self.mode, UiMode::SessionPicker(_)) {
