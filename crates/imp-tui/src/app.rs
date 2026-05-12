@@ -166,6 +166,18 @@ struct SessionListResult {
     preferred_cwd: PathBuf,
 }
 
+#[derive(Debug)]
+struct StatusCommandResult {
+    text: String,
+}
+
+struct StatusSnapshot {
+    cwd: PathBuf,
+    git_lines: Option<Vec<String>>,
+    sandbox_status: Option<Result<String, String>>,
+    stale_improve_metadata_message: Option<String>,
+}
+
 fn open_url(url: &str) {
     #[cfg(target_os = "macos")]
     {
@@ -255,6 +267,8 @@ enum RuntimeSignal {
         mana_dir: Option<PathBuf>,
         message: String,
     },
+    StatusCommandFinished(StatusCommandResult),
+    StatusCommandFailed(String),
     UiRequest(crate::tui_interface::UiRequest),
 }
 
@@ -839,6 +853,7 @@ pub struct App {
     session_list_task: Option<tokio::task::JoinHandle<()>>,
     session_open_task: Option<tokio::task::JoinHandle<()>>,
     mana_navigator_task: Option<tokio::task::JoinHandle<()>>,
+    status_command_task: Option<tokio::task::JoinHandle<()>>,
     runtime_signal_tx: tokio::sync::mpsc::Sender<RuntimeSignal>,
     runtime_signal_rx: tokio::sync::mpsc::Receiver<RuntimeSignal>,
 
@@ -1167,6 +1182,101 @@ fn validate_improve_sandbox_metadata(
     }))
 }
 
+fn build_status_snapshot(cwd: &Path, sandbox: Option<&ImproveSandbox>) -> StatusSnapshot {
+    StatusSnapshot {
+        cwd: cwd.to_path_buf(),
+        git_lines: concise_git_status(cwd),
+        sandbox_status: sandbox.map(|sandbox| run_git(&sandbox.worktree, &["status", "--short"])),
+        stale_improve_metadata_message: stale_improve_metadata_message_for_cwd(cwd),
+    }
+}
+
+fn stale_improve_metadata_message_for_cwd(cwd: &Path) -> Option<String> {
+    match read_improve_sandbox_metadata(cwd) {
+        Ok(Some(_)) | Ok(None) => None,
+        Err(err) => Some(format!("Stale Improve sandbox metadata: {err}")),
+    }
+}
+
+fn render_status_text(
+    snapshot: &StatusSnapshot,
+    workflow_mode: WorkflowMode,
+    agent_status: &str,
+    active_mana_scope: Option<&ManaUnitRef>,
+    active_mana_run: Option<&ManaRunSummary>,
+    improve_auto_turns: u32,
+    improve_auto_turn_budget: u32,
+    improve_safe_mode: bool,
+    sandbox: Option<&ImproveSandbox>,
+    loop_state: Option<&LoopState>,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push("Status:".to_string());
+    lines.push(format!("cwd: {}", snapshot.cwd.display()));
+    if let Some(git_lines) = snapshot.git_lines.as_ref() {
+        lines.extend(git_lines.iter().cloned());
+    }
+    lines.push(format!("mode: {}", workflow_mode.display_name()));
+    lines.push(format!("agent: {agent_status}"));
+    if let Some(scope) = active_mana_scope {
+        lines.push(format!("scope: {} — {}", scope.id, scope.title.trim()));
+    }
+    if let Some(run) = active_mana_run {
+        lines.push(format!(
+            "mana run: {} {} ({}/{}, failed {})",
+            run.run_id, run.status, run.total_closed, run.total_units, run.total_failed
+        ));
+    }
+    if workflow_mode == WorkflowMode::Improve {
+        let budget = improve_auto_turn_budget.max(1);
+        lines.push(format!("improve loop: {improve_auto_turns}/{budget}"));
+        lines.push(format!(
+            "improve mode: {}",
+            if improve_safe_mode { "safe" } else { "sandbox" }
+        ));
+    }
+    if let Some(sandbox) = sandbox {
+        lines.push(format!("improve branch: {}", sandbox.branch));
+        lines.push(format!("improve worktree: {}", sandbox.worktree.display()));
+        lines.push(format!("improve base: {}", sandbox.base_branch));
+        lines.push(format!(
+            "improve changelog: {}",
+            sandbox.worktree.join(IMPROVE_CHANGELOG_PATH).display()
+        ));
+        lines.push(
+            "next: review changelog, run /improve merge, then /improve merge --confirm (or /clean to discard)"
+                .to_string(),
+        );
+        if let Some(status) = snapshot.sandbox_status.as_ref() {
+            match status {
+                Ok(status) => {
+                    lines.push(format!(
+                        "worktree status: {}",
+                        if status.trim().is_empty() { "clean" } else { "dirty" }
+                    ));
+                    if !status.trim().is_empty() {
+                        lines.extend(status.lines().take(10).map(|line| format!("  {line}")));
+                    }
+                }
+                Err(err) => lines.push(format!("worktree status: unavailable ({err})")),
+            }
+        }
+    } else if let Some(message) = snapshot.stale_improve_metadata_message.as_ref() {
+        lines.extend(message.lines().map(str::to_string));
+    }
+    if let Some(state) = loop_state {
+        match state.budget {
+            Some(budget) => lines.push(format!("loop: {}/{}", state.completed_turns, budget)),
+            None => lines.push(format!("loop: {}", state.completed_turns)),
+        }
+        lines.push(format!(
+            "loop message: {}",
+            single_line_preview(&state.message)
+        ));
+    }
+    lines.join("\n")
+}
+
 fn selected_read_file_path_from_tool(tc: Option<&DisplayToolCall>, cwd: &Path) -> Option<PathBuf> {
     let tc = tc?;
     if tc.name != "read" {
@@ -1450,6 +1560,7 @@ impl App {
             session_list_task: None,
             session_open_task: None,
             mana_navigator_task: None,
+            status_command_task: None,
             runtime_signal_tx,
             runtime_signal_rx,
             accumulated_usage: Usage::default(),
@@ -1895,6 +2006,14 @@ impl App {
             RuntimeSignal::ManaNavigatorLoaded(state) => self.finish_mana_navigator_load(state),
             RuntimeSignal::ManaNavigatorLoadFailed { mana_dir, message } => {
                 self.fail_mana_navigator_load(mana_dir, message);
+            }
+            RuntimeSignal::StatusCommandFinished(result) => {
+                self.status_command_task = None;
+                self.push_system_msg(&result.text);
+            }
+            RuntimeSignal::StatusCommandFailed(error) => {
+                self.status_command_task = None;
+                self.push_error_msg(&error);
             }
             RuntimeSignal::UiRequest(req) => self.handle_ui_request(req),
         }
@@ -4416,88 +4535,75 @@ impl App {
         }
     }
 
-    fn active_status_text(&mut self) -> String {
-        let mut lines = Vec::new();
-        lines.push("Status:".to_string());
-        lines.push(format!("cwd: {}", self.cwd.display()));
-        if let Some(git_lines) = concise_git_status(&self.cwd) {
-            lines.extend(git_lines);
-        }
-        lines.push(format!("mode: {}", self.workflow_mode.display_name()));
+    fn agent_status_label(&self) -> &'static str {
         if self.is_streaming || self.agent_task.is_some() {
-            lines.push("agent: running".to_string());
+            "running"
         } else if self.pending_agent_prompt.is_some() {
-            lines.push("agent: queued".to_string());
+            "queued"
         } else {
-            lines.push("agent: idle".to_string());
+            "idle"
         }
-        if let Some(scope) = self.active_mana_scope.as_ref() {
-            lines.push(format!("scope: {} — {}", scope.id, scope.title.trim()));
-        }
-        if let Some(run) = self.active_mana_run.as_ref() {
-            lines.push(format!(
-                "mana run: {} {} ({}/{}, failed {})",
-                run.run_id, run.status, run.total_closed, run.total_units, run.total_failed
-            ));
-        }
-        if self.workflow_mode == WorkflowMode::Improve {
-            let budget = self.config.ui.improve_auto_turn_budget.max(1);
-            lines.push(format!(
-                "improve loop: {}/{}",
-                self.improve_auto_turns, budget
-            ));
-            lines.push(format!(
-                "improve mode: {}",
-                if self.improve_safe_mode {
-                    "safe"
-                } else {
-                    "sandbox"
-                }
-            ));
-        }
-        if let Some(sandbox) = self.current_improve_sandbox() {
-            lines.push(format!("improve branch: {}", sandbox.branch));
-            lines.push(format!("improve worktree: {}", sandbox.worktree.display()));
-            lines.push(format!("improve base: {}", sandbox.base_branch));
-            lines.push(format!(
-                "improve changelog: {}",
-                sandbox.worktree.join(IMPROVE_CHANGELOG_PATH).display()
-            ));
-            lines.push(format!(
-                "next: review changelog, run /improve merge, then /improve merge --confirm (or /clean to discard)"
-            ));
-            if let Ok(status) = run_git(&sandbox.worktree, &["status", "--short"]) {
-                lines.push(format!(
-                    "worktree status: {}",
-                    if status.trim().is_empty() {
-                        "clean"
-                    } else {
-                        "dirty"
-                    }
-                ));
-                if !status.trim().is_empty() {
-                    lines.extend(status.lines().take(10).map(|line| format!("  {line}")));
-                }
-            }
-        } else if let Some(message) = self.stale_improve_metadata_message() {
-            lines.extend(message.lines().map(str::to_string));
-        }
-        if let Some(state) = self.loop_state.as_ref() {
-            match state.budget {
-                Some(budget) => lines.push(format!("loop: {}/{}", state.completed_turns, budget)),
-                None => lines.push(format!("loop: {}", state.completed_turns)),
-            }
-            lines.push(format!(
-                "loop message: {}",
-                single_line_preview(&state.message)
-            ));
-        }
-        lines.join("\n")
+    }
+
+    fn active_status_text(&self, snapshot: &StatusSnapshot) -> String {
+        render_status_text(
+            snapshot,
+            self.workflow_mode,
+            self.agent_status_label(),
+            self.active_mana_scope.as_ref(),
+            self.active_mana_run.as_ref(),
+            self.improve_auto_turns,
+            self.config.ui.improve_auto_turn_budget,
+            self.improve_safe_mode,
+            self.improve_sandbox.as_ref(),
+            self.loop_state.as_ref(),
+        )
     }
 
     fn show_status_command(&mut self) {
-        let status = self.active_status_text();
-        self.push_system_msg(&status);
+        if self.status_command_task.is_some() {
+            self.push_system_msg("Status is already loading…");
+            return;
+        }
+        let cwd = self.cwd.clone();
+        let sandbox = self.improve_sandbox.clone();
+        let workflow_mode = self.workflow_mode;
+        let agent_status = self.agent_status_label().to_string();
+        let active_mana_scope = self.active_mana_scope.clone();
+        let active_mana_run = self.active_mana_run.clone();
+        let improve_auto_turns = self.improve_auto_turns;
+        let improve_auto_turn_budget = self.config.ui.improve_auto_turn_budget;
+        let improve_safe_mode = self.improve_safe_mode;
+        let loop_state = self.loop_state.clone();
+        let signal_tx = self.runtime_signal_tx.clone();
+        self.push_system_msg("Loading status…");
+        self.status_command_task = Some(tokio::spawn(async move {
+            let signal = match tokio::task::spawn_blocking(move || {
+                let snapshot = build_status_snapshot(&cwd, sandbox.as_ref());
+                StatusCommandResult {
+                    text: render_status_text(
+                        &snapshot,
+                        workflow_mode,
+                        &agent_status,
+                        active_mana_scope.as_ref(),
+                        active_mana_run.as_ref(),
+                        improve_auto_turns,
+                        improve_auto_turn_budget,
+                        improve_safe_mode,
+                        sandbox.as_ref(),
+                        loop_state.as_ref(),
+                    ),
+                }
+            })
+            .await
+            {
+                Ok(result) => RuntimeSignal::StatusCommandFinished(result),
+                Err(error) => RuntimeSignal::StatusCommandFailed(format!(
+                    "Status task failure: {error}"
+                )),
+            };
+            let _ = signal_tx.send(signal).await;
+        }));
     }
 
     fn improve_merge_command(&mut self, args: &str) {
@@ -10160,10 +10266,39 @@ mod session_lifecycle {
             budget: Some(3),
         });
 
-        let status = app.active_status_text();
+        let snapshot = StatusSnapshot {
+            cwd: app.cwd.clone(),
+            git_lines: None,
+            sandbox_status: None,
+            stale_improve_metadata_message: None,
+        };
+        let status = app.active_status_text(&snapshot);
 
         assert!(status.contains("loop: 2/3"));
         assert!(status.contains("loop message: keep going"));
+    }
+
+    #[tokio::test]
+    async fn status_command_opens_background_task() {
+        let mut app = make_app();
+
+        app.show_status_command();
+
+        assert!(app.status_command_task.is_some());
+        assert_eq!(app.messages.last().unwrap().content, "Loading status…");
+    }
+
+    #[tokio::test]
+    async fn status_signal_clears_background_task() {
+        let mut app = make_app();
+        app.status_command_task = Some(tokio::spawn(async {}));
+
+        app.handle_runtime_signal(RuntimeSignal::StatusCommandFinished(StatusCommandResult {
+            text: "Status:\nagent: idle".into(),
+        }));
+
+        assert!(app.status_command_task.is_none());
+        assert_eq!(app.messages.last().unwrap().content, "Status:\nagent: idle");
     }
 
     #[test]
