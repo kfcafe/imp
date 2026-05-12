@@ -1137,7 +1137,6 @@ fn mana_skill_follow_up_hint(
     let lower = prompt.to_ascii_lowercase();
 
     let orchestration_signal = [
-        "ask_agent",
         "decompose",
         "decomposition",
         "split this",
@@ -1146,7 +1145,6 @@ fn mana_skill_follow_up_hint(
         "parallel",
         "parallel helper",
         "bounded helper",
-        "ask_agent helper",
         "orchestrate",
         "orchestration",
         "create a unit",

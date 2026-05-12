@@ -749,7 +749,6 @@ fn tool_input_summary_rows(tc: &DisplayToolCall) -> Vec<String> {
         "web" => {
             summarize_named_fields(args, &["action", "query", "url", "provider", "maxResults"])
         }
-        "ask_agent" => summarize_named_fields(args, &["worker_type", "prompt", "timeout_secs"]),
         _ => summarize_object_fields(args),
     }
 }

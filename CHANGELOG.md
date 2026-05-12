@@ -23,7 +23,7 @@ Use this section for changes that have landed on `main` after the 0.1.3 draft.
 ### Added
 
 - Added a native `worktree` tool for creating, listing, and removing git worktrees separately from the general `git` tool.
-- Added `ask_agent` as the focused helper-agent interface, replacing the older spawn-oriented workflow.
+- Removed defunct `ask_agent` helper-agent tool; use mana units/runs for durable delegation.
 - Added `ask_user` schema support, including TUI multi-select prompts.
 - Added mana `guide` and `template` actions so agents can inspect task/epic/decision/verify/orchestration guidance from the native mana tool.
 - Added validation hints to mana actions to make schema errors and missing arguments easier for agents to recover from.

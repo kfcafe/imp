@@ -10,7 +10,6 @@ use crate::hooks::HookDef;
 use crate::personality::PersonalityConfig;
 use crate::roles::RoleDef;
 use crate::storage;
-use crate::tools::imp::AskAgentConfig;
 use crate::tools::web::types::WebConfig;
 
 /// Agent mode — controls which tools and mana actions the agent may use.
@@ -35,16 +34,7 @@ pub enum AgentMode {
 const WORKER_TOOLS: &[&str] = &[
     "read", "scan", "web", "recall", "write", "edit", "bash", "git", "mana", "ask_user",
 ];
-const ORCHESTRATOR_TOOLS: &[&str] = &[
-    "read",
-    "scan",
-    "web",
-    "recall",
-    "mana",
-    "git",
-    "ask_user",
-    "ask_agent",
-];
+const ORCHESTRATOR_TOOLS: &[&str] = &["read", "scan", "web", "recall", "mana", "git", "ask_user"];
 const PLANNER_TOOLS: &[&str] = &["read", "scan", "web", "recall", "git", "mana", "ask_user"];
 const REVIEWER_TOOLS: &[&str] = &["read", "scan", "web", "recall", "git", "ask_user"];
 const AUDITOR_TOOLS: &[&str] = &["read", "scan", "web", "recall", "git", "mana"];
@@ -191,7 +181,7 @@ impl AgentMode {
                 Encode unresolved questions as decisions instead of burying ambiguity in prose. \
                 When the conversation itself is producing durable plans, architecture, migrations, or implementation structure, externalize that structure into mana during the conversation rather than waiting until the end. \
                 Prefer native mana actions, including scope-aware and append-style updates, over shell or direct file edits for maintaining the work graph. \
-                You may not read or write files directly — create and dispatch mana units for all file work, and use ask_agent only for bounded ad_hoc review or second opinions. \
+                You may not read or write files directly — create and dispatch mana units for all file work. \
                 Update units with concrete failure context and do not retry unchanged failed plans. \
                 You are responsible for unit structure, completeness, and verify quality.",
             ),
@@ -516,10 +506,6 @@ pub struct Config {
     /// Shipped Lua extension runtime policy.
     #[serde(default)]
     pub lua: LuaConfig,
-
-    /// Helper-agent tool profiles.
-    #[serde(default)]
-    pub ask_agent: AskAgentConfig,
 
     /// Secret injection policy for native command execution.
     #[serde(default)]
@@ -1632,7 +1618,6 @@ model = "sonnet"
         assert!(mode.allows_tool("recall"));
         assert!(mode.allows_tool("mana"));
         assert!(mode.allows_tool("ask_user"));
-        assert!(mode.allows_tool("ask_agent"));
     }
 
     #[test]
@@ -1644,16 +1629,17 @@ model = "sonnet"
     }
 
     #[test]
-    fn non_orchestrator_modes_block_ask_agent() {
+    fn non_full_modes_block_removed_ask_agent() {
         for mode in [
             AgentMode::Worker,
+            AgentMode::Orchestrator,
             AgentMode::Planner,
             AgentMode::Reviewer,
             AgentMode::Auditor,
         ] {
             assert!(
                 !mode.allows_tool("ask_agent"),
-                "mode {mode:?} should block ask_agent"
+                "mode {mode:?} should block removed ask_agent"
             );
         }
     }
