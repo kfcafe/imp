@@ -311,7 +311,6 @@ struct ThemeKind {
 struct ChatRenderCacheKey {
     width: u16,
     messages_epoch: u64,
-    tick: u64,
     chat_tool_focus: Option<usize>,
     word_wrap: bool,
     chat_tool_display: imp_core::config::ChatToolDisplay,
@@ -332,7 +331,6 @@ struct ChatRenderCache {
 struct SidebarStreamCacheKey {
     width: u16,
     messages_epoch: u64,
-    tick: u64,
     selected: Option<usize>,
     word_wrap: bool,
     tool_output: imp_core::config::ToolOutputDisplay,
@@ -2401,7 +2399,6 @@ impl App {
         ChatRenderCacheKey {
             width,
             messages_epoch: self.chat_render_epoch,
-            tick: self.tick,
             chat_tool_focus,
             word_wrap: self.config.ui.word_wrap,
             chat_tool_display,
@@ -2462,7 +2459,6 @@ impl App {
         SidebarStreamCacheKey {
             width,
             messages_epoch: self.chat_render_epoch,
-            tick: self.tick,
             selected: self.tool_focus,
             word_wrap: self.config.ui.word_wrap,
             tool_output: self.config.ui.tool_output,
@@ -10139,6 +10135,37 @@ mod session_lifecycle {
         assert_eq!(click_map[0].1, "tc-1");
         assert_eq!(click_map[1].1, "tc-2");
         assert_eq!(click_map[1].0, click_map[0].0 + 1);
+    }
+
+    #[test]
+    fn chat_and_sidebar_stream_cache_ignore_animation_tick() {
+        let mut app = make_app();
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: true,
+            timestamp: imp_llm::now(),
+        });
+        app.is_streaming = true;
+        let activity = app.current_activity_state();
+
+        let chat_key = app.chat_render_cache_key(
+            80,
+            None,
+            app.config.ui.chat_tool_display,
+            activity,
+        );
+        let sidebar_key = app.sidebar_stream_cache_key(40);
+        app.tick = app.tick.wrapping_add(1);
+
+        assert_eq!(
+            chat_key,
+            app.chat_render_cache_key(80, None, app.config.ui.chat_tool_display, activity)
+        );
+        assert_eq!(sidebar_key, app.sidebar_stream_cache_key(40));
     }
 
     #[test]
