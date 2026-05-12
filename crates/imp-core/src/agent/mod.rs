@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use imp_llm::provider::RetryPolicy;
 
 use crate::config::{AgentMode, Config, ContextConfig, ContinuePolicy};
+use crate::evidence::EvidencePacketBuilder;
 use crate::guardrails::{GuardrailConfig, GuardrailProfile};
 use crate::hooks::{HookBackgroundEvent, HookEvent, HookRunner};
 use crate::mana_review::{
@@ -22,6 +23,7 @@ use crate::mana_review::{
 use crate::policy::RunPolicy;
 use crate::roles::Role;
 use crate::tools::{LuaToolLoader, ToolRegistry};
+use crate::trace::TraceWriter;
 use crate::workflow::WorkflowContract;
 
 mod events;
@@ -124,6 +126,11 @@ pub struct Agent {
     pub run_policy: RunPolicy,
     /// Lightweight workflow contract for this agent run. Initially informational; future runtime layers use it for policy, verification, and evidence.
     pub workflow_contract: WorkflowContract,
+    /// Optional structured trace writer for this run.
+    pub trace_writer: Option<Arc<std::sync::Mutex<TraceWriter>>>,
+    /// Optional evidence packet builder and output path for this run.
+    pub evidence_builder: Option<Arc<std::sync::Mutex<EvidencePacketBuilder>>>,
+    pub evidence_path: Option<PathBuf>,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_tx: mpsc::Sender<AgentCommand>,
@@ -215,6 +222,9 @@ impl Agent {
             workflow_contract: WorkflowContract::implicit_from(
                 crate::workflow::ImplicitWorkflowContractInput::prompt("").cwd(&cwd),
             ),
+            trace_writer: None,
+            evidence_builder: None,
+            evidence_path: None,
             lua_tool_loader: None,
 
             event_tx,
@@ -323,7 +333,7 @@ impl Agent {
         }
     }
 
-    async fn emit(&self, event: AgentEvent) {
+    pub(crate) async fn emit(&self, event: AgentEvent) {
         // Fire corresponding hooks for lifecycle events
         match &event {
             AgentEvent::AgentEnd { .. } => {
@@ -342,6 +352,22 @@ impl Agent {
                     .await;
             }
             _ => {}
+        }
+        if let Some(trace_writer) = &self.trace_writer {
+            if let Ok(mut writer) = trace_writer.lock() {
+                let _ = writer.write_event(event.to_trace_event("run"));
+            }
+        }
+        if let Some(evidence_builder) = &self.evidence_builder {
+            if let Ok(mut builder) = evidence_builder.lock() {
+                builder.record_event(&event);
+                if matches!(event, AgentEvent::AgentEnd { .. }) {
+                    if let Some(path) = &self.evidence_path {
+                        let packet = builder.clone().finish();
+                        let _ = packet.write_markdown(path);
+                    }
+                }
+            }
         }
         let _ = self.event_tx.send(event).await;
     }
