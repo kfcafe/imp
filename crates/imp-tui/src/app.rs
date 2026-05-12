@@ -178,6 +178,17 @@ struct StatusSnapshot {
     stale_improve_metadata_message: Option<String>,
 }
 
+#[derive(Debug)]
+struct ImproveMergeCommandResult {
+    text: String,
+}
+
+#[derive(Debug)]
+struct CleanCommandResult {
+    text: String,
+    clear_improve_sandbox: bool,
+}
+
 fn open_url(url: &str) {
     #[cfg(target_os = "macos")]
     {
@@ -269,6 +280,10 @@ enum RuntimeSignal {
     },
     StatusCommandFinished(StatusCommandResult),
     StatusCommandFailed(String),
+    ImproveMergeCommandFinished(ImproveMergeCommandResult),
+    ImproveMergeCommandFailed(String),
+    CleanCommandFinished(CleanCommandResult),
+    CleanCommandFailed(String),
     UiRequest(crate::tui_interface::UiRequest),
 }
 
@@ -854,6 +869,8 @@ pub struct App {
     session_open_task: Option<tokio::task::JoinHandle<()>>,
     mana_navigator_task: Option<tokio::task::JoinHandle<()>>,
     status_command_task: Option<tokio::task::JoinHandle<()>>,
+    improve_merge_task: Option<tokio::task::JoinHandle<()>>,
+    clean_task: Option<tokio::task::JoinHandle<()>>,
     runtime_signal_tx: tokio::sync::mpsc::Sender<RuntimeSignal>,
     runtime_signal_rx: tokio::sync::mpsc::Receiver<RuntimeSignal>,
 
@@ -1195,6 +1212,128 @@ fn stale_improve_metadata_message_for_cwd(cwd: &Path) -> Option<String> {
     match read_improve_sandbox_metadata(cwd) {
         Ok(Some(_)) | Ok(None) => None,
         Err(err) => Some(format!("Stale Improve sandbox metadata: {err}")),
+    }
+}
+
+fn run_improve_merge_command(
+    cwd: &Path,
+    sandbox: &ImproveSandbox,
+    confirmed: bool,
+) -> ImproveMergeCommandResult {
+    let changelog = sandbox.worktree.join(IMPROVE_CHANGELOG_PATH);
+    if !changelog.exists() {
+        return ImproveMergeCommandResult {
+            text: format!(
+                "Refusing to merge: missing Improve changelog at {}. Review/complete the changelog first.",
+                changelog.display()
+            ),
+        };
+    }
+    match run_git(cwd, &["status", "--short"]) {
+        Ok(status) if !status.trim().is_empty() => {
+            return ImproveMergeCommandResult {
+                text: format!(
+                    "Refusing to merge: current checkout is dirty. Commit/stash/revert first.\n{}",
+                    status
+                ),
+            };
+        }
+        Err(err) => {
+            return ImproveMergeCommandResult {
+                text: format!("Could not inspect current checkout: {err}"),
+            };
+        }
+        _ => {}
+    }
+    match run_git(&sandbox.worktree, &["status", "--short"]) {
+        Ok(status) if !status.trim().is_empty() => {
+            return ImproveMergeCommandResult {
+                text: format!(
+                    "Refusing to merge: Improve sandbox has uncommitted changes. Commit them in {} or clean/discard.\n{}",
+                    sandbox.worktree.display(),
+                    status
+                ),
+            };
+        }
+        Err(err) => {
+            return ImproveMergeCommandResult {
+                text: format!("Could not inspect Improve sandbox: {err}"),
+            };
+        }
+        _ => {}
+    }
+    if !confirmed {
+        return ImproveMergeCommandResult {
+            text: format!(
+                "Improve merge plan:\n- Branch: {}\n- Worktree: {}\n- Changelog: {}\n- Target checkout: {}\n- Operation: git merge --no-ff {}\n\nReview the changelog, then run `/improve merge --confirm` to merge. No merge has been performed.",
+                sandbox.branch,
+                sandbox.worktree.display(),
+                changelog.display(),
+                cwd.display(),
+                sandbox.branch
+            ),
+        };
+    }
+    match run_git(cwd, &["merge", "--no-ff", &sandbox.branch]) {
+        Ok(output) => ImproveMergeCommandResult {
+            text: format!(
+                "Merged Improve branch {}. Changelog reviewed from {}.\n{}",
+                sandbox.branch,
+                changelog.display(),
+                output
+            ),
+        },
+        Err(err) => ImproveMergeCommandResult {
+            text: format!("Improve merge failed: {err}"),
+        },
+    }
+}
+
+fn run_clean_command(cwd: &Path, sandbox: &ImproveSandbox, force: bool) -> CleanCommandResult {
+    let status = run_git(&sandbox.worktree, &["status", "--short"]).unwrap_or_default();
+    if !status.trim().is_empty() && !force {
+        return CleanCommandResult {
+            text: format!(
+                "Improve sandbox is dirty; not cleaning without confirmation. Review `{}` then run `/clean --force` to remove worktree {}.\n{}",
+                sandbox.branch,
+                sandbox.worktree.display(),
+                status
+            ),
+            clear_improve_sandbox: false,
+        };
+    }
+
+    let mut command = Command::new("git");
+    command.arg("worktree").arg("remove");
+    if force {
+        command.arg("--force");
+    }
+    command.arg(&sandbox.worktree).current_dir(cwd);
+    match command.output() {
+        Ok(output) if output.status.success() => {
+            if let Some(path) = improve_metadata_file(cwd) {
+                let _ = std::fs::remove_file(path);
+            }
+            CleanCommandResult {
+                text: format!(
+                    "Removed Improve worktree {}. Branch {} was kept.",
+                    sandbox.worktree.display(),
+                    sandbox.branch
+                ),
+                clear_improve_sandbox: true,
+            }
+        }
+        Ok(output) => {
+            let err = String::from_utf8_lossy(&output.stderr);
+            CleanCommandResult {
+                text: format!("Clean failed: {}", err.trim()),
+                clear_improve_sandbox: false,
+            }
+        }
+        Err(err) => CleanCommandResult {
+            text: format!("Clean failed: {err}"),
+            clear_improve_sandbox: false,
+        },
     }
 }
 
@@ -1561,6 +1700,8 @@ impl App {
             session_open_task: None,
             mana_navigator_task: None,
             status_command_task: None,
+            improve_merge_task: None,
+            clean_task: None,
             runtime_signal_tx,
             runtime_signal_rx,
             accumulated_usage: Usage::default(),
@@ -2013,6 +2154,25 @@ impl App {
             }
             RuntimeSignal::StatusCommandFailed(error) => {
                 self.status_command_task = None;
+                self.push_error_msg(&error);
+            }
+            RuntimeSignal::ImproveMergeCommandFinished(result) => {
+                self.improve_merge_task = None;
+                self.push_system_msg(&result.text);
+            }
+            RuntimeSignal::ImproveMergeCommandFailed(error) => {
+                self.improve_merge_task = None;
+                self.push_error_msg(&error);
+            }
+            RuntimeSignal::CleanCommandFinished(result) => {
+                self.clean_task = None;
+                if result.clear_improve_sandbox {
+                    self.improve_sandbox = None;
+                }
+                self.push_system_msg(&result.text);
+            }
+            RuntimeSignal::CleanCommandFailed(error) => {
+                self.clean_task = None;
                 self.push_error_msg(&error);
             }
             RuntimeSignal::UiRequest(req) => self.handle_ui_request(req),
@@ -4607,6 +4767,10 @@ impl App {
     }
 
     fn improve_merge_command(&mut self, args: &str) {
+        if self.improve_merge_task.is_some() {
+            self.push_system_msg("Improve merge is already running…");
+            return;
+        }
         let confirmed = args
             .split_whitespace()
             .any(|arg| arg == "--confirm" || arg == "confirm");
@@ -4614,71 +4778,36 @@ impl App {
             self.push_system_msg("No active Improve sandbox to merge.");
             return;
         };
-        let changelog = sandbox.worktree.join(IMPROVE_CHANGELOG_PATH);
-        if !changelog.exists() {
-            self.push_system_msg(&format!(
-                "Refusing to merge: missing Improve changelog at {}. Review/complete the changelog first.",
-                changelog.display()
-            ));
-            return;
-        }
-        match run_git(&self.cwd, &["status", "--short"]) {
-            Ok(status) if !status.trim().is_empty() => {
-                self.push_system_msg(&format!(
-                    "Refusing to merge: current checkout is dirty. Commit/stash/revert first.\n{}",
-                    status
-                ));
-                return;
-            }
-            Err(err) => {
-                self.push_system_msg(&format!("Could not inspect current checkout: {err}"));
-                return;
-            }
-            _ => {}
-        }
-        match run_git(&sandbox.worktree, &["status", "--short"]) {
-            Ok(status) if !status.trim().is_empty() => {
-                self.push_system_msg(&format!(
-                    "Refusing to merge: Improve sandbox has uncommitted changes. Commit them in {} or clean/discard.\n{}",
-                    sandbox.worktree.display(),
-                    status
-                ));
-                return;
-            }
-            Err(err) => {
-                self.push_system_msg(&format!("Could not inspect Improve sandbox: {err}"));
-                return;
-            }
-            _ => {}
-        }
-        if !confirmed {
-            self.push_system_msg(&format!(
-                "Improve merge plan:\n- Branch: {}\n- Worktree: {}\n- Changelog: {}\n- Target checkout: {}\n- Operation: git merge --no-ff {}\n\nReview the changelog, then run `/improve merge --confirm` to merge. No merge has been performed.",
-                sandbox.branch,
-                sandbox.worktree.display(),
-                changelog.display(),
-                self.cwd.display(),
-                sandbox.branch
-            ));
-            return;
-        }
-        match run_git(&self.cwd, &["merge", "--no-ff", &sandbox.branch]) {
-            Ok(output) => {
-                self.push_system_msg(&format!(
-                    "Merged Improve branch {}. Changelog reviewed from {}.\n{}",
-                    sandbox.branch,
-                    changelog.display(),
-                    output
-                ));
-            }
-            Err(err) => self.push_system_msg(&format!("Improve merge failed: {err}")),
-        }
+        let cwd = self.cwd.clone();
+        let signal_tx = self.runtime_signal_tx.clone();
+        self.push_system_msg(if confirmed {
+            "Running Improve merge…"
+        } else {
+            "Loading Improve merge plan…"
+        });
+        self.improve_merge_task = Some(tokio::spawn(async move {
+            let signal = match tokio::task::spawn_blocking(move || {
+                run_improve_merge_command(&cwd, &sandbox, confirmed)
+            })
+            .await
+            {
+                Ok(result) => RuntimeSignal::ImproveMergeCommandFinished(result),
+                Err(error) => RuntimeSignal::ImproveMergeCommandFailed(format!(
+                    "Improve merge task failure: {error}"
+                )),
+            };
+            let _ = signal_tx.send(signal).await;
+        }));
     }
 
     fn clean_command(&mut self, args: &str) {
         let force = args
             .split_whitespace()
             .any(|arg| arg == "--force" || arg == "force");
+        if self.clean_task.is_some() {
+            self.push_system_msg("Clean is already running…");
+            return;
+        }
         let Some(sandbox) = self.current_improve_sandbox() else {
             if force {
                 if let Some(path) = improve_metadata_file(&self.cwd) {
@@ -4708,40 +4837,27 @@ impl App {
             }
             return;
         };
-        let status = run_git(&sandbox.worktree, &["status", "--short"]).unwrap_or_default();
-        if !status.trim().is_empty() && !force {
-            self.push_system_msg(&format!(
-                "Improve sandbox is dirty; not cleaning without confirmation. Review `{}` then run `/clean --force` to remove worktree {}.\n{}",
-                sandbox.branch,
-                sandbox.worktree.display(),
-                status
-            ));
-            return;
-        }
-        let mut command = Command::new("git");
-        command.arg("worktree").arg("remove");
-        if force {
-            command.arg("--force");
-        }
-        command.arg(&sandbox.worktree).current_dir(&self.cwd);
-        match command.output() {
-            Ok(output) if output.status.success() => {
-                self.improve_sandbox = None;
-                if let Some(path) = improve_metadata_file(&self.cwd) {
-                    let _ = std::fs::remove_file(path);
+        let cwd = self.cwd.clone();
+        let signal_tx = self.runtime_signal_tx.clone();
+        let initial_message = if force {
+            "Checking and cleaning Improve sandbox…"
+        } else {
+            "Checking Improve sandbox cleanliness…"
+        };
+        self.push_system_msg(initial_message);
+        self.clean_task = Some(tokio::spawn(async move {
+            let signal = match tokio::task::spawn_blocking(move || {
+                run_clean_command(&cwd, &sandbox, force)
+            })
+            .await
+            {
+                Ok(result) => RuntimeSignal::CleanCommandFinished(result),
+                Err(error) => {
+                    RuntimeSignal::CleanCommandFailed(format!("Clean task failure: {error}"))
                 }
-                self.push_system_msg(&format!(
-                    "Removed Improve worktree {}. Branch {} was kept.",
-                    sandbox.worktree.display(),
-                    sandbox.branch
-                ));
-            }
-            Ok(output) => {
-                let err = String::from_utf8_lossy(&output.stderr);
-                self.push_system_msg(&format!("Clean failed: {}", err.trim()));
-            }
-            Err(err) => self.push_system_msg(&format!("Clean failed: {err}")),
-        }
+            };
+            let _ = signal_tx.send(signal).await;
+        }));
     }
 
     fn start_loop_command(&mut self, message: &str) {
@@ -10238,6 +10354,64 @@ mod session_lifecycle {
 
         assert!(label.starts_with("git "));
         assert!(label.contains("±1"));
+    }
+
+    #[tokio::test]
+    async fn improve_merge_command_opens_background_task() {
+        let temp = TempDir::new().unwrap();
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir_all(worktree.join(".imp")).unwrap();
+        std::fs::write(worktree.join(IMPROVE_CHANGELOG_PATH), "changelog").unwrap();
+        let mut app = make_app_with_session(SessionManager::in_memory(), temp.path().to_path_buf());
+        app.improve_sandbox = Some(ImproveSandbox {
+            branch: "imp/improve/test".into(),
+            base_branch: "nightly".into(),
+            worktree,
+        });
+
+        app.improve_merge_command("");
+
+        assert!(app.improve_merge_task.is_some());
+        assert_eq!(app.messages.last().unwrap().content, "Loading Improve merge plan…");
+    }
+
+    #[tokio::test]
+    async fn clean_command_opens_background_task() {
+        let temp = TempDir::new().unwrap();
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut app = make_app_with_session(SessionManager::in_memory(), temp.path().to_path_buf());
+        app.improve_sandbox = Some(ImproveSandbox {
+            branch: "imp/improve/test".into(),
+            base_branch: "nightly".into(),
+            worktree,
+        });
+
+        app.clean_command("");
+
+        assert!(app.clean_task.is_some());
+        assert_eq!(
+            app.messages.last().unwrap().content,
+            "Checking Improve sandbox cleanliness…"
+        );
+    }
+
+    #[test]
+    fn clean_signal_clears_improve_sandbox_when_requested() {
+        let mut app = make_app();
+        app.improve_sandbox = Some(ImproveSandbox {
+            branch: "imp/improve/test".into(),
+            base_branch: "nightly".into(),
+            worktree: PathBuf::from("/tmp/imp-improve-test"),
+        });
+
+        app.handle_runtime_signal(RuntimeSignal::CleanCommandFinished(CleanCommandResult {
+            text: "cleaned".into(),
+            clear_improve_sandbox: true,
+        }));
+
+        assert!(app.improve_sandbox.is_none());
+        assert_eq!(app.messages.last().unwrap().content, "cleaned");
     }
 
     #[test]
