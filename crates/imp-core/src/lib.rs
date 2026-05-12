@@ -34,6 +34,7 @@ pub mod tools;
 pub mod typescript_extensions;
 pub mod ui;
 pub mod usage;
+pub mod workflow;
 
 pub use agent::{RecoveryCheckpoint, RecoveryCheckpointKind, TimingEvent, TimingStage};
 pub use error::{Error, Result};
