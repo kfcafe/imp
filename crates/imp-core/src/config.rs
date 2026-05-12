@@ -703,8 +703,8 @@ pub struct UiConfig {
     pub improve_auto_turn_budget: u32,
 
     /// Maximum number of `/loop` automatic turns before pausing.
-    /// Default: 10.
-    #[serde(default = "default_loop_turn_budget")]
+    /// 0 disables the imp-level loop cap. Default: 0.
+    #[serde(default)]
     pub loop_turn_budget: u32,
 }
 
@@ -738,9 +738,6 @@ fn default_build_auto_turn_budget() -> u32 {
 fn default_improve_auto_turn_budget() -> u32 {
     5
 }
-fn default_loop_turn_budget() -> u32 {
-    10
-}
 
 impl Default for UiConfig {
     fn default() -> Self {
@@ -768,7 +765,7 @@ impl Default for UiConfig {
             continue_policy: ContinuePolicy::Disabled,
             build_auto_turn_budget: default_build_auto_turn_budget(),
             improve_auto_turn_budget: default_improve_auto_turn_budget(),
-            loop_turn_budget: default_loop_turn_budget(),
+            loop_turn_budget: 0,
         }
     }
 }

@@ -505,7 +505,11 @@ impl SettingsState {
                     self.improve_auto_turn_budget.saturating_add(1).min(100);
             }
             SettingsField::LoopTurnBudget => {
-                self.loop_turn_budget = self.loop_turn_budget.saturating_add(1).min(100);
+                self.loop_turn_budget = if self.loop_turn_budget >= 100 {
+                    0
+                } else {
+                    self.loop_turn_budget.saturating_add(1)
+                };
             }
             SettingsField::WebSearchProvider => {
                 self.web_search_provider = match self.web_search_provider {
@@ -655,7 +659,7 @@ impl SettingsState {
                     self.improve_auto_turn_budget.saturating_sub(1).max(1);
             }
             SettingsField::LoopTurnBudget => {
-                self.loop_turn_budget = self.loop_turn_budget.saturating_sub(1).max(1);
+                self.loop_turn_budget = self.loop_turn_budget.saturating_sub(1);
             }
             SettingsField::WebSearchProvider => {
                 self.web_search_provider = match self.web_search_provider {
@@ -830,7 +834,7 @@ impl SettingsState {
             }
             SettingsField::LoopTurnBudget => {
                 if let Ok(v) = self.edit_buffer.parse::<u32>() {
-                    self.loop_turn_budget = v.clamp(1, 100);
+                    self.loop_turn_budget = v.min(100);
                 }
             }
             SettingsField::ObservationMask => {
@@ -1607,6 +1611,8 @@ fn render_settings_field(
             let value =
                 if state.editing_number && state.current_field() == SettingsField::LoopTurnBudget {
                     format!("{}▎", state.edit_buffer)
+                } else if state.loop_turn_budget == 0 {
+                    "unlimited".to_string()
                 } else {
                     state.loop_turn_budget.to_string()
                 };
