@@ -4853,21 +4853,6 @@ impl App {
         }
     }
 
-    fn active_status_text(&self, snapshot: &StatusSnapshot) -> String {
-        render_status_text(
-            snapshot,
-            self.workflow_mode,
-            self.agent_status_label(),
-            self.active_mana_scope.as_ref(),
-            self.active_mana_run.as_ref(),
-            self.improve_auto_turns,
-            self.config.ui.improve_auto_turn_budget,
-            self.improve_safe_mode,
-            self.improve_sandbox.as_ref(),
-            self.loop_state.as_ref(),
-        )
-    }
-
     fn show_status_command(&mut self) {
         if self.status_command_task.is_some() {
             self.push_system_msg("Status is already loading…");
@@ -10741,7 +10726,18 @@ mod session_lifecycle {
             sandbox_status: None,
             stale_improve_metadata_message: None,
         };
-        let status = app.active_status_text(&snapshot);
+        let status = render_status_text(
+            &snapshot,
+            app.workflow_mode,
+            app.agent_status_label(),
+            app.active_mana_scope.as_ref(),
+            app.active_mana_run.as_ref(),
+            app.improve_auto_turns,
+            app.config.ui.improve_auto_turn_budget,
+            app.improve_safe_mode,
+            app.improve_sandbox.as_ref(),
+            app.loop_state.as_ref(),
+        );
 
         assert!(status.contains("loop: 2/3"));
         assert!(status.contains("loop message: keep going"));
