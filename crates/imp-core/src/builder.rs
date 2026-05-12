@@ -12,6 +12,7 @@ use crate::resources;
 use crate::roles::Role;
 use crate::system_prompt::{self, Fact, TaskContext};
 use crate::tools::{LuaToolLoader, ToolRegistry};
+use crate::workflow::{AutonomyMode, ImplicitWorkflowContractInput, WorkflowContract};
 
 fn load_scoped_memory_block(
     cwd: &std::path::Path,
@@ -75,6 +76,8 @@ pub struct AgentBuilder {
     lua_tool_loader: Option<LuaToolLoader>,
     /// Per-run tool/write policy layered on top of AgentMode.
     run_policy: RunPolicy,
+    /// Optional workflow contract override. If absent, build creates an implicit contract.
+    workflow_contract: Option<WorkflowContract>,
 }
 
 impl AgentBuilder {
@@ -92,6 +95,7 @@ impl AgentBuilder {
             extra_tools: None,
             lua_tool_loader: None,
             run_policy: RunPolicy::default(),
+            workflow_contract: None,
         }
     }
 
@@ -149,6 +153,24 @@ impl AgentBuilder {
     /// Apply a per-run policy on top of the configured agent mode.
     pub fn run_policy(mut self, policy: RunPolicy) -> Self {
         self.run_policy = policy;
+        self
+    }
+
+    /// Override the implicit workflow contract for this agent run.
+    pub fn workflow_contract(mut self, contract: WorkflowContract) -> Self {
+        self.workflow_contract = Some(contract);
+        self
+    }
+
+    /// Set the autonomy mode on the implicit workflow contract.
+    pub fn autonomy_mode(mut self, mode: AutonomyMode) -> Self {
+        let mut contract = self.workflow_contract.unwrap_or_else(|| {
+            WorkflowContract::implicit_from(
+                ImplicitWorkflowContractInput::prompt("").cwd(&self.cwd),
+            )
+        });
+        contract.autonomy_mode = mode;
+        self.workflow_contract = Some(contract);
         self
     }
 

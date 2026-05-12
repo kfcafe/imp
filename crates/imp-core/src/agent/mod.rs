@@ -22,6 +22,7 @@ use crate::mana_review::{
 use crate::policy::RunPolicy;
 use crate::roles::Role;
 use crate::tools::{LuaToolLoader, ToolRegistry};
+use crate::workflow::WorkflowContract;
 
 mod events;
 mod loop_policy;
@@ -121,6 +122,8 @@ pub struct Agent {
     pub config: Arc<Config>,
     /// Per-run tool/write policy layered on top of AgentMode.
     pub run_policy: RunPolicy,
+    /// Lightweight workflow contract for this agent run. Initially informational; future runtime layers use it for policy, verification, and evidence.
+    pub workflow_contract: WorkflowContract,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_tx: mpsc::Sender<AgentCommand>,
@@ -173,7 +176,7 @@ impl Agent {
             tools: ToolRegistry::new(),
             messages: Vec::new(),
             system_prompt: String::new(),
-            cwd,
+            cwd: cwd.clone(),
             max_tokens: None,
             role: None,
             hooks,
@@ -209,6 +212,9 @@ impl Agent {
             turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
             config: Arc::new(Config::default()),
             run_policy: RunPolicy::default(),
+            workflow_contract: WorkflowContract::implicit_from(
+                crate::workflow::ImplicitWorkflowContractInput::prompt("").cwd(&cwd),
+            ),
             lua_tool_loader: None,
 
             event_tx,
