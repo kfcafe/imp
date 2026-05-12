@@ -39,10 +39,36 @@ pub struct ManaNavigatorState {
     detail_error: Option<String>,
     filter: String,
     detail_scroll: usize,
+    pub loading: bool,
 }
 
 impl ManaNavigatorState {
     pub fn load(cwd: &Path, initial_id: Option<&str>) -> Self {
+        match Self::try_load(cwd, initial_id) {
+            Ok(state) => state,
+            Err((mana_dir, message)) => Self::error(mana_dir, message),
+        }
+    }
+
+    pub fn loading(cwd: &Path) -> Self {
+        Self {
+            mana_dir: api::find_mana_dir(cwd).ok(),
+            nodes: Vec::new(),
+            load_error: None,
+            selected_id: None,
+            expanded: HashSet::new(),
+            detail: None,
+            detail_error: None,
+            filter: String::new(),
+            detail_scroll: 0,
+            loading: true,
+        }
+    }
+
+    pub fn try_load(
+        cwd: &Path,
+        initial_id: Option<&str>,
+    ) -> Result<Self, (Option<PathBuf>, String)> {
         match api::find_mana_dir(cwd) {
             Ok(mana_dir) => match load_nodes(&mana_dir) {
                 Ok(nodes) => {
@@ -56,6 +82,7 @@ impl ManaNavigatorState {
                         detail_error: None,
                         filter: String::new(),
                         detail_scroll: 0,
+                        loading: false,
                     };
                     if let Some(id) = initial_id {
                         state.expand_ancestors(id);
@@ -65,20 +92,18 @@ impl ManaNavigatorState {
                         .map(|node| node.id.clone())
                         .or_else(|| state.nodes.first().map(|node| node.id.clone()));
                     state.refresh_detail();
-                    state
+                    Ok(state)
                 }
-                Err(error) => {
-                    Self::error(Some(mana_dir), format!("Failed to load mana tree: {error}"))
-                }
+                Err(error) => Err((Some(mana_dir), format!("Failed to load mana tree: {error}"))),
             },
-            Err(error) => Self::error(
+            Err(error) => Err((
                 None,
                 format!("No .mana directory found from {}: {error}", cwd.display()),
-            ),
+            )),
         }
     }
 
-    fn error(mana_dir: Option<PathBuf>, message: String) -> Self {
+    pub fn error(mana_dir: Option<PathBuf>, message: String) -> Self {
         Self {
             mana_dir,
             nodes: Vec::new(),
@@ -89,6 +114,7 @@ impl ManaNavigatorState {
             detail_error: None,
             filter: String::new(),
             detail_scroll: 0,
+            loading: false,
         }
     }
 
@@ -411,6 +437,15 @@ impl Widget for ManaNavigatorView<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
+        if self.state.loading {
+            buf.set_line(
+                inner.x,
+                inner.y,
+                &Line::from(Span::styled("Loading mana…", self.theme.muted_style())),
+                inner.width,
+            );
+            return;
+        }
         if let Some(error) = &self.state.load_error {
             buf.set_line(
                 inner.x,
@@ -675,6 +710,7 @@ mod tests {
             detail_error: None,
             filter: String::new(),
             detail_scroll: 0,
+            loading: false,
         };
         state.move_up();
         assert_eq!(state.selected_id(), Some("1"));
@@ -695,6 +731,7 @@ mod tests {
             detail_error: None,
             filter: String::new(),
             detail_scroll: 0,
+            loading: false,
         };
         assert_eq!(state.visible_nodes().len(), 2);
         state.toggle_selected();

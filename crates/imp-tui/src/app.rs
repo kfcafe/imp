@@ -25,7 +25,7 @@ use imp_core::compaction::{
 };
 use imp_core::config::Config;
 use imp_core::personality::default_soul_markdown;
-use imp_core::session::{SessionEntry, SessionManager};
+use imp_core::session::{SessionEntry, SessionInfo, SessionManager};
 use imp_core::Error as ImpCoreError;
 use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelMeta, ModelRegistry, ProviderRegistry};
@@ -147,6 +147,25 @@ enum LoginTaskExit {
     Failed(String),
 }
 
+struct SessionOpenResult {
+    session: SessionManager,
+    summary: Option<String>,
+}
+
+impl std::fmt::Debug for SessionOpenResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionOpenResult")
+            .field("summary", &self.summary)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+struct SessionListResult {
+    sessions: Vec<SessionInfo>,
+    preferred_cwd: PathBuf,
+}
+
 fn open_url(url: &str) {
     #[cfg(target_os = "macos")]
     {
@@ -227,6 +246,15 @@ enum RuntimeSignal {
     },
     LoginTaskSucceeded(String),
     LoginTaskFailed(String),
+    SessionListLoaded(SessionListResult),
+    SessionListFailed(String),
+    SessionOpened(SessionOpenResult),
+    SessionOpenFailed(String),
+    ManaNavigatorLoaded(ManaNavigatorState),
+    ManaNavigatorLoadFailed {
+        mana_dir: Option<PathBuf>,
+        message: String,
+    },
     UiRequest(crate::tui_interface::UiRequest),
 }
 
@@ -757,6 +785,7 @@ pub struct App {
 
     // Agent
     pub agent_handle: Option<AgentHandle>,
+    agent_event_task: Option<tokio::task::JoinHandle<()>>,
     agent_task: Option<tokio::task::JoinHandle<Result<(), ImpCoreError>>>,
     compaction_task: Option<tokio::task::JoinHandle<Result<String, String>>>,
     lua_command_task: Option<tokio::task::JoinHandle<(String, Result<Option<String>, String>)>>,
@@ -807,6 +836,11 @@ pub struct App {
     loop_state: Option<LoopState>,
     secrets_flow: Option<SecretsFlowState>,
     login_task: Option<tokio::task::JoinHandle<LoginTaskExit>>,
+    session_list_task: Option<tokio::task::JoinHandle<()>>,
+    session_open_task: Option<tokio::task::JoinHandle<()>>,
+    mana_navigator_task: Option<tokio::task::JoinHandle<()>>,
+    runtime_signal_tx: tokio::sync::mpsc::Sender<RuntimeSignal>,
+    runtime_signal_rx: tokio::sync::mpsc::Receiver<RuntimeSignal>,
 
     // Accumulated stats
     pub accumulated_usage: Usage,
@@ -1362,6 +1396,7 @@ impl App {
             .resolve_meta(&model_name, None)
             .map(|m| m.context_window)
             .unwrap_or(200_000);
+        let (runtime_signal_tx, runtime_signal_rx) = tokio::sync::mpsc::channel(256);
 
         Self {
             running: true,
@@ -1370,6 +1405,7 @@ impl App {
             ask_editor_backup: None,
             cwd,
             agent_handle: None,
+            agent_event_task: None,
             agent_task: None,
             compaction_task: None,
             lua_command_task: None,
@@ -1411,6 +1447,11 @@ impl App {
             loop_state: None,
             secrets_flow: None,
             login_task: None,
+            session_list_task: None,
+            session_open_task: None,
+            mana_navigator_task: None,
+            runtime_signal_tx,
+            runtime_signal_rx,
             accumulated_usage: Usage::default(),
             accumulated_cost: Cost::default(),
             current_context_tokens: 0,
@@ -1600,6 +1641,11 @@ impl App {
                         break;
                     }
                 }
+                signal = self.runtime_signal_rx.recv() => {
+                    if let Some(signal) = signal {
+                        self.handle_runtime_signal(signal);
+                    }
+                }
                 _ = frame_tick.tick() => {
                     self.tick = self.tick.wrapping_add(1);
                     self.maybe_autoscroll_selection();
@@ -1668,6 +1714,13 @@ impl App {
                     Ok(event) => signals.push(RuntimeSignal::AgentEvent(event)),
                     Err(_) => break,
                 }
+            }
+        }
+
+        while signals.len() < MAX_RUNTIME_SIGNALS_PER_TICK {
+            match self.runtime_signal_rx.try_recv() {
+                Ok(signal) => signals.push(signal),
+                Err(_) => break,
             }
         }
 
@@ -1790,6 +1843,9 @@ impl App {
                     .as_ref()
                     .is_some_and(|task| !task.is_finished());
                 if !has_active_replacement {
+                    if let Some(task) = self.agent_event_task.take() {
+                        task.abort();
+                    }
                     self.agent_handle = None;
                 }
             }
@@ -1799,6 +1855,9 @@ impl App {
                     .as_ref()
                     .is_some_and(|task| !task.is_finished());
                 if !has_active_replacement {
+                    if let Some(task) = self.agent_event_task.take() {
+                        task.abort();
+                    }
                     self.agent_handle = None;
                 }
                 self.present_agent_failure(error);
@@ -1829,6 +1888,14 @@ impl App {
             }
             RuntimeSignal::LoginTaskSucceeded(message) => self.push_system_msg(&message),
             RuntimeSignal::LoginTaskFailed(message) => self.push_error_msg(&message),
+            RuntimeSignal::SessionListLoaded(result) => self.finish_session_list_load(result),
+            RuntimeSignal::SessionListFailed(error) => self.fail_session_list_load(error),
+            RuntimeSignal::SessionOpened(result) => self.finish_session_open(result),
+            RuntimeSignal::SessionOpenFailed(error) => self.push_error_msg(&error),
+            RuntimeSignal::ManaNavigatorLoaded(state) => self.finish_mana_navigator_load(state),
+            RuntimeSignal::ManaNavigatorLoadFailed { mana_dir, message } => {
+                self.fail_mana_navigator_load(mana_dir, message);
+            }
             RuntimeSignal::UiRequest(req) => self.handle_ui_request(req),
         }
         self.needs_redraw = true;
@@ -4084,6 +4151,9 @@ impl App {
             if let Some(task) = self.agent_task.take() {
                 task.abort();
             }
+            if let Some(task) = self.agent_event_task.take() {
+                task.abort();
+            }
             self.agent_handle = None;
             self.is_streaming = false;
             self.streaming_anchor_user_index = None;
@@ -4131,6 +4201,9 @@ impl App {
             });
             if already_cancelled {
                 if let Some(task) = self.agent_task.take() {
+                    task.abort();
+                }
+                if let Some(task) = self.agent_event_task.take() {
                     task.abort();
                 }
                 self.agent_handle = None;
@@ -4696,8 +4769,27 @@ impl App {
 
         let prompt = prompt.to_string();
         let task = tokio::spawn(async move { agent.run(prompt).await });
+        let command_tx = handle.command_tx.clone();
+        let cancel_token = Arc::clone(&handle.cancel_token);
+        let signal_tx = self.runtime_signal_tx.clone();
+        let mut event_rx = handle.event_rx;
+        self.agent_event_task = Some(tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                if signal_tx
+                    .send(RuntimeSignal::AgentEvent(event))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
 
-        self.agent_handle = Some(handle);
+        self.agent_handle = Some(AgentHandle {
+            event_rx: tokio::sync::mpsc::channel(1).1,
+            command_tx,
+            cancel_token,
+        });
         self.agent_task = Some(task);
         Ok(())
     }
@@ -5195,47 +5287,7 @@ impl App {
                 self.open_personality();
             }
             "resume" => {
-                let session_dir = imp_core::storage::global_sessions_dir();
-                match SessionManager::list(&session_dir) {
-                    Ok(sessions) if !sessions.is_empty() => {
-                        let state = SessionPickerState::new(sessions, Some(&self.cwd));
-                        if state.filtered_indices.is_empty() {
-                            self.messages.push(DisplayMessage {
-                                role: MessageRole::System,
-                                content: "No saved sessions found.".into(),
-                                thinking: None,
-                                tool_calls: Vec::new(),
-                                assistant_blocks: Vec::new(),
-                                is_streaming: false,
-                                timestamp: imp_llm::now(),
-                            });
-                        } else {
-                            self.mode = UiMode::SessionPicker(state);
-                        }
-                    }
-                    Ok(_) => {
-                        self.messages.push(DisplayMessage {
-                            role: MessageRole::System,
-                            content: "No saved sessions found.".into(),
-                            thinking: None,
-                            tool_calls: Vec::new(),
-                            assistant_blocks: Vec::new(),
-                            is_streaming: false,
-                            timestamp: imp_llm::now(),
-                        });
-                    }
-                    Err(e) => {
-                        self.messages.push(DisplayMessage {
-                            role: MessageRole::Error,
-                            content: format!("Failed to list sessions: {e}"),
-                            thinking: None,
-                            tool_calls: Vec::new(),
-                            assistant_blocks: Vec::new(),
-                            is_streaming: false,
-                            timestamp: imp_llm::now(),
-                        });
-                    }
-                }
+                self.start_session_list_load();
             }
             "session" => {
                 self.push_system_msg("/session is defunct. Use /resume to browse/search sessions.");
@@ -6012,6 +6064,101 @@ impl App {
         self.mode = UiMode::Personality(state);
     }
 
+    fn start_session_list_load(&mut self) {
+        self.mode = UiMode::SessionPicker(SessionPickerState::loading(Some(&self.cwd)));
+        if self.session_list_task.is_some() {
+            return;
+        }
+        let session_dir = imp_core::storage::global_sessions_dir();
+        let preferred_cwd = self.cwd.clone();
+        let signal_tx = self.runtime_signal_tx.clone();
+        self.session_list_task = Some(tokio::spawn(async move {
+            let signal = match tokio::task::spawn_blocking(move || {
+                SessionManager::list(&session_dir)
+                    .map(|sessions| SessionListResult {
+                        sessions,
+                        preferred_cwd,
+                    })
+                    .map_err(|error| format!("Failed to list sessions: {error}"))
+            })
+            .await
+            {
+                Ok(Ok(result)) => RuntimeSignal::SessionListLoaded(result),
+                Ok(Err(error)) => RuntimeSignal::SessionListFailed(error),
+                Err(error) => {
+                    RuntimeSignal::SessionListFailed(format!("Session list task failure: {error}"))
+                }
+            };
+            let _ = signal_tx.send(signal).await;
+        }));
+    }
+
+    fn finish_session_list_load(&mut self, result: SessionListResult) {
+        if result.sessions.is_empty() {
+            self.mode = UiMode::Normal;
+            self.push_system_msg("No saved sessions found.");
+            return;
+        }
+
+        let preferred_cwd = result.preferred_cwd;
+        if let UiMode::SessionPicker(state) = &mut self.mode {
+            state.finish_loading(result.sessions);
+            if state.filtered_indices.is_empty() {
+                self.mode = UiMode::Normal;
+                self.push_system_msg("No saved sessions found.");
+            }
+        } else {
+            self.mode = UiMode::SessionPicker(SessionPickerState::new(
+                result.sessions,
+                Some(&preferred_cwd),
+            ));
+        }
+    }
+
+    fn fail_session_list_load(&mut self, error: String) {
+        if let UiMode::SessionPicker(state) = &mut self.mode {
+            state.fail_loading();
+            self.mode = UiMode::Normal;
+        }
+        self.push_error_msg(&error);
+    }
+
+    fn start_session_open(&mut self, path: PathBuf) {
+        if self.session_open_task.is_some() {
+            return;
+        }
+        self.mode = UiMode::Normal;
+        self.push_system_msg("Resuming session…");
+        let signal_tx = self.runtime_signal_tx.clone();
+        self.session_open_task = Some(tokio::spawn(async move {
+            let signal = match tokio::task::spawn_blocking(move || {
+                let session = SessionManager::open(&path)
+                    .map_err(|error| format!("Failed to open session: {error}"))?;
+                let summary = session.summary().map(str::to_string);
+                Ok(SessionOpenResult { session, summary })
+            })
+            .await
+            {
+                Ok(Ok(result)) => RuntimeSignal::SessionOpened(result),
+                Ok(Err(error)) => RuntimeSignal::SessionOpenFailed(error),
+                Err(error) => {
+                    RuntimeSignal::SessionOpenFailed(format!("Session open task failure: {error}"))
+                }
+            };
+            let _ = signal_tx.send(signal).await;
+        }));
+    }
+
+    fn finish_session_open(&mut self, result: SessionOpenResult) {
+        self.session = result.session;
+        self.load_session_messages();
+        if let Some(summary) = result.summary {
+            self.push_system_msg(&format!("Session resumed — {summary}"));
+        } else {
+            self.push_system_msg("Session resumed.");
+        }
+    }
+
     fn handle_session_picker_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
@@ -6043,46 +6190,8 @@ impl App {
                 } else {
                     None
                 };
-                self.mode = UiMode::Normal;
                 if let Some(path) = selected_path {
-                    match SessionManager::open(&path) {
-                        Ok(session) => {
-                            self.session = session;
-                            self.load_session_messages();
-                            if let Some(summary) = self.session.summary() {
-                                self.messages.push(DisplayMessage {
-                                    role: MessageRole::System,
-                                    content: format!("Session resumed — {}", summary),
-                                    thinking: None,
-                                    tool_calls: Vec::new(),
-                                    assistant_blocks: Vec::new(),
-                                    is_streaming: false,
-                                    timestamp: imp_llm::now(),
-                                });
-                            } else {
-                                self.messages.push(DisplayMessage {
-                                    role: MessageRole::System,
-                                    content: "Session resumed.".into(),
-                                    thinking: None,
-                                    tool_calls: Vec::new(),
-                                    assistant_blocks: Vec::new(),
-                                    is_streaming: false,
-                                    timestamp: imp_llm::now(),
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            self.messages.push(DisplayMessage {
-                                role: MessageRole::Error,
-                                content: format!("Failed to open session: {e}"),
-                                thinking: None,
-                                tool_calls: Vec::new(),
-                                assistant_blocks: Vec::new(),
-                                is_streaming: false,
-                                timestamp: imp_llm::now(),
-                            });
-                        }
-                    }
+                    self.start_session_open(path);
                 }
             }
             _ => {}
@@ -7041,7 +7150,46 @@ impl App {
     }
 
     fn open_mana_navigator(&mut self, initial_id: Option<&str>) {
-        self.mode = UiMode::ManaNavigator(ManaNavigatorState::load(&self.cwd, initial_id));
+        self.mode = UiMode::ManaNavigator(ManaNavigatorState::loading(&self.cwd));
+        if self.mana_navigator_task.is_some() {
+            return;
+        }
+        let cwd = self.cwd.clone();
+        let initial_id = initial_id.map(str::to_string);
+        let signal_tx = self.runtime_signal_tx.clone();
+        self.mana_navigator_task = Some(tokio::spawn(async move {
+            let signal = match tokio::task::spawn_blocking(move || {
+                ManaNavigatorState::try_load(&cwd, initial_id.as_deref())
+            })
+            .await
+            {
+                Ok(Ok(state)) => RuntimeSignal::ManaNavigatorLoaded(state),
+                Ok(Err((mana_dir, message))) => {
+                    RuntimeSignal::ManaNavigatorLoadFailed { mana_dir, message }
+                }
+                Err(error) => RuntimeSignal::ManaNavigatorLoadFailed {
+                    mana_dir: None,
+                    message: format!("Mana navigator task failure: {error}"),
+                },
+            };
+            let _ = signal_tx.send(signal).await;
+        }));
+    }
+
+    fn finish_mana_navigator_load(&mut self, state: ManaNavigatorState) {
+        self.mana_navigator_task = None;
+        if matches!(self.mode, UiMode::ManaNavigator(_)) {
+            self.mode = UiMode::ManaNavigator(state);
+        }
+    }
+
+    fn fail_mana_navigator_load(&mut self, mana_dir: Option<PathBuf>, message: String) {
+        self.mana_navigator_task = None;
+        if matches!(self.mode, UiMode::ManaNavigator(_)) {
+            self.mode = UiMode::ManaNavigator(ManaNavigatorState::error(mana_dir, message));
+        } else {
+            self.push_error_msg(&message);
+        }
     }
 
     fn open_tree_view(&mut self) {
@@ -8245,8 +8393,8 @@ mod session_lifecycle {
         assert!(msgs[0].is_user());
     }
 
-    #[test]
-    fn tui_integration_slash_mana_opens_navigator() {
+    #[tokio::test]
+    async fn tui_integration_slash_mana_opens_navigator() {
         let mut app = make_app();
         app.execute_command("mana");
         assert!(matches!(app.mode, UiMode::ManaNavigator(_)));
@@ -8324,6 +8472,50 @@ mod session_lifecycle {
         let after_render = render_status_to_string(&after, 120);
         assert_eq!(after.context_percent, 0.0);
         assert!(after_render.contains("0%"));
+    }
+
+    #[tokio::test]
+    async fn resume_command_opens_loading_session_picker() {
+        let mut app = make_app();
+
+        app.execute_command("resume");
+
+        match &app.mode {
+            UiMode::SessionPicker(state) => assert!(state.loading),
+            other => panic!("expected session picker, got {other:?}"),
+        }
+        assert!(app.session_list_task.is_some());
+    }
+
+    #[test]
+    fn session_list_load_finishes_into_picker() {
+        let temp = TempDir::new().unwrap();
+        let mut app = make_app_with_session(SessionManager::in_memory(), temp.path().to_path_buf());
+        app.mode = UiMode::SessionPicker(SessionPickerState::loading(Some(temp.path())));
+        let info = SessionInfo {
+            id: "session-1".into(),
+            path: temp.path().join("session-1.jsonl"),
+            cwd: temp.path().to_string_lossy().to_string(),
+            created_at: 1,
+            updated_at: 2,
+            message_count: 1,
+            first_message: Some("hello".into()),
+            name: None,
+            summary: None,
+        };
+
+        app.finish_session_list_load(SessionListResult {
+            sessions: vec![info],
+            preferred_cwd: temp.path().to_path_buf(),
+        });
+
+        match &app.mode {
+            UiMode::SessionPicker(state) => {
+                assert!(!state.loading);
+                assert_eq!(state.sessions.len(), 1);
+            }
+            other => panic!("expected session picker, got {other:?}"),
+        }
     }
 
     #[test]
