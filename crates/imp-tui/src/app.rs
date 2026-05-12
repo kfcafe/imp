@@ -738,6 +738,13 @@ struct LoopState {
     budget: u32,
 }
 
+#[derive(Debug, Clone)]
+struct GitLabelCache {
+    cwd: PathBuf,
+    refreshed_at: Instant,
+    label: Option<String>,
+}
+
 pub struct App {
     // Core
     pub running: bool,
@@ -805,6 +812,10 @@ pub struct App {
     /// Last turn's input tokens — best proxy for actual current context size.
     pub current_context_tokens: u32,
     chat_render_epoch: u64,
+
+    current_oauth_display_info: Option<imp_llm::auth::OAuthDisplayInfo>,
+    current_oauth_display_info_model: String,
+    git_label_cache: Option<GitLabelCache>,
 
     // Extension state
     pub status_items: HashMap<String, String>,
@@ -1402,6 +1413,9 @@ impl App {
             accumulated_cost: Cost::default(),
             current_context_tokens: 0,
             chat_render_epoch: 0,
+            current_oauth_display_info: None,
+            current_oauth_display_info_model: String::new(),
+            git_label_cache: None,
             status_items: HashMap::new(),
             widgets: HashMap::new(),
             lua_runtime: None,
@@ -2396,6 +2410,7 @@ impl App {
     }
 
     fn render(&mut self, frame: &mut Frame) {
+        self.refresh_render_caches();
         let area = frame.area();
         frame.render_widget(Clear, area);
 
@@ -2629,6 +2644,7 @@ impl App {
             frame.render_widget(AskBar::new(state, &self.theme), editor_area);
         } else {
             let status_info = self.build_status_info();
+            let git_label = self.cached_git_label();
             let editor = EditorView::new(&self.editor, &self.theme, self.thinking_level)
                 .summarize_paste(true)
                 .model(&self.model_name)
@@ -2650,7 +2666,7 @@ impl App {
                 .mana_run_label(self.active_mana_run_label())
                 .improve_status_label(self.improve_status_label())
                 .loop_label(self.loop_label())
-                .git_label(compact_git_label(&self.cwd));
+                .git_label(git_label);
             frame.render_widget(editor, editor_area);
         }
 
@@ -2743,6 +2759,52 @@ impl App {
         }
     }
 
+    fn cached_git_label(&mut self) -> Option<String> {
+        const GIT_LABEL_CACHE_TTL: Duration = Duration::from_secs(2);
+
+        let now = Instant::now();
+        let cache_hit = self.git_label_cache.as_ref().is_some_and(|cache| {
+            cache.cwd == self.cwd && now.duration_since(cache.refreshed_at) < GIT_LABEL_CACHE_TTL
+        });
+        if cache_hit
+            || self.is_streaming
+            || self.compaction_task.is_some()
+            || self.lua_command_task.is_some()
+        {
+            return self
+                .git_label_cache
+                .as_ref()
+                .and_then(|cache| (cache.cwd == self.cwd).then(|| cache.label.clone()))
+                .flatten();
+        }
+
+        let label = compact_git_label(&self.cwd);
+        self.git_label_cache = Some(GitLabelCache {
+            cwd: self.cwd.clone(),
+            refreshed_at: now,
+            label: label.clone(),
+        });
+        label
+    }
+
+    fn refresh_render_caches(&mut self) {
+        if self.current_oauth_display_info_model != self.model_name {
+            self.current_oauth_display_info = self.load_current_oauth_display_info();
+            self.current_oauth_display_info_model = self.model_name.clone();
+        }
+    }
+
+    fn load_current_oauth_display_info(&self) -> Option<imp_llm::auth::OAuthDisplayInfo> {
+        let auth_path = imp_core::storage::global_auth_path();
+        let auth_store = AuthStore::load(&auth_path).ok()?;
+        let meta = self.model_registry.resolve_meta(&self.model_name, None)?;
+        let mut provider_name = meta.provider.clone();
+        if should_use_chatgpt_provider(&auth_store, &self.model_registry, &meta) {
+            provider_name = "openai-codex".to_string();
+        }
+        auth_store.oauth_display_info(&provider_name)
+    }
+
     fn build_status_info(&self) -> StatusInfo {
         let cwd = self.cwd.to_string_lossy().to_string();
         let session_name = self
@@ -2799,14 +2861,7 @@ impl App {
     }
 
     fn current_oauth_display_info(&self) -> Option<imp_llm::auth::OAuthDisplayInfo> {
-        let auth_path = imp_core::storage::global_auth_path();
-        let auth_store = AuthStore::load(&auth_path).ok()?;
-        let meta = self.model_registry.resolve_meta(&self.model_name, None)?;
-        let mut provider_name = meta.provider.clone();
-        if should_use_chatgpt_provider(&auth_store, &self.model_registry, &meta) {
-            provider_name = "openai-codex".to_string();
-        }
-        auth_store.oauth_display_info(&provider_name)
+        self.current_oauth_display_info.clone()
     }
 
     fn current_model_meta_for_persistence(&self) -> Option<ModelMeta> {
@@ -3213,29 +3268,90 @@ impl App {
             KeyCode::Esc | KeyCode::Tab => {
                 self.mode = UiMode::Normal;
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 if let UiMode::ManaNavigator(ref mut state) = self.mode {
                     state.move_up();
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Char('k') => {
+                if let UiMode::ManaNavigator(ref mut state) = self.mode {
+                    if state.filter().is_empty() {
+                        state.move_up();
+                    } else {
+                        state.push_filter_char('k');
+                    }
+                }
+            }
+            KeyCode::Down => {
                 if let UiMode::ManaNavigator(ref mut state) = self.mode {
                     state.move_down();
                 }
             }
-            KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Char('j') => {
+                if let UiMode::ManaNavigator(ref mut state) = self.mode {
+                    if state.filter().is_empty() {
+                        state.move_down();
+                    } else {
+                        state.push_filter_char('j');
+                    }
+                }
+            }
+            KeyCode::Left => {
                 if let UiMode::ManaNavigator(ref mut state) = self.mode {
                     state.collapse_selected();
                 }
             }
-            KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Char('h') => {
+                if let UiMode::ManaNavigator(ref mut state) = self.mode {
+                    if state.filter().is_empty() {
+                        state.collapse_selected();
+                    } else {
+                        state.push_filter_char('h');
+                    }
+                }
+            }
+            KeyCode::Right => {
                 if let UiMode::ManaNavigator(ref mut state) = self.mode {
                     state.expand_selected();
+                }
+            }
+            KeyCode::Char('l') => {
+                if let UiMode::ManaNavigator(ref mut state) = self.mode {
+                    if state.filter().is_empty() {
+                        state.expand_selected();
+                    } else {
+                        state.push_filter_char('l');
+                    }
                 }
             }
             KeyCode::Enter => {
                 if let UiMode::ManaNavigator(ref mut state) = self.mode {
                     state.toggle_selected();
+                }
+            }
+            KeyCode::PageUp => {
+                if let UiMode::ManaNavigator(ref mut state) = self.mode {
+                    state.scroll_detail_up();
+                }
+            }
+            KeyCode::PageDown => {
+                if let UiMode::ManaNavigator(ref mut state) = self.mode {
+                    state.scroll_detail_down();
+                }
+            }
+            KeyCode::Backspace => {
+                if let UiMode::ManaNavigator(ref mut state) = self.mode {
+                    state.pop_filter_char();
+                }
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let UiMode::ManaNavigator(ref mut state) = self.mode {
+                    state.clear_filter();
+                }
+            }
+            KeyCode::Char(ch) => {
+                if let UiMode::ManaNavigator(ref mut state) = self.mode {
+                    state.push_filter_char(ch);
                 }
             }
             _ => {}
@@ -4558,7 +4674,6 @@ impl App {
             Err(error) => self.push_error_msg(&format!("cd failed: {error}")),
         }
     }
-
 
     fn run_shell_command(&mut self, command: &str) {
         if command.is_empty() {
@@ -8133,6 +8248,62 @@ mod session_lifecycle {
         let after_render = render_status_to_string(&after, 120);
         assert_eq!(after.context_percent, 0.0);
         assert!(after_render.contains("0%"));
+    }
+
+    #[test]
+    fn current_oauth_display_info_is_cached_for_render_status() {
+        let mut app = make_app();
+        let info = imp_llm::auth::OAuthDisplayInfo {
+            account_id: Some("account-123456".into()),
+            plan: Some("Pro".into()),
+            using_subscription: true,
+        };
+        app.current_oauth_display_info = Some(info);
+        app.current_oauth_display_info_model = app.model_name.clone();
+
+        let status = app.build_status_info();
+
+        assert_eq!(
+            status.extension_items.get("oauth"),
+            Some(&"Pro · account-…".to_string())
+        );
+    }
+
+    #[test]
+    fn cached_git_label_reuses_recent_value() {
+        let temp = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let mut app = make_app_with_session(SessionManager::in_memory(), temp.path().to_path_buf());
+
+        let first = app.cached_git_label();
+        std::fs::write(temp.path().join("changed.txt"), "dirty").unwrap();
+        let second = app.cached_git_label();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn cached_git_label_refreshes_after_ttl() {
+        let temp = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let mut app = make_app_with_session(SessionManager::in_memory(), temp.path().to_path_buf());
+        let first = app.cached_git_label();
+        std::fs::write(temp.path().join("changed.txt"), "dirty").unwrap();
+        if let Some(cache) = app.git_label_cache.as_mut() {
+            cache.refreshed_at -= Duration::from_secs(3);
+        }
+
+        let refreshed = app.cached_git_label();
+
+        assert_ne!(first, refreshed);
     }
 
     #[test]

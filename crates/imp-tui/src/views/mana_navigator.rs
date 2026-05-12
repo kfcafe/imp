@@ -19,6 +19,8 @@ pub struct ManaTreeNode {
     pub priority: u8,
     pub kind: String,
     pub parent: Option<String>,
+    pub labels: Vec<String>,
+    pub assignee: Option<String>,
     pub has_verify: bool,
     pub child_count: usize,
     pub depth: usize,
@@ -35,6 +37,8 @@ pub struct ManaNavigatorState {
     expanded: HashSet<String>,
     detail: Option<Unit>,
     detail_error: Option<String>,
+    filter: String,
+    detail_scroll: usize,
 }
 
 impl ManaNavigatorState {
@@ -50,8 +54,12 @@ impl ManaNavigatorState {
                         expanded: HashSet::new(),
                         detail: None,
                         detail_error: None,
+                        filter: String::new(),
+                        detail_scroll: 0,
                     };
-                    state.expand_all();
+                    if let Some(id) = initial_id {
+                        state.expand_ancestors(id);
+                    }
                     state.selected_id = initial_id
                         .and_then(|id| state.nodes.iter().find(|node| node.id == id))
                         .map(|node| node.id.clone())
@@ -79,6 +87,8 @@ impl ManaNavigatorState {
             expanded: HashSet::new(),
             detail: None,
             detail_error: None,
+            filter: String::new(),
+            detail_scroll: 0,
         }
     }
 
@@ -144,10 +154,55 @@ impl ManaNavigatorState {
     }
 
     pub fn visible_nodes(&self) -> Vec<&ManaTreeNode> {
-        self.nodes
-            .iter()
-            .filter(|node| self.ancestors_expanded(node))
-            .collect()
+        if self.filter.trim().is_empty() {
+            self.nodes
+                .iter()
+                .filter(|node| self.ancestors_expanded(node))
+                .collect()
+        } else {
+            self.nodes
+                .iter()
+                .filter(|node| node.matches_filter(&self.filter))
+                .collect()
+        }
+    }
+
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    pub fn push_filter_char(&mut self, ch: char) {
+        if ch.is_control() {
+            return;
+        }
+        self.filter.push(ch);
+        self.select_first_visible();
+    }
+
+    pub fn pop_filter_char(&mut self) {
+        self.filter.pop();
+        self.select_first_visible();
+    }
+
+    pub fn clear_filter(&mut self) {
+        if !self.filter.is_empty() {
+            self.filter.clear();
+            self.select_first_visible();
+        }
+    }
+
+    pub fn scroll_detail_up(&mut self) {
+        self.detail_scroll = self.detail_scroll.saturating_sub(1);
+    }
+
+    pub fn scroll_detail_down(&mut self) {
+        self.detail_scroll = self.detail_scroll.saturating_add(1);
+    }
+
+    fn select_first_visible(&mut self) {
+        let visible = self.visible_node_ids();
+        self.selected_id = visible.first().cloned();
+        self.refresh_detail();
     }
 
     pub fn selected_visible_index(&self) -> Option<usize> {
@@ -182,16 +237,24 @@ impl ManaNavigatorState {
         true
     }
 
-    fn expand_all(&mut self) {
-        self.expanded = self
+    fn expand_ancestors(&mut self, id: &str) {
+        let mut parent = self
             .nodes
             .iter()
-            .filter(|node| node.child_count > 0)
-            .map(|node| node.id.clone())
-            .collect();
+            .find(|node| node.id == id)
+            .and_then(|node| node.parent.clone());
+        while let Some(parent_id) = parent {
+            self.expanded.insert(parent_id.clone());
+            parent = self
+                .nodes
+                .iter()
+                .find(|node| node.id == parent_id)
+                .and_then(|node| node.parent.clone());
+        }
     }
 
     fn refresh_detail(&mut self) {
+        self.detail_scroll = 0;
         self.detail = None;
         self.detail_error = None;
         let (Some(mana_dir), Some(id)) = (self.mana_dir.as_deref(), self.selected_id.as_deref())
@@ -246,6 +309,8 @@ fn flatten_entries(
             priority: entry.priority,
             kind: format!("{:?}", entry.kind),
             parent: entry.parent.clone(),
+            labels: entry.labels.clone(),
+            assignee: entry.assignee.clone(),
             has_verify: entry.has_verify,
             child_count,
             depth,
@@ -256,6 +321,30 @@ fn flatten_entries(
         child_guides.push(!is_last_child);
         flatten_entries(Some(&entry.id), depth + 1, child_guides, by_parent, out);
     }
+}
+
+impl ManaTreeNode {
+    fn matches_filter(&self, query: &str) -> bool {
+        let haystack = format!(
+            "{} {} {} {} {} {}",
+            self.id,
+            self.title,
+            self.status,
+            self.kind,
+            self.assignee.as_deref().unwrap_or(""),
+            self.labels.join(" ")
+        )
+        .to_lowercase();
+        fuzzy_match(&haystack, &query.to_lowercase())
+    }
+}
+
+fn fuzzy_match(haystack: &str, needle: &str) -> bool {
+    let mut chars = haystack.chars();
+    needle
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .all(|needle_ch| chars.any(|hay_ch| hay_ch == needle_ch))
 }
 
 pub struct ManaNavigatorView<'a> {
@@ -298,22 +387,48 @@ impl Widget for ManaNavigatorView<'_> {
             return;
         }
 
-        let columns = if inner.width >= 90 {
+        let body = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner);
+        render_filter_bar(body[0], self.state, buf, self.theme);
+        let columns = if body[1].width >= 90 {
             Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
-                .split(inner)
+                .split(body[1])
         } else {
             Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(100), Constraint::Percentage(0)])
-                .split(inner)
+                .split(body[1])
         };
         render_mana_list(columns[0], self.state, buf, self.theme);
         if columns[1].width > 0 {
             render_mana_detail(columns[1], self.state, buf, self.theme);
         }
     }
+}
+
+fn render_filter_bar(area: Rect, state: &ManaNavigatorState, buf: &mut Buffer, theme: &Theme) {
+    let filter = if state.filter().is_empty() {
+        "type to fuzzy find".to_string()
+    } else {
+        format!("find: {}", state.filter())
+    };
+    let hint = "  ↑/↓ move • ←/→ fold • PgUp/PgDn detail • Backspace clear • Esc close";
+    let available = area.width as usize;
+    let filter_width = available.saturating_sub(hint.chars().count());
+    let filter = truncate_chars_with_suffix(&filter, filter_width.max(8), "…");
+    buf.set_line(
+        area.x,
+        area.y,
+        &Line::from(vec![
+            Span::styled(filter, theme.accent_style()),
+            Span::styled(hint, theme.muted_style()),
+        ]),
+        area.width,
+    );
 }
 
 fn render_mana_list(area: Rect, state: &ManaNavigatorState, buf: &mut Buffer, theme: &Theme) {
@@ -408,6 +523,7 @@ fn render_mana_detail(area: Rect, state: &ManaNavigatorState, buf: &mut Buffer, 
             ),
             String::new(),
         ]);
+        push_section(&mut lines, "Description", unit.description.as_deref());
         push_section(&mut lines, "Acceptance", unit.acceptance.as_deref());
         push_section(&mut lines, "Verify", unit.verify.as_deref());
         push_section(&mut lines, "Notes", unit.notes.as_deref());
@@ -423,17 +539,24 @@ fn render_mana_detail(area: Rect, state: &ManaNavigatorState, buf: &mut Buffer, 
         if !unit.dependencies.is_empty() {
             lines.push(format!("Dependencies: {}", unit.dependencies.join(", ")));
         }
-        lines.push("↑/↓ move • ←/→ collapse/expand • Enter toggle • Esc close".to_string());
+        lines.push(
+            "↑/↓ move • ←/→ collapse/expand • type find • PgUp/PgDn scroll detail • Esc close"
+                .to_string(),
+        );
     }
 
-    for (i, line) in wrap_lines(&lines, inner.width as usize, inner.height as usize)
+    let wrapped = wrap_lines(&lines, inner.width as usize);
+    let max_scroll = wrapped.len().saturating_sub(inner.height as usize);
+    let scroll = state.detail_scroll.min(max_scroll);
+    for (i, line) in wrapped
         .iter()
+        .skip(scroll)
+        .take(inner.height as usize)
         .enumerate()
     {
-        if i >= inner.height as usize {
-            break;
-        }
-        let style = if ["Acceptance", "Verify", "Notes", "Decisions"].contains(&line.as_str()) {
+        let style = if ["Description", "Acceptance", "Verify", "Notes", "Decisions"]
+            .contains(&line.as_str())
+        {
             theme.accent_style().add_modifier(Modifier::BOLD)
         } else {
             theme.muted_style()
@@ -463,8 +586,8 @@ fn render_guides(guides: &[bool]) -> String {
         .collect()
 }
 
-fn wrap_lines(lines: &[String], width: usize, max_lines: usize) -> Vec<String> {
-    if width == 0 || max_lines == 0 {
+fn wrap_lines(lines: &[String], width: usize) -> Vec<String> {
+    if width == 0 {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -479,9 +602,6 @@ fn wrap_lines(lines: &[String], width: usize, max_lines: usize) -> Vec<String> {
                 out.push(chunk);
                 rest = rest.get(used..).unwrap_or("").trim_start();
             }
-        }
-        if out.len() >= max_lines {
-            break;
         }
     }
     out
@@ -499,6 +619,8 @@ mod tests {
             priority: 2,
             kind: "Task".into(),
             parent: parent.map(str::to_string),
+            labels: Vec::new(),
+            assignee: None,
             has_verify: false,
             child_count,
             depth,
@@ -517,6 +639,8 @@ mod tests {
             expanded: HashSet::new(),
             detail: None,
             detail_error: None,
+            filter: String::new(),
+            detail_scroll: 0,
         };
         state.move_up();
         assert_eq!(state.selected_id(), Some("1"));
@@ -535,6 +659,8 @@ mod tests {
             expanded: HashSet::from(["1".into()]),
             detail: None,
             detail_error: None,
+            filter: String::new(),
+            detail_scroll: 0,
         };
         assert_eq!(state.visible_nodes().len(), 2);
         state.toggle_selected();
