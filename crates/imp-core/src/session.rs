@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use imp_llm::{truncate_chars_with_suffix, AssistantMessage, Message, Model, ToolResultMessage};
+use imp_llm::{
+    truncate_chars_with_suffix, AssistantMessage, ContentBlock, Message, Model, ToolResultMessage,
+    UserMessage,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{AgentEvent, RecoveryCheckpoint};
@@ -168,6 +171,7 @@ impl SessionInfo {
 /// exists on the current branch. In that case, callers should prefer
 /// `get_active_messages()` over `get_messages()` when assembling context for an
 /// LLM request.
+#[derive(Debug, Clone)]
 pub struct SessionManager {
     entries: Vec<SessionEntry>,
     path: Option<PathBuf>,
@@ -984,6 +988,33 @@ impl SessionManager {
     /// Get the current leaf id.
     pub fn leaf_id(&self) -> Option<&str> {
         self.leaf_id.as_deref()
+    }
+
+    /// Set the current leaf id for an in-memory session.
+    pub fn set_leaf_id_for_in_memory(&mut self, leaf_id: String) {
+        if self.path.is_none() {
+            self.leaf_id = Some(leaf_id);
+        }
+    }
+
+    pub fn snapshot_with_pending_user_message(
+        &self,
+        id: String,
+        timestamp: u64,
+        text: String,
+    ) -> Self {
+        let mut session = self.clone();
+        let parent_id = session.leaf_id().map(str::to_string);
+        session.entries.push(SessionEntry::Message {
+            id: id.clone(),
+            parent_id,
+            message: Message::User(UserMessage {
+                content: vec![ContentBlock::Text { text }],
+                timestamp,
+            }),
+        });
+        session.leaf_id = Some(id);
+        session
     }
 
     /// Get the stable session id derived from the persisted file name, if any.

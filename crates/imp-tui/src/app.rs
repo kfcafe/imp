@@ -33,7 +33,8 @@ use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelMeta, ModelRegistry, ProviderRegistry};
 use imp_llm::providers::create_provider;
 use imp_llm::{
-    truncate_chars_with_suffix, Cost, Message, Model, StreamEvent, ThinkingLevel, Usage,
+    truncate_chars_with_suffix, ContentBlock, Cost, Message, Model, StreamEvent, ThinkingLevel,
+    Usage, UserMessage,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
@@ -278,6 +279,11 @@ enum RuntimeSignal {
     SessionListFailed(String),
     SessionOpened(SessionOpenResult),
     SessionOpenFailed(String),
+    UserMessagePersisted {
+        entry_id: String,
+        persisted_session: Option<SessionManager>,
+    },
+    UserMessagePersistFailed(String),
     ManaNavigatorLoaded(ManaNavigatorState),
     ManaNavigatorLoadFailed {
         mana_dir: Option<PathBuf>,
@@ -910,6 +916,7 @@ pub struct App {
     login_task: Option<tokio::task::JoinHandle<LoginTaskExit>>,
     session_list_task: Option<tokio::task::JoinHandle<()>>,
     session_open_task: Option<tokio::task::JoinHandle<()>>,
+    user_message_persist_task: Option<tokio::task::JoinHandle<()>>,
     mana_navigator_task: Option<tokio::task::JoinHandle<()>>,
     status_command_task: Option<tokio::task::JoinHandle<()>>,
     improve_merge_task: Option<tokio::task::JoinHandle<()>>,
@@ -1756,6 +1763,7 @@ impl App {
             login_task: None,
             session_list_task: None,
             session_open_task: None,
+            user_message_persist_task: None,
             mana_navigator_task: None,
             status_command_task: None,
             improve_merge_task: None,
@@ -2257,6 +2265,11 @@ impl App {
             RuntimeSignal::SessionListFailed(error) => self.fail_session_list_load(error),
             RuntimeSignal::SessionOpened(result) => self.finish_session_open(result),
             RuntimeSignal::SessionOpenFailed(error) => self.push_error_msg(&error),
+            RuntimeSignal::UserMessagePersisted {
+                entry_id,
+                persisted_session,
+            } => self.finish_user_message_persist(entry_id, persisted_session),
+            RuntimeSignal::UserMessagePersistFailed(error) => self.push_error_msg(&error),
             RuntimeSignal::ManaNavigatorLoaded(state) => self.finish_mana_navigator_load(state),
             RuntimeSignal::ManaNavigatorLoadFailed { mana_dir, message } => {
                 self.fail_mana_navigator_load(mana_dir, message);
@@ -5280,6 +5293,7 @@ impl App {
 
     fn enqueue_visible_agent_turn(&mut self, text: String) {
         let user_message_index = self.messages.len();
+        let timestamp = imp_llm::now();
         self.messages.push(DisplayMessage {
             role: MessageRole::User,
             content: text.clone(),
@@ -5287,7 +5301,7 @@ impl App {
             tool_calls: Vec::new(),
             assistant_blocks: Vec::new(),
             is_streaming: false,
-            timestamp: imp_llm::now(),
+            timestamp,
         });
         self.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
@@ -5299,12 +5313,15 @@ impl App {
             timestamp: imp_llm::now(),
         });
         self.invalidate_chat_render_cache();
-
-        let _ = self.session.append(SessionEntry::Message {
-            id: uuid::Uuid::new_v4().to_string(),
-            parent_id: None,
-            message: imp_llm::Message::user(&text),
-        });
+        let entry_id = uuid::Uuid::new_v4().to_string();
+        let persist_session = self.session.clone();
+        let agent_session = self.session.snapshot_with_pending_user_message(
+            entry_id.clone(),
+            timestamp,
+            text.clone(),
+        );
+        self.start_user_message_persist(persist_session, entry_id, text.clone(), timestamp);
+        self.session = agent_session;
 
         self.is_streaming = true;
         self.streaming_anchor_user_index = Some(user_message_index);
@@ -5317,6 +5334,65 @@ impl App {
         self.sidebar_auto_follow = true;
         self.pending_agent_prompt = Some(text);
         self.pending_agent_cwd = None;
+    }
+
+    fn start_user_message_persist(
+        &mut self,
+        session: SessionManager,
+        entry_id: String,
+        prompt: String,
+        timestamp: u64,
+    ) {
+        if self.user_message_persist_task.is_some() {
+            self.trace_tui("user_message_persist skipped_existing_task");
+            return;
+        }
+
+        let mut session = session;
+        let signal_tx = self.runtime_signal_tx.clone();
+        self.user_message_persist_task = Some(tokio::spawn(async move {
+            let signal = match tokio::task::spawn_blocking(move || {
+                let message = Message::User(UserMessage {
+                    content: vec![ContentBlock::Text { text: prompt }],
+                    timestamp,
+                });
+                let entry = SessionEntry::Message {
+                    id: entry_id.clone(),
+                    parent_id: session.leaf_id().map(str::to_string),
+                    message,
+                };
+                let entry_id = entry.id().unwrap_or_default().to_string();
+                session
+                    .append(entry)
+                    .map(|_| (entry_id, session.path().is_some().then_some(session)))
+                    .map_err(|error| format!("Failed to persist user message: {error}"))
+            })
+            .await
+            {
+                Ok(Ok((entry_id, persisted_session))) => RuntimeSignal::UserMessagePersisted {
+                    entry_id,
+                    persisted_session,
+                },
+                Ok(Err(error)) => RuntimeSignal::UserMessagePersistFailed(error),
+                Err(error) => RuntimeSignal::UserMessagePersistFailed(format!(
+                    "User message persist task failure: {error}"
+                )),
+            };
+            let _ = signal_tx.send(signal).await;
+        }));
+    }
+
+    fn finish_user_message_persist(
+        &mut self,
+        entry_id: String,
+        persisted_session: Option<SessionManager>,
+    ) {
+        self.user_message_persist_task = None;
+        if let Some(session) = persisted_session {
+            self.session = session;
+        } else if self.session.path().is_none() {
+            self.session.set_leaf_id_for_in_memory(entry_id);
+        }
     }
 
     fn send_message(&mut self) {
@@ -8586,8 +8662,17 @@ mod session_lifecycle {
         assert!(app.messages[1].is_streaming);
     }
 
-    #[test]
-    fn send_message_defers_agent_start_until_after_echo_redraw() {
+    #[tokio::test]
+    async fn user_message_persist_signal_updates_in_memory_leaf() {
+        let mut app = make_app();
+
+        app.finish_user_message_persist("entry-1".into(), None);
+
+        assert_eq!(app.session.leaf_id(), Some("entry-1"));
+    }
+
+    #[tokio::test]
+    async fn send_message_defers_agent_start_until_after_echo_redraw() {
         let tmp = TempDir::new().unwrap();
         let mut app = make_persistent_app(&tmp);
 
@@ -10367,8 +10452,8 @@ mod session_lifecycle {
         assert!(content.contains("slow_render duration_ms=40"));
     }
 
-    #[test]
-    fn runtime_signal_batch_drains_bursty_agent_events_before_render() {
+    #[tokio::test]
+    async fn runtime_signal_batch_drains_bursty_agent_events_before_render() {
         let mut app = make_app();
         app.is_streaming = true;
         for index in 0..3 {
