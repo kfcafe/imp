@@ -924,6 +924,8 @@ pub struct App {
 
     current_oauth_display_info: Option<imp_llm::auth::OAuthDisplayInfo>,
     current_oauth_display_info_model: String,
+    current_model_meta_for_persistence: Option<ModelMeta>,
+    current_model_meta_for_persistence_model: String,
     git_label_cache: Option<GitLabelCache>,
     startup_skill_detail_cache: Option<StartupSkillDetailCache>,
     startup_surface_metadata: StartupSurfaceMetadata,
@@ -1759,6 +1761,8 @@ impl App {
             chat_render_epoch: 0,
             current_oauth_display_info: None,
             current_oauth_display_info_model: String::new(),
+            current_model_meta_for_persistence: None,
+            current_model_meta_for_persistence_model: String::new(),
             git_label_cache: None,
             startup_skill_detail_cache: None,
             startup_surface_metadata,
@@ -3286,6 +3290,26 @@ impl App {
             self.current_oauth_display_info = self.load_current_oauth_display_info();
             self.current_oauth_display_info_model = self.model_name.clone();
         }
+        if self.current_model_meta_for_persistence_model != self.model_name {
+            self.current_model_meta_for_persistence = self.load_current_model_meta_for_persistence();
+            self.current_model_meta_for_persistence_model = self.model_name.clone();
+        }
+    }
+
+    fn load_current_model_meta_for_persistence(&self) -> Option<ModelMeta> {
+        let auth_path = imp_core::storage::global_auth_path();
+        let auth_store = AuthStore::load(&auth_path).ok();
+        let mut meta = self.model_registry.resolve_meta(&self.model_name, None)?;
+
+        if let Some(auth_store) = auth_store.as_ref() {
+            if should_use_chatgpt_provider(auth_store, &self.model_registry, &meta) {
+                meta = self
+                    .model_registry
+                    .resolve_meta(&self.model_name, Some("openai-codex"))?;
+            }
+        }
+
+        Some(meta)
     }
 
     fn load_current_oauth_display_info(&self) -> Option<imp_llm::auth::OAuthDisplayInfo> {
@@ -3359,19 +3383,7 @@ impl App {
     }
 
     fn current_model_meta_for_persistence(&self) -> Option<ModelMeta> {
-        let auth_path = imp_core::storage::global_auth_path();
-        let auth_store = AuthStore::load(&auth_path).ok();
-        let mut meta = self.model_registry.resolve_meta(&self.model_name, None)?;
-
-        if let Some(auth_store) = auth_store.as_ref() {
-            if should_use_chatgpt_provider(auth_store, &self.model_registry, &meta) {
-                meta = self
-                    .model_registry
-                    .resolve_meta(&self.model_name, Some("openai-codex"))?;
-            }
-        }
-
-        Some(meta)
+        self.current_model_meta_for_persistence.clone()
     }
 
     // ── Key handling ────────────────────────────────────────────
@@ -8890,6 +8902,18 @@ mod session_lifecycle {
 
         assert_eq!(app.editor.content(), "@");
         assert!(matches!(app.mode, UiMode::Normal));
+    }
+
+    #[test]
+    fn current_model_meta_for_persistence_is_cached_for_render_status() {
+        let mut app = make_app();
+        let meta = app.model_registry.resolve_meta(&app.model_name, None).unwrap();
+        app.current_model_meta_for_persistence = Some(meta.clone());
+        app.current_model_meta_for_persistence_model = app.model_name.clone();
+
+        let resolved = app.current_model_meta_for_persistence();
+
+        assert_eq!(resolved.as_ref().map(|item| item.id.as_str()), Some(meta.id.as_str()));
     }
 
     #[test]
