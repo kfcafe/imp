@@ -42,7 +42,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
 use ratatui::Frame;
 
-use crate::animation::{title_breather_frame, title_working_glyph, AnimationState};
+use crate::animation::{title_spinner_frame, title_working_glyph, AnimationState};
 use crate::event_source::TerminalEventSource;
 use crate::highlight::Highlighter;
 use crate::keybindings::{self, Action};
@@ -1882,7 +1882,7 @@ impl App {
             if self.config.ui.animations == imp_core::config::AnimationLevel::None {
                 title_working_glyph()
             } else {
-                title_breather_frame(self.tick)
+                title_spinner_frame(self.tick)
             }
         } else {
             "imp"
@@ -8529,14 +8529,14 @@ mod session_lifecycle {
     }
 
     #[test]
-    fn terminal_title_uses_breather_while_streaming() {
+    fn terminal_title_uses_nine_dot_spinner_while_streaming() {
         let mut app = make_app();
         app.session.set_name("my chat");
         app.is_streaming = true;
         app.tick = 0;
-        assert_eq!(app.terminal_title(), "· — my chat");
-        app.tick = 18;
-        assert_eq!(app.terminal_title(), "● — my chat");
+        assert_eq!(app.terminal_title(), "⠁ — my chat");
+        app.tick = 16;
+        assert_eq!(app.terminal_title(), "⢀ — my chat");
     }
 
     #[test]
