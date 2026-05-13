@@ -8536,9 +8536,9 @@ mod session_lifecycle {
         app.session.set_name("my chat");
         app.is_streaming = true;
         app.tick = 0;
-        assert_eq!(app.terminal_title(), "⠁ — my chat");
-        app.tick = 16;
-        assert_eq!(app.terminal_title(), "⢀ — my chat");
+        assert_eq!(app.terminal_title(), "⠋ — my chat");
+        app.tick = 24;
+        assert_eq!(app.terminal_title(), "⠼ — my chat");
     }
 
     #[test]
