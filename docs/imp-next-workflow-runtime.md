@@ -328,12 +328,29 @@ Suggested artifact layout:
 
 ```text
 .imp/runs/<run-id>/
+  workflow-contract.json
   trace.jsonl
   evidence.md
-  diff.patch
-  verify.log
-  policy.jsonl
+  diff.patch        # later verification/diff slices
+  verify.log        # later verification slice
+  policy.jsonl      # later reference-monitor slice
 ```
+
+The implemented first slice creates `workflow-contract.json`, `trace.jsonl`, and
+`evidence.md` for agent runs. `trace.jsonl` is machine/debug oriented and stores
+structured runtime events. `evidence.md` is human-review oriented and summarizes
+workflow metadata, final status, basic action summaries, and artifact refs. The
+TUI surfaces the evidence path after closeout as `Evidence:
+.imp/runs/<run-id>/evidence.md` without changing normal chat flow.
+
+Trace payloads are local artifacts and may contain sensitive context. The trace
+writer truncates large string fields and marks redaction metadata, but this is not
+a complete privacy boundary. Mana should store stable summaries and artifact
+references, not raw trace/evidence bodies. Eval-candidate extraction should treat
+these artifacts as source material and apply explicit redaction before promotion.
+
+Even `allow-all` mode must emit trace and evidence artifacts. Autonomy removes
+interactive friction; it does not disable accountability.
 
 Mana can point to these artifacts from workflow/task records.
 
@@ -657,6 +674,16 @@ Phase the work so current users keep working.
 - Centralize tool checks in reference monitor.
 - Add `safe`, `local-auto`, `worktree-auto`, `allow-all-local`, `allow-all`, and `ci` modes.
 - Keep default TUI behavior familiar.
+
+Current reference-monitor slice:
+
+- routes AgentMode and RunPolicy tool/write-path checks through `ReferenceMonitor`
+- emits `policy.checked` trace events into the 394.4 trace/evidence pipeline
+- threads workflow autonomy, risk, workspace scope, and trust labels into policy context
+- blocks unsupported future non-allow decisions (`ask_user`, `dry_run_only`, `sandbox_only`, `require_verification`) until dedicated UX/runtime support exists
+- leaves TypeScript extension manifests to 394.10
+- documents trust/provenance behavior and prompt-injection limits in `docs/trust-labels-and-provenance.md`
+- documents user-facing autonomy examples and maintainer semantics in `docs/autonomy-modes.md`
 
 ### Phase 4: Verification gates
 

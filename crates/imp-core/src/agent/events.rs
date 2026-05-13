@@ -1,9 +1,14 @@
+use std::path::PathBuf;
+
 use imp_llm::{AssistantMessage, Cost, Message, StreamEvent, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::mana_review::TurnManaReview;
+use crate::reference_monitor::PolicyTraceRecord;
 use crate::trace::TraceEvent;
+use crate::trust::Provenance;
+use crate::workflow::VerificationGate;
 
 use super::NextActionAssessment;
 
@@ -137,6 +142,7 @@ pub enum AgentEvent {
     ToolExecutionEnd {
         tool_call_id: String,
         result: imp_llm::ToolResultMessage,
+        provenance: Option<Provenance>,
     },
     Warning {
         message: String,
@@ -146,6 +152,19 @@ pub enum AgentEvent {
     },
     RecoveryCheckpoint {
         checkpoint: RecoveryCheckpoint,
+    },
+    VerificationStarted {
+        gate: VerificationGate,
+    },
+    VerificationCompleted {
+        gate: VerificationGate,
+        closeout_effect: crate::workflow::VerificationCloseoutEffect,
+    },
+    EvidenceWritten {
+        path: PathBuf,
+    },
+    PolicyChecked {
+        record: PolicyTraceRecord,
     },
     Error {
         error: String,
@@ -231,10 +250,15 @@ impl AgentEvent {
             AgentEvent::ToolExecutionEnd {
                 tool_call_id,
                 result,
+                provenance,
             } => TraceEvent::new(
                 run_id,
                 "tool.execution.end",
-                json!({ "tool_call_id": tool_call_id, "result": format!("{result:?}") }),
+                json!({
+                    "tool_call_id": tool_call_id,
+                    "result": format!("{result:?}"),
+                    "provenance": provenance,
+                }),
             )
             .with_tool_call_id(tool_call_id.clone()),
             AgentEvent::Warning { message } => {
@@ -276,11 +300,54 @@ impl AgentEvent {
                 }
                 event
             }
+            AgentEvent::VerificationStarted { gate } => TraceEvent::new(
+                run_id,
+                "verification.started",
+                verification_gate_payload(gate, None),
+            ),
+            AgentEvent::VerificationCompleted {
+                gate,
+                closeout_effect,
+            } => TraceEvent::new(
+                run_id,
+                "verification.completed",
+                verification_gate_payload(gate, Some(*closeout_effect)),
+            ),
+            AgentEvent::EvidenceWritten { path } => TraceEvent::new(
+                run_id,
+                "evidence.written",
+                json!({ "path": path.display().to_string() }),
+            ),
+            AgentEvent::PolicyChecked { record } => record.to_trace_event(run_id),
             AgentEvent::Error { error } => {
                 TraceEvent::new(run_id, "error", json!({ "error": error }))
             }
         }
     }
+}
+
+fn verification_gate_payload(
+    gate: &VerificationGate,
+    closeout_effect: Option<crate::workflow::VerificationCloseoutEffect>,
+) -> serde_json::Value {
+    json!({
+        "id": gate.id,
+        "name": gate.name,
+        "kind": gate.kind,
+        "required": gate.is_required(),
+        "status": gate.status,
+        "command": gate.command.as_ref().map(|command| &command.command),
+        "exit_code": gate.result.as_ref().and_then(|result| result.exit_code),
+        "summary": gate.result.as_ref().and_then(|result| result.summary.as_deref()).or(gate.reason.as_deref()),
+        "artifacts": gate.artifacts.iter().map(|artifact| json!({
+            "kind": artifact.kind,
+            "path": artifact.path.display().to_string(),
+            "summary": artifact.summary,
+            "bytes": artifact.bytes,
+            "redaction": artifact.redaction,
+        })).collect::<Vec<_>>(),
+        "closeout_effect": closeout_effect,
+    })
 }
 
 #[cfg(test)]

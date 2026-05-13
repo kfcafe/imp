@@ -172,6 +172,16 @@ pub enum AutonomyMode {
 }
 
 impl AutonomyMode {
+    pub const ALL: [Self; 7] = [
+        Self::Suggest,
+        Self::Safe,
+        Self::LocalAuto,
+        Self::WorktreeAuto,
+        Self::AllowAllLocal,
+        Self::AllowAll,
+        Self::Ci,
+    ];
+
     pub fn canonical_name(self) -> &'static str {
         match self {
             AutonomyMode::Suggest => "suggest",
@@ -197,13 +207,13 @@ impl FromStr for AutonomyMode {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
         match normalized.as_str() {
-            "suggest" | "review" | "review-only" => Ok(Self::Suggest),
-            "safe" | "default" => Ok(Self::Safe),
+            "suggest" | "plan" | "planning" | "review" | "review-only" => Ok(Self::Suggest),
+            "safe" | "default" | "interactive" => Ok(Self::Safe),
             "local" | "auto-local" | "local-auto" => Ok(Self::LocalAuto),
             "worktree" | "auto-worktree" | "worktree-auto" => Ok(Self::WorktreeAuto),
-            "allow-all-local" | "all-local" | "local-all" => Ok(Self::AllowAllLocal),
+            "allow-all-local" | "all-local" | "local-all" | "yolo-local" => Ok(Self::AllowAllLocal),
             "allow-all" | "all" | "yolo" => Ok(Self::AllowAll),
-            "ci" | "headless" => Ok(Self::Ci),
+            "ci" | "headless" | "noninteractive" | "non-interactive" => Ok(Self::Ci),
             _ => Err(ParseAutonomyModeError(value.to_owned())),
         }
     }
@@ -470,6 +480,80 @@ mod tests {
         assert!(json.contains("local-auto"));
         let decoded: WorkflowContract = serde_json::from_str(&json).expect("deserialize contract");
         assert_eq!(decoded, contract);
+    }
+
+    #[test]
+    fn autonomy_modes_have_canonical_names_and_safe_default() {
+        assert_eq!(AutonomyMode::default(), AutonomyMode::Safe);
+        let names: Vec<_> = AutonomyMode::ALL
+            .iter()
+            .map(|mode| mode.canonical_name())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "suggest",
+                "safe",
+                "local-auto",
+                "worktree-auto",
+                "allow-all-local",
+                "allow-all",
+                "ci"
+            ]
+        );
+        for mode in AutonomyMode::ALL {
+            assert_eq!(mode.to_string(), mode.canonical_name());
+        }
+    }
+
+    #[test]
+    fn autonomy_modes_parse_canonical_names_and_aliases() {
+        let cases = [
+            ("suggest", AutonomyMode::Suggest),
+            ("plan", AutonomyMode::Suggest),
+            ("planning", AutonomyMode::Suggest),
+            ("review-only", AutonomyMode::Suggest),
+            ("safe", AutonomyMode::Safe),
+            ("default", AutonomyMode::Safe),
+            ("interactive", AutonomyMode::Safe),
+            ("local", AutonomyMode::LocalAuto),
+            ("local_auto", AutonomyMode::LocalAuto),
+            ("auto-local", AutonomyMode::LocalAuto),
+            ("worktree", AutonomyMode::WorktreeAuto),
+            ("worktree_auto", AutonomyMode::WorktreeAuto),
+            ("auto-worktree", AutonomyMode::WorktreeAuto),
+            ("allow-all-local", AutonomyMode::AllowAllLocal),
+            ("all-local", AutonomyMode::AllowAllLocal),
+            ("local-all", AutonomyMode::AllowAllLocal),
+            ("yolo-local", AutonomyMode::AllowAllLocal),
+            ("allow-all", AutonomyMode::AllowAll),
+            ("all", AutonomyMode::AllowAll),
+            ("yolo", AutonomyMode::AllowAll),
+            ("ci", AutonomyMode::Ci),
+            ("headless", AutonomyMode::Ci),
+            ("noninteractive", AutonomyMode::Ci),
+            ("non-interactive", AutonomyMode::Ci),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(input.parse::<AutonomyMode>().unwrap(), expected, "{input}");
+            assert_eq!(
+                input.to_ascii_uppercase().parse::<AutonomyMode>().unwrap(),
+                expected,
+                "uppercase {input}"
+            );
+        }
+        assert!("dangerous".parse::<AutonomyMode>().is_err());
+    }
+
+    #[test]
+    fn autonomy_modes_serde_roundtrip_canonical_names() {
+        for mode in AutonomyMode::ALL {
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, format!("\"{}\"", mode.canonical_name()));
+            let decoded: AutonomyMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, mode);
+        }
     }
 
     #[test]

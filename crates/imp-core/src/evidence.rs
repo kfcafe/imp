@@ -19,6 +19,7 @@ pub struct EvidencePacket {
     pub plan: Vec<String>,
     pub actions: EvidenceActions,
     pub policy: EvidencePolicy,
+    pub trust: EvidenceTrustSummary,
     pub verification: Vec<EvidenceVerificationGate>,
     pub artifacts: Vec<EvidenceArtifact>,
     pub concerns: Vec<String>,
@@ -42,6 +43,7 @@ impl EvidencePacket {
         self.render_plan(&mut out);
         self.render_actions(&mut out);
         self.render_policy(&mut out);
+        self.render_trust(&mut out);
         self.render_verification(&mut out);
         self.render_artifacts(&mut out);
         self.render_closeout(&mut out);
@@ -95,6 +97,18 @@ impl EvidencePacket {
         render_named_list(out, "Decisions", &self.policy.decisions);
         render_named_list(out, "Denials", &self.policy.denials);
         render_named_list(out, "Approvals", &self.policy.approvals);
+        out.push('\n');
+    }
+
+    fn render_trust(&self, out: &mut String) {
+        out.push_str("## Trust & Provenance\n\n");
+        render_named_list(out, "Sources", &self.trust.sources);
+        render_named_list(
+            out,
+            "Low-trust influences",
+            &self.trust.low_trust_influences,
+        );
+        render_named_list(out, "Warnings", &self.trust.warnings);
         out.push('\n');
     }
 
@@ -173,6 +187,14 @@ pub struct EvidencePolicy {
     pub decisions: Vec<String>,
     pub denials: Vec<String>,
     pub approvals: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct EvidenceTrustSummary {
+    pub sources: Vec<String>,
+    pub low_trust_influences: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -32,6 +32,7 @@ use crate::imp_session::{ImpSession, SessionChoice, SessionOptions};
 use crate::mana_prompt_context;
 use crate::system_prompt::{Attempt, Dependency, Fact, TaskContext};
 use crate::tools::LuaToolLoader;
+use crate::workflow::{AutonomyMode, VerificationGate};
 
 // ---------------------------------------------------------------------------
 // Shared contract re-exports
@@ -279,6 +280,8 @@ pub struct WorkerRunOptions {
     pub api_key: Option<String>,
     pub thinking: Option<ThinkingLevel>,
     pub max_turns: Option<u32>,
+    pub autonomy_mode: Option<AutonomyMode>,
+    pub verification_gates: Vec<VerificationGate>,
     pub max_tokens: Option<u32>,
     pub system_prompt: Option<String>,
     pub no_tools: bool,
@@ -344,6 +347,8 @@ pub async fn prepare_worker_run(
         api_key: options.api_key,
         thinking: options.thinking,
         max_turns: options.max_turns,
+        autonomy_mode: options.autonomy_mode,
+        verification_gates: options.verification_gates.clone(),
         max_tokens: options.max_tokens,
         system_prompt: options.system_prompt,
         no_tools: options.no_tools,

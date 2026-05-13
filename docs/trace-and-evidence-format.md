@@ -443,6 +443,46 @@ Evidence is human-facing and should be safer than raw traces:
 
 Trace is machine/debug oriented. Evidence is human/review oriented.
 
+## Implemented first slice
+
+The current workflow-runtime slice writes run artifacts for agent runs under the
+project-local run directory:
+
+```text
+.imp/runs/run_<uuid>/
+  workflow-contract.json
+  trace.jsonl
+  evidence.md
+```
+
+`trace.jsonl` contains newline-delimited `TraceEvent` records derived from the
+agent event stream, including lifecycle, turn, message, tool, timing, recovery,
+warning, error, and `evidence.written` events. Large string payloads are
+truncated by the trace writer and marked in the event redaction metadata; traces
+are still local debug artifacts and should be treated as potentially sensitive.
+
+`evidence.md` is a concise human-review packet. The first implementation records
+workflow metadata, final status, basic action summaries derived from tool calls,
+and artifact references back to `trace.jsonl` and `workflow-contract.json`.
+Policy decisions, verification gates, diffs, and richer provenance are added by
+later workflow-runtime slices.
+
+The TUI surfaces the latest evidence path after closeout as a compact system
+message:
+
+```text
+Evidence: .imp/runs/run_<uuid>/evidence.md
+```
+
+It also stores the path in the status item map as `evidence` for existing status
+surfaces. If evidence is absent, normal chat behavior is unchanged.
+
+Even high-autonomy modes such as future `allow-all` must keep these artifacts
+enabled. Autonomy can reduce prompts; it must not remove auditability. Mana
+should store durable summaries and artifact refs rather than inline raw trace or
+evidence contents. Future eval-candidate extraction should point at these run
+artifacts and apply privacy/redaction policy before promotion.
+
 ## Schema evolution
 
 - Increment `schema_version` for breaking changes.
@@ -453,10 +493,10 @@ Trace is machine/debug oriented. Evidence is human/review oriented.
 
 ## Non-goals for this slice
 
-- No `evidence.md` renderer.
-- No artifact directory implementation.
-- No trace writer implementation.
-- No policy/verification/evidence runtime integration.
-- No GUI/TUI redesign.
+- No reference-monitor policy log beyond the existing trace event stream.
+- No verification gate runner or `verify.log` population yet.
+- No diff artifact capture yet.
+- No mana ledger write path for evidence refs yet.
+- No GUI/TUI redesign beyond compact evidence path surfacing.
 
 Those are child tasks under `394.4`.

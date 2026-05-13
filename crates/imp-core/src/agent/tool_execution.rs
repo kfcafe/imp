@@ -9,12 +9,96 @@ use crate::agent::{
 };
 use crate::guardrails::{self, GuardrailLevel};
 use crate::hooks::HookEvent;
+use crate::reference_monitor::{PolicyReason, PolicySource, ToolPolicyContext, ToolPolicyDecision};
+use crate::trust::{Provenance, RiskLabel};
 
 use super::{
     extract_file_path, mana_bash_equivalent_hint,
     mana_loop::{enrich_mana_result_details, evaluate_mana_policy},
     RepeatedToolCallCheck, RepeatedToolCallState,
 };
+
+fn legacy_policy_error_message(
+    tool_name: &str,
+    mode: crate::config::AgentMode,
+    reason: &PolicyReason,
+) -> String {
+    match reason.source {
+        PolicySource::AgentMode => format!(
+            "Tool '{tool_name}' is not available in {} mode",
+            format!("{:?}", mode).to_lowercase()
+        ),
+        PolicySource::RunPolicy => reason.message.clone(),
+        _ => reason.message.clone(),
+    }
+}
+
+fn policy_block_reason(decision: &ToolPolicyDecision) -> Option<PolicyReason> {
+    match decision {
+        ToolPolicyDecision::Allow { .. } => None,
+        ToolPolicyDecision::Deny { reason }
+        | ToolPolicyDecision::AskUser { reason }
+        | ToolPolicyDecision::DryRunOnly { reason }
+        | ToolPolicyDecision::SandboxOnly { reason }
+        | ToolPolicyDecision::RequireVerification { reason } => Some(reason.clone()),
+    }
+}
+
+fn legacy_policy_checkpoint_reason(reason: &PolicyReason) -> &'static str {
+    match reason.code.as_str() {
+        "agent_mode_tool_denied" => "mode_blocked",
+        "run_policy_tool_denied" | "run_policy_write_path_denied" => "run_policy_blocked",
+        "require_verification" => "verification_required",
+        "ask_user_required" => "approval_required",
+        "dry_run_required" => "dry_run_required",
+        "sandbox_required" => "sandbox_required",
+        _ => "policy_blocked",
+    }
+}
+
+fn tool_result_provenance(tool_name: &str, args: &serde_json::Value) -> Provenance {
+    match tool_name {
+        "read" => args
+            .get("path")
+            .and_then(|value| value.as_str())
+            .map(Provenance::workspace_file)
+            .unwrap_or_else(|| Provenance::tool_observation(tool_name)),
+        "web" => args
+            .get("url")
+            .and_then(|value| value.as_str())
+            .map(Provenance::external_web)
+            .unwrap_or_else(|| {
+                Provenance::tool_observation(tool_name).with_risk(RiskLabel::NetworkDerived)
+            }),
+        "mana" => args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .map(|action| Provenance::mana_record(crate::trust::ManaRecordKind::Note, action))
+            .unwrap_or_else(|| Provenance::tool_observation(tool_name)),
+        _ => Provenance::tool_observation(tool_name),
+    }
+}
+
+fn attach_provenance_to_result(
+    mut result: imp_llm::ToolResultMessage,
+    provenance: &Provenance,
+) -> imp_llm::ToolResultMessage {
+    let mut details = match result.details {
+        serde_json::Value::Object(map) => map,
+        serde_json::Value::Null => serde_json::Map::new(),
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("raw".into(), other);
+            map
+        }
+    };
+    details.insert(
+        "provenance".into(),
+        serde_json::to_value(provenance).unwrap_or(serde_json::Value::Null),
+    );
+    result.details = serde_json::Value::Object(details);
+    result
+}
 
 impl Agent {
     pub(super) fn plan_tools(&self, calls: Vec<(String, String, serde_json::Value)>) -> ToolPlan {
@@ -189,6 +273,7 @@ impl Agent {
             self.emit(AgentEvent::ToolExecutionEnd {
                 tool_call_id: call_id.to_string(),
                 result: loop_result.clone(),
+                provenance: Some(tool_result_provenance(tool_name, &args)),
             })
             .await;
             self.emit_timing_with_details(
@@ -229,40 +314,48 @@ impl Agent {
             })
             .await;
 
-        // Execution-time mode guard — reject tools not permitted by the active mode.
-        if !self.mode.allows_tool(tool_name) {
-            let reason = format!(
-                "Tool '{tool_name}' is not available in {} mode",
-                format!("{:?}", self.mode).to_lowercase()
-            );
-            let result =
-                crate::tools::ToolOutput::error(reason).into_tool_result(call_id, tool_name);
-            self.emit(AgentEvent::ToolExecutionEnd {
-                tool_call_id: call_id.to_string(),
-                result: result.clone(),
-            })
-            .await;
-            self.emit_recovery_checkpoint(Self::recovery_checkpoint(
-                turn,
-                RecoveryCheckpointKind::ToolExecutionEnd,
-                Some(call_id.to_string()),
-                Some(tool_name.to_string()),
-                Some(args_hash.clone()),
-                Some(false),
-                Some("mode_blocked".to_string()),
-            ))
-            .await;
-            return result;
+        let mut policy_context = ToolPolicyContext::new(
+            tool_name,
+            self.tools
+                .policy_metadata(tool_name)
+                .map(|metadata| metadata.action_kind)
+                .unwrap_or_default(),
+        );
+        policy_context.run_id = self.run_id.lock().ok().and_then(|run_id| run_id.clone());
+        policy_context.workflow_id = self
+            .workflow_contract
+            .id
+            .clone()
+            .or_else(|| self.workflow_contract.mana_unit_ref.clone());
+        policy_context.turn = Some(turn);
+        policy_context.tool_call_id = Some(call_id.to_string());
+        policy_context.args = args.clone();
+        policy_context.args_hash = Some(args_hash.clone());
+        policy_context.cwd = Some(self.cwd.clone());
+        if let Some(metadata) = self.tools.policy_metadata(tool_name) {
+            policy_context.resource_scope =
+                metadata.resource_scope_for_args(Some(&self.cwd), &args);
+            policy_context.metadata = metadata;
         }
+        policy_context.mode = self.mode;
+        policy_context.apply_workflow_contract(&self.workflow_contract);
 
-        if let crate::policy::ToolPolicyDecision::Denied(reason) =
-            self.run_policy.check_tool(tool_name)
-        {
-            let result =
-                crate::tools::ToolOutput::error(reason).into_tool_result(call_id, tool_name);
+        let policy_record =
+            crate::reference_monitor::ReferenceMonitor.evaluate(&policy_context, &self.run_policy);
+        let policy_block = policy_block_reason(&policy_record.decision);
+        self.emit(AgentEvent::PolicyChecked {
+            record: policy_record.clone(),
+        })
+        .await;
+        if let Some(reason) = policy_block {
+            let result = crate::tools::ToolOutput::error(legacy_policy_error_message(
+                tool_name, self.mode, &reason,
+            ))
+            .into_tool_result(call_id, tool_name);
             self.emit(AgentEvent::ToolExecutionEnd {
                 tool_call_id: call_id.to_string(),
                 result: result.clone(),
+                provenance: Some(tool_result_provenance(tool_name, &args)),
             })
             .await;
             self.emit_recovery_checkpoint(Self::recovery_checkpoint(
@@ -272,7 +365,7 @@ impl Agent {
                 Some(tool_name.to_string()),
                 Some(args_hash.clone()),
                 Some(false),
-                Some("run_policy_blocked".to_string()),
+                Some(legacy_policy_checkpoint_reason(&reason).to_string()),
             ))
             .await;
             return result;
@@ -287,6 +380,7 @@ impl Agent {
             self.emit(AgentEvent::ToolExecutionEnd {
                 tool_call_id: call_id.to_string(),
                 result: result.clone(),
+                provenance: Some(tool_result_provenance(tool_name, &args)),
             })
             .await;
             self.emit_recovery_checkpoint(Self::recovery_checkpoint(
@@ -310,6 +404,7 @@ impl Agent {
                     self.emit(AgentEvent::ToolExecutionEnd {
                         tool_call_id: call_id.to_string(),
                         result: result.clone(),
+                        provenance: Some(tool_result_provenance(tool_name, &args)),
                     })
                     .await;
                     self.emit_recovery_checkpoint(Self::recovery_checkpoint(
@@ -340,6 +435,7 @@ impl Agent {
                 self.emit(AgentEvent::ToolExecutionEnd {
                     tool_call_id: call_id.to_string(),
                     result: result.clone(),
+                    provenance: Some(tool_result_provenance(tool_name, &args)),
                 })
                 .await;
                 self.emit_recovery_checkpoint(Self::recovery_checkpoint(
@@ -366,6 +462,7 @@ impl Agent {
                 self.emit(AgentEvent::ToolExecutionEnd {
                     tool_call_id: call_id.to_string(),
                     result: result.clone(),
+                    provenance: Some(tool_result_provenance(tool_name, &args)),
                 })
                 .await;
                 self.emit_recovery_checkpoint(Self::recovery_checkpoint(
@@ -401,6 +498,7 @@ impl Agent {
                     turn_mana_review: self.turn_mana_review.clone(),
                     config: self.config.clone(),
                     run_policy: self.run_policy.clone(),
+                    supporting_provenance: policy_context.supporting_provenance.clone(),
                 };
 
                 // Forward tool output deltas to event stream
@@ -494,9 +592,12 @@ impl Agent {
             }
         }
 
+        let provenance = tool_result_provenance(tool_name, &args);
+        result = attach_provenance_to_result(result, &provenance);
         self.emit(AgentEvent::ToolExecutionEnd {
             tool_call_id: call_id.to_string(),
             result: result.clone(),
+            provenance: Some(provenance),
         })
         .await;
         self.emit_timing_with_details(

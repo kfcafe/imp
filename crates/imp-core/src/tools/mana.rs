@@ -1311,6 +1311,8 @@ fn worker_options_for_native_unit(
         api_key: None,
         thinking: ctx.config.thinking,
         max_turns: Some(run_args.timeout),
+        autonomy_mode: None,
+        verification_gates: Vec::new(),
         max_tokens: None,
         system_prompt: None,
         no_tools: false,
@@ -3674,6 +3676,7 @@ mod tests {
             )),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
 
         let tool = ManaTool::default();
@@ -3742,6 +3745,7 @@ mod tests {
             )),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         (ctx, tempfile::tempdir().unwrap())
     }
@@ -3785,6 +3789,7 @@ mod tests {
             )),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         (ctx, tempfile::tempdir().unwrap(), widgets)
     }
@@ -4334,6 +4339,7 @@ mod tests {
             )),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         let tool = ManaTool::default();
         let reopened = tool
@@ -4370,6 +4376,7 @@ mod tests {
             )),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         let verify = tool
             .execute(
@@ -4405,6 +4412,7 @@ mod tests {
             )),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         let fact = tool.execute("call_fact", json!({ "action": "fact_create", "title": "Auth fact", "verify": "test -d .mana", "description": "fact body", "ttl_days": 7 }), ctx3).await.unwrap();
         assert_eq!(fact.details["unit"]["unit_type"], "fact");
@@ -4510,6 +4518,7 @@ mod tests {
             )),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -4557,6 +4566,7 @@ mod tests {
             )),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -4617,6 +4627,7 @@ mod tests {
             )),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -4670,6 +4681,7 @@ mod tests {
             )),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -4899,6 +4911,7 @@ mod tests {
             )),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
 
         let tool = ManaTool::default();

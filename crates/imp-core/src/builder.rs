@@ -1,5 +1,8 @@
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use imp_llm::Model;
 
@@ -12,7 +15,10 @@ use crate::resources;
 use crate::roles::Role;
 use crate::system_prompt::{self, Fact, TaskContext};
 use crate::tools::{LuaToolLoader, ToolRegistry};
-use crate::workflow::{AutonomyMode, ImplicitWorkflowContractInput, WorkflowContract};
+use crate::workflow::{
+    AutonomyMode, ImplicitWorkflowContractInput, VerificationGate, VerificationRequirement,
+    WorkflowContract,
+};
 
 fn load_scoped_memory_block(
     cwd: &std::path::Path,
@@ -67,6 +73,8 @@ pub struct AgentBuilder {
     /// Additional tool registrar called after native tools are registered.
     #[allow(clippy::type_complexity)]
     extra_tools: Option<Box<dyn FnOnce(&mut ToolRegistry) + Send>>,
+    /// Preloaded Lua extension tool registrar.
+    preloaded_lua_tools: Option<ToolRegistry>,
     /// Lua extension tool loader — called after native and extra tools.
     ///
     /// The imp-lua crate provides the actual implementation; the binary
@@ -76,7 +84,10 @@ pub struct AgentBuilder {
     lua_tool_loader: Option<LuaToolLoader>,
     /// Per-run tool/write policy layered on top of AgentMode.
     run_policy: RunPolicy,
+    /// Preloaded mana prompt context; avoids duplicate mana reads for worker mode.
+    preloaded_prompt_context: Option<mana_prompt_context::SessionPromptContext>,
     /// Optional workflow contract override. If absent, build creates an implicit contract.
+    pub verification_gates: Vec<VerificationGate>,
     workflow_contract: Option<WorkflowContract>,
 }
 
@@ -93,8 +104,11 @@ impl AgentBuilder {
             facts: Vec::new(),
             system_prompt_override: None,
             extra_tools: None,
+            preloaded_lua_tools: None,
+            preloaded_prompt_context: None,
             lua_tool_loader: None,
             run_policy: RunPolicy::default(),
+            verification_gates: Vec::new(),
             workflow_contract: None,
         }
     }
@@ -142,6 +156,11 @@ impl AgentBuilder {
     ///
     /// The binary crate typically calls this with a closure that invokes
     /// `imp_lua::load_lua_extensions()`.
+    pub fn preloaded_lua_tools(mut self, tools: ToolRegistry) -> Self {
+        self.preloaded_lua_tools = Some(tools);
+        self
+    }
+
     pub fn lua_tool_loader<F>(mut self, f: F) -> Self
     where
         F: Fn(&LuaCapabilityPolicy, &mut ToolRegistry) + Send + Sync + 'static,
@@ -153,6 +172,44 @@ impl AgentBuilder {
     /// Apply a per-run policy on top of the configured agent mode.
     pub fn run_policy(mut self, policy: RunPolicy) -> Self {
         self.run_policy = policy;
+        self
+    }
+
+    /// Add a verification gate to the agent run.
+    pub fn verification_gate(mut self, gate: VerificationGate) -> Self {
+        self.verification_gates.push(gate);
+        self
+    }
+
+    /// Add verification gates to the agent run.
+    pub fn verification_gates<I>(mut self, gates: I) -> Self
+    where
+        I: IntoIterator<Item = VerificationGate>,
+    {
+        self.verification_gates.extend(gates);
+        self
+    }
+
+    /// Add a command verification gate to the agent run.
+    pub fn verify_command(mut self, command: impl Into<String>, required: bool) -> Self {
+        let requirement = VerificationRequirement {
+            name: None,
+            kind: crate::workflow::VerificationRequirementKind::Command {
+                command: command.into(),
+            },
+            required,
+        };
+        let gate = VerificationGate::from_requirement(self.verification_gates.len(), &requirement);
+        self.verification_gates.push(gate);
+        self
+    }
+
+    /// Use preloaded mana prompt context instead of loading it during build.
+    pub fn preloaded_prompt_context(
+        mut self,
+        context: mana_prompt_context::SessionPromptContext,
+    ) -> Self {
+        self.preloaded_prompt_context = Some(context);
         self
     }
 
@@ -178,125 +235,144 @@ impl AgentBuilder {
     ///
     /// Returns `(Agent, AgentHandle)` ready for use.
     pub fn build(self) -> Result<(Agent, AgentHandle)> {
+        let build_started = Instant::now();
+        let trace_path = std::env::var_os("IMP_TUI_TRACE").map(PathBuf::from);
+        let trace_phase = |phase: &str, started: Instant| {
+            if let Some(path) = trace_path.as_ref() {
+                if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                    let _ = writeln!(
+                        file,
+                        "{} agent_builder_phase phase={} duration_ms={}",
+                        imp_llm::now(),
+                        phase,
+                        started.elapsed().as_millis()
+                    );
+                }
+            }
+        };
+
         let (mut agent, handle) = Agent::new(self.model, self.cwd.clone());
-
-        // Wire API key
         agent.api_key = self.api_key;
-
-        // Wire thinking level from config
         if let Some(thinking) = self.config.thinking {
             agent.thinking_level = thinking;
         }
-
-        // Wire max output tokens from config
         if let Some(max_tokens) = self.config.max_tokens {
             agent.max_tokens = Some(max_tokens);
         }
-
-        // Wire context thresholds from config
         agent.context_config = self.config.context.clone();
-
-        // Wire role overrides.
         if let Some(ref role) = self.role {
             if let Some(thinking) = role.thinking_level {
                 agent.thinking_level = thinking;
             }
             agent.role = Some(role.clone());
         }
-
-        // Load hooks from config
         agent.hooks.load_from_config(self.config.hooks.clone());
-
-        // Wire agent mode from config
         agent.mode = self.config.mode;
-
-        // Wire guardrails config
         agent.guardrail_config = self.config.guardrails.clone();
         agent.guardrail_profile = if self.config.guardrails.is_enabled() {
             Some(self.config.guardrails.resolve_effective_profile(&self.cwd))
         } else {
             None
         };
-
-        // Wire read tool truncation from config
         agent.read_max_lines = self.config.ui.read_max_lines;
         agent.continue_policy = self.config.ui.continue_policy;
         agent.config = Arc::new(self.config.clone());
         agent.run_policy = self.run_policy;
+        agent.verification_gates = self.verification_gates;
         agent.lua_tool_loader = self.lua_tool_loader.clone();
 
-        // Register native tools
+        let phase_started = Instant::now();
         register_native_tools(&mut agent.tools);
-
-        // Register any extra tools provided by the caller
         if let Some(extra) = self.extra_tools {
             extra(&mut agent.tools);
         }
+        trace_phase("native_extra_tools", phase_started);
 
-        // Load Lua extension tools (provided by the binary crate via lua_tool_loader)
-        if let Some(lua_loader) = self.lua_tool_loader {
+        let phase_started = Instant::now();
+        if let Some(preloaded_lua_tools) = self.preloaded_lua_tools {
+            agent.tools.extend(preloaded_lua_tools);
+        } else if let Some(lua_loader) = self.lua_tool_loader {
             let lua_policy = self.config.lua.resolve_policy(agent.mode);
             lua_loader(&lua_policy, &mut agent.tools);
         }
+        trace_phase("lua_tools", phase_started);
 
-        // Load project-local TypeScript extension tools from .imp/extensions.
+        let phase_started = Instant::now();
         if let Err(err) =
             crate::typescript_extensions::load_typescript_extensions(&self.cwd, &mut agent.tools)
         {
             eprintln!("Failed to load TypeScript extensions: {err}");
         }
-
-        // Filter registered tools to those allowed by the mode.
-        // Full mode allows everything — no filtering needed.
         if agent.mode != crate::config::AgentMode::Full {
             let mode = agent.mode;
             agent.tools.retain(|name| mode.allows_tool(name));
         }
+        trace_phase("typescript_filter", phase_started);
 
-        // Assemble system prompt
+        let phase_started = Instant::now();
         agent.system_prompt = if let Some(prompt) = self.system_prompt_override {
             prompt
         } else {
             let user_config_dir = Config::user_config_dir();
+            let resource_started = Instant::now();
             let agents_md = resources::discover_agents_md(&self.cwd, &user_config_dir);
             let soul = resources::discover_soul(&self.cwd, &user_config_dir);
             let skills = resources::discover_skills(&self.cwd, &user_config_dir);
+            trace_phase("resources_discovery", resource_started);
             agent.has_mana_skill = skills.iter().any(|skill| skill.name == "mana");
             agent.has_mana_basics_skill = skills.iter().any(|skill| skill.name == "mana-basics");
             agent.has_mana_delegation_skill =
                 skills.iter().any(|skill| skill.name == "mana-delegation");
 
-            // Layer 6: Load agent memory if learning is enabled
             let (memory_block, user_block) = if self.config.learning.enabled {
+                let memory_started = Instant::now();
                 let mem = load_scoped_memory_block(
                     &self.cwd,
                     &user_config_dir.join("memory.md"),
                     "MEMORY (your personal notes)",
                     self.config.learning.memory_char_limit,
                 );
-
                 let user = load_scoped_memory_block(
                     &self.cwd,
                     &user_config_dir.join("user.md"),
                     "USER PROFILE",
                     self.config.learning.user_char_limit,
                 );
-
+                trace_phase("memory_load", memory_started);
                 (mem, user)
             } else {
                 (None, None)
             };
 
+            let prompt_context_started = Instant::now();
             let prompt_context = if self.facts.is_empty() {
-                mana_prompt_context::load_session_prompt_context(&self.cwd)
+                self.preloaded_prompt_context
+                    .clone()
+                    .unwrap_or_else(|| mana_prompt_context::load_session_prompt_context(&self.cwd))
             } else {
                 mana_prompt_context::SessionPromptContext {
                     facts: self.facts.clone(),
+                    fact_provenance: self
+                        .facts
+                        .iter()
+                        .map(|fact| {
+                            crate::trust::TrustedContext::new(
+                                fact.text.clone(),
+                                crate::trust::Provenance::mana_record(
+                                    crate::trust::ManaRecordKind::Fact,
+                                    "builder-fact",
+                                ),
+                            )
+                        })
+                        .collect(),
                     project_memory_status: None,
+                    project_memory_status_provenance: None,
                 }
             };
+            trace_phase("mana_prompt_context", prompt_context_started);
 
-            system_prompt::assemble(&system_prompt::AssembleParams {
+            let assemble_started = Instant::now();
+            let prompt = system_prompt::assemble(&system_prompt::AssembleParams {
                 tools: &agent.tools,
                 agents_md: &agents_md,
                 skills: &skills,
@@ -313,9 +389,21 @@ impl AgentBuilder {
                 learning_enabled: self.config.learning.enabled,
                 guardrail_profile: agent.guardrail_profile,
             })
-            .text
+            .text;
+            trace_phase("system_prompt_assemble", assemble_started);
+            prompt
         };
-
+        trace_phase("system_prompt_total", phase_started);
+        if let Some(path) = trace_path.as_ref() {
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(
+                    file,
+                    "{} agent_builder_total duration_ms={}",
+                    imp_llm::now(),
+                    build_started.elapsed().as_millis()
+                );
+            }
+        }
         Ok((agent, handle))
     }
 }

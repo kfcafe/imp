@@ -5,5 +5,9 @@
 //! features (policy, verification, evidence, child runs) build on these types.
 
 mod contract;
+mod verification;
+mod verification_runner;
 
 pub use contract::*;
+pub use verification::*;
+pub use verification_runner::*;

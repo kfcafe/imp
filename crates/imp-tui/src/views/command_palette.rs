@@ -86,6 +86,10 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
             description: "Show active imp work status".into(),
         },
         SlashCommand {
+            name: "autonomy".into(),
+            description: "Set autonomy mode (/autonomy safe|local-auto|allow-all-local)".into(),
+        },
+        SlashCommand {
             name: "clean".into(),
             description: "Clean active sandbox/artifacts safely".into(),
         },

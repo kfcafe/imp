@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 use imp_llm::message::{ContentBlock, Message, UserMessage};
 
+use crate::trust::{Provenance, TrustedContext};
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -43,6 +45,8 @@ pub struct PrefillConfig {
     pub budget_tokens: usize,
     /// Max estimated tokens per individual file. Default: 10_000.
     pub per_file_tokens: usize,
+    /// Render compact trust/provenance labels in prompt context blocks.
+    pub annotate_trust: bool,
 }
 
 impl Default for PrefillConfig {
@@ -50,6 +54,7 @@ impl Default for PrefillConfig {
         Self {
             budget_tokens: 50_000,
             per_file_tokens: 10_000,
+            annotate_trust: false,
         }
     }
 }
@@ -63,6 +68,8 @@ pub struct AssembledContext {
     pub included_files: Vec<PathBuf>,
     /// Warnings (missing files, truncations, budget exceeded).
     pub warnings: Vec<String>,
+    /// Provenance for successfully included files. Prompt text is unchanged; metadata is internal.
+    pub provenance: Vec<TrustedContext<PathBuf>>,
     /// Estimated token count of assembled context.
     pub estimated_tokens: usize,
 }
@@ -74,6 +81,7 @@ impl AssembledContext {
             messages: Vec::new(),
             included_files: Vec::new(),
             warnings: Vec::new(),
+            provenance: Vec::new(),
             estimated_tokens: 0,
         }
     }
@@ -200,7 +208,17 @@ pub fn assemble_context(
             FileMode::Tail(n) => format!(r#" note="last {n} lines""#),
             FileMode::Range(s, e) => format!(r#" note="lines {s}-{e}""#),
         };
-        let header = format!(r#"<file path="{}"{}>"#, spec.path.display(), mode_note);
+        let trust_attr = if config.annotate_trust {
+            r#" trust="workspace:file""#
+        } else {
+            ""
+        };
+        let header = format!(
+            r#"<file path="{}"{}{}>"#,
+            spec.path.display(),
+            trust_attr,
+            mode_note
+        );
         let footer = "</file>";
         let section_overhead = header.len() + footer.len() + 2; // newlines
 
@@ -250,6 +268,7 @@ pub fn assemble_context(
             messages: Vec::new(),
             included_files,
             warnings,
+            provenance: Vec::new(),
             estimated_tokens: 0,
         };
     }
@@ -262,10 +281,17 @@ pub fn assemble_context(
         timestamp: imp_llm::now(),
     });
 
+    let provenance = included_files
+        .iter()
+        .cloned()
+        .map(|path| TrustedContext::new(path.clone(), Provenance::workspace_file(path)))
+        .collect();
+
     AssembledContext {
         messages: vec![message],
         included_files,
         warnings,
+        provenance,
         estimated_tokens,
     }
 }
@@ -365,6 +391,53 @@ mod tests {
     // -- Assembly tests --
 
     #[test]
+    fn prompt_context_trust_annotations_are_configurable() {
+        let dir = temp_dir_with_files(&[("README.md", "hello")]);
+        let specs = vec![FileSpec {
+            path: PathBuf::from("README.md"),
+            mode: FileMode::Full,
+        }];
+
+        let unannotated = assemble_context(&specs, dir.path(), &PrefillConfig::default());
+        let text = message_text(&unannotated.messages[0]);
+        assert!(text.contains(r#"<file path="README.md">"#));
+        assert!(!text.contains("trust="));
+
+        let annotated = assemble_context(
+            &specs,
+            dir.path(),
+            &PrefillConfig {
+                annotate_trust: true,
+                ..PrefillConfig::default()
+            },
+        );
+        let text = message_text(&annotated.messages[0]);
+        assert!(text.contains(r#"<file path="README.md" trust="workspace:file">"#));
+    }
+
+    #[test]
+    fn test_context_prefill_records_workspace_file_provenance() {
+        let dir = temp_dir_with_files(&[("README.md", "hello")]);
+        let specs = vec![FileSpec {
+            path: PathBuf::from("README.md"),
+            mode: FileMode::Full,
+        }];
+
+        let assembled = assemble_context(&specs, dir.path(), &PrefillConfig::default());
+
+        assert_eq!(assembled.provenance.len(), 1);
+        assert_eq!(assembled.provenance[0].value, PathBuf::from("README.md"));
+        assert_eq!(
+            assembled.provenance[0].provenance.trust,
+            crate::trust::TrustLabel::ProjectTrusted
+        );
+        assert!(matches!(
+            assembled.provenance[0].provenance.source,
+            crate::trust::ProvenanceSource::WorkspaceFile { .. }
+        ));
+    }
+
+    #[test]
     fn test_context_prefill_assembles_single_file() {
         let dir =
             temp_dir_with_files(&[("src/main.rs", "fn main() {\n    println!(\"hello\");\n}")]);
@@ -438,6 +511,7 @@ mod tests {
         let config = PrefillConfig {
             budget_tokens: 100_000,
             per_file_tokens: 100, // ~400 chars — file will be truncated
+            ..PrefillConfig::default()
         };
         let ctx = assemble_context(&specs, dir.path(), &config);
         assert_eq!(ctx.included_files.len(), 1);
@@ -469,6 +543,7 @@ mod tests {
         let config = PrefillConfig {
             budget_tokens: 2500, // ~10000 chars — first file + XML wrapper fits, second doesn't
             per_file_tokens: 50_000,
+            ..PrefillConfig::default()
         };
         let ctx = assemble_context(&specs, dir.path(), &config);
         // First file should be included, second skipped

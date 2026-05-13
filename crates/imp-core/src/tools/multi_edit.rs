@@ -309,6 +309,7 @@ mod tests {
             )),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         }
     }
 

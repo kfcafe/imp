@@ -95,6 +95,7 @@ use imp_core::tools::web::types::SearchProvider;
 use imp_core::typescript_extensions::{
     inspect_typescript_extension_statuses, TypeScriptExtensionLoadState,
 };
+use imp_core::workflow::{AutonomyMode, VerificationGate};
 use std::ffi::OsString;
 
 use imp_core::imp_session::{
@@ -302,6 +303,14 @@ struct Cli {
     /// Final output format for --print: text or json
     #[arg(long, default_value = "text")]
     output: String,
+
+    /// Autonomy mode: suggest, safe, local-auto, worktree-auto, allow-all-local, allow-all, ci
+    #[arg(long, value_name = "MODE")]
+    autonomy: Option<AutonomyMode>,
+
+    /// Verification command gate to require for closeout. Repeat for multiple gates.
+    #[arg(long = "verify", value_name = "COMMAND")]
+    verify: Vec<String>,
 
     /// Maximum turns before stopping (default: 50)
     #[arg(long)]
@@ -2032,6 +2041,8 @@ async fn run_headless_mode(
             .as_ref()
             .map(|thinking| parse_thinking_level(thinking)),
         max_turns: cli.max_turns.or(config.max_turns),
+        autonomy_mode: cli.autonomy,
+        verification_gates: cli_verification_gates(&cli.verify),
         max_tokens: cli.max_tokens.or(config.max_tokens),
         system_prompt: cli.system_prompt.clone(),
         no_tools: cli.no_tools,
@@ -2170,6 +2181,16 @@ async fn run_reserved_mana_namespace_command(
     .into())
 }
 
+fn cli_verification_gates(commands: &[String]) -> Vec<VerificationGate> {
+    commands
+        .iter()
+        .enumerate()
+        .map(|(index, command)| {
+            VerificationGate::command(format!("cli-verify-{}", index + 1), command.clone())
+        })
+        .collect()
+}
+
 fn determine_headless_output_mode(cli_mode: &str, stdout_is_terminal: bool) -> HeadlessOutputMode {
     match cli_mode {
         "json" | "rpc" => HeadlessOutputMode::Json,
@@ -2300,11 +2321,13 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
         AgentEvent::ToolExecutionEnd {
             tool_call_id,
             result,
+            provenance,
         } => {
             json!({
                 "type": "tool_execution_end",
                 "tool_call_id": tool_call_id,
                 "result": result,
+                "provenance": provenance,
             })
         }
         AgentEvent::Timing { timing } => json!({
@@ -2322,6 +2345,26 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
             "checkpoint": checkpoint,
         }),
         AgentEvent::Warning { message } => json!({ "type": "warning", "message": message }),
+        AgentEvent::EvidenceWritten { path } => json!({
+            "type": "evidence_written",
+            "path": path.display().to_string(),
+        }),
+        AgentEvent::VerificationStarted { gate } => json!({
+            "type": "verification_started",
+            "gate": gate,
+        }),
+        AgentEvent::VerificationCompleted {
+            gate,
+            closeout_effect,
+        } => json!({
+            "type": "verification_completed",
+            "gate": gate,
+            "closeout_effect": closeout_effect,
+        }),
+        AgentEvent::PolicyChecked { record } => json!({
+            "type": "policy_checked",
+            "record": record,
+        }),
         AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
         AgentEvent::ToolOutputDelta { .. } => return Ok(()), // handled in TUI only
     };
@@ -2955,6 +2998,7 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
         AgentEvent::ToolExecutionEnd {
             tool_call_id,
             result,
+            provenance,
         } => json!({
             "type": "tool_execution_end",
             "tool_call_id": tool_call_id,
@@ -2963,6 +3007,7 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             "content": result.content,
             "details": result.details,
             "timestamp": result.timestamp,
+            "provenance": provenance,
         }),
         AgentEvent::Timing { timing } => json!({
             "type": "timing",
@@ -2981,6 +3026,26 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
         AgentEvent::Warning { message } => {
             json!({ "type": "warning", "message": message })
         }
+        AgentEvent::EvidenceWritten { path } => json!({
+            "type": "evidence_written",
+            "path": path.display().to_string(),
+        }),
+        AgentEvent::VerificationStarted { gate } => json!({
+            "type": "verification_started",
+            "gate": gate,
+        }),
+        AgentEvent::VerificationCompleted {
+            gate,
+            closeout_effect,
+        } => json!({
+            "type": "verification_completed",
+            "gate": gate,
+            "closeout_effect": closeout_effect,
+        }),
+        AgentEvent::PolicyChecked { record } => json!({
+            "type": "policy_checked",
+            "record": record,
+        }),
         AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
         AgentEvent::ToolOutputDelta { tool_call_id, text } => {
             json!({ "type": "tool_output_delta", "tool_call_id": tool_call_id, "text": text })
@@ -3150,6 +3215,8 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
             .as_ref()
             .map(|thinking| parse_thinking_level(thinking)),
         max_turns: cli.max_turns.or(config.max_turns),
+        autonomy_mode: cli.autonomy,
+        verification_gates: cli_verification_gates(&cli.verify),
         max_tokens: cli.max_tokens.or(config.max_tokens),
         system_prompt: cli.system_prompt.clone(),
         no_tools: cli.no_tools,
@@ -4136,6 +4203,8 @@ async fn build_chat_session(
             .as_ref()
             .map(|thinking| parse_thinking_level(thinking)),
         max_turns: cli.max_turns.or(config.max_turns),
+        autonomy_mode: cli.autonomy,
+        verification_gates: cli_verification_gates(&cli.verify),
         max_tokens: cli.max_tokens.or(config.max_tokens),
         system_prompt: cli.system_prompt.clone(),
         no_tools: cli.no_tools,
@@ -4835,6 +4904,8 @@ mod tests {
             no_tools: false,
             system_prompt: None,
             mode: "interactive".to_string(),
+            autonomy: None,
+            verify: Vec::new(),
             output: "text".to_string(),
             max_turns: None,
             max_tokens: None,
@@ -4930,6 +5001,47 @@ mod tests {
         unit.updated_at = unit.created_at;
         unit.to_file(&mana_dir.join(format!("{id}-{title_slug}.md")))
             .unwrap();
+    }
+
+    #[test]
+    fn cli_parses_autonomy_mode_flag() {
+        let cli = Cli::try_parse_from(["imp", "--autonomy", "allow-all-local", "fix it"])
+            .expect("parse autonomy flag");
+        assert_eq!(cli.autonomy, Some(AutonomyMode::AllowAllLocal));
+        assert_eq!(cli.args, vec!["fix it".to_string()]);
+    }
+
+    #[test]
+    fn cli_rejects_unknown_autonomy_mode() {
+        let err = match Cli::try_parse_from(["imp", "--autonomy", "dangerous", "fix it"]) {
+            Ok(_) => panic!("unknown autonomy mode should fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn cli_parses_verify_command_gates() {
+        let cli = Cli::try_parse_from([
+            "imp",
+            "--verify",
+            "cargo test -p imp-core",
+            "--verify",
+            "cargo fmt --check",
+            "fix it",
+        ])
+        .expect("parse verify gates");
+        let gates = cli_verification_gates(&cli.verify);
+        assert_eq!(gates.len(), 2);
+        assert_eq!(gates[0].id, "cli-verify-1");
+        assert_eq!(
+            gates[0]
+                .command
+                .as_ref()
+                .map(|command| command.command.as_str()),
+            Some("cargo test -p imp-core")
+        );
+        assert_eq!(gates[1].id, "cli-verify-2");
     }
 
     #[test]
@@ -5029,6 +5141,8 @@ mod tests {
             system_prompt: None,
             thinking: Some(ThinkingLevel::Off),
             max_turns: Some(2),
+            autonomy_mode: None,
+            verification_gates: Vec::new(),
             max_tokens: None,
             no_tools: false,
             mana_dir_override: Some(temp.path().join(".mana")),
@@ -5090,6 +5204,8 @@ mod tests {
             system_prompt: None,
             thinking: Some(ThinkingLevel::Off),
             max_turns: Some(1),
+            autonomy_mode: None,
+            verification_gates: Vec::new(),
             max_tokens: None,
             no_tools: true,
             mana_dir_override: Some(temp.path().join(".mana")),
