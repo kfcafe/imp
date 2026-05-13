@@ -254,6 +254,33 @@ const IDLE_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 const SLOW_TUI_EVENT_THRESHOLD: Duration = Duration::from_millis(16);
 const SLOW_TUI_RENDER_THRESHOLD: Duration = Duration::from_millis(33);
 
+struct AgentStartRequest {
+    session: SessionManager,
+    model_name: String,
+    model_registry: ModelRegistry,
+    thinking_level: ThinkingLevel,
+    config: Config,
+    workflow_mode: WorkflowMode,
+    active_mana_scope: Option<ManaUnitRef>,
+    improve_sandbox: Option<ImproveSandbox>,
+    improve_safe_mode: bool,
+    runtime_signal_tx: tokio::sync::mpsc::Sender<RuntimeSignal>,
+    ui_tx: tokio::sync::mpsc::Sender<crate::tui_interface::UiRequest>,
+}
+
+struct AgentStartResult {
+    command_tx: tokio::sync::mpsc::Sender<AgentCommand>,
+    cancel_token: Arc<std::sync::atomic::AtomicBool>,
+    task: tokio::task::JoinHandle<Result<(), ImpCoreError>>,
+    event_task: tokio::task::JoinHandle<()>,
+}
+
+impl std::fmt::Debug for AgentStartResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentStartResult").finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug)]
 enum RuntimeSignal {
     AgentEvent(AgentEvent),
@@ -284,6 +311,8 @@ enum RuntimeSignal {
         persisted_session: Option<SessionManager>,
     },
     UserMessagePersistFailed(String),
+    AgentStartCompleted(AgentStartResult),
+    AgentStartFailed(String),
     ManaNavigatorLoaded(ManaNavigatorState),
     ManaNavigatorLoadFailed {
         mana_dir: Option<PathBuf>,
@@ -1236,6 +1265,127 @@ fn read_improve_sandbox_metadata_file(
     let metadata: ImproveSandboxMetadata = serde_json::from_str(&raw)
         .map_err(|err| format!("failed to parse Improve metadata {}: {err}", path.display()))?;
     Ok(Some(metadata))
+}
+
+fn start_agent_from_request(
+    request: AgentStartRequest,
+    prompt: &str,
+    agent_cwd: PathBuf,
+) -> Result<AgentStartResult, String> {
+    let auth_path = imp_core::storage::global_auth_path();
+    let mut auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
+    let mut meta = request
+        .model_registry
+        .resolve_meta(&request.model_name, None)
+        .ok_or_else(|| format!("Unknown model: {}", request.model_name))?;
+    let mut provider_name = meta.provider.clone();
+    if should_use_chatgpt_provider(&auth_store, &request.model_registry, &meta) {
+        provider_name = "openai-codex".to_string();
+        meta = request
+            .model_registry
+            .resolve_meta(&request.model_name, Some(&provider_name))
+            .ok_or_else(|| format!("Unknown model: {}", request.model_name))?;
+    }
+    let provider = create_provider(&provider_name)
+        .ok_or_else(|| format!("Unknown provider: {provider_name}"))?;
+    let api_key = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current()
+            .block_on(resolve_provider_api_key(&mut auth_store, &provider_name))
+    })
+    .map_err(|e: imp_llm::Error| e.to_string())?;
+    let model = Model {
+        meta,
+        provider: Arc::from(provider),
+    };
+
+    let mut config = request.config.clone();
+    config.thinking = Some(request.thinking_level);
+    let requested_max_tokens = request.config.max_tokens;
+    let lua_cwd = agent_cwd.clone();
+    let user_config_dir = imp_core::config::Config::user_config_dir();
+    let (mut agent, handle) = AgentBuilder::new(config, agent_cwd, model, api_key)
+        .lua_tool_loader(move |policy, tools| {
+            imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools, policy);
+        })
+        .build()
+        .map_err(|e: imp_core::error::Error| e.to_string())?;
+
+    let tui_ui = crate::tui_interface::TuiInterface::new(request.ui_tx.clone());
+    agent.ui = tui_ui;
+    if let Some(max_tokens) = requested_max_tokens {
+        agent.max_tokens = Some(max_tokens);
+    }
+
+    let mut messages: Vec<Message> = request.session.get_active_messages();
+    if matches!(
+        messages.last(),
+        Some(Message::User(user))
+            if matches!(
+                user.content.as_slice(),
+                [ContentBlock::Text { text }] if text == prompt
+            )
+    ) {
+        messages.pop();
+    }
+    imp_core::session::sanitize_messages(&mut messages);
+    agent.messages = messages;
+    if let Some(workflow_context) = workflow_context_prompt_for_request(&request) {
+        agent.messages.push(Message::user(workflow_context));
+    }
+
+    let prompt = prompt.to_string();
+    let task = tokio::spawn(async move { agent.run(prompt).await });
+    let command_tx = handle.command_tx.clone();
+    let cancel_token = Arc::clone(&handle.cancel_token);
+    let signal_tx = request.runtime_signal_tx.clone();
+    let mut event_rx = handle.event_rx;
+    let event_task = tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            if signal_tx.send(RuntimeSignal::AgentEvent(event)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    Ok(AgentStartResult {
+        command_tx,
+        cancel_token,
+        task,
+        event_task,
+    })
+}
+
+fn workflow_context_prompt_for_request(request: &AgentStartRequest) -> Option<String> {
+    let mut context = String::new();
+    if request.workflow_mode == WorkflowMode::Improve {
+        if request.improve_safe_mode {
+            context.push_str(" Improve safe mode is bounded autoresearch, evaluation, critique, and mana follow-up creation; avoid code edits.");
+        } else if let Some(sandbox) = request.improve_sandbox.as_ref() {
+            context.push_str(&format!(
+                " Improve mode may make code changes only in sandbox branch {} at {}. Do not edit the original checkout, commit, or merge without explicit approval.",
+                sandbox.branch,
+                sandbox.worktree.display()
+            ));
+        } else {
+            context.push_str(" Improve mode may create a sandbox branch/worktree for code changes; do not edit the original checkout, commit, or merge without explicit approval.");
+        }
+    }
+    if let Some(scope) = request.active_mana_scope.as_ref() {
+        if !context.is_empty() {
+            context.push(' ');
+        }
+        let title = scope.title.trim();
+        if title.is_empty() {
+            context.push_str(&format!(" Active mana scope: {}.", scope.id));
+        } else {
+            context.push_str(&format!(" Active mana scope: {} — {}.", scope.id, title));
+        }
+    }
+    if context.is_empty() {
+        None
+    } else {
+        Some(context)
+    }
 }
 
 fn validate_improve_sandbox_metadata(
@@ -2273,6 +2423,8 @@ impl App {
                 persisted_session,
             } => self.finish_user_message_persist(entry_id, persisted_session),
             RuntimeSignal::UserMessagePersistFailed(error) => self.push_error_msg(&error),
+            RuntimeSignal::AgentStartCompleted(result) => self.finish_agent_start(result),
+            RuntimeSignal::AgentStartFailed(error) => self.fail_agent_start(error),
             RuntimeSignal::ManaNavigatorLoaded(state) => self.finish_mana_navigator_load(state),
             RuntimeSignal::ManaNavigatorLoadFailed { mana_dir, message } => {
                 self.fail_mana_navigator_load(mana_dir, message);
@@ -4698,38 +4850,6 @@ impl App {
         })
     }
 
-    fn workflow_context_prompt(&self) -> Option<String> {
-        let mut context = String::new();
-        if self.workflow_mode == WorkflowMode::Improve {
-            if self.improve_safe_mode {
-                context.push_str(" Improve safe mode is bounded autoresearch, evaluation, critique, and mana follow-up creation; avoid code edits.");
-            } else if let Some(sandbox) = self.improve_sandbox.as_ref() {
-                context.push_str(&format!(
-                    " Improve mode may make code changes only in sandbox branch {} at {}. Do not edit the original checkout, commit, or merge without explicit approval.",
-                    sandbox.branch,
-                    sandbox.worktree.display()
-                ));
-            } else {
-                context.push_str(" Improve mode may create a sandbox branch/worktree for code changes; do not edit the original checkout, commit, or merge without explicit approval.");
-            }
-        }
-        if let Some(scope) = self.active_mana_scope.as_ref() {
-            if !context.is_empty() {
-                context.push(' ');
-            }
-            let title = scope.title.trim();
-            if title.is_empty() {
-                context.push_str(&format!(" Active mana scope: {}.", scope.id));
-            } else {
-                context.push_str(&format!(" Active mana scope: {} — {}.", scope.id, title));
-            }
-        }
-        if context.is_empty() {
-            None
-        } else {
-            Some(context)
-        }
-    }
 
     fn queue_improve_mode_continuation_if_ready(&mut self) {
         if self.workflow_mode != WorkflowMode::Improve
@@ -5052,123 +5172,78 @@ impl App {
         }
     }
 
-    fn spawn_agent_for_prompt_in_cwd(
-        &mut self,
-        prompt: &str,
-        agent_cwd: PathBuf,
-    ) -> Result<(), String> {
-        let auth_path = imp_core::storage::global_auth_path();
-        let mut auth_store =
-            AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path.clone()));
-
-        let mut meta = self
-            .model_registry
-            .resolve_meta(&self.model_name, None)
-            .ok_or_else(|| format!("Unknown model: {}", self.model_name))?;
-
-        let mut provider_name = meta.provider.clone();
-        if should_use_chatgpt_provider(&auth_store, &self.model_registry, &meta) {
-            provider_name = "openai-codex".to_string();
-            meta = self
-                .model_registry
-                .resolve_meta(&self.model_name, Some(&provider_name))
-                .ok_or_else(|| format!("Unknown model: {}", self.model_name))?;
-        }
-
-        let provider = create_provider(&provider_name)
-            .ok_or_else(|| format!("Unknown provider: {provider_name}"))?;
-
-        // Resolve API key with auto-refresh for expired OAuth tokens
-        let api_key = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(resolve_provider_api_key(&mut auth_store, &provider_name))
-        })
-        .map_err(|e: imp_llm::Error| e.to_string())?;
-
-        let model = Model {
-            meta,
-            provider: Arc::from(provider),
-        };
-
-        // Override thinking level from the TUI's current selection.
-        let mut config = self.config.clone();
-        config.thinking = Some(self.thinking_level);
-
-        let requested_max_tokens = self.config.max_tokens;
-
-        let lua_cwd = agent_cwd.clone();
-        let user_config_dir = imp_core::config::Config::user_config_dir();
-        let (mut agent, handle) = AgentBuilder::new(config, agent_cwd, model, api_key)
-            .lua_tool_loader(move |policy, tools| {
-                imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools, policy);
-            })
-            .build()
-            .map_err(|e: imp_core::error::Error| e.to_string())?;
-
-        // Wire TuiInterface so the ask tool works
+    fn agent_start_request(&mut self) -> AgentStartRequest {
         let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(16);
-        let tui_ui = crate::tui_interface::TuiInterface::new(ui_tx);
-        agent.ui = tui_ui.clone();
+        let tui_ui = crate::tui_interface::TuiInterface::new(ui_tx.clone());
         self.lua_command_ui = Some(tui_ui);
         self.ui_rx = Some(ui_rx);
 
-        if let Some(max_tokens) = requested_max_tokens {
-            agent.max_tokens = Some(max_tokens);
+        AgentStartRequest {
+            session: self.session.clone(),
+            model_name: self.model_name.clone(),
+            model_registry: self.model_registry.clone(),
+            thinking_level: self.thinking_level,
+            config: self.config.clone(),
+            workflow_mode: self.workflow_mode,
+            active_mana_scope: self.active_mana_scope.clone(),
+            improve_sandbox: self.improve_sandbox.clone(),
+            improve_safe_mode: self.improve_safe_mode,
+            runtime_signal_tx: self.runtime_signal_tx.clone(),
+            ui_tx,
         }
+    }
 
-        let mut messages: Vec<Message> = self.session.get_active_messages();
-        if matches!(
-            messages.last(),
-            Some(Message::User(user))
-                if matches!(
-                    user.content.as_slice(),
-                    [imp_llm::ContentBlock::Text { text }] if text == prompt
-                )
-        ) {
-            messages.pop();
-        }
-        // Collect tool_result IDs to know which tool_calls are paired (used by sanitize below)
-        let _result_ids: std::collections::HashSet<String> = messages
-            .iter()
-            .filter_map(|m| match m {
-                Message::ToolResult(tr) => Some(tr.tool_call_id.clone()),
-                _ => None,
-            })
-            .collect();
-
-        // Sanitize: strip unpaired tool_calls and orphaned tool_results
-        imp_core::session::sanitize_messages(&mut messages);
-        agent.messages = messages;
-
-        if let Some(workflow_context) = self.workflow_context_prompt() {
-            agent.messages.push(Message::user(workflow_context));
-        }
-
-        let prompt = prompt.to_string();
-        let task = tokio::spawn(async move { agent.run(prompt).await });
-        let command_tx = handle.command_tx.clone();
-        let cancel_token = Arc::clone(&handle.cancel_token);
+    fn start_agent_for_prompt_in_background(&mut self, text: String, agent_cwd: PathBuf) {
+        let request = self.agent_start_request();
         let signal_tx = self.runtime_signal_tx.clone();
-        let mut event_rx = handle.event_rx;
-        self.agent_event_task = Some(tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                if signal_tx
-                    .send(RuntimeSignal::AgentEvent(event))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        }));
+        self.trace_tui("agent_start_task queued");
+        tokio::spawn(async move {
+            let signal = match tokio::task::spawn_blocking(move || {
+                start_agent_from_request(request, &text, agent_cwd)
+            })
+            .await
+            {
+                Ok(Ok(result)) => RuntimeSignal::AgentStartCompleted(result),
+                Ok(Err(error)) => RuntimeSignal::AgentStartFailed(error),
+                Err(error) => RuntimeSignal::AgentStartFailed(format!(
+                    "Agent start task failure: {error}"
+                )),
+            };
+            let _ = signal_tx.send(signal).await;
+        });
+    }
 
+    fn finish_agent_start(&mut self, result: AgentStartResult) {
         self.agent_handle = Some(AgentHandle {
             event_rx: tokio::sync::mpsc::channel(1).1,
-            command_tx,
-            cancel_token,
+            command_tx: result.command_tx,
+            cancel_token: result.cancel_token,
         });
-        self.agent_task = Some(task);
-        Ok(())
+        self.agent_task = Some(result.task);
+        self.agent_event_task = Some(result.event_task);
+    }
+
+    fn fail_agent_start(&mut self, error: String) {
+        self.is_streaming = false;
+        self.streaming_anchor_user_index = None;
+        if self
+            .messages
+            .last()
+            .is_some_and(|message| message.role == MessageRole::Assistant)
+        {
+            self.messages.pop();
+        }
+        self.messages.push(DisplayMessage {
+            role: MessageRole::Error,
+            content: error,
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: false,
+            timestamp: imp_llm::now(),
+        });
+        self.invalidate_chat_render_cache();
+        self.needs_redraw = true;
     }
 
     fn try_prompt_command(&mut self, text: &str) -> bool {
@@ -5467,22 +5542,7 @@ impl App {
             .take()
             .unwrap_or_else(|| self.cwd.clone());
 
-        if let Err(error) = self.spawn_agent_for_prompt_in_cwd(&text, agent_cwd) {
-            self.is_streaming = false;
-            self.streaming_anchor_user_index = None;
-            self.messages.pop();
-            self.messages.push(DisplayMessage {
-                role: MessageRole::Error,
-                content: error,
-                thinking: None,
-                tool_calls: Vec::new(),
-                assistant_blocks: Vec::new(),
-                is_streaming: false,
-                timestamp: imp_llm::now(),
-            });
-            self.invalidate_chat_render_cache();
-            self.needs_redraw = true;
-        }
+        self.start_agent_for_prompt_in_background(text, agent_cwd);
     }
 
     fn restore_checkpoint_command(&mut self, needle: &str) {
