@@ -382,6 +382,7 @@ pub struct App {
     drag_autoscroll: Option<DragAutoScroll>,
     /// Cached chat render data reused while only scroll offset changes.
     chat_render_cache: Option<ChatRenderCache>,
+    streaming_anchor_user_index: Option<usize>,
     sidebar_stream_cache: Option<SidebarStreamCache>,
     sidebar_detail_cache: Option<SidebarDetailCache>,
 
@@ -681,6 +682,7 @@ impl App {
             drag_selection: None,
             drag_autoscroll: None,
             chat_render_cache: None,
+            streaming_anchor_user_index: None,
             sidebar_stream_cache: None,
             sidebar_detail_cache: None,
             llm_thought_segment_started_at: None,
@@ -3362,7 +3364,10 @@ impl App {
     }
 
     fn execute_command(&mut self, cmd: &str) {
-        match cmd.split_whitespace().next().unwrap_or("") {
+        let mut parts = cmd.split_whitespace();
+        let command = parts.next().unwrap_or("");
+        let args = parts.collect::<Vec<_>>().join(" ");
+        match command {
             "quit" | "q" => {
                 self.running = false;
             }
@@ -3373,7 +3378,11 @@ impl App {
                 self.open_tree_view();
             }
             "mana" => {
-                self.open_mana_navigator(if args.is_empty() { None } else { Some(args) });
+                self.open_mana_navigator(if args.is_empty() {
+                    None
+                } else {
+                    Some(args.as_str())
+                });
             }
             "new" => {
                 self.messages.clear();
@@ -7776,6 +7785,9 @@ mod session_lifecycle {
                 cache_read: 0.0,
                 cache_write: 0.0,
                 total: 3.0,
+            },
+            status: imp_core::agent::RunFinalStatus::Done {
+                reason: imp_core::agent::StopReason::WorkCompleted,
             },
         });
 
