@@ -899,6 +899,7 @@ pub struct App {
     pub agent_handle: Option<AgentHandle>,
     agent_event_task: Option<tokio::task::JoinHandle<()>>,
     agent_task: Option<tokio::task::JoinHandle<Result<(), ImpCoreError>>>,
+    agent_start_task: Option<tokio::task::JoinHandle<()>>,
     compaction_task: Option<tokio::task::JoinHandle<Result<String, String>>>,
     lua_command_task: Option<tokio::task::JoinHandle<(String, Result<Option<String>, String>)>>,
     pub is_streaming: bool,
@@ -1874,6 +1875,7 @@ impl App {
             agent_handle: None,
             agent_event_task: None,
             agent_task: None,
+            agent_start_task: None,
             compaction_task: None,
             lua_command_task: None,
             is_streaming: false,
@@ -2032,7 +2034,10 @@ impl App {
             .or_else(|| self.session.title(48))
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| "chat".to_string());
-        let identity = if self.is_streaming || self.compaction_task.is_some() {
+        let identity = if self.is_streaming
+            || self.agent_start_task.is_some()
+            || self.compaction_task.is_some()
+        {
             if self.config.ui.animations == imp_core::config::AnimationLevel::None {
                 title_working_glyph()
             } else {
@@ -2061,7 +2066,7 @@ impl App {
     }
 
     fn sync_window_title_if_needed(&mut self) {
-        if self.is_streaming || self.compaction_task.is_some() {
+        if self.is_streaming || self.agent_start_task.is_some() || self.compaction_task.is_some() {
             self.sync_window_title();
         }
     }
@@ -2144,7 +2149,11 @@ impl App {
                 _ = frame_tick.tick() => {
                     self.tick = self.tick.wrapping_add(1);
                     self.maybe_autoscroll_selection();
-                    if self.is_streaming || self.compaction_task.is_some() || self.drag_autoscroll.is_some() {
+                    if self.is_streaming
+                        || self.agent_start_task.is_some()
+                        || self.compaction_task.is_some()
+                        || self.drag_autoscroll.is_some()
+                    {
                         self.sync_window_title_if_needed();
                         self.needs_redraw = true;
                     }
@@ -5199,7 +5208,7 @@ impl App {
         let request = self.agent_start_request();
         let signal_tx = self.runtime_signal_tx.clone();
         self.trace_tui("agent_start_task queued");
-        tokio::spawn(async move {
+        let start_task = tokio::spawn(async move {
             let signal = match tokio::task::spawn_blocking(move || {
                 start_agent_from_request(request, &text, agent_cwd)
             })
@@ -5213,9 +5222,11 @@ impl App {
             };
             let _ = signal_tx.send(signal).await;
         });
+        self.agent_start_task = Some(start_task);
     }
 
     fn finish_agent_start(&mut self, result: AgentStartResult) {
+        self.agent_start_task = None;
         self.agent_handle = Some(AgentHandle {
             event_rx: tokio::sync::mpsc::channel(1).1,
             command_tx: result.command_tx,
@@ -5226,6 +5237,7 @@ impl App {
     }
 
     fn fail_agent_start(&mut self, error: String) {
+        self.agent_start_task = None;
         self.is_streaming = false;
         self.streaming_anchor_user_index = None;
         if self
@@ -8609,6 +8621,15 @@ mod session_lifecycle {
         assert_eq!(app.terminal_title(), "⠼ — my chat");
     }
 
+    #[tokio::test]
+    async fn terminal_title_spins_while_agent_start_is_pending() {
+        let mut app = make_app();
+        app.session.set_name("my chat");
+        app.agent_start_task = Some(tokio::spawn(async {}));
+        app.tick = 4;
+        assert_eq!(app.terminal_title(), "⠙ — my chat");
+    }
+
     #[test]
     fn terminal_title_uses_static_working_glyph_when_animations_are_off() {
         let mut app = make_app();
@@ -10711,6 +10732,23 @@ mod session_lifecycle {
         assert_eq!(app.accumulated_usage.input_tokens, 500_000);
         assert_eq!(app.accumulated_usage.output_tokens, 25_000);
         assert_eq!(app.accumulated_cost.total, 3.0);
+    }
+
+    #[test]
+    fn evidence_written_event_surfaces_path_in_chat_and_status() {
+        let mut app = make_app();
+        app.handle_agent_event(AgentEvent::EvidenceWritten {
+            path: ".imp/runs/run_1/evidence.md".into(),
+        });
+
+        assert_eq!(
+            app.status_items.get("evidence").map(String::as_str),
+            Some(".imp/runs/run_1/evidence.md")
+        );
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Evidence: .imp/runs/run_1/evidence.md")));
     }
 
     #[test]
