@@ -73,10 +73,6 @@ pub struct AgentBuilder {
     /// and imp-lua.
     #[allow(clippy::type_complexity)]
     lua_tool_loader: Option<LuaToolLoader>,
-    /// Optional trace writer for structured run events.
-    trace_writer: Option<TraceWriter>,
-    evidence_builder: Option<EvidencePacketBuilder>,
-    evidence_path: Option<std::path::PathBuf>,
     /// Per-run tool/write policy layered on top of AgentMode.
     run_policy: RunPolicy,
 }
@@ -95,9 +91,6 @@ impl AgentBuilder {
             system_prompt_override: None,
             extra_tools: None,
             lua_tool_loader: None,
-            trace_writer: None,
-            evidence_builder: None,
-            evidence_path: None,
             run_policy: RunPolicy::default(),
         }
     }
@@ -208,13 +201,6 @@ impl AgentBuilder {
         agent.continue_policy = self.config.ui.continue_policy;
         agent.config = Arc::new(self.config.clone());
         agent.run_policy = self.run_policy;
-        agent.trace_writer = self
-            .trace_writer
-            .map(|writer| Arc::new(std::sync::Mutex::new(writer)));
-        agent.evidence_builder = self
-            .evidence_builder
-            .map(|builder| Arc::new(std::sync::Mutex::new(builder)));
-        agent.evidence_path = self.evidence_path;
         agent.lua_tool_loader = self.lua_tool_loader.clone();
 
         // Register native tools
@@ -685,43 +671,6 @@ mod tests {
         assert!(agent.system_prompt.contains("Project memory status:"));
         assert!(agent.system_prompt.contains("Working on:"));
         assert!(agent.system_prompt.contains("[1] Implement auth flow"));
-    }
-
-    #[tokio::test]
-    async fn builder_writes_trace_and_evidence_artifacts_from_agent_events() {
-        use imp_llm::{Cost, Usage};
-
-        let cwd = tempfile::TempDir::new().unwrap();
-        let trace_path = cwd.path().join("run").join("trace.jsonl");
-        let evidence_path = cwd.path().join("run").join("evidence.md");
-        let (agent, _handle) = AgentBuilder::new(
-            Config::default(),
-            cwd.path().to_path_buf(),
-            test_model(),
-            "key".into(),
-        )
-        .trace_writer(TraceWriter::create(&trace_path).unwrap())
-        .evidence_packet(
-            EvidencePacketBuilder::new("run_builder", "Test artifacts"),
-            &evidence_path,
-        )
-        .build()
-        .unwrap();
-
-        agent
-            .emit(crate::agent::AgentEvent::AgentEnd {
-                usage: Usage::default(),
-                cost: Cost::default(),
-                status: crate::agent::RunFinalStatus::Done {
-                    reason: crate::agent::StopReason::WorkCompleted,
-                },
-            })
-            .await;
-
-        assert!(trace_path.exists());
-        assert!(evidence_path.exists());
-        let evidence = std::fs::read_to_string(evidence_path).unwrap();
-        assert!(evidence.contains("Test artifacts"));
     }
 
     #[test]
