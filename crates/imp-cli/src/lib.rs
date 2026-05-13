@@ -394,6 +394,11 @@ enum Commands {
         #[command(subcommand)]
         command: UsageCommand,
     },
+    /// Open or inspect run evidence artifacts
+    Evidence {
+        #[command(subcommand)]
+        command: Option<EvidenceCommand>,
+    },
     /// Import skills and config from other agents (pi, Claude Code, Codex)
     Import {
         /// Only detect — don't copy anything
@@ -420,6 +425,14 @@ enum Commands {
         /// Search provider to configure (tavily, exa, linkup, perplexity)
         provider: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum EvidenceCommand {
+    /// List recent run evidence records
+    List,
+    /// Print the latest evidence HTML path
+    Latest,
 }
 
 #[derive(Subcommand, Debug)]
@@ -757,6 +770,31 @@ fn run_install_local(
     Ok(())
 }
 
+fn run_evidence_command(command: Option<&EvidenceCommand>) -> imp_core::Result<()> {
+    let records =
+        imp_core::run_evidence::read_index_records(imp_core::storage::global_run_index_path())?;
+    match command.unwrap_or(&EvidenceCommand::List) {
+        EvidenceCommand::List => {
+            for record in records.iter().rev().take(20) {
+                let status = record.status.as_deref().unwrap_or("running");
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    record.run_id,
+                    status,
+                    record.cwd.display(),
+                    record.evidence_html_path.display()
+                );
+            }
+        }
+        EvidenceCommand::Latest => {
+            if let Some(record) = records.last() {
+                println!("{}", record.evidence_html_path.display());
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn run() {
     let cli = Cli::parse();
 
@@ -874,6 +912,13 @@ pub async fn run() {
             }
             Commands::Usage { command } => {
                 if let Err(e) = usage_report::run_usage_command(command) {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
+            Commands::Evidence { command } => {
+                if let Err(e) = run_evidence_command(command.as_ref()) {
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }

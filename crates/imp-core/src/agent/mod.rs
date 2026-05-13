@@ -21,6 +21,7 @@ use crate::mana_review::{
 };
 use crate::policy::RunPolicy;
 use crate::roles::Role;
+use crate::run_evidence::{RunEventWriter, RunIndexRecord};
 use crate::tools::{LuaToolLoader, ToolRegistry};
 
 mod events;
@@ -122,6 +123,11 @@ pub struct Agent {
     /// Per-run tool/write policy layered on top of AgentMode.
     pub run_policy: RunPolicy,
 
+    /// JSONL event writer for the current run evidence artifact.
+    run_event_writer: Arc<std::sync::Mutex<Option<RunEventWriter>>>,
+    /// Summary index record for the current run, finalized at closeout.
+    run_index_record: Arc<std::sync::Mutex<Option<RunIndexRecord>>>,
+
     event_tx: mpsc::Sender<AgentEvent>,
     command_tx: mpsc::Sender<AgentCommand>,
     command_rx: mpsc::Receiver<AgentCommand>,
@@ -210,6 +216,8 @@ impl Agent {
             config: Arc::new(Config::default()),
             run_policy: RunPolicy::default(),
 
+            run_event_writer: Arc::new(std::sync::Mutex::new(None)),
+            run_index_record: Arc::new(std::sync::Mutex::new(None)),
             lua_tool_loader: None,
 
             event_tx,
@@ -337,6 +345,21 @@ impl Agent {
                     .await;
             }
             _ => {}
+        }
+        if let Ok(mut writer) = self.run_event_writer.lock() {
+            if let Some(writer) = writer.as_mut() {
+                let run_id = self
+                    .run_index_record
+                    .lock()
+                    .ok()
+                    .and_then(|record| record.as_ref().map(|record| record.run_id.clone()));
+                if let Some(run_id) = run_id {
+                    let _ = writer.write_event(&crate::run_evidence::RunEvent::from_agent_event(
+                        &run_id, &event,
+                    ));
+                    let _ = writer.flush();
+                }
+            }
         }
         let _ = self.event_tx.send(event).await;
     }

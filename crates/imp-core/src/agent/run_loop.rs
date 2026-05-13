@@ -13,6 +13,11 @@ use crate::agent::{
 };
 use crate::error::Result;
 use crate::hooks::HookEvent;
+use crate::run_evidence::{
+    append_index_record, read_run_events, write_evidence_html, RunArtifacts, RunEventWriter,
+    RunIndexRecord,
+};
+use crate::storage;
 use crate::ui::NotifyLevel;
 
 use super::{
@@ -51,13 +56,66 @@ impl Agent {
         Some(reconciliation)
     }
 
+    fn begin_run_evidence(&self, prompt: &str, started_at: u64) -> Option<(String, RunArtifacts)> {
+        let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
+        let artifacts = RunArtifacts::create(storage::global_runs_dir().join(&run_id)).ok()?;
+        let writer = RunEventWriter::create(artifacts.events_path()).ok()?;
+        let record = RunIndexRecord::started(
+            run_id.clone(),
+            self.cwd.clone(),
+            started_at,
+            prompt,
+            &artifacts,
+        );
+
+        if let Ok(mut slot) = self.run_event_writer.lock() {
+            *slot = Some(writer);
+        }
+        if let Ok(mut slot) = self.run_index_record.lock() {
+            *slot = Some(record);
+        }
+
+        Some((run_id, artifacts))
+    }
+
+    fn finish_run_evidence(&self, artifacts: &RunArtifacts, status: &RunFinalStatus) {
+        if let Ok(mut writer) = self.run_event_writer.lock() {
+            if let Some(writer) = writer.as_mut() {
+                let _ = writer.flush();
+            }
+            *writer = None;
+        }
+
+        let mut record = match self.run_index_record.lock() {
+            Ok(mut slot) => slot.take(),
+            Err(_) => None,
+        };
+
+        if let Some(record) = record.as_mut() {
+            record.completed_at = Some(imp_llm::now());
+            record.status = Some(match status {
+                RunFinalStatus::Done { .. } => "done".into(),
+                RunFinalStatus::DoneWithConcerns { .. } => "done_with_concerns".into(),
+                RunFinalStatus::Blocked { .. } => "blocked".into(),
+                RunFinalStatus::NeedsUserInput { .. } => "needs_user_input".into(),
+                RunFinalStatus::Cancelled => "cancelled".into(),
+                RunFinalStatus::Failed { .. } => "failed".into(),
+            });
+            let events = read_run_events(artifacts.events_path()).unwrap_or_default();
+            let _ = write_evidence_html(artifacts.evidence_html_path(), record, &events);
+            let _ = append_index_record(storage::global_run_index_path(), record);
+        }
+    }
+
     /// Run the agent loop with an initial prompt.
     pub async fn run(&mut self, prompt: String) -> Result<()> {
-        self.emit(AgentEvent::AgentStart {
+        let started_at = imp_llm::now();
+        let run_evidence = self.begin_run_evidence(&prompt, started_at);
+        let agent_start = AgentEvent::AgentStart {
             model: self.model.meta.id.clone(),
-            timestamp: imp_llm::now(),
-        })
-        .await;
+            timestamp: started_at,
+        };
+        self.emit(agent_start).await;
         self.hooks
             .fire(&HookEvent::OnAgentStart { prompt: &prompt })
             .await;
@@ -678,18 +736,22 @@ impl Agent {
         }
 
         let cost = total_usage.cost(&self.model.meta.pricing);
+        let status = if cancelled {
+            RunFinalStatus::Cancelled
+        } else {
+            final_status.unwrap_or_else(|| {
+                RunFinalStatus::from_stop_reason(AgentStopReason::NoAutomaticFollowUp)
+            })
+        };
         self.emit(AgentEvent::AgentEnd {
             usage: total_usage,
             cost,
-            status: if cancelled {
-                RunFinalStatus::Cancelled
-            } else {
-                final_status.unwrap_or_else(|| {
-                    RunFinalStatus::from_stop_reason(AgentStopReason::NoAutomaticFollowUp)
-                })
-            },
+            status: status.clone(),
         })
         .await;
+        if let Some((_, artifacts)) = &run_evidence {
+            self.finish_run_evidence(artifacts, &status);
+        }
 
         if cancelled {
             return Err(crate::error::Error::Cancelled);
