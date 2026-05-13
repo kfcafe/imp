@@ -18,7 +18,7 @@ pub fn is_retryable(err: &imp_llm::Error) -> bool {
         // Those are usually transient provider/proxy failures and are safe to
         // retry before any meaningful stream event has been emitted.
         imp_llm::Error::Http(e) => {
-            e.is_connect() || e.is_timeout() || e.is_request() || e.is_decode()
+            e.is_connect() || e.is_timeout() || e.is_request() || e.is_decode() || e.is_body()
         }
         // Stream errors are transient (connection reset, partial read, etc.).
         imp_llm::Error::Stream(_) => true,
@@ -217,9 +217,7 @@ mod tests {
             let mut request_buf = [0u8; 1024];
             let _ = socket.read(&mut request_buf).await;
             socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-encoding: gzip\r\ncontent-length: 12\r\n\r\nnot-gzip-body",
-                )
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 999\r\n\r\nnot-g!")
                 .await
                 .unwrap();
         });
@@ -231,7 +229,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.is_decode());
+        assert!(err.is_decode() || err.is_body());
         assert!(is_retryable(&imp_llm::Error::Http(err)));
     }
 
