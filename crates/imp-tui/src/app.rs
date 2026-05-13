@@ -1705,12 +1705,8 @@ impl App {
             .map(|m| m.context_window)
             .unwrap_or(200_000);
         let (runtime_signal_tx, runtime_signal_rx) = tokio::sync::mpsc::channel(256);
-        let startup_surface_metadata = Self::load_startup_surface_metadata(
-            &cwd,
-            &config,
-            &model_registry,
-            &model_name,
-        );
+        let startup_surface_metadata =
+            Self::load_startup_surface_metadata(&cwd, &config, &model_registry, &model_name);
 
         Self {
             running: true,
@@ -2816,10 +2812,8 @@ impl App {
             .unwrap_or("this project")
             .to_string();
 
-        let lua_extension_summary = summarize_inline(
-            self.startup_surface_metadata.lua_extension_names.clone(),
-            3,
-        );
+        let lua_extension_summary =
+            summarize_inline(self.startup_surface_metadata.lua_extension_names.clone(), 3);
         let provider_id = self.startup_surface_metadata.provider_id.as_str();
         let provider_auth = if self.startup_surface_metadata.provider_auth_ready {
             "ready"
@@ -3323,7 +3317,8 @@ impl App {
             self.current_oauth_display_info_model = self.model_name.clone();
         }
         if self.current_model_meta_for_persistence_model != self.model_name {
-            self.current_model_meta_for_persistence = self.load_current_model_meta_for_persistence();
+            self.current_model_meta_for_persistence =
+                self.load_current_model_meta_for_persistence();
             self.current_model_meta_for_persistence_model = self.model_name.clone();
         }
     }
@@ -8996,13 +8991,19 @@ mod session_lifecycle {
     #[test]
     fn current_model_meta_for_persistence_is_cached_for_render_status() {
         let mut app = make_app();
-        let meta = app.model_registry.resolve_meta(&app.model_name, None).unwrap();
+        let meta = app
+            .model_registry
+            .resolve_meta(&app.model_name, None)
+            .unwrap();
         app.current_model_meta_for_persistence = Some(meta.clone());
         app.current_model_meta_for_persistence_model = app.model_name.clone();
 
         let resolved = app.current_model_meta_for_persistence();
 
-        assert_eq!(resolved.as_ref().map(|item| item.id.as_str()), Some(meta.id.as_str()));
+        assert_eq!(
+            resolved.as_ref().map(|item| item.id.as_str()),
+            Some(meta.id.as_str())
+        );
     }
 
     #[test]
@@ -10430,7 +10431,10 @@ mod session_lifecycle {
         unsafe {
             std::env::set_var("IMP_TUI_TRACE", "/tmp/imp-tui-test.log");
         }
-        assert_eq!(TuiTrace::from_env().unwrap().path, PathBuf::from("/tmp/imp-tui-test.log"));
+        assert_eq!(
+            TuiTrace::from_env().unwrap().path,
+            PathBuf::from("/tmp/imp-tui-test.log")
+        );
         unsafe {
             if let Some(previous) = previous {
                 std::env::set_var("IMP_TUI_TRACE", previous);

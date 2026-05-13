@@ -13,8 +13,6 @@ use crate::roles::Role;
 use crate::system_prompt::{self, Fact, TaskContext};
 use crate::tools::{LuaToolLoader, ToolRegistry};
 
-
-
 fn load_scoped_memory_block(
     cwd: &std::path::Path,
     path: &std::path::Path,
@@ -160,8 +158,6 @@ impl AgentBuilder {
         self.run_policy = policy;
         self
     }
-
-
 
     /// Build the agent, wiring config → thresholds, hooks, resources, and tools.
     ///
@@ -693,7 +689,7 @@ mod tests {
 
     #[tokio::test]
     async fn builder_writes_trace_and_evidence_artifacts_from_agent_events() {
-                        use imp_llm::{Cost, Usage};
+        use imp_llm::{Cost, Usage};
 
         let cwd = tempfile::TempDir::new().unwrap();
         let trace_path = cwd.path().join("run").join("trace.jsonl");

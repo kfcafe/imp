@@ -23,8 +23,6 @@ use crate::policy::RunPolicy;
 use crate::roles::Role;
 use crate::tools::{LuaToolLoader, ToolRegistry};
 
-
-
 mod events;
 mod loop_policy;
 mod loop_state;
@@ -124,8 +122,6 @@ pub struct Agent {
     /// Per-run tool/write policy layered on top of AgentMode.
     pub run_policy: RunPolicy,
 
-
-
     event_tx: mpsc::Sender<AgentEvent>,
     command_tx: mpsc::Sender<AgentCommand>,
     command_rx: mpsc::Receiver<AgentCommand>,
@@ -213,7 +209,6 @@ impl Agent {
             turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
             config: Arc::new(Config::default()),
             run_policy: RunPolicy::default(),
-
 
             lua_tool_loader: None,
 
