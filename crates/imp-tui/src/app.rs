@@ -359,6 +359,7 @@ struct ChatRenderCacheKey {
     animation_level: imp_core::config::AnimationLevel,
     activity_state: AnimationState,
     theme: ThemeKind,
+    tick: u64,
 }
 
 #[derive(Debug)]
@@ -2690,6 +2691,7 @@ impl App {
             animation_level: self.config.ui.animations,
             activity_state,
             theme: self.theme_kind(),
+            tick: self.tick,
         }
     }
 
@@ -8266,6 +8268,12 @@ impl App {
                 self.push_warning_msg(&message);
             }
             AgentEvent::RecoveryCheckpoint { .. } => {}
+            AgentEvent::EvidenceWritten { path } => {
+                self.status_items
+                    .insert("evidence".to_string(), path.display().to_string());
+                self.push_system_msg(&format!("Evidence: {}", path.display()));
+                self.invalidate_chat_render_cache();
+            }
             AgentEvent::Timing { timing } => {
                 self.status_items.insert("timing".to_string(), {
                     let label = timing
@@ -10547,7 +10555,7 @@ mod session_lifecycle {
     }
 
     #[test]
-    fn chat_and_sidebar_stream_cache_ignore_animation_tick() {
+    fn chat_waiting_cache_changes_across_animation_ticks() {
         let mut app = make_app();
         app.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
@@ -10561,15 +10569,30 @@ mod session_lifecycle {
         app.is_streaming = true;
         let activity = app.current_activity_state();
 
-        let chat_key =
-            app.chat_render_cache_key(80, None, app.config.ui.chat_tool_display, activity);
+        let first = app.chat_render_cache_key(80, None, app.config.ui.chat_tool_display, activity);
+        app.tick = 4;
+        let second = app.chat_render_cache_key(80, None, app.config.ui.chat_tool_display, activity);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn sidebar_stream_cache_ignores_animation_tick() {
+        let mut app = make_app();
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: true,
+            timestamp: imp_llm::now(),
+        });
+        app.is_streaming = true;
+
         let sidebar_key = app.sidebar_stream_cache_key(40);
         app.tick = app.tick.wrapping_add(1);
 
-        assert_eq!(
-            chat_key,
-            app.chat_render_cache_key(80, None, app.config.ui.chat_tool_display, activity)
-        );
         assert_eq!(sidebar_key, app.sidebar_stream_cache_key(40));
     }
 
