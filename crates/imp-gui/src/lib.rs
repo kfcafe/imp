@@ -250,7 +250,11 @@ fn panel_frame(fill: egui::Color32) -> egui::Frame {
 
 fn section_heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(8.0);
-    ui.label(egui::RichText::new(text.to_uppercase()).small().color(MUTED));
+    ui.label(
+        egui::RichText::new(text.to_uppercase())
+            .small()
+            .color(MUTED),
+    );
     ui.add_space(4.0);
 }
 
@@ -275,7 +279,11 @@ fn work_item_button(ui: &mut egui::Ui, item: &WorkItem, selected: bool) -> egui:
         .fill(fill)
         .stroke(egui::Stroke::new(
             1.0,
-            if selected { ACCENT } else { egui::Color32::TRANSPARENT },
+            if selected {
+                ACCENT
+            } else {
+                egui::Color32::TRANSPARENT
+            },
         ))
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(egui::Margin::same(9))
@@ -311,7 +319,10 @@ fn card(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
 
 fn key_value(ui: &mut egui::Ui, key: &str, value: &str) {
     ui.horizontal(|ui| {
-        ui.add_sized([90.0, 18.0], egui::Label::new(egui::RichText::new(key).color(MUTED)));
+        ui.add_sized(
+            [90.0, 18.0],
+            egui::Label::new(egui::RichText::new(key).color(MUTED)),
+        );
         ui.label(value);
     });
 }
