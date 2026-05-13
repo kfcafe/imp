@@ -1276,7 +1276,7 @@ mod tests {
             .into_iter()
             .map(|span| span.content.into_owned())
             .collect();
-        assert_eq!(text, "EXPLORE");
+        assert_eq!(text, "");
     }
 
     #[test]

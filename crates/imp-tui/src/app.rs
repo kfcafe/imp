@@ -8407,8 +8407,8 @@ mod session_lifecycle {
             .collect()
     }
 
-    #[test]
-    fn loop_command_defaults_to_unbounded_budget() {
+    #[tokio::test]
+    async fn loop_command_defaults_to_unbounded_budget() {
         let mut app = make_app();
         app.config.ui.loop_turn_budget = 0;
 
@@ -8844,6 +8844,13 @@ mod session_lifecycle {
 
         app.editor.set_content("persist me");
         app.send_message();
+        for _ in 0..100 {
+            app.pump_runtime_signals().await;
+            if app.user_message_persist_task.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
 
         // Reopen the file and verify the message is there
         let reopened = SessionManager::open(&session_path).unwrap();
@@ -10783,8 +10790,8 @@ mod session_lifecycle {
         assert_eq!(app.messages.last().unwrap().content, "cleaned");
     }
 
-    #[test]
-    fn loop_command_queues_prompt_and_shows_label() {
+    #[tokio::test]
+    async fn loop_command_queues_prompt_and_shows_label() {
         let mut app = make_app();
         app.config.ui.loop_turn_budget = 3;
 
