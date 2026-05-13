@@ -14,7 +14,6 @@ pub mod hooks;
 pub mod imp_session;
 pub mod import;
 pub mod learning;
-pub mod mana_next;
 pub mod mana_prompt_context;
 pub mod mana_review;
 pub mod mana_run_state;
