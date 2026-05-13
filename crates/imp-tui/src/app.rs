@@ -266,6 +266,7 @@ struct AgentStartRequest {
     improve_safe_mode: bool,
     runtime_signal_tx: tokio::sync::mpsc::Sender<RuntimeSignal>,
     ui_tx: tokio::sync::mpsc::Sender<crate::tui_interface::UiRequest>,
+    tui_trace: Option<TuiTrace>,
 }
 
 struct AgentStartResult {
@@ -852,7 +853,7 @@ struct GitLabelCache {
     label: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TuiTrace {
     path: PathBuf,
 }
@@ -1269,11 +1270,21 @@ fn read_improve_sandbox_metadata_file(
     Ok(Some(metadata))
 }
 
+fn trace_tui_to(trace: Option<&TuiTrace>, message: impl AsRef<str>) {
+    if let Some(trace) = trace {
+        trace.log(message);
+    }
+}
+
 fn start_agent_from_request(
     request: AgentStartRequest,
     prompt: &str,
     agent_cwd: PathBuf,
 ) -> Result<AgentStartResult, String> {
+    let started = Instant::now();
+    let trace = request.tui_trace.as_ref();
+
+    let phase_started = Instant::now();
     let auth_path = imp_core::storage::global_auth_path();
     let mut auth_store = AuthStore::load(&auth_path).unwrap_or_else(|_| AuthStore::new(auth_path));
     let mut meta = request
@@ -1288,6 +1299,15 @@ fn start_agent_from_request(
             .resolve_meta(&request.model_name, Some(&provider_name))
             .ok_or_else(|| format!("Unknown model: {}", request.model_name))?;
     }
+    trace_tui_to(
+        trace,
+        format!(
+            "agent_start_phase phase=model_provider duration_ms={}",
+            phase_started.elapsed().as_millis()
+        ),
+    );
+
+    let phase_started = Instant::now();
     let provider = create_provider(&provider_name)
         .ok_or_else(|| format!("Unknown provider: {provider_name}"))?;
     let api_key = tokio::task::block_in_place(|| {
@@ -1295,11 +1315,19 @@ fn start_agent_from_request(
             .block_on(resolve_provider_api_key(&mut auth_store, &provider_name))
     })
     .map_err(|e: imp_llm::Error| e.to_string())?;
+    trace_tui_to(
+        trace,
+        format!(
+            "agent_start_phase phase=auth duration_ms={}",
+            phase_started.elapsed().as_millis()
+        ),
+    );
     let model = Model {
         meta,
         provider: Arc::from(provider),
     };
 
+    let phase_started = Instant::now();
     let mut config = request.config.clone();
     config.thinking = Some(request.thinking_level);
     let requested_max_tokens = request.config.max_tokens;
@@ -1311,6 +1339,13 @@ fn start_agent_from_request(
         })
         .build()
         .map_err(|e: imp_core::error::Error| e.to_string())?;
+    trace_tui_to(
+        trace,
+        format!(
+            "agent_start_phase phase=builder_lua duration_ms={}",
+            phase_started.elapsed().as_millis()
+        ),
+    );
 
     let tui_ui = crate::tui_interface::TuiInterface::new(request.ui_tx.clone());
     agent.ui = tui_ui;
@@ -1318,6 +1353,7 @@ fn start_agent_from_request(
         agent.max_tokens = Some(max_tokens);
     }
 
+    let phase_started = Instant::now();
     let mut messages: Vec<Message> = request.session.get_active_messages();
     if matches!(
         messages.last(),
@@ -1334,7 +1370,16 @@ fn start_agent_from_request(
     if let Some(workflow_context) = workflow_context_prompt_for_request(&request) {
         agent.messages.push(Message::user(workflow_context));
     }
+    trace_tui_to(
+        trace,
+        format!(
+            "agent_start_phase phase=session_messages duration_ms={} messages={}",
+            phase_started.elapsed().as_millis(),
+            agent.messages.len()
+        ),
+    );
 
+    let phase_started = Instant::now();
     let prompt = prompt.to_string();
     let task = tokio::spawn(async move { agent.run(prompt).await });
     let command_tx = handle.command_tx.clone();
@@ -1343,11 +1388,26 @@ fn start_agent_from_request(
     let mut event_rx = handle.event_rx;
     let event_task = tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
-            if signal_tx.send(RuntimeSignal::AgentEvent(event)).await.is_err() {
+            if signal_tx
+                .send(RuntimeSignal::AgentEvent(event))
+                .await
+                .is_err()
+            {
                 break;
             }
         }
     });
+    trace_tui_to(
+        trace,
+        format!(
+            "agent_start_phase phase=spawn_tasks duration_ms={}",
+            phase_started.elapsed().as_millis()
+        ),
+    );
+    trace_tui_to(
+        trace,
+        format!("agent_start_total duration_ms={}", started.elapsed().as_millis()),
+    );
 
     Ok(AgentStartResult {
         command_tx,
@@ -3233,11 +3293,8 @@ impl App {
                 chat_area,
                 self.scroll_offset,
             ));
-            self.chat_tool_click_map = build_click_map_from_rendered_lines(
-                &chat_lines,
-                chat_area,
-                self.scroll_offset,
-            );
+            self.chat_tool_click_map =
+                build_click_map_from_rendered_lines(&chat_lines, chat_area, self.scroll_offset);
         }
 
         if !matches!(self.mode, UiMode::Normal) || !self.messages.is_empty() {
@@ -4861,7 +4918,6 @@ impl App {
         })
     }
 
-
     fn queue_improve_mode_continuation_if_ready(&mut self) {
         if self.workflow_mode != WorkflowMode::Improve
             || self.is_streaming
@@ -5201,6 +5257,7 @@ impl App {
             improve_safe_mode: self.improve_safe_mode,
             runtime_signal_tx: self.runtime_signal_tx.clone(),
             ui_tx,
+            tui_trace: self.tui_trace.clone(),
         }
     }
 
@@ -5216,9 +5273,9 @@ impl App {
             {
                 Ok(Ok(result)) => RuntimeSignal::AgentStartCompleted(result),
                 Ok(Err(error)) => RuntimeSignal::AgentStartFailed(error),
-                Err(error) => RuntimeSignal::AgentStartFailed(format!(
-                    "Agent start task failure: {error}"
-                )),
+                Err(error) => {
+                    RuntimeSignal::AgentStartFailed(format!("Agent start task failure: {error}"))
+                }
             };
             let _ = signal_tx.send(signal).await;
         });
@@ -8286,6 +8343,7 @@ impl App {
                 self.push_system_msg(&format!("Evidence: {}", path.display()));
                 self.invalidate_chat_render_cache();
             }
+            AgentEvent::PolicyChecked { .. } => {}
             AgentEvent::Timing { timing } => {
                 self.status_items.insert("timing".to_string(), {
                     let label = timing
@@ -10745,10 +10803,9 @@ mod session_lifecycle {
             app.status_items.get("evidence").map(String::as_str),
             Some(".imp/runs/run_1/evidence.md")
         );
-        assert!(app
-            .messages
-            .iter()
-            .any(|message| message.content.contains("Evidence: .imp/runs/run_1/evidence.md")));
+        assert!(app.messages.iter().any(|message| message
+            .content
+            .contains("Evidence: .imp/runs/run_1/evidence.md")));
     }
 
     #[test]
