@@ -6575,8 +6575,8 @@ mod session_lifecycle {
             .any(|cmd| cmd.name == "greet" && cmd.description == "Say hello from Lua"));
     }
 
-    #[test]
-    fn lua_extension_command_can_be_selected_from_palette() {
+    #[tokio::test]
+    async fn lua_extension_command_can_be_selected_from_palette() {
         let mut app = make_app();
         let runtime = LuaRuntime::new().unwrap();
         imp_lua::setup_host_api(&runtime).unwrap();
@@ -6593,6 +6593,13 @@ mod session_lifecycle {
         app.lua_runtime = Some(Arc::new(Mutex::new(runtime)));
 
         app.execute_command("greet world");
+        for _ in 0..100 {
+            app.pump_runtime_signals().await;
+            if app.lua_command_task.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
 
         let last = app.messages.last().expect("Lua command output");
         assert_eq!(last.role, MessageRole::System);
