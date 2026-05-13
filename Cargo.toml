@@ -34,7 +34,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 license = "MPL-2.0"
 repository = "https://github.com/kfcafe/imp"
@@ -77,9 +77,9 @@ readability-rust = "0.1"
 project-detect = "0.1"
 mana-core = { version = "0.3.1", path = "../mana/crates/mana-core" }
 
-imp-llm = { version = "0.1.6", path = "crates/imp-llm" }
-imp-core = { version = "0.1.6", path = "crates/imp-core" }
-imp-lua = { version = "0.1.6", path = "crates/imp-lua" }
-imp-tui = { version = "0.1.6", path = "crates/imp-tui" }
-imp-gui = { version = "0.1.6", path = "crates/imp-gui" }
-imp-cli = { version = "0.1.6", path = "crates/imp-cli" }
+imp-llm = { version = "0.1.7", path = "crates/imp-llm" }
+imp-core = { version = "0.1.7", path = "crates/imp-core" }
+imp-lua = { version = "0.1.7", path = "crates/imp-lua" }
+imp-tui = { version = "0.1.7", path = "crates/imp-tui" }
+imp-gui = { version = "0.1.7", path = "crates/imp-gui" }
+imp-cli = { version = "0.1.7", path = "crates/imp-cli" }
