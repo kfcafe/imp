@@ -13,7 +13,6 @@ use tokio::sync::mpsc;
 use imp_llm::provider::RetryPolicy;
 
 use crate::config::{AgentMode, Config, ContextConfig, ContinuePolicy};
-use crate::evidence::EvidencePacketBuilder;
 use crate::guardrails::{GuardrailConfig, GuardrailProfile};
 use crate::hooks::{HookBackgroundEvent, HookEvent, HookRunner};
 use crate::mana_review::{
@@ -23,8 +22,8 @@ use crate::mana_review::{
 use crate::policy::RunPolicy;
 use crate::roles::Role;
 use crate::tools::{LuaToolLoader, ToolRegistry};
-use crate::trace::TraceWriter;
-use crate::workflow::WorkflowContract;
+
+
 
 mod events;
 mod loop_policy;
@@ -124,13 +123,8 @@ pub struct Agent {
     pub config: Arc<Config>,
     /// Per-run tool/write policy layered on top of AgentMode.
     pub run_policy: RunPolicy,
-    /// Lightweight workflow contract for this agent run. Initially informational; future runtime layers use it for policy, verification, and evidence.
-    pub workflow_contract: WorkflowContract,
-    /// Optional structured trace writer for this run.
-    pub trace_writer: Option<Arc<std::sync::Mutex<TraceWriter>>>,
-    /// Optional evidence packet builder and output path for this run.
-    pub evidence_builder: Option<Arc<std::sync::Mutex<EvidencePacketBuilder>>>,
-    pub evidence_path: Option<PathBuf>,
+
+
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_tx: mpsc::Sender<AgentCommand>,
@@ -183,7 +177,7 @@ impl Agent {
             tools: ToolRegistry::new(),
             messages: Vec::new(),
             system_prompt: String::new(),
-            cwd: cwd.clone(),
+            cwd,
             max_tokens: None,
             role: None,
             hooks,
@@ -219,12 +213,8 @@ impl Agent {
             turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
             config: Arc::new(Config::default()),
             run_policy: RunPolicy::default(),
-            workflow_contract: WorkflowContract::implicit_from(
-                crate::workflow::ImplicitWorkflowContractInput::prompt("").cwd(&cwd),
-            ),
-            trace_writer: None,
-            evidence_builder: None,
-            evidence_path: None,
+
+
             lua_tool_loader: None,
 
             event_tx,

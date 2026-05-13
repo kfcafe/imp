@@ -132,40 +132,7 @@ Additional terms for imp-next:
 └──────────────────────────────────────────────┘
 ```
 
-## Implementation status
-
-### Initial workflow contract model
-
-The first implementation slice adds the workflow contract as data and plumbing only.
-
-Implemented locations:
-
-- `crates/imp-core/src/workflow/mod.rs`
-- `crates/imp-core/src/workflow/contract.rs`
-- `crates/imp-core/src/agent/mod.rs`
-- `crates/imp-core/src/builder.rs`
-
-Current behavior:
-
-- `WorkflowContract` is exported from `imp-core`.
-- `Agent` carries a `workflow_contract` field.
-- `AgentBuilder` creates a lightweight implicit contract for existing runs.
-- `AgentBuilder::workflow_contract(...)` can override the implicit contract.
-- `AgentBuilder::autonomy_mode(...)` can set the autonomy mode on the implicit contract.
-- Default implicit contracts preserve existing behavior: `AutonomyMode::Safe`, `WorkflowType::AdHoc`, `RiskLevel::Unknown`, current/repo workspace scope, no required verification gates, and no new policy enforcement.
-- Mana-backed or task-backed runs can attach a `mana_unit_ref`, but no mana ledger writes are implemented by this slice.
-
-Intentionally not implemented yet:
-
-- reference monitor enforcement from the workflow contract
-- autonomy mode behavior changes
-- verification gate execution or closeout enforcement
-- evidence packet or trace emission from workflow contract fields
-- mana workflow-ledger writes
-- TUI workflow-status redesign
-- TypeScript extension support
-
-The contract is therefore safe to thread through existing runs before the rest of the workflow runtime exists.
+## Default UX
 
 ### TUI-first
 

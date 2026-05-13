@@ -6,15 +6,14 @@ use imp_llm::Model;
 use crate::agent::{Agent, AgentHandle};
 use crate::config::{Config, LuaCapabilityPolicy};
 use crate::error::Result;
-use crate::evidence::EvidencePacketBuilder;
 use crate::mana_prompt_context;
 use crate::policy::RunPolicy;
 use crate::resources;
 use crate::roles::Role;
 use crate::system_prompt::{self, Fact, TaskContext};
 use crate::tools::{LuaToolLoader, ToolRegistry};
-use crate::trace::TraceWriter;
-use crate::workflow::{AutonomyMode, ImplicitWorkflowContractInput, WorkflowContract};
+
+
 
 fn load_scoped_memory_block(
     cwd: &std::path::Path,
@@ -82,8 +81,6 @@ pub struct AgentBuilder {
     evidence_path: Option<std::path::PathBuf>,
     /// Per-run tool/write policy layered on top of AgentMode.
     run_policy: RunPolicy,
-    /// Optional workflow contract override. If absent, build creates an implicit contract.
-    workflow_contract: Option<WorkflowContract>,
 }
 
 impl AgentBuilder {
@@ -104,7 +101,6 @@ impl AgentBuilder {
             evidence_builder: None,
             evidence_path: None,
             run_policy: RunPolicy::default(),
-            workflow_contract: None,
         }
     }
 
@@ -165,40 +161,7 @@ impl AgentBuilder {
         self
     }
 
-    /// Configure an evidence packet builder and output path for this run.
-    pub fn evidence_packet(
-        mut self,
-        builder: EvidencePacketBuilder,
-        path: impl Into<std::path::PathBuf>,
-    ) -> Self {
-        self.evidence_builder = Some(builder);
-        self.evidence_path = Some(path.into());
-        self
-    }
 
-    /// Configure a structured trace writer for this run.
-    pub fn trace_writer(mut self, trace_writer: TraceWriter) -> Self {
-        self.trace_writer = Some(trace_writer);
-        self
-    }
-
-    /// Override the implicit workflow contract for this agent run.
-    pub fn workflow_contract(mut self, contract: WorkflowContract) -> Self {
-        self.workflow_contract = Some(contract);
-        self
-    }
-
-    /// Set the autonomy mode on the implicit workflow contract.
-    pub fn autonomy_mode(mut self, mode: AutonomyMode) -> Self {
-        let mut contract = self.workflow_contract.unwrap_or_else(|| {
-            WorkflowContract::implicit_from(
-                ImplicitWorkflowContractInput::prompt("").cwd(&self.cwd),
-            )
-        });
-        contract.autonomy_mode = mode;
-        self.workflow_contract = Some(contract);
-        self
-    }
 
     /// Build the agent, wiring config → thresholds, hooks, resources, and tools.
     ///
@@ -730,9 +693,7 @@ mod tests {
 
     #[tokio::test]
     async fn builder_writes_trace_and_evidence_artifacts_from_agent_events() {
-        use crate::evidence::EvidencePacketBuilder;
-        use crate::trace::TraceWriter;
-        use imp_llm::{Cost, Usage};
+                        use imp_llm::{Cost, Usage};
 
         let cwd = tempfile::TempDir::new().unwrap();
         let trace_path = cwd.path().join("run").join("trace.jsonl");
