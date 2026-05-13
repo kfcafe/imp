@@ -58,7 +58,7 @@ pub fn spinner_frame(tick: u64) -> &'static str {
 /// Braille dot spinner for global agent work in the terminal title.
 pub fn title_spinner_frame(tick: u64) -> &'static str {
     const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    FRAMES[(tick / 6) as usize % FRAMES.len()]
+    FRAMES[(tick / 4) as usize % FRAMES.len()]
 }
 
 /// Static title glyph for active work when animated motion is disabled.
@@ -180,12 +180,12 @@ mod tests {
     #[test]
     fn title_spinner_uses_braille_dot_cycle() {
         assert_eq!(title_spinner_frame(0), "⠋");
-        assert_eq!(title_spinner_frame(5), "⠋");
-        assert_eq!(title_spinner_frame(6), "⠙");
-        assert_eq!(title_spinner_frame(12), "⠹");
-        assert_eq!(title_spinner_frame(24), "⠼");
-        assert_eq!(title_spinner_frame(54), "⠏");
-        assert_eq!(title_spinner_frame(60), "⠋");
+        assert_eq!(title_spinner_frame(3), "⠋");
+        assert_eq!(title_spinner_frame(4), "⠙");
+        assert_eq!(title_spinner_frame(8), "⠹");
+        assert_eq!(title_spinner_frame(16), "⠼");
+        assert_eq!(title_spinner_frame(36), "⠏");
+        assert_eq!(title_spinner_frame(40), "⠋");
     }
 
     #[test]
