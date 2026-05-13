@@ -1127,8 +1127,6 @@ fn format_timestamp(ts: u64) -> String {
     format!("{h:02}:{m:02}")
 }
 
-/// Build a click map: Vec<(screen_y, tool_call_id)> for each tool call header
-/// line that is visible in the chat area.
 pub fn build_text_surface_from_lines(
     lines: &[Line<'_>],
     chat_area: Rect,
@@ -1178,6 +1176,34 @@ pub fn build_text_surface(
     );
 
     build_text_surface_from_lines(&render.lines, chat_area, scroll_offset)
+}
+
+/// Build a click map from already-rendered chat lines.
+pub fn build_click_map_from_rendered_lines(
+    lines: &[Line<'_>],
+    chat_area: Rect,
+    scroll_offset: usize,
+) -> Vec<(u16, String)> {
+    let total_lines = lines.len();
+    let window = visible_line_window(total_lines, chat_area.height as usize, scroll_offset);
+    let mut result = Vec::new();
+
+    for line_index in window.start..window.end {
+        let plain = line_to_plain_text(&lines[line_index]);
+        let Some(rest) = plain.strip_prefix("▸ ").or_else(|| plain.strip_prefix("▾ ")) else {
+            continue;
+        };
+        let Some(id) = rest.strip_prefix('#') else {
+            continue;
+        };
+        let id = id.split_whitespace().next().unwrap_or_default();
+        if !id.is_empty() {
+            let screen_y = chat_area.y + (line_index - window.start) as u16;
+            result.push((screen_y, id.to_string()));
+        }
+    }
+
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1347,6 +1373,29 @@ mod tests {
         );
 
         assert!(visible_tools.is_empty());
+    }
+
+    #[test]
+    fn build_click_map_from_rendered_lines_finds_visible_tool_headers() {
+        let lines = vec![
+            Line::from("hello"),
+            Line::from("▸ #tool-1 read src/main.rs"),
+            Line::from("world"),
+        ];
+        let map = build_click_map_from_rendered_lines(&lines, Rect::new(0, 10, 80, 3), 0);
+        assert_eq!(map, vec![(11, "tool-1".to_string())]);
+    }
+
+    #[test]
+    fn build_click_map_from_rendered_lines_respects_scroll_window() {
+        let lines = vec![
+            Line::from("before"),
+            Line::from("▸ #tool-1 read src/main.rs"),
+            Line::from("middle"),
+            Line::from("▾ #tool-2 bash cargo test"),
+        ];
+        let map = build_click_map_from_rendered_lines(&lines, Rect::new(0, 5, 80, 2), 0);
+        assert_eq!(map, vec![(6, "tool-2".to_string())]);
     }
 
     #[test]

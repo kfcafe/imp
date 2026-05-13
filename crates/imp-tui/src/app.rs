@@ -54,7 +54,7 @@ use crate::theme::Theme;
 use crate::turn_tracker::TurnTracker;
 use crate::views::ask_bar::AskState;
 use crate::views::chat::{
-    build_chat_render_data, build_click_map, build_text_surface_from_lines,
+    build_chat_render_data, build_click_map_from_rendered_lines, build_text_surface_from_lines,
     clamped_scroll_offset_for_total_lines, scroll_offset_for_message_at_top, DisplayMessage,
     MessageRole, RenderedChatView,
 };
@@ -965,6 +965,8 @@ pub struct App {
     pub sidebar_detail_rect: Option<Rect>,
     /// Cached selectable chat surface from last render.
     pub chat_surface: Option<TextSurface>,
+    /// Cached tool header hit map from last chat render.
+    chat_tool_click_map: Vec<(u16, String)>,
     /// Cached selectable sidebar detail surface from last render.
     pub sidebar_detail_surface: Option<TextSurface>,
     /// Current app-native text selection.
@@ -1791,6 +1793,7 @@ impl App {
             sidebar_list_rect: None,
             sidebar_detail_rect: None,
             chat_surface: None,
+            chat_tool_click_map: Vec::new(),
             sidebar_detail_surface: None,
             selection: None,
             drag_selection: None,
@@ -3057,6 +3060,7 @@ impl App {
                 Vec::new(),
                 0,
             ));
+            self.chat_tool_click_map.clear();
         } else {
             let chat = RenderedChatView::new(&chat_lines).scroll(self.scroll_offset);
             frame.render_widget(chat, chat_area);
@@ -3066,6 +3070,11 @@ impl App {
                 chat_area,
                 self.scroll_offset,
             ));
+            self.chat_tool_click_map = build_click_map_from_rendered_lines(
+                &chat_lines,
+                chat_area,
+                self.scroll_offset,
+            );
         }
 
         if !matches!(self.mode, UiMode::Normal) || !self.messages.is_empty() {
@@ -4027,19 +4036,12 @@ impl App {
     }
 
     fn tool_id_at_chat_row(&self, row: u16, chat_area: Rect) -> Option<String> {
-        build_click_map(
-            &self.messages,
-            &self.theme,
-            &self.highlighter,
-            chat_area,
-            self.scroll_offset,
-            self.config.ui.word_wrap,
-            self.config.ui.effective_chat_tool_display(),
-            self.config.ui.thinking_lines,
-            self.config.ui.show_timestamps,
-        )
-        .into_iter()
-        .find_map(|(tool_row, tool_id)| (tool_row == row).then_some(tool_id))
+        if row < chat_area.y || row >= chat_area.y.saturating_add(chat_area.height) {
+            return None;
+        }
+        self.chat_tool_click_map
+            .iter()
+            .find_map(|(tool_row, tool_id)| (*tool_row == row).then(|| tool_id.clone()))
     }
 
     /// Total number of tool calls across all display messages.
