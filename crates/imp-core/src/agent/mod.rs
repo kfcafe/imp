@@ -338,22 +338,6 @@ impl Agent {
             }
             _ => {}
         }
-        if let Some(trace_writer) = &self.trace_writer {
-            if let Ok(mut writer) = trace_writer.lock() {
-                let _ = writer.write_event(event.to_trace_event("run"));
-            }
-        }
-        if let Some(evidence_builder) = &self.evidence_builder {
-            if let Ok(mut builder) = evidence_builder.lock() {
-                builder.record_event(&event);
-                if matches!(event, AgentEvent::AgentEnd { .. }) {
-                    if let Some(path) = &self.evidence_path {
-                        let packet = builder.clone().finish();
-                        let _ = packet.write_markdown(path);
-                    }
-                }
-            }
-        }
         let _ = self.event_tx.send(event).await;
     }
 
