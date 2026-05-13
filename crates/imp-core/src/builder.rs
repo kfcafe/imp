@@ -695,7 +695,7 @@ mod tests {
         recent.status = mana_core::unit::Status::Closed;
         recent.closed_at = Some(chrono::Utc::now() - chrono::Duration::hours(2));
         let recent_slug = mana_core::util::title_to_slug(&recent.title);
-        let archive_dir = mana_dir.join("archive").join("closed");
+        let archive_dir = mana_dir.join("archive").join("2026").join("05");
         std::fs::create_dir_all(&archive_dir).unwrap();
         recent
             .to_file(archive_dir.join(format!("3-{}.md", recent_slug)))
