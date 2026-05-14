@@ -177,8 +177,14 @@ impl OpenAiProvider {
     }
 
     fn persistent_transport_enabled() -> bool {
-        std::env::var(PERSISTENT_TRANSPORT_ENV)
-            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        Self::persistent_transport_enabled_value(
+            std::env::var(PERSISTENT_TRANSPORT_ENV).ok().as_deref(),
+        )
+    }
+
+    fn persistent_transport_enabled_value(value: Option<&str>) -> bool {
+        value
+            .map(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "on"))
             .unwrap_or(false)
     }
 
@@ -1293,19 +1299,14 @@ mod tests {
         let events = process_sse_event(event, &mut state);
         assert!(events.is_empty());
     }
-    fn openai_env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap()
-    }
-
     #[test]
     fn openai_transport_capabilities_are_stateless_by_default() {
-        let _guard = openai_env_lock();
-        unsafe {
-            std::env::remove_var(PERSISTENT_TRANSPORT_ENV);
-        }
-        let provider = OpenAiProvider::new();
-        let capabilities = provider.transport_capabilities();
+        assert!(!OpenAiProvider::persistent_transport_enabled_value(None));
+        assert!(!OpenAiProvider::persistent_transport_enabled_value(Some(
+            "0"
+        )));
+
+        let capabilities = TransportCapabilities::default();
 
         assert_eq!(capabilities, TransportCapabilities::default());
         assert_eq!(capabilities.persistent_session, PersistentSessionMode::None);
@@ -1315,15 +1316,13 @@ mod tests {
 
     #[test]
     fn openai_transport_capabilities_are_persistent_only_when_enabled() {
-        let _guard = openai_env_lock();
-        unsafe {
-            std::env::set_var(PERSISTENT_TRANSPORT_ENV, "1");
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(OpenAiProvider::persistent_transport_enabled_value(Some(
+                value
+            )));
         }
-        let provider = OpenAiProvider::new();
-        let capabilities = provider.transport_capabilities();
-        unsafe {
-            std::env::remove_var(PERSISTENT_TRANSPORT_ENV);
-        }
+
+        let capabilities = OpenAiProvider::persistent_transport_capabilities();
 
         assert_eq!(
             capabilities.persistent_session,

@@ -836,7 +836,11 @@ struct StartupSkillDetailCache {
 
 impl TuiTrace {
     fn from_env() -> Option<Self> {
-        std::env::var_os("IMP_TUI_TRACE")
+        Self::from_env_value(std::env::var_os("IMP_TUI_TRACE"))
+    }
+
+    fn from_env_value(value: Option<std::ffi::OsString>) -> Option<Self> {
+        value
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .map(|path| Self { path })
@@ -10434,21 +10438,14 @@ mod session_lifecycle {
 
     #[test]
     fn tui_trace_from_env_reads_path() {
-        let previous = std::env::var_os("IMP_TUI_TRACE");
-        unsafe {
-            std::env::set_var("IMP_TUI_TRACE", "/tmp/imp-tui-test.log");
-        }
         assert_eq!(
-            TuiTrace::from_env().unwrap().path,
+            TuiTrace::from_env_value(Some("/tmp/imp-tui-test.log".into()))
+                .unwrap()
+                .path,
             PathBuf::from("/tmp/imp-tui-test.log")
         );
-        unsafe {
-            if let Some(previous) = previous {
-                std::env::set_var("IMP_TUI_TRACE", previous);
-            } else {
-                std::env::remove_var("IMP_TUI_TRACE");
-            }
-        }
+        assert!(TuiTrace::from_env_value(None).is_none());
+        assert!(TuiTrace::from_env_value(Some("".into())).is_none());
     }
 
     #[test]
