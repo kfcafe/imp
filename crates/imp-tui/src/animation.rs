@@ -49,9 +49,9 @@ impl AnimationState {
     }
 }
 
-/// Classic braille spinner retained as a sharp generic running indicator.
+/// Main working/thinking spinner.
 pub fn spinner_frame(tick: u64) -> &'static str {
-    const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    const FRAMES: &[&str] = &["⣠", "⡴", "⠞", "⠋", "⠙", "⠳", "⢦", "⣄"];
     FRAMES[(tick / 3) as usize % FRAMES.len()]
 }
 
@@ -66,22 +66,19 @@ pub fn title_working_glyph() -> &'static str {
     "•"
 }
 
-/// Subtle expanding/contracting activity for waiting and thinking.
+/// Main working/thinking spinner.
 pub fn thinking_frame(tick: u64) -> &'static str {
-    const FRAMES: &[&str] = &["⠂", "⠌", "⡑", "⢕", "⢝", "⢕", "⡑", "⠌"];
-    FRAMES[(tick / 4) as usize % FRAMES.len()]
+    spinner_frame(tick)
 }
 
-/// Directional runner used for streaming responses.
+/// Main working/thinking spinner used while streaming responses.
 pub fn responding_frame(tick: u64) -> &'static str {
-    const FRAMES: &[&str] = &["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
-    FRAMES[(tick / 3) as usize % FRAMES.len()]
+    spinner_frame(tick)
 }
 
-/// Orbit-style indicator for concrete tool execution.
+/// Main working/thinking spinner used for concrete tool execution.
 pub fn tool_frame(tick: u64) -> &'static str {
-    const FRAMES: &[&str] = &["⠉", "⠘", "⠰", "⢀", "⣀", "⡄", "⠆", "⠃"];
-    FRAMES[(tick / 3) as usize % FRAMES.len()]
+    spinner_frame(tick)
 }
 
 /// Static glyph for running states when animated motion is disabled.
