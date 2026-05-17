@@ -2917,10 +2917,11 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             "model": model,
             "timestamp": timestamp,
         }),
-        AgentEvent::AgentEnd { usage, cost, .. } => json!({
+        AgentEvent::AgentEnd { usage, cost, status } => json!({
             "type": "agent_end",
             "usage": usage,
             "cost": cost,
+            "status": status,
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
             "cache_read_tokens": usage.cache_read_tokens,
@@ -5716,6 +5717,40 @@ mod tests {
         assert_eq!(json["output_tokens"], 500);
         assert_eq!(json["cache_read_tokens"], 100);
         assert_eq!(json["cost_total"], 0.0107175);
+        assert_eq!(json["status"]["type"], "done");
+        assert_eq!(json["status"]["reason"], "work_completed");
+    }
+
+    #[test]
+    fn rpc_agent_event_agent_end_serializes_blocked_status() {
+        let event = AgentEvent::AgentEnd {
+            usage: imp_llm::Usage::default(),
+            cost: imp_llm::Cost::default(),
+            status: imp_core::agent::RunFinalStatus::Blocked {
+                reason: imp_core::agent::StopReason::ExecutionBlocked,
+                message: "verification failed".to_string(),
+            },
+        };
+        let json = rpc_agent_event_to_json(&event);
+        assert_eq!(json["type"], "agent_end");
+        assert_eq!(json["status"]["type"], "blocked");
+        assert_eq!(json["status"]["reason"], "execution_blocked");
+        assert_eq!(json["status"]["message"], "verification failed");
+    }
+
+    #[test]
+    fn rpc_agent_event_agent_end_serializes_failed_status() {
+        let event = AgentEvent::AgentEnd {
+            usage: imp_llm::Usage::default(),
+            cost: imp_llm::Cost::default(),
+            status: imp_core::agent::RunFinalStatus::Failed {
+                message: "provider error".to_string(),
+            },
+        };
+        let json = rpc_agent_event_to_json(&event);
+        assert_eq!(json["type"], "agent_end");
+        assert_eq!(json["status"]["type"], "failed");
+        assert_eq!(json["status"]["message"], "provider error");
     }
 
     #[test]
