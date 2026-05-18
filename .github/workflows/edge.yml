@@ -50,7 +50,7 @@ jobs:
 
       - name: Install Linux dependencies
         if: contains(matrix.os, 'ubuntu')
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
 
       - uses: Swatinem/rust-cache@v2
         with:
