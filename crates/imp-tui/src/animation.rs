@@ -197,7 +197,7 @@ mod tests {
                 AnimationLevel::Minimal,
                 ActivitySurface::Chat,
             ),
-            "⠂ thinking"
+            "⣠ thinking"
         );
         assert_eq!(
             activity_label(
@@ -206,7 +206,7 @@ mod tests {
                 AnimationLevel::Minimal,
                 ActivitySurface::Chat,
             ),
-            "⠁ responding"
+            "⣠ responding"
         );
         assert_eq!(
             activity_label(
@@ -215,7 +215,7 @@ mod tests {
                 AnimationLevel::Minimal,
                 ActivitySurface::Chat,
             ),
-            "⠉ working · 2 tools"
+            "⣠ working · 2 tools"
         );
         assert_eq!(
             activity_label(

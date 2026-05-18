@@ -9135,10 +9135,21 @@ mod session_lifecycle {
     async fn pending_agent_start_reports_error_after_deferred_start() {
         let tmp = TempDir::new().unwrap();
         let mut app = make_persistent_app(&tmp);
+        app.model_name = "not-a-real-model".into();
 
         app.editor.set_content("start later");
         app.send_message();
         app.start_pending_agent_after_redraw();
+        while let Some(signal) = app.runtime_signal_rx.recv().await {
+            app.handle_runtime_signal(signal);
+            if app
+                .messages
+                .iter()
+                .any(|message| message.role == MessageRole::Error)
+            {
+                break;
+            }
+        }
 
         assert!(app.pending_agent_prompt.is_none());
         assert!(app

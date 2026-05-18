@@ -5931,10 +5931,12 @@ mod tests {
         let prompt = imp_core::mana_worker::build_task_prompt(&assignment);
         let context = imp_core::mana_worker::build_task_context(&assignment);
 
-        assert!(prompt.starts_with("Task: Fix the widget"));
-        assert!(prompt.contains("Notes:\nCheck the edge case."));
-        assert!(prompt.contains("Previous attempts:"));
-        assert!(prompt.contains("Verify command: cargo test -p imp-cli"));
+        assert!(prompt.starts_with("# Mana worker assignment"));
+        assert!(prompt.contains("Title: Fix the widget"));
+        assert!(prompt.contains("## Task\nThe widget is broken."));
+        assert!(prompt.contains("## Current notes / prior context\nCheck the edge case."));
+        assert!(prompt.contains("## Previous attempts"));
+        assert!(prompt.contains("## Verification contract\nCommand: cargo test -p imp-cli"));
 
         assert_eq!(context.title, "Fix the widget");
         assert_eq!(context.acceptance.as_deref(), Some("Widget tests pass"));
