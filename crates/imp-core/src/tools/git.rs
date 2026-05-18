@@ -1045,6 +1045,7 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         }
     }
 

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::workflow::{VerificationCloseoutEffect, VerificationGate, VerificationGateStatus};
+
 /// Coarse-grained phase of a single agent turn.
 ///
 /// This is intentionally small and mechanical: it describes where the runtime
@@ -184,6 +186,116 @@ impl RunFinalStatus {
             _ => Self::Done { reason },
         }
     }
+    pub fn with_concern(self, concern: impl Into<String>) -> Self {
+        match self {
+            Self::Done { reason } => Self::DoneWithConcerns {
+                reason,
+                concerns: vec![concern.into()],
+            },
+            Self::DoneWithConcerns {
+                reason,
+                mut concerns,
+            } => {
+                concerns.push(concern.into());
+                Self::DoneWithConcerns { reason, concerns }
+            }
+            other => other,
+        }
+    }
+}
+
+pub fn enforce_verification_closeout(
+    proposed: RunFinalStatus,
+    gates: &[VerificationGate],
+) -> RunFinalStatus {
+    if gates.is_empty() {
+        return proposed;
+    }
+
+    let mut concerns = Vec::new();
+    let mut blocked = Vec::new();
+    for gate in gates.iter().filter(|gate| gate.is_required()) {
+        match gate.closeout_effect() {
+            VerificationCloseoutEffect::AllowsDone => {}
+            VerificationCloseoutEffect::BlocksDone => blocked.push(verification_gate_message(gate)),
+            VerificationCloseoutEffect::BlocksDoneWithConcerns => {
+                concerns.push(verification_gate_message(gate));
+            }
+        }
+    }
+
+    if blocked.is_empty() && concerns.is_empty() {
+        return proposed;
+    }
+
+    if !blocked.is_empty() {
+        let message = blocked.join("; ");
+        return match proposed {
+            RunFinalStatus::Cancelled | RunFinalStatus::Failed { .. } => proposed,
+            _ => RunFinalStatus::Blocked {
+                reason: StopReason::ExecutionBlocked,
+                message,
+            },
+        };
+    }
+
+    match proposed {
+        RunFinalStatus::Done { reason } => RunFinalStatus::DoneWithConcerns { reason, concerns },
+        RunFinalStatus::DoneWithConcerns {
+            reason,
+            concerns: mut existing,
+        } => {
+            existing.extend(concerns);
+            RunFinalStatus::DoneWithConcerns {
+                reason,
+                concerns: existing,
+            }
+        }
+        RunFinalStatus::Blocked { .. }
+        | RunFinalStatus::NeedsUserInput { .. }
+        | RunFinalStatus::Cancelled
+        | RunFinalStatus::Failed { .. } => proposed,
+    }
+}
+
+#[allow(dead_code)]
+pub fn enforce_verification_decision(
+    decision: LoopDecision,
+    gates: &[VerificationGate],
+) -> LoopDecision {
+    match decision {
+        LoopDecision::Finish { status } => LoopDecision::Finish {
+            status: enforce_verification_closeout(status, gates),
+        },
+        LoopDecision::Continue { .. } => decision,
+    }
+}
+
+fn verification_gate_message(gate: &VerificationGate) -> String {
+    let name = if gate.name.is_empty() {
+        &gate.id
+    } else {
+        &gate.name
+    };
+    let status = match gate.status {
+        VerificationGateStatus::Pending => "pending",
+        VerificationGateStatus::Running => "still running",
+        VerificationGateStatus::Passed => "passed",
+        VerificationGateStatus::Failed => "failed",
+        VerificationGateStatus::Skipped => "skipped",
+        VerificationGateStatus::Blocked => "blocked",
+    };
+    let detail = gate.reason.as_deref().or_else(|| {
+        gate.result
+            .as_ref()
+            .and_then(|result| result.summary.as_deref())
+    });
+    match detail {
+        Some(detail) if !detail.is_empty() => {
+            format!("required verification {status}: {name} ({detail})")
+        }
+        _ => format!("required verification {status}: {name}"),
+    }
 }
 
 /// Tool risk visible before execution. This is deliberately conservative and
@@ -232,5 +344,139 @@ impl ToolPlan {
 
     pub fn is_empty(&self) -> bool {
         self.calls.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod workflow_closeout_tests {
+    use super::*;
+    use crate::workflow::{
+        VerificationGate, VerificationGateRequirement, VerificationGateResult,
+        VerificationGateStatus,
+    };
+
+    fn done() -> RunFinalStatus {
+        RunFinalStatus::Done {
+            reason: StopReason::WorkCompleted,
+        }
+    }
+
+    #[test]
+    fn workflow_closeout_preserves_done_when_no_gates_or_required_passed() {
+        assert_eq!(enforce_verification_closeout(done(), &[]), done());
+
+        let mut gate = VerificationGate::command("unit", "cargo test");
+        gate.mark_passed(VerificationGateResult::passed(0));
+        assert_eq!(enforce_verification_closeout(done(), &[gate]), done());
+    }
+
+    #[test]
+    fn workflow_closeout_downgrades_done_for_required_failed_or_skipped_gates() {
+        let mut failed = VerificationGate::command("unit", "cargo test");
+        failed.mark_failed(VerificationGateResult {
+            summary: Some("tests failed".into()),
+            ..VerificationGateResult::failed(101)
+        });
+        let status = enforce_verification_closeout(done(), &[failed]);
+        match status {
+            RunFinalStatus::DoneWithConcerns { reason, concerns } => {
+                assert_eq!(reason, StopReason::WorkCompleted);
+                assert!(concerns
+                    .iter()
+                    .any(|concern| concern.contains("required verification failed: unit")));
+                assert!(concerns
+                    .iter()
+                    .any(|concern| concern.contains("tests failed")));
+            }
+            other => panic!("expected DoneWithConcerns, got {other:?}"),
+        }
+
+        let mut skipped = VerificationGate::command("fmt", "cargo fmt --check");
+        skipped.mark_skipped("formatter unavailable");
+        let status = enforce_verification_closeout(done(), &[skipped]);
+        match status {
+            RunFinalStatus::DoneWithConcerns { concerns, .. } => {
+                assert!(concerns
+                    .iter()
+                    .any(|concern| concern.contains("required verification skipped: fmt")));
+                assert!(concerns
+                    .iter()
+                    .any(|concern| concern.contains("formatter unavailable")));
+            }
+            other => panic!("expected DoneWithConcerns, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workflow_closeout_blocks_done_for_required_blocked_gates() {
+        let mut gate = VerificationGate::command("unit", "cargo test");
+        gate.mark_blocked("cargo missing");
+        let status = enforce_verification_closeout(done(), &[gate]);
+        match status {
+            RunFinalStatus::Blocked { reason, message } => {
+                assert_eq!(reason, StopReason::ExecutionBlocked);
+                assert!(message.contains("required verification blocked: unit"));
+                assert!(message.contains("cargo missing"));
+            }
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workflow_closeout_pending_and_running_required_gates_cannot_report_done() {
+        let pending = VerificationGate::command("unit", "cargo test");
+        let status = enforce_verification_closeout(done(), &[pending]);
+        assert!(matches!(status, RunFinalStatus::DoneWithConcerns { .. }));
+
+        let mut running = VerificationGate::command("fmt", "cargo fmt --check");
+        running.mark_running();
+        let status = enforce_verification_closeout(done(), &[running]);
+        match status {
+            RunFinalStatus::DoneWithConcerns { concerns, .. } => {
+                assert!(concerns
+                    .iter()
+                    .any(|concern| concern.contains("required verification still running: fmt")));
+            }
+            other => panic!("expected DoneWithConcerns, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workflow_closeout_optional_failed_gate_does_not_block_done() {
+        let mut gate = VerificationGate::command("smoke", "cargo test smoke");
+        gate.requirement = VerificationGateRequirement::Optional;
+        gate.mark_failed(VerificationGateResult::failed(1));
+        assert_eq!(enforce_verification_closeout(done(), &[gate]), done());
+    }
+
+    #[test]
+    fn workflow_closeout_merges_existing_concerns_and_wraps_loop_decision() {
+        let mut gate = VerificationGate::command("fmt", "cargo fmt --check");
+        gate.status = VerificationGateStatus::Failed;
+        let proposed = RunFinalStatus::DoneWithConcerns {
+            reason: StopReason::NoProgress,
+            concerns: vec!["pre-existing".into()],
+        };
+        let status = enforce_verification_closeout(proposed, &[gate]);
+        match status {
+            RunFinalStatus::DoneWithConcerns { reason, concerns } => {
+                assert_eq!(reason, StopReason::NoProgress);
+                assert!(concerns.iter().any(|concern| concern == "pre-existing"));
+                assert!(concerns
+                    .iter()
+                    .any(|concern| concern.contains("required verification failed: fmt")));
+            }
+            other => panic!("expected DoneWithConcerns, got {other:?}"),
+        }
+
+        let mut blocked = VerificationGate::command("unit", "cargo test");
+        blocked.mark_blocked("timeout");
+        let decision = LoopDecision::Finish { status: done() };
+        assert!(matches!(
+            enforce_verification_decision(decision, &[blocked]),
+            LoopDecision::Finish {
+                status: RunFinalStatus::Blocked { .. }
+            }
+        ));
     }
 }

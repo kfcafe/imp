@@ -66,6 +66,7 @@ pub enum SessionChoice {
 }
 
 use crate::tools::LuaToolLoader;
+use crate::workflow::{AutonomyMode, VerificationGate};
 
 /// Configuration for creating an `ImpSession`.
 ///
@@ -93,6 +94,12 @@ pub struct SessionOptions {
 
     /// Agent mode (full, worker, orchestrator, …).
     pub mode: Option<AgentMode>,
+
+    /// Autonomy mode for workflow/runtime policy. Defaults to safe.
+    pub autonomy_mode: Option<AutonomyMode>,
+
+    /// Verification gates declared by CLI/config/user input.
+    pub verification_gates: Vec<VerificationGate>,
 
     /// Maximum turns before the agent stops.
     pub max_turns: Option<u32>,
@@ -145,6 +152,8 @@ impl Default for SessionOptions {
             api_key: None,
             thinking: None,
             mode: None,
+            autonomy_mode: None,
+            verification_gates: Vec::new(),
             max_turns: None,
             max_tokens: None,
             system_prompt: None,
@@ -342,6 +351,10 @@ impl ImpSession {
         if let Some(lua_loader) = options.lua_loader {
             builder = builder.lua_tool_loader(move |policy, tools| lua_loader(policy, tools));
         }
+        if let Some(autonomy_mode) = options.autonomy_mode {
+            builder = builder.autonomy_mode(autonomy_mode);
+        }
+        builder = builder.verification_gates(options.verification_gates.clone());
         builder = builder.run_policy(options.run_policy.clone());
 
         let (mut agent, handle) = builder.build()?;
@@ -1747,6 +1760,7 @@ mod tests {
                 details: json!({"exit_code": 0}),
                 timestamp: 999,
             },
+            provenance: None,
         });
 
         assert_eq!(persisted, vec!["tool result"]);

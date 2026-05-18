@@ -88,6 +88,7 @@ impl LuaCallContext {
             )),
             run_policy: self.run_policy.clone(),
             config: Arc::clone(&self.config),
+            supporting_provenance: Vec::new(),
         }
     }
 }

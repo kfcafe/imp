@@ -129,6 +129,7 @@ impl RunEvent {
             AgentEvent::ToolExecutionEnd {
                 tool_call_id,
                 result,
+                ..
             } => {
                 run_event.tool_call_id = Some(tool_call_id.clone());
                 run_event.tool_name = Some(result.tool_name.clone());
@@ -153,6 +154,41 @@ impl RunEvent {
                     .success
                     .map(|ok| if ok { "ok" } else { "error" }.into());
                 run_event.summary = Some(checkpoint.kind.as_str().into());
+            }
+            AgentEvent::PolicyChecked { record } => {
+                run_event.tool_name = Some(record.tool_name.clone());
+                run_event.status = Some(
+                    if record.decision.is_allowed() {
+                        "allowed"
+                    } else {
+                        "denied"
+                    }
+                    .into(),
+                );
+                run_event.summary = Some(truncate(
+                    &format!(
+                        "action={:?} scope={:?}",
+                        record.action_kind, record.resource_scope
+                    ),
+                    240,
+                ));
+            }
+            AgentEvent::VerificationStarted { gate } => {
+                run_event.status = Some("started".into());
+                run_event.summary = Some(truncate(&gate.name, 240));
+            }
+            AgentEvent::VerificationCompleted {
+                gate,
+                closeout_effect,
+            } => {
+                run_event.status = Some(format!("{:?}", gate.status));
+                run_event.summary = Some(truncate(
+                    &format!("{} ({closeout_effect:?})", gate.name),
+                    240,
+                ));
+            }
+            AgentEvent::EvidenceWritten { path } => {
+                run_event.summary = Some(path.display().to_string());
             }
             AgentEvent::MessageStart { .. }
             | AgentEvent::MessageDelta { .. }
@@ -316,6 +352,10 @@ fn agent_event_kind(event: &AgentEvent) -> &'static str {
         AgentEvent::Warning { .. } => "warning",
         AgentEvent::Timing { .. } => "timing",
         AgentEvent::RecoveryCheckpoint { .. } => "recovery.checkpoint",
+        AgentEvent::PolicyChecked { .. } => "policy.checked",
+        AgentEvent::VerificationStarted { .. } => "verification.started",
+        AgentEvent::VerificationCompleted { .. } => "verification.completed",
+        AgentEvent::EvidenceWritten { .. } => "evidence.written",
         AgentEvent::Error { .. } => "error",
     }
 }

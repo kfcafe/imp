@@ -51,10 +51,6 @@ pub fn global_sessions_dir() -> PathBuf {
     global_root().join("sessions")
 }
 
-pub fn global_runs_dir() -> PathBuf {
-    global_root().join("runs")
-}
-
 pub fn global_run_index_path() -> PathBuf {
     global_runs_dir().join("index.jsonl")
 }
@@ -113,6 +109,107 @@ pub fn project_tools_dir(project_dir: &Path) -> PathBuf {
 
 pub fn project_lua_dir(project_dir: &Path) -> PathBuf {
     project_root(project_dir).join("lua")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunArtifacts {
+    root: PathBuf,
+}
+
+impl RunArtifacts {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    pub fn create(root: PathBuf) -> io::Result<Self> {
+        fs::create_dir_all(&root)?;
+        Ok(Self { root })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn workflow_contract_path(&self) -> PathBuf {
+        self.root.join("workflow-contract.json")
+    }
+
+    pub fn trace_path(&self) -> PathBuf {
+        self.root.join("trace.jsonl")
+    }
+
+    pub fn evidence_path(&self) -> PathBuf {
+        self.root.join("evidence.md")
+    }
+
+    pub fn diff_path(&self) -> PathBuf {
+        self.root.join("diff.patch")
+    }
+
+    pub fn verify_log_path(&self) -> PathBuf {
+        self.root.join("verify.log")
+    }
+
+    pub fn policy_log_path(&self) -> PathBuf {
+        self.root.join("policy.jsonl")
+    }
+}
+
+pub fn project_runs_dir(project_dir: &Path) -> PathBuf {
+    project_root(project_dir).join("runs")
+}
+
+pub fn global_runs_dir() -> PathBuf {
+    global_root().join("runs")
+}
+
+pub fn project_run_artifacts(project_dir: &Path, run_id: &str) -> io::Result<RunArtifacts> {
+    run_artifacts_under(project_runs_dir(project_dir), run_id)
+}
+
+pub fn global_run_artifacts(run_id: &str) -> io::Result<RunArtifacts> {
+    run_artifacts_under(global_runs_dir(), run_id)
+}
+
+pub fn run_artifacts_under(base: PathBuf, run_id: &str) -> io::Result<RunArtifacts> {
+    let safe_run_id = sanitize_run_id(run_id)?;
+    let root = base.join(safe_run_id);
+    ensure_child_path(&base, &root)?;
+    RunArtifacts::create(root)
+}
+
+fn sanitize_run_id(run_id: &str) -> io::Result<&str> {
+    let valid = !run_id.is_empty()
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+    if valid {
+        Ok(run_id)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "run id must contain only ascii letters, numbers, '-' or '_'",
+        ))
+    }
+}
+
+fn ensure_child_path(base: &Path, child: &Path) -> io::Result<()> {
+    if child
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "run artifact path must not contain parent components",
+        ));
+    }
+    if !child.starts_with(base) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "run artifact path escapes base directory",
+        ));
+    }
+    Ok(())
 }
 
 pub fn legacy_config_roots() -> Vec<PathBuf> {
@@ -390,6 +487,52 @@ fn dedupe(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn run_artifacts_create_expected_project_paths() {
+        let temp = TempDir::new().unwrap();
+        let artifacts = project_run_artifacts(temp.path(), "run_1").unwrap();
+
+        assert_eq!(
+            artifacts.root(),
+            temp.path().join(".imp").join("runs").join("run_1")
+        );
+        assert!(artifacts.root().exists());
+        assert_eq!(artifacts.trace_path(), artifacts.root().join("trace.jsonl"));
+        assert_eq!(
+            artifacts.evidence_path(),
+            artifacts.root().join("evidence.md")
+        );
+        assert_eq!(artifacts.diff_path(), artifacts.root().join("diff.patch"));
+        assert_eq!(
+            artifacts.verify_log_path(),
+            artifacts.root().join("verify.log")
+        );
+        assert_eq!(
+            artifacts.policy_log_path(),
+            artifacts.root().join("policy.jsonl")
+        );
+        assert_eq!(
+            artifacts.workflow_contract_path(),
+            artifacts.root().join("workflow-contract.json")
+        );
+    }
+
+    #[test]
+    fn run_artifacts_reject_path_traversal_run_ids() {
+        let temp = TempDir::new().unwrap();
+        assert!(project_run_artifacts(temp.path(), "../escape").is_err());
+        assert!(project_run_artifacts(temp.path(), "bad/slash").is_err());
+        assert!(project_run_artifacts(temp.path(), "").is_err());
+    }
+
+    #[test]
+    fn run_artifacts_under_keeps_root_inside_base() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path().join("runs");
+        let artifacts = run_artifacts_under(base.clone(), "run-abc_123").unwrap();
+        assert!(artifacts.root().starts_with(&base));
+    }
 
     #[test]
     fn global_root_prefers_home_imp_directory() {

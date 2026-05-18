@@ -7,18 +7,24 @@ use imp_llm::{
     Usage,
 };
 
+use crate::agent::loop_state::enforce_verification_closeout;
 use crate::agent::{
     Agent, AgentCommand, AgentEvent, LoopDecision, RecoveryCheckpointKind, RunFinalStatus,
     StopReason as AgentStopReason, TimingStage, TurnPhase, TurnState,
 };
 use crate::error::Result;
-use crate::hooks::HookEvent;
-use crate::run_evidence::{
-    append_index_record, read_run_events, write_evidence_html, RunArtifacts, RunEventWriter,
-    RunIndexRecord,
+use crate::evidence::{
+    EvidenceActions, EvidenceArtifact, EvidencePacket, EvidencePolicy, EvidenceTrustSummary,
+    EvidenceVerificationGate,
 };
-use crate::storage;
+use crate::hooks::HookEvent;
 use crate::ui::NotifyLevel;
+use crate::workflow::{AutonomyMode, VerificationGateRunner};
+use crate::{
+    storage,
+    trace::TraceWriter,
+    trust::{Provenance, RiskLabel, TrustLabel},
+};
 
 use super::{
     build_assistant_message, clone_model, mana_skill_follow_up_hint, push_stream_text_block,
@@ -56,69 +62,144 @@ impl Agent {
         Some(reconciliation)
     }
 
-    fn begin_run_evidence(&self, prompt: &str, started_at: u64) -> Option<(String, RunArtifacts)> {
-        let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
-        let artifacts = RunArtifacts::create(storage::global_runs_dir().join(&run_id)).ok()?;
-        let writer = RunEventWriter::create(artifacts.events_path()).ok()?;
-        let record = RunIndexRecord::started(
-            run_id.clone(),
-            self.cwd.clone(),
-            started_at,
-            prompt,
-            &artifacts,
-        );
-
-        if let Ok(mut slot) = self.run_event_writer.lock() {
-            *slot = Some(writer);
+    async fn run_verification_gates(&mut self, artifacts: &storage::RunArtifacts) {
+        let runner = VerificationGateRunner::new(&self.cwd, artifacts.root().join("verification"));
+        let mut completed = Vec::new();
+        for index in 0..self.verification_gates.len() {
+            if matches!(
+                self.verification_gates[index].status,
+                crate::workflow::VerificationGateStatus::Passed
+                    | crate::workflow::VerificationGateStatus::Failed
+                    | crate::workflow::VerificationGateStatus::Blocked
+                    | crate::workflow::VerificationGateStatus::Skipped
+            ) {
+                continue;
+            }
+            self.emit(AgentEvent::VerificationStarted {
+                gate: self.verification_gates[index].clone(),
+            })
+            .await;
+            let _ = runner.run(&mut self.verification_gates[index]).await;
+            completed.push(self.verification_gates[index].clone());
         }
-        if let Ok(mut slot) = self.run_index_record.lock() {
-            *slot = Some(record);
+        for gate in completed {
+            self.emit(AgentEvent::VerificationCompleted {
+                closeout_effect: gate.closeout_effect(),
+                gate,
+            })
+            .await;
         }
-
-        Some((run_id, artifacts))
     }
 
-    fn finish_run_evidence(&self, artifacts: &RunArtifacts, status: &RunFinalStatus) {
-        if let Ok(mut writer) = self.run_event_writer.lock() {
-            if let Some(writer) = writer.as_mut() {
-                let _ = writer.flush();
-            }
-            *writer = None;
-        }
-
-        let mut record = match self.run_index_record.lock() {
-            Ok(mut slot) => slot.take(),
-            Err(_) => None,
-        };
-
-        if let Some(record) = record.as_mut() {
-            record.completed_at = Some(imp_llm::now());
-            record.status = Some(match status {
-                RunFinalStatus::Done { .. } => "done".into(),
-                RunFinalStatus::DoneWithConcerns { .. } => "done_with_concerns".into(),
-                RunFinalStatus::Blocked { .. } => "blocked".into(),
-                RunFinalStatus::NeedsUserInput { .. } => "needs_user_input".into(),
-                RunFinalStatus::Cancelled => "cancelled".into(),
-                RunFinalStatus::Failed { .. } => "failed".into(),
+    async fn write_run_evidence(
+        &self,
+        run_id: &str,
+        artifacts: &storage::RunArtifacts,
+        prompt: &str,
+        status: &RunFinalStatus,
+    ) {
+        let mut packet = EvidencePacket::new(run_id, prompt);
+        packet.workflow_id = self
+            .workflow_contract
+            .id
+            .clone()
+            .or_else(|| self.workflow_contract.mana_unit_ref.clone());
+        packet.workflow_type = Some(format!("{:?}", self.workflow_contract.workflow_type));
+        packet.risk_level = Some(format!("{:?}", self.workflow_contract.risk_level));
+        packet.autonomy_mode = Some(self.workflow_contract.autonomy_mode.to_string());
+        packet.final_status = Some(format!("{:?}", status));
+        packet.policy = evidence_policy_for_autonomy(self.workflow_contract.autonomy_mode);
+        packet.trust = evidence_trust_summary_from_messages(&self.messages);
+        packet
+            .summary
+            .push("Agent run completed; inspect trace.jsonl for structured event details.".into());
+        packet.actions = evidence_actions_from_messages(&self.messages);
+        packet.verification = self
+            .verification_gates
+            .iter()
+            .map(evidence_verification_gate)
+            .collect();
+        packet.artifacts = vec![
+            EvidenceArtifact {
+                kind: "trace".into(),
+                path: artifacts.trace_path(),
+                summary: Some("Structured runtime event trace".into()),
+            },
+            EvidenceArtifact {
+                kind: "workflow-contract".into(),
+                path: artifacts.workflow_contract_path(),
+                summary: Some("Workflow contract snapshot".into()),
+            },
+        ];
+        let evidence_path = artifacts.evidence_path();
+        if packet.write_markdown(&evidence_path).is_ok() {
+            self.write_trace_event(&AgentEvent::EvidenceWritten {
+                path: evidence_path.clone(),
             });
-            let events = read_run_events(artifacts.events_path()).unwrap_or_default();
-            let _ = write_evidence_html(artifacts.evidence_html_path(), record, &events);
-            let _ = append_index_record(storage::global_run_index_path(), record);
+            let _ = self
+                .event_tx
+                .send(AgentEvent::EvidenceWritten {
+                    path: evidence_path,
+                })
+                .await;
         }
     }
 
     /// Run the agent loop with an initial prompt.
     pub async fn run(&mut self, prompt: String) -> Result<()> {
-        let started_at = imp_llm::now();
-        let run_evidence = self.begin_run_evidence(&prompt, started_at);
-        let agent_start = AgentEvent::AgentStart {
-            model: self.model.meta.id.clone(),
-            timestamp: started_at,
+        let trace_path = std::env::var_os("IMP_TUI_TRACE").map(std::path::PathBuf::from);
+        let trace_run = |phase: &str, started: std::time::Instant| {
+            if let Some(path) = trace_path.as_ref() {
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    use std::io::Write as _;
+                    let _ = writeln!(
+                        file,
+                        "{} agent_run_phase phase={} duration_ms={}",
+                        imp_llm::now(),
+                        phase,
+                        started.elapsed().as_millis()
+                    );
+                }
+            }
         };
-        self.emit(agent_start).await;
+        let phase_started = std::time::Instant::now();
+        let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
+        let run_artifacts = storage::project_run_artifacts(&self.cwd, &run_id).ok();
+        if let Some(artifacts) = &run_artifacts {
+            if let Ok(writer) = TraceWriter::create(artifacts.trace_path()) {
+                if let Ok(mut active_trace_writer) = self.trace_writer.lock() {
+                    *active_trace_writer = Some(writer);
+                }
+            }
+            let _ = std::fs::write(
+                artifacts.workflow_contract_path(),
+                serde_json::to_string_pretty(&self.workflow_contract).unwrap_or_default(),
+            );
+        }
+        trace_run("artifacts", phase_started);
+        let phase_started = std::time::Instant::now();
+        if let Ok(mut active_run_id) = self.run_id.lock() {
+            *active_run_id = Some(run_id.clone());
+        }
+        trace_run("set_run_id", phase_started);
+        let phase_started = std::time::Instant::now();
+
+        self.emit(AgentEvent::AgentStart {
+            model: self.model.meta.id.clone(),
+            timestamp: imp_llm::now(),
+        })
+        .await;
+        trace_run("emit_agent_start", phase_started);
+        let phase_started = std::time::Instant::now();
         self.hooks
             .fire(&HookEvent::OnAgentStart { prompt: &prompt })
             .await;
+        trace_run("hook_agent_start", phase_started);
+        let phase_started = std::time::Instant::now();
 
         self.messages.push(Message::user(&prompt));
 
@@ -132,6 +213,7 @@ impl Agent {
             std::collections::VecDeque::new();
         let mut queued_pre_turn_follow_ups: std::collections::VecDeque<String> =
             std::collections::VecDeque::new();
+        trace_run("init_loop_state", phase_started);
 
         if let Some(nudge) = mana_skill_follow_up_hint(
             &prompt,
@@ -735,22 +817,36 @@ impl Agent {
             turn += 1;
         }
 
-        let cost = total_usage.cost(&self.model.meta.pricing);
-        let status = if cancelled {
+        let mut status = if cancelled {
             RunFinalStatus::Cancelled
         } else {
             final_status.unwrap_or_else(|| {
                 RunFinalStatus::from_stop_reason(AgentStopReason::NoAutomaticFollowUp)
             })
         };
+        if !cancelled && !self.verification_gates.is_empty() {
+            if let Some(artifacts) = &run_artifacts {
+                self.run_verification_gates(artifacts).await;
+            }
+            status = enforce_verification_closeout(status, &self.verification_gates);
+        }
+        if let Some(artifacts) = &run_artifacts {
+            self.write_run_evidence(&run_id, artifacts, &prompt, &status)
+                .await;
+        }
+        let cost = total_usage.cost(&self.model.meta.pricing);
         self.emit(AgentEvent::AgentEnd {
             usage: total_usage,
             cost,
             status: status.clone(),
         })
         .await;
-        if let Some((_, artifacts)) = &run_evidence {
-            self.finish_run_evidence(artifacts, &status);
+
+        if let Ok(mut active_trace_writer) = self.trace_writer.lock() {
+            *active_trace_writer = None;
+        }
+        if let Ok(mut active_run_id) = self.run_id.lock() {
+            *active_run_id = None;
         }
 
         if cancelled {
@@ -759,4 +855,182 @@ impl Agent {
 
         Ok(())
     }
+}
+
+fn evidence_trust_summary_from_messages(messages: &[Message]) -> EvidenceTrustSummary {
+    let mut summary = EvidenceTrustSummary::default();
+    for message in messages {
+        let Message::ToolResult(result) = message else {
+            continue;
+        };
+        let Some(provenance) = result
+            .details
+            .get("provenance")
+            .and_then(|value| serde_json::from_value::<Provenance>(value.clone()).ok())
+        else {
+            continue;
+        };
+        record_evidence_provenance(&mut summary, &provenance);
+    }
+    summary.sources.sort();
+    summary.sources.dedup();
+    summary.low_trust_influences.sort();
+    summary.low_trust_influences.dedup();
+    summary.warnings.sort();
+    summary.warnings.dedup();
+    summary
+}
+
+fn record_evidence_provenance(summary: &mut EvidenceTrustSummary, provenance: &Provenance) {
+    summary.sources.push(format!(
+        "source={:?}; trust={:?}; origin={}",
+        provenance.source,
+        provenance.trust,
+        provenance.origin.as_deref().unwrap_or("unknown")
+    ));
+    if provenance.is_low_trust() {
+        summary.low_trust_influences.push(format!(
+            "low-trust source observed: {}",
+            provenance.origin.as_deref().unwrap_or("unknown")
+        ));
+    }
+    if provenance.risk.iter().any(|risk| {
+        matches!(
+            risk,
+            RiskLabel::PossiblePromptInjection | RiskLabel::ContainsInstructions
+        )
+    }) {
+        summary.warnings.push(format!(
+            "instruction-like low-trust content observed from {}",
+            provenance.origin.as_deref().unwrap_or("unknown")
+        ));
+    }
+    if provenance.trust == TrustLabel::ExternalUntrusted {
+        summary
+            .warnings
+            .push("external/untrusted content cannot authorize policy or tool escalation".into());
+    }
+}
+
+fn evidence_verification_gate(
+    gate: &crate::workflow::VerificationGate,
+) -> EvidenceVerificationGate {
+    EvidenceVerificationGate {
+        name: if gate.name.is_empty() {
+            gate.id.clone()
+        } else {
+            gate.name.clone()
+        },
+        required: gate.is_required(),
+        status: format!("{:?}", gate.status).to_lowercase(),
+        command: gate.command.as_ref().map(|command| command.command.clone()),
+        exit_code: gate.result.as_ref().and_then(|result| result.exit_code),
+        artifact_path: gate
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "status")
+            .or_else(|| gate.artifacts.first())
+            .map(|artifact| artifact.path.clone()),
+    }
+}
+
+fn evidence_policy_for_autonomy(mode: AutonomyMode) -> EvidencePolicy {
+    let mut policy = EvidencePolicy::default();
+    policy.decisions.push(format!("autonomy mode: {mode}"));
+    policy
+        .decisions
+        .push("policy.checked trace events record mode, scope, and decision context when policy checks run".into());
+    policy
+        .denials
+        .push("hard-rail bypass: none recorded; dangerous grants are not implemented".into());
+    match mode {
+        AutonomyMode::LocalAuto | AutonomyMode::WorktreeAuto => {
+            policy.decisions.push(
+                "autonomous local actions remain subject to workspace, network, secret, and hard-rail policy".into(),
+            );
+            policy.approvals.push(
+                "network, outside-workspace, destructive, and secret-sensitive actions require approval or are denied".into(),
+            );
+        }
+        AutonomyMode::AllowAllLocal => {
+            policy
+                .decisions
+                .push("allow-all-local remained scoped to local workspace/worktree actions".into());
+            policy.decisions.push(
+                "notable high-risk actions should be inspected in policy.checked trace events"
+                    .into(),
+            );
+            policy.approvals.push(
+                "network, outside-workspace, production, secret, and dangerous-grant actions were not silently allowed".into(),
+            );
+        }
+        AutonomyMode::AllowAll => {
+            policy.decisions.push(
+                "allow-all mode was active; audit evidence and policy.checked trace events remain enabled".into(),
+            );
+            policy.decisions.push(
+                "notable high-risk actions should be inspected in policy.checked trace events"
+                    .into(),
+            );
+            policy.approvals.push(
+                "secret exfiltration, dangerous grants, and unsupported outside-scope mutations were not silently allowed".into(),
+            );
+        }
+        AutonomyMode::Ci => {
+            policy.decisions.push(
+                "ci mode fails closed for prompts/approvals not declared ahead of time".into(),
+            );
+        }
+        AutonomyMode::Suggest | AutonomyMode::Safe => {}
+    }
+    policy
+}
+
+fn evidence_actions_from_messages(messages: &[Message]) -> EvidenceActions {
+    let mut actions = EvidenceActions::default();
+    for message in messages {
+        let Message::Assistant(assistant) = message else {
+            continue;
+        };
+        for block in &assistant.content {
+            let ContentBlock::ToolCall {
+                name, arguments, ..
+            } = block
+            else {
+                continue;
+            };
+            actions.tools.push(name.clone());
+            match name.as_str() {
+                "read" => {
+                    if let Some(path) = arguments.get("path").and_then(|value| value.as_str()) {
+                        actions.files_inspected.push(path.to_string());
+                    }
+                }
+                "write" | "edit" => {
+                    if let Some(path) = arguments.get("path").and_then(|value| value.as_str()) {
+                        actions.files_changed.push(path.to_string());
+                    }
+                }
+                "bash" => {
+                    if let Some(command) = arguments.get("command").and_then(|value| value.as_str())
+                    {
+                        actions.commands_run.push(command.to_string());
+                    }
+                }
+                "scan" => actions.searches.push(format!("scan {arguments}")),
+                _ => {}
+            }
+        }
+    }
+    actions.files_inspected.sort();
+    actions.files_inspected.dedup();
+    actions.files_changed.sort();
+    actions.files_changed.dedup();
+    actions.commands_run.sort();
+    actions.commands_run.dedup();
+    actions.searches.sort();
+    actions.searches.dedup();
+    actions.tools.sort();
+    actions.tools.dedup();
+    actions
 }

@@ -109,6 +109,7 @@ mod tests {
             run_policy: Default::default(),
             config: Arc::new(imp_core::config::Config::default()),
             lua_tool_loader: None,
+            supporting_provenance: Vec::new(),
         }
     }
 

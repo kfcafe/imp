@@ -2074,6 +2074,7 @@ mod tests {
             )),
             run_policy: Default::default(),
             config: std::sync::Arc::new(crate::config::Config::default()),
+            supporting_provenance: Vec::new(),
         };
 
         let output = execute_extract(&["not-a-target".to_string()], &ctx);

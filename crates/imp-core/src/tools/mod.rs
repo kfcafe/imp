@@ -31,6 +31,8 @@ use crate::config::AgentMode;
 use crate::config::LuaCapabilityPolicy;
 use crate::error::Result;
 use crate::mana_review::TurnManaReviewAccumulator;
+use crate::reference_monitor::ToolMetadata;
+use crate::trust::Provenance;
 use crate::ui::UserInterface;
 
 /// Resolve a user-provided path: expands `~` to home dir, resolves relative paths against cwd.
@@ -69,6 +71,11 @@ pub trait Tool: Send + Sync {
 
     /// Whether this tool only reads (no side effects).
     fn is_readonly(&self) -> bool;
+
+    /// Metadata used by the runtime reference monitor.
+    fn policy_metadata(&self) -> ToolMetadata {
+        ToolMetadata::for_tool_name(self.name(), self.is_readonly())
+    }
 
     /// Execute the tool.
     async fn execute(
@@ -222,6 +229,8 @@ pub struct ToolContext {
     pub config: Arc<crate::config::Config>,
     /// Per-run tool/write policy layered on top of AgentMode.
     pub run_policy: crate::policy::RunPolicy,
+    /// Supporting provenance for content that motivates durable writes in this tool call.
+    pub supporting_provenance: Vec<Provenance>,
 }
 
 /// In-session file content cache. Avoids re-reading files that haven't changed.
@@ -538,6 +547,15 @@ impl ToolRegistry {
         self.aliases.insert(alias.into(), canonical.into());
     }
 
+    pub fn extend(&mut self, other: ToolRegistry) {
+        for tool in other.tools.into_values() {
+            self.register(tool);
+        }
+        for (alias, canonical) in other.aliases {
+            self.register_alias(alias, canonical);
+        }
+    }
+
     /// Get a tool by canonical name or compatibility alias.
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
         if let Some(tool) = self.tools.get(name) {
@@ -631,6 +649,11 @@ impl ToolRegistry {
             .collect();
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
+    }
+
+    /// Lookup reference monitor metadata by canonical name or alias.
+    pub fn policy_metadata(&self, name: &str) -> Option<ToolMetadata> {
+        self.get(name).map(|tool| tool.policy_metadata())
     }
 
     /// Number of registered tools.

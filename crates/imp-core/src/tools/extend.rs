@@ -304,6 +304,7 @@ mod tests {
             )),
             run_policy: Default::default(),
             config: std::sync::Arc::new(crate::config::Config::default()),
+            supporting_provenance: Vec::new(),
         }
     }
 

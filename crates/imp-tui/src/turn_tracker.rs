@@ -58,6 +58,22 @@ impl TurnTracker {
         }
     }
 
+    pub fn start_now(&mut self) {
+        self.started_at = Instant::now();
+    }
+
+    pub fn clear_counts(&mut self) {
+        self.tool_calls_started = 0;
+        self.tool_calls_completed = 0;
+        self.tool_errors = 0;
+        self.files_read.clear();
+        self.files_written.clear();
+        self.files_created.clear();
+        self.commands_run.clear();
+        self.searches = 0;
+        self.pending.clear();
+    }
+
     /// Reset all counters and restart the clock. Called at `AgentStart`.
     pub fn reset(&mut self) {
         self.started_at = Instant::now();

@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use imp_llm::{
@@ -21,13 +21,18 @@ use crate::mana_review::{
 };
 use crate::policy::RunPolicy;
 use crate::roles::Role;
-use crate::run_evidence::{RunEventWriter, RunIndexRecord};
 use crate::tools::{LuaToolLoader, ToolRegistry};
+use crate::trace::TraceWriter;
+use crate::workflow::WorkflowContract;
 
 mod events;
 mod loop_policy;
 mod loop_state;
 mod mana_loop;
+#[cfg(not(test))]
+pub(crate) use mana_loop::ManaPolicyDecision;
+#[cfg(test)]
+pub(crate) use mana_loop::{evaluate_mana_policy, ManaPolicyDecision};
 mod recovery;
 mod run_loop;
 mod tool_execution;
@@ -122,11 +127,15 @@ pub struct Agent {
     pub config: Arc<Config>,
     /// Per-run tool/write policy layered on top of AgentMode.
     pub run_policy: RunPolicy,
+    /// Verification gates declared for this run.
+    pub verification_gates: Vec<crate::workflow::VerificationGate>,
 
-    /// JSONL event writer for the current run evidence artifact.
-    run_event_writer: Arc<std::sync::Mutex<Option<RunEventWriter>>>,
-    /// Summary index record for the current run, finalized at closeout.
-    run_index_record: Arc<std::sync::Mutex<Option<RunIndexRecord>>>,
+    /// Lightweight workflow contract for this agent run. Initially informational; future runtime layers use it for policy, verification, and evidence.
+    pub workflow_contract: WorkflowContract,
+    /// Active trace writer for the current run artifact, if artifact creation succeeded.
+    trace_writer: Arc<Mutex<Option<TraceWriter>>>,
+    /// Active run artifact id for trace correlation.
+    run_id: Arc<Mutex<Option<String>>>,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_tx: mpsc::Sender<AgentCommand>,
@@ -179,7 +188,7 @@ impl Agent {
             tools: ToolRegistry::new(),
             messages: Vec::new(),
             system_prompt: String::new(),
-            cwd,
+            cwd: cwd.clone(),
             max_tokens: None,
             role: None,
             hooks,
@@ -215,9 +224,12 @@ impl Agent {
             turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
             config: Arc::new(Config::default()),
             run_policy: RunPolicy::default(),
-
-            run_event_writer: Arc::new(std::sync::Mutex::new(None)),
-            run_index_record: Arc::new(std::sync::Mutex::new(None)),
+            workflow_contract: WorkflowContract::implicit_from(
+                crate::workflow::ImplicitWorkflowContractInput::prompt("").cwd(&cwd),
+            ),
+            verification_gates: Vec::new(),
+            trace_writer: Arc::new(Mutex::new(None)),
+            run_id: Arc::new(Mutex::new(None)),
             lua_tool_loader: None,
 
             event_tx,
@@ -346,22 +358,29 @@ impl Agent {
             }
             _ => {}
         }
-        if let Ok(mut writer) = self.run_event_writer.lock() {
+        self.write_trace_event(&event);
+        let _ = self.event_tx.send(event).await;
+    }
+
+    fn write_trace_event(&self, event: &AgentEvent) {
+        let Some(run_id) = self.run_id.lock().ok().and_then(|run_id| run_id.clone()) else {
+            return;
+        };
+        let mut trace_event = event.to_trace_event(run_id);
+        if let Some(workflow_id) = self
+            .workflow_contract
+            .id
+            .as_ref()
+            .or(self.workflow_contract.mana_unit_ref.as_ref())
+        {
+            trace_event = trace_event.with_workflow_id(workflow_id.clone());
+        }
+        if let Ok(mut writer) = self.trace_writer.lock() {
             if let Some(writer) = writer.as_mut() {
-                let run_id = self
-                    .run_index_record
-                    .lock()
-                    .ok()
-                    .and_then(|record| record.as_ref().map(|record| record.run_id.clone()));
-                if let Some(run_id) = run_id {
-                    let _ = writer.write_event(&crate::run_evidence::RunEvent::from_agent_event(
-                        &run_id, &event,
-                    ));
-                    let _ = writer.flush();
-                }
+                let _ = writer.write_event(trace_event);
+                let _ = writer.flush();
             }
         }
-        let _ = self.event_tx.send(event).await;
     }
 
     async fn emit_timing(
@@ -404,6 +423,9 @@ impl Agent {
             label,
             success,
         };
+        self.write_trace_event(&AgentEvent::Timing {
+            timing: timing.clone(),
+        });
         let _ = self.event_tx.send(AgentEvent::Timing { timing }).await;
     }
 
@@ -411,6 +433,9 @@ impl Agent {
         if let Ok(mut ledger) = self.recovery_ledger.lock() {
             ledger.record(checkpoint.clone());
         }
+        self.write_trace_event(&AgentEvent::RecoveryCheckpoint {
+            checkpoint: checkpoint.clone(),
+        });
         let _ = self
             .event_tx
             .send(AgentEvent::RecoveryCheckpoint { checkpoint })
@@ -1201,6 +1226,7 @@ fn mana_skill_follow_up_hint(
 mod tests {
     use super::*;
     use crate::agent::turn_assessment::NextAction;
+    use crate::builder::AgentBuilder;
     use std::pin::Pin;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -1213,6 +1239,7 @@ mod tests {
     use imp_llm::auth::{ApiKey, AuthStore};
     use imp_llm::model::{Capabilities, ModelMeta, ModelPricing};
     use imp_llm::provider::Provider;
+    use imp_llm::ToolResultMessage;
     use tokio::sync::{Mutex, Notify};
 
     /// A mock provider that returns pre-programmed responses.
@@ -1804,6 +1831,315 @@ mod tests {
             debug.chosen_action,
             NextActionDebugView::Continue { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn agent_run_artifacts_writes_trace_and_evidence_packet() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let provider = Arc::new(MockProvider::new(vec![text_response("done", 10, 5)]));
+        let model = test_model(provider);
+        let (mut agent, _handle) = AgentBuilder::new(
+            Config::default(),
+            temp.path().to_path_buf(),
+            model,
+            String::new(),
+        )
+        .verify_command("printf verify-ok", true)
+        .build()
+        .unwrap();
+        agent.workflow_contract.autonomy_mode = crate::workflow::AutonomyMode::AllowAll;
+
+        agent.run("Do the work".to_string()).await.unwrap();
+
+        let runs_dir = temp.path().join(".imp").join("runs");
+        let mut runs = std::fs::read_dir(&runs_dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        let run_dir = runs.pop().unwrap().path();
+        let trace = std::fs::read_to_string(run_dir.join("trace.jsonl")).unwrap();
+        assert!(trace.contains("agent.start"));
+        assert!(trace.contains("agent.end"));
+        let evidence = std::fs::read_to_string(run_dir.join("evidence.md")).unwrap();
+        assert!(evidence.contains("# Evidence Packet"));
+        assert!(evidence.contains("Do the work"));
+        assert!(evidence.contains("**Autonomy:** allow-all"));
+        assert!(evidence.contains("allow-all mode was active"));
+        assert!(evidence.contains("hard-rail bypass: none recorded"));
+        assert!(evidence.contains("policy.checked trace events"));
+        assert!(evidence.contains("trace.jsonl"));
+        assert!(evidence.contains("verify-ok"));
+        assert!(evidence.contains("passed"));
+        assert!(run_dir.join("verification/verify-1/status.json").exists());
+        assert!(run_dir.join("workflow-contract.json").exists());
+    }
+
+    #[tokio::test]
+    async fn default_safe_compatibility_allows_readonly_tool() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_read",
+                "echo",
+                serde_json::json!({"text": "hello"}),
+                100,
+                30,
+            ),
+            text_response("done", 100, 10),
+        ]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(EchoTool));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Echo hello".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let policy = first_policy_record(&events).expect("policy checked");
+        assert_eq!(policy.autonomy_mode, crate::workflow::AutonomyMode::Safe);
+        assert!(policy.decision.is_allowed());
+        let result = first_tool_result(&events).expect("tool end event");
+        assert!(!result.is_error);
+        assert_eq!(
+            tool_result_text(&Message::ToolResult(result.clone())),
+            Some("echo: hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn default_safe_compatibility_allows_write_tool() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_write",
+                "write",
+                serde_json::json!({"data": "hello"}),
+                100,
+                30,
+            ),
+            text_response("done", 100, 10),
+        ]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(WriteTool));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Write hello".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let policy = first_policy_record(&events).expect("policy checked");
+        assert_eq!(policy.autonomy_mode, crate::workflow::AutonomyMode::Safe);
+        assert!(policy.decision.is_allowed());
+        let result = first_tool_result(&events).expect("tool end event");
+        assert!(!result.is_error);
+        assert_eq!(
+            tool_result_text(&Message::ToolResult(result.clone())),
+            Some("wrote: hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn default_safe_compatibility_preserves_run_policy_tool_deny() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_echo",
+                "echo",
+                serde_json::json!({"text": "hello"}),
+                100,
+                30,
+            ),
+            text_response("done", 100, 10),
+        ]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(EchoTool));
+        agent.run_policy = crate::policy::RunPolicy::new().deny_tool("echo");
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Echo hello".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let policy = first_policy_record(&events).expect("policy checked");
+        assert_eq!(policy.autonomy_mode, crate::workflow::AutonomyMode::Safe);
+        assert!(matches!(
+            policy.decision,
+            crate::reference_monitor::ToolPolicyDecision::Deny { .. }
+        ));
+        let result = first_tool_result(&events).expect("tool end event");
+        assert!(result.is_error);
+        assert_eq!(
+            tool_result_text(&Message::ToolResult(result.clone())),
+            Some("Tool `echo` denied by run policy.")
+        );
+    }
+
+    #[tokio::test]
+    async fn default_safe_compatibility_preserves_agent_mode_tool_deny() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_write",
+                "write",
+                serde_json::json!({"data": "hello"}),
+                100,
+                30,
+            ),
+            text_response("done", 100, 10),
+        ]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Reviewer;
+        agent.tools.register(Arc::new(WriteTool));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Write hello".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let policy = first_policy_record(&events).expect("policy checked");
+        assert_eq!(policy.autonomy_mode, crate::workflow::AutonomyMode::Safe);
+        assert!(matches!(
+            policy.decision,
+            crate::reference_monitor::ToolPolicyDecision::Deny { .. }
+        ));
+        let result = first_tool_result(&events).expect("tool end event");
+        assert!(result.is_error);
+        assert_eq!(
+            tool_result_text(&Message::ToolResult(result.clone())),
+            Some("Tool 'write' is not available in reviewer mode")
+        );
+    }
+
+    fn first_policy_record(
+        events: &[AgentEvent],
+    ) -> Option<&crate::reference_monitor::PolicyTraceRecord> {
+        events.iter().find_map(|event| match event {
+            AgentEvent::PolicyChecked { record } => Some(record),
+            _ => None,
+        })
+    }
+
+    fn first_tool_result(events: &[AgentEvent]) -> Option<&ToolResultMessage> {
+        events.iter().find_map(|event| match event {
+            AgentEvent::ToolExecutionEnd { result, .. } => Some(result),
+            _ => None,
+        })
+    }
+
+    #[tokio::test]
+    async fn tool_execution_policy_routes_run_policy_deny_through_reference_monitor() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_1",
+                "echo",
+                serde_json::json!({"text": "hello"}),
+                100,
+                30,
+            ),
+            text_response("done", 100, 10),
+        ]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(EchoTool));
+        agent.run_policy = crate::policy::RunPolicy::new().deny_tool("echo");
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Echo hello".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let policy_event = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::PolicyChecked { record } => Some(record),
+                _ => None,
+            })
+            .expect("policy checked event");
+        assert_eq!(policy_event.tool_name, "echo");
+        assert!(policy_event.args_hash.is_some());
+        assert!(matches!(
+            policy_event.decision,
+            crate::reference_monitor::ToolPolicyDecision::Deny { .. }
+        ));
+
+        let result = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolExecutionEnd { result, .. } => Some(result),
+                _ => None,
+            })
+            .expect("tool end event");
+        assert!(result.is_error);
+        assert_eq!(
+            tool_result_text(&Message::ToolResult(result.clone())),
+            Some("Tool `echo` denied by run policy.")
+        );
+
+        let checkpoint = events.iter().rev().find_map(|event| match event {
+            AgentEvent::RecoveryCheckpoint { checkpoint } => checkpoint.error_class.as_deref(),
+            _ => None,
+        });
+        assert_eq!(checkpoint, Some("run_policy_blocked"));
+    }
+
+    #[tokio::test]
+    async fn tool_execution_policy_routes_agent_mode_deny_through_reference_monitor() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_1",
+                "write",
+                serde_json::json!({"data": "hello"}),
+                100,
+                30,
+            ),
+            text_response("done", 100, 10),
+        ]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Reviewer;
+        agent.tools.register(Arc::new(WriteTool));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Write hello".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let policy_event = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::PolicyChecked { record } => Some(record),
+                _ => None,
+            })
+            .expect("policy checked event");
+        assert_eq!(policy_event.tool_name, "write");
+        assert_eq!(
+            policy_event.autonomy_mode,
+            crate::workflow::AutonomyMode::default()
+        );
+        assert!(matches!(
+            policy_event.decision,
+            crate::reference_monitor::ToolPolicyDecision::Deny { .. }
+        ));
+
+        let result = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolExecutionEnd { result, .. } => Some(result),
+                _ => None,
+            })
+            .expect("tool end event");
+        assert!(result.is_error);
+        assert_eq!(
+            tool_result_text(&Message::ToolResult(result.clone())),
+            Some("Tool 'write' is not available in reviewer mode")
+        );
+
+        let checkpoint = events.iter().rev().find_map(|event| match event {
+            AgentEvent::RecoveryCheckpoint { checkpoint } => checkpoint.error_class.as_deref(),
+            _ => None,
+        });
+        assert_eq!(checkpoint, Some("mode_blocked"));
     }
 
     #[tokio::test]
@@ -3552,6 +3888,10 @@ mod tests {
                 AgentEvent::ToolExecutionStart { .. } => "ToolExecStart",
                 AgentEvent::ToolExecutionEnd { .. } => "ToolExecEnd",
                 AgentEvent::Warning { .. } => "Warning",
+                AgentEvent::EvidenceWritten { .. } => "EvidenceWritten",
+                AgentEvent::VerificationStarted { .. } => "VerificationStarted",
+                AgentEvent::VerificationCompleted { .. } => "VerificationCompleted",
+                AgentEvent::PolicyChecked { .. } => "PolicyChecked",
                 AgentEvent::Error { .. } => "Error",
                 _ => "Other",
             })
