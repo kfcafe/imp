@@ -350,21 +350,6 @@ end)
 
 Capability policy controls extension access to shell, filesystem, HTTP, secrets, and native imp tools.
 
-### Slash-command skills
-
-A skill at `.imp/skills/deploy/SKILL.md` or `~/.config/imp/skills/deploy/SKILL.md` creates `/deploy` unless a built-in or Lua command already uses that name. Use `/skill:deploy` to explicitly invoke the skill when a name is ambiguous.
-
-Invoking a skill inserts its `SKILL.md` instructions into the next agent turn. YAML frontmatter is stripped. `$ARGUMENTS` is replaced with everything after the command name; if arguments are provided and `$ARGUMENTS` is absent, imp appends `ARGUMENTS: ...`.
-
-### TypeScript compatibility
-
-TypeScript extension support is a limited compatibility and forward-direction layer, not full Pi API parity.
-
-```bash
-imp import --from pi
-```
-
-Current support includes Bun-backed `.ts` entrypoints, Pi-style `registerTool(...)`, common TypeBox-style schemas, text/details tool results, and limited `session_start` lifecycle hooks for dynamic tool registration.
 
 ## Programmatic usage
 

@@ -36,7 +36,6 @@ pub mod system_prompt;
 pub mod tools;
 pub mod trace;
 pub mod trust;
-pub mod typescript_extensions;
 pub mod ui;
 pub mod usage;
 pub mod workflow;

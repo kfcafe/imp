@@ -298,16 +298,11 @@ impl AgentBuilder {
         trace_phase("lua_tools", phase_started);
 
         let phase_started = Instant::now();
-        if let Err(err) =
-            crate::typescript_extensions::load_typescript_extensions(&self.cwd, &mut agent.tools)
-        {
-            eprintln!("Failed to load TypeScript extensions: {err}");
-        }
         if agent.mode != crate::config::AgentMode::Full {
             let mode = agent.mode;
             agent.tools.retain(|name| mode.allows_tool(name));
         }
-        trace_phase("typescript_filter", phase_started);
+        trace_phase("mode_filter", phase_started);
 
         let phase_started = Instant::now();
         agent.system_prompt = if let Some(prompt) = self.system_prompt_override {
@@ -413,15 +408,14 @@ impl AgentBuilder {
 /// This is the canonical list — update here when adding or removing tools.
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
-        ask::AskTool, bash::BashTool, edit::EditTool, extend::ExtendTool, git::GitTool,
-        mana::ManaTool, read::ReadTool, scan::ScanTool, session_search::SessionSearchTool,
-        web::WebTool, worktree::WorktreeTool, write::WriteTool,
+        ask::AskTool, bash::BashTool, edit::EditTool, git::GitTool, mana::ManaTool, read::ReadTool,
+        scan::ScanTool, session_search::SessionSearchTool, web::WebTool, worktree::WorktreeTool,
+        write::WriteTool,
     };
 
     tools.register(Arc::new(AskTool));
     tools.register(Arc::new(BashTool::canonical()));
     tools.register(Arc::new(EditTool));
-    tools.register(Arc::new(ExtendTool));
     tools.register(Arc::new(GitTool));
     tools.register(Arc::new(ManaTool::default()));
     tools.register(Arc::new(ReadTool));

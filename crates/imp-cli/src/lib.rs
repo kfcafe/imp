@@ -92,9 +92,6 @@ use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use imp_core::config::{AnimationLevel, Config, ToolOutputDisplay};
 use imp_core::format_error_for_display;
 use imp_core::tools::web::types::SearchProvider;
-use imp_core::typescript_extensions::{
-    inspect_typescript_extension_statuses, TypeScriptExtensionLoadState,
-};
 use imp_core::workflow::{AutonomyMode, VerificationGate};
 use std::ffi::OsString;
 
@@ -5962,8 +5959,7 @@ mod tests {
 
 fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
     use imp_core::import::{
-        detect_sources, import_agents_md, import_skills, import_typescript_extensions, AgentSource,
-        SkipReason,
+        detect_sources, import_agents_md, import_skills, AgentSource, SkipReason,
     };
 
     let home = match std::env::var("HOME") {
@@ -6005,7 +6001,6 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
     println!("Found agent configurations:\n");
     let mut total_skills = 0;
     let mut total_agents_md = 0;
-    let mut total_typescript_extensions = 0;
 
     for source in &sources {
         println!(
@@ -6034,22 +6029,6 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
             total_agents_md += source.agents_md.len();
         }
 
-        if !source.typescript_extensions.is_empty() {
-            println!(
-                "    {} TypeScript extensions:",
-                source.typescript_extensions.len()
-            );
-            for extension in &source.typescript_extensions {
-                let package = extension
-                    .package_name
-                    .as_deref()
-                    .map(|name| format!(" ({name})"))
-                    .unwrap_or_default();
-                println!("      - {}{}", extension.name, package);
-            }
-            total_typescript_extensions += source.typescript_extensions.len();
-        }
-
         println!();
     }
 
@@ -6059,7 +6038,7 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
         return;
     }
 
-    if total_skills == 0 && total_agents_md == 0 && total_typescript_extensions == 0 {
+    if total_skills == 0 && total_agents_md == 0 {
         println!("Nothing to import.");
         return;
     }
@@ -6067,8 +6046,8 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
     // Confirm unless --yes
     if !auto_yes {
         print!(
-            "Import {} skills, {} instruction files, and {} TypeScript extensions into imp? [y/N] ",
-            total_skills, total_agents_md, total_typescript_extensions
+            "Import {} skills and {} instruction files into imp? [y/N] ",
+            total_skills, total_agents_md
         );
         io::stdout().flush().unwrap();
         let mut input = String::new();
@@ -6081,11 +6060,6 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
 
     let imp_config = Config::user_config_dir();
     let imp_skills = imp_config.join("skills");
-    let imp_extensions = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".imp")
-        .join("extensions");
-
     // Import skills
     for source in &sources {
         if source.skills.is_empty() {
@@ -6122,59 +6096,6 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
                 );
             }
         }
-    }
-
-    // Import TypeScript extensions into the project-local .imp extension root.
-    for source in &sources {
-        if source.typescript_extensions.is_empty() {
-            continue;
-        }
-
-        match import_typescript_extensions(
-            &source.typescript_extensions,
-            &imp_extensions,
-            source.agent.import_namespace(),
-        ) {
-            Ok(result) => {
-                if !result.copied.is_empty() {
-                    println!(
-                        "  ✓ Imported {} TypeScript extensions from {} → {}:",
-                        result.copied.len(),
-                        source.agent.label(),
-                        imp_extensions
-                            .join(source.agent.import_namespace())
-                            .display()
-                    );
-                    for name in &result.copied {
-                        println!("      {name}");
-                    }
-                }
-                for (name, reason) in &result.skipped {
-                    match reason {
-                        SkipReason::AlreadyExists => {
-                            println!("    ⊘ {name} — TypeScript extension already exists, skipped");
-                        }
-                        SkipReason::CopyFailed(err) => {
-                            eprintln!("    ✗ {name} — TypeScript extension copy failed: {err}");
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "  ✗ Failed to import TypeScript extensions from {}: {e}",
-                    source.agent.label()
-                );
-            }
-        }
-    }
-
-    if total_typescript_extensions > 0 {
-        println!(
-            "\nTypeScript extensions are staged in {}. Runtime support is limited to the current compatibility subset.",
-            imp_extensions.display()
-        );
-        print_typescript_extension_statuses(&imp_extensions);
     }
 
     // Import AGENTS.md (only the first one found, if imp doesn't have one yet)
@@ -6215,40 +6136,4 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
     }
 
     println!("\nDone. Skills are in {}", imp_skills.display());
-}
-
-fn print_typescript_extension_statuses(imp_extensions: &Path) {
-    let Some(project_dir) = imp_extensions.parent().and_then(Path::parent) else {
-        return;
-    };
-    let statuses = inspect_typescript_extension_statuses(project_dir);
-    if statuses.is_empty() {
-        return;
-    }
-
-    println!("\nTypeScript extension runtime status:");
-    for status in statuses {
-        println!("  - {} — {}", status.extension_name, status.state.label());
-        if !status.tools.is_empty() {
-            let tool_names: Vec<_> = status.tools.iter().map(|tool| tool.name.as_str()).collect();
-            println!("      tools: {}", tool_names.join(", "));
-        }
-        if status.state == TypeScriptExtensionLoadState::LoadedWithStubs {
-            let notes: Vec<_> = status
-                .tools
-                .iter()
-                .flat_map(|tool| tool.compatibility.stubbed_apis.iter())
-                .map(String::as_str)
-                .collect();
-            if !notes.is_empty() {
-                println!("      stubbed APIs: {}", notes.join(", "));
-            }
-        }
-        if status.state == TypeScriptExtensionLoadState::NeedsDependencies {
-            println!("      dependencies are missing; ask before installing with Bun");
-        }
-        if let Some(message) = status.message {
-            println!("      {message}");
-        }
-    }
 }

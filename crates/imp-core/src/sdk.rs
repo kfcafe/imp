@@ -13,7 +13,7 @@
 //! - switch models and thinking levels for later prompts
 //!
 //! Explicitly out of scope for this first slice:
-//! - TypeScript extension/runtime loading
+//! - extension/runtime loading
 //! - packaged customization discovery
 //! - a higher-level runtime/session-replacement wrapper above [`ImpSession`]
 //! - CLI/TUI-specific orchestration helpers

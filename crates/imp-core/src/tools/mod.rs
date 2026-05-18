@@ -1,7 +1,6 @@
 pub mod ask;
 pub mod bash;
 pub mod edit;
-pub mod extend;
 pub mod git;
 pub mod lua;
 pub mod mana;
