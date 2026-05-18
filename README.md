@@ -2,7 +2,7 @@
 
 `imp` is an extensible coding agent built for efficiency and performance. It runs in your terminal, uses native development tools, keeps durable sessions, and can coordinate longer tasks with an included mana work graph.
 
-imp is actively developed. The core coding-agent workflow is usable today; some extension and embedding surfaces are still evolving.
+imp is actively developed. The `0.2.0` release line includes the workflow runtime foundations: structured run artifacts, evidence/trace emission, verification gates, and policy/trust events around tool execution. Some extension and embedding surfaces are still evolving.
 
 ```bash
 brew tap kfcafe/tap && brew install imp
@@ -74,14 +74,14 @@ Linux release archives:
 
 ```bash
 # x86_64
-curl -LO https://github.com/kfcafe/imp/releases/latest/download/imp-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-tar xzf imp-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-sudo mv imp-0.1.0-x86_64-unknown-linux-gnu/imp /usr/local/bin/
+curl -LO https://github.com/kfcafe/imp/releases/latest/download/imp-0.2.0-x86_64-unknown-linux-gnu.tar.gz
+tar xzf imp-0.2.0-x86_64-unknown-linux-gnu.tar.gz
+sudo mv imp-0.2.0-x86_64-unknown-linux-gnu/imp /usr/local/bin/
 
 # aarch64
-curl -LO https://github.com/kfcafe/imp/releases/latest/download/imp-0.1.0-aarch64-unknown-linux-gnu.tar.gz
-tar xzf imp-0.1.0-aarch64-unknown-linux-gnu.tar.gz
-sudo mv imp-0.1.0-aarch64-unknown-linux-gnu/imp /usr/local/bin/
+curl -LO https://github.com/kfcafe/imp/releases/latest/download/imp-0.2.0-aarch64-unknown-linux-gnu.tar.gz
+tar xzf imp-0.2.0-aarch64-unknown-linux-gnu.tar.gz
+sudo mv imp-0.2.0-aarch64-unknown-linux-gnu/imp /usr/local/bin/
 ```
 
 If a locally installed macOS binary is killed immediately after install:
