@@ -155,12 +155,6 @@ pub enum VerificationGateRequirement {
     Advisory,
 }
 
-impl Default for VerificationGateRequirement {
-    fn default() -> Self {
-        Self::Required
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VerificationGateStatus {
@@ -170,12 +164,6 @@ pub enum VerificationGateStatus {
     Failed,
     Skipped,
     Blocked,
-}
-
-impl Default for VerificationGateStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,12 +253,6 @@ pub enum VerificationGateSource {
     Inferred,
     Policy,
     Extension { id: String },
-}
-
-impl Default for VerificationGateSource {
-    fn default() -> Self {
-        Self::WorkflowContract
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

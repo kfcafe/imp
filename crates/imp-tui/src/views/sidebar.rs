@@ -191,6 +191,8 @@ pub struct SidebarView<'a> {
 }
 
 impl<'a> SidebarView<'a> {
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         tool_calls: Vec<&'a DisplayToolCall>,
         selected: Option<usize>,
@@ -353,6 +355,7 @@ fn render_scrolled_lines(lines: &[Line<'_>], area: Rect, buf: &mut Buffer, scrol
     total
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_stream_lines(
     tool_calls: &[&DisplayToolCall],
     selected: Option<usize>,
@@ -482,6 +485,7 @@ fn render_stream(
 
 // ── Split mode: tool list ───────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn render_list(
     tool_calls: &[&DisplayToolCall],
     selected: Option<usize>,

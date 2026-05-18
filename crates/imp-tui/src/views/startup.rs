@@ -352,7 +352,7 @@ pub fn truncate_preview(text: &str, max_lines: usize, max_chars: usize) -> Strin
     let mut preview = lines.join("\n");
     if truncated {
         if !preview.is_empty() {
-            preview.push_str("\n");
+            preview.push('\n');
         }
         preview.push_str("[… truncated preview]");
     }

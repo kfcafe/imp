@@ -260,8 +260,10 @@ mod tests {
         let mana_dir = dir.path().join(".mana");
         std::fs::create_dir(&mana_dir).unwrap();
 
-        let mut config = Config::default();
-        config.project = "test".to_string();
+        let config = Config {
+            project: "test".to_string(),
+            ..Default::default()
+        };
         config.save(&mana_dir).unwrap();
 
         (dir, mana_dir)

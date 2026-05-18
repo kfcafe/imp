@@ -1051,7 +1051,7 @@ fn display_width(text: &str) -> usize {
 fn last_whitespace_byte_in(text: &str) -> Option<usize> {
     text.char_indices()
         .filter_map(|(idx, ch)| ch.is_whitespace().then_some(idx + ch.len_utf8()))
-        .last()
+        .next_back()
 }
 
 pub fn cursor_visual_position_for_text(

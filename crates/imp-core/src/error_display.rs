@@ -74,9 +74,7 @@ fn looks_like_html_error(raw: &str) -> bool {
 fn extract_http_status(raw: &str) -> Option<String> {
     let start = raw.find("HTTP ")?;
     let rest = &raw[start..];
-    let end = rest
-        .find(|c: char| c == ':' || c == '\n' || c == '<')
-        .unwrap_or(rest.len());
+    let end = rest.find([':', '\n', '<']).unwrap_or(rest.len());
     let status = rest[..end].trim();
     (!status.is_empty()).then(|| status.to_string())
 }

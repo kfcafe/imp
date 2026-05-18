@@ -293,7 +293,7 @@ impl CapturedOutput {
         }
         let mut summary: String = trimmed.chars().take(500).collect();
         if trimmed.chars().count() > 500 {
-            summary.push_str("…");
+            summary.push('…');
         }
         summary
     }

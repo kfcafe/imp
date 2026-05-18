@@ -22,7 +22,7 @@ pub fn set_window_title(title: &str) -> io::Result<()> {
 pub fn ring_terminal_bell() -> io::Result<()> {
     #[cfg(test)]
     {
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(test))]
@@ -53,10 +53,11 @@ fn restore_terminal<W: Write>(writer: &mut W) -> io::Result<()> {
 
 fn restore_terminal_if_needed<W: Write>(writer: &mut W, restored: &mut bool) -> io::Result<()> {
     if *restored {
-        return Ok(());
+        Ok(())
+    } else {
+        *restored = true;
+        restore_terminal(writer)
     }
-    *restored = true;
-    restore_terminal(writer)
 }
 
 pub struct TerminalSession {

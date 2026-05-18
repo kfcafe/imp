@@ -1375,11 +1375,10 @@ fn run_secrets_list() -> Result<(), Box<dyn std::error::Error>> {
         .max("Status".len());
 
     println!(
-        "{:<provider_w$}  {:<kind_w$}  {:<status_w$}  {}",
+        "{:<provider_w$}  {:<kind_w$}  {:<status_w$}  Fields",
         "Provider",
         "Kind",
         "Status",
-        "Fields",
         provider_w = provider_w,
         kind_w = kind_w,
         status_w = status_w
@@ -4874,6 +4873,7 @@ fn build_full_prompt(prompt: &str, file_context: &str, stdin: &Option<String>) -
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
@@ -5003,7 +5003,7 @@ mod tests {
         unit.description = Some(description.to_string());
         unit.verify = Some(verify.to_string());
         unit.updated_at = unit.created_at;
-        unit.to_file(&mana_dir.join(format!("{id}-{title_slug}.md")))
+        unit.to_file(mana_dir.join(format!("{id}-{title_slug}.md")))
             .unwrap();
     }
 
@@ -5494,7 +5494,7 @@ mod tests {
         cli.session = Some(PathBuf::from("session.jsonl"));
         assert!(matches!(
             shell_session_choice(&cli),
-            SessionChoice::Open(path) if path == PathBuf::from("session.jsonl")
+            SessionChoice::Open(path) if path.as_os_str() == "session.jsonl"
         ));
     }
 
@@ -5604,8 +5604,10 @@ mod tests {
     fn resolve_model_cli_overrides_config() {
         let mut cli = default_cli();
         cli.model = Some("haiku".to_string());
-        let mut config = Config::default();
-        config.model = Some("sonnet".to_string());
+        let config = Config {
+            model: Some("sonnet".to_string()),
+            ..Default::default()
+        };
         let registry = ModelRegistry::with_builtins();
         let auth_store = empty_auth_store();
         let (model_id, _) =
@@ -5645,8 +5647,10 @@ mod tests {
             )
             .unwrap();
 
-        let mut config = Config::default();
-        config.model = Some("gpt-5.4".to_string());
+        let config = Config {
+            model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        };
         let registry = ModelRegistry::with_builtins();
 
         let (model_id, provider) =
@@ -5679,8 +5683,10 @@ mod tests {
             )
             .unwrap();
 
-        let mut config = Config::default();
-        config.model = Some("gpt-5.4".to_string());
+        let config = Config {
+            model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        };
         let registry = ModelRegistry::with_builtins();
 
         let (model_id, provider) =
@@ -5705,8 +5711,10 @@ mod tests {
             )
             .unwrap();
 
-        let mut config = Config::default();
-        config.model = Some("gpt-4o".to_string());
+        let config = Config {
+            model: Some("gpt-4o".to_string()),
+            ..Default::default()
+        };
         let registry = ModelRegistry::with_builtins();
 
         let (model_id, provider) =

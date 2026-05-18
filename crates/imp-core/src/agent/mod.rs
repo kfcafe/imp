@@ -390,39 +390,16 @@ impl Agent {
         turn_started_at: Instant,
         llm_request_started_at: Option<Instant>,
     ) {
-        self.emit_timing_with_details(
+        self.emit_timing_with_details(TimingEvent::new(
             turn,
             stage,
             turn_started_at,
             llm_request_started_at,
-            None,
-            None,
-            None,
-        )
+        ))
         .await;
     }
 
-    async fn emit_timing_with_details(
-        &self,
-        turn: u32,
-        stage: TimingStage,
-        turn_started_at: Instant,
-        llm_request_started_at: Option<Instant>,
-        duration_ms: Option<u64>,
-        label: Option<String>,
-        success: Option<bool>,
-    ) {
-        let now = Instant::now();
-        let timing = TimingEvent {
-            turn,
-            stage,
-            since_turn_start_ms: now.duration_since(turn_started_at).as_millis() as u64,
-            since_llm_request_start_ms: llm_request_started_at
-                .map(|started_at| now.duration_since(started_at).as_millis() as u64),
-            duration_ms,
-            label,
-            success,
-        };
+    async fn emit_timing_with_details(&self, timing: TimingEvent) {
         self.write_trace_event(&AgentEvent::Timing {
             timing: timing.clone(),
         });

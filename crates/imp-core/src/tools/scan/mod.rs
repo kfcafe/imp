@@ -1093,7 +1093,7 @@ fn find_references(
                 continue;
             }
             let line_no = idx + 1;
-            let (kind, confidence, why) = classify_reference(index, &rel, line_no, line, &needle);
+            let (kind, confidence, why) = classify_reference(index, &rel, line_no, line, needle);
             hits.push(ReferenceHit {
                 file: rel.clone(),
                 line: line_no,

@@ -5,7 +5,8 @@ use futures::future::join_all;
 use tokio::sync::mpsc;
 
 use crate::agent::{
-    Agent, AgentEvent, RecoveryCheckpointKind, TimingStage, ToolExecutionMode, ToolPlan, ToolRisk,
+    Agent, AgentEvent, RecoveryCheckpointKind, TimingEvent, TimingStage, ToolExecutionMode,
+    ToolPlan, ToolRisk,
 };
 use crate::guardrails::{self, GuardrailLevel};
 use crate::hooks::HookEvent;
@@ -242,13 +243,8 @@ impl Agent {
         let repeat_check = self.repeated_tool_call_check(call_id, tool_name, &args);
         let tool_started_at = Instant::now();
         self.emit_timing_with_details(
-            turn,
-            TimingStage::ToolExecutionStart,
-            turn_started_at,
-            None,
-            None,
-            Some(tool_name.to_string()),
-            None,
+            TimingEvent::new(turn, TimingStage::ToolExecutionStart, turn_started_at, None)
+                .with_label(tool_name.to_string()),
         )
         .await;
 
@@ -277,13 +273,10 @@ impl Agent {
             })
             .await;
             self.emit_timing_with_details(
-                turn,
-                TimingStage::ToolExecutionEnd,
-                turn_started_at,
-                None,
-                Some(tool_started_at.elapsed().as_millis() as u64),
-                Some(tool_name.to_string()),
-                Some(false),
+                TimingEvent::new(turn, TimingStage::ToolExecutionEnd, turn_started_at, None)
+                    .with_duration_ms(tool_started_at.elapsed().as_millis() as u64)
+                    .with_label(tool_name.to_string())
+                    .with_success(false),
             )
             .await;
             self.emit_recovery_checkpoint(Self::recovery_checkpoint(
@@ -601,13 +594,10 @@ impl Agent {
         })
         .await;
         self.emit_timing_with_details(
-            turn,
-            TimingStage::ToolExecutionEnd,
-            turn_started_at,
-            None,
-            Some(tool_started_at.elapsed().as_millis() as u64),
-            Some(tool_name.to_string()),
-            Some(!result.is_error),
+            TimingEvent::new(turn, TimingStage::ToolExecutionEnd, turn_started_at, None)
+                .with_duration_ms(tool_started_at.elapsed().as_millis() as u64)
+                .with_label(tool_name.to_string())
+                .with_success(!result.is_error),
         )
         .await;
 

@@ -1188,8 +1188,8 @@ pub fn build_click_map_from_rendered_lines(
     let window = visible_line_window(total_lines, chat_area.height as usize, scroll_offset);
     let mut result = Vec::new();
 
-    for line_index in window.start..window.end {
-        let plain = line_to_plain_text(&lines[line_index]);
+    for (line_index, line) in lines.iter().enumerate().take(window.end).skip(window.start) {
+        let plain = line_to_plain_text(line);
         let Some(rest) = plain
             .strip_prefix("▸ ")
             .or_else(|| plain.strip_prefix("▾ "))

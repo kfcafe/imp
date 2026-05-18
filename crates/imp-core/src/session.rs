@@ -220,7 +220,7 @@ impl SessionManager {
         let mut session_name = None;
         let mut session_summary = None;
 
-        for (_line_num, line) in content.lines().enumerate() {
+        for line in content.lines() {
             if line.trim().is_empty() {
                 continue;
             }
