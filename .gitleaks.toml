@@ -1,0 +1,10 @@
+[allowlist]
+paths = [
+  '''^\.mana/''',
+  '''^target/''',
+  '''^evals/dirac-comparison/worktrees/''',
+  '''^evals/dirac-comparison/results/''',
+]
+regexes = [
+  '''oauth-2025-04-20''',
+]

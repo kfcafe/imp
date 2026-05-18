@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 description = "Source-install shim so `cargo install --path .` and `uu install` work from the imp repo root"
 publish = false
+include = ["Cargo.toml", "src/main.rs", "README.md"]
 
 [[bin]]
 name = "imp"
