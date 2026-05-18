@@ -1,5 +1,11 @@
 target/
 
+# OS/editor noise.
+.DS_Store
+*.swp
+*.swo
+*~
+
 # Local imp runtime/dev state.
 .imp/
 
@@ -7,3 +13,21 @@ target/
 .mana/
 .tmp/
 .vibecheck/
+
+# Private/local planning notes and scratch docs.
+*-idea.md
+*-notes.md
+*-scratch.md
+scratch-*.md
+local-*.md
+private-*.md
+just-bash.md
+justbash.md
+AGENTS copy.md
+
+# Local generated experiments/artifacts.
+art_original.html
+art_test.txt
+art.html
+art.html.bak
+draft.html

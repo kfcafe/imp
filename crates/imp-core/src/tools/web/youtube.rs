@@ -2,7 +2,7 @@ use reqwest::Client;
 use serde_json::Value;
 use url::Url;
 
-use super::types::{ContentFormat, PageContent};
+use super::types::{ContentFormat, ExtractionQuality, PageContent};
 
 const WATCH_BASE_URL: &str = "https://www.youtube.com/watch";
 const PLAYER_RESPONSE_VAR: &str = "ytInitialPlayerResponse";
@@ -155,6 +155,8 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
         was_redirected,
         raw_body_bytes,
         diagnostics,
+        quality: ExtractionQuality::Good,
+        quality_reasons: Vec::new(),
     })
 }
 
@@ -809,12 +811,19 @@ impl std::fmt::Display for YouTubeError {
                 write!(f, "YouTube player API required login: {reason}")
             }
             Self::VisitorDataMissing => write!(f, "YouTube visitor data was unavailable"),
-            Self::CaptionTracksMissing => write!(f, "YouTube captions are unavailable for this video"),
+            Self::CaptionTracksMissing => {
+                write!(f, "YouTube captions are unavailable for this video")
+            }
             Self::NoUsableCaptionTrack => write!(f, "No usable YouTube caption track found"),
             Self::InvalidCaptionUrl(msg) => write!(f, "Invalid YouTube caption URL: {msg}"),
-            Self::TranscriptHttpStatus(code) => write!(f, "YouTube transcript returned HTTP {code}"),
+            Self::TranscriptHttpStatus(code) => {
+                write!(f, "YouTube transcript returned HTTP {code}")
+            }
             Self::TranscriptParse(msg) => write!(f, "YouTube transcript parse failed: {msg}"),
-            Self::TranscriptEmpty => write!(f, "YouTube transcript was empty; caption track metadata was found but YouTube returned no caption body for this client"),
+            Self::TranscriptEmpty => write!(
+                f,
+                "YouTube transcript was empty; caption track metadata was found but YouTube returned no caption body for this client"
+            ),
         }
     }
 }

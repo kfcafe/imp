@@ -95,6 +95,7 @@ use imp_core::tools::web::types::SearchProvider;
 use imp_core::typescript_extensions::{
     inspect_typescript_extension_statuses, TypeScriptExtensionLoadState,
 };
+use imp_core::workflow::{AutonomyMode, VerificationGate};
 use std::ffi::OsString;
 
 use imp_core::imp_session::{
@@ -271,6 +272,22 @@ struct Cli {
     #[arg(long)]
     tools: Option<String>,
 
+    /// Allow a tool by exact name for this run (repeatable)
+    #[arg(long = "allow-tool")]
+    allow_tools: Vec<String>,
+
+    /// Deny a tool by exact name for this run (repeatable)
+    #[arg(long = "deny-tool")]
+    deny_tools: Vec<String>,
+
+    /// Allow writes matching this path/glob relative to the worker cwd (repeatable)
+    #[arg(long = "allow-write")]
+    allow_writes: Vec<String>,
+
+    /// Deny writes matching this path/glob relative to the worker cwd (repeatable)
+    #[arg(long = "deny-write")]
+    deny_writes: Vec<String>,
+
     /// Disable all built-in tools
     #[arg(long)]
     no_tools: bool,
@@ -282,6 +299,18 @@ struct Cli {
     /// Output mode: interactive, rpc, json
     #[arg(long, default_value = "interactive")]
     mode: String,
+
+    /// Final output format for --print: text or json
+    #[arg(long, default_value = "text")]
+    output: String,
+
+    /// Autonomy mode: suggest, safe, local-auto, worktree-auto, allow-all-local, allow-all, ci
+    #[arg(long, value_name = "MODE")]
+    autonomy: Option<AutonomyMode>,
+
+    /// Verification command gate to require for closeout. Repeat for multiple gates.
+    #[arg(long = "verify", value_name = "COMMAND")]
+    verify: Vec<String>,
 
     /// Maximum turns before stopping (default: 50)
     #[arg(long)]
@@ -374,6 +403,11 @@ enum Commands {
         #[command(subcommand)]
         command: UsageCommand,
     },
+    /// Open or inspect run evidence artifacts
+    Evidence {
+        #[command(subcommand)]
+        command: Option<EvidenceCommand>,
+    },
     /// Import skills and config from other agents (pi, Claude Code, Codex)
     Import {
         /// Only detect — don't copy anything
@@ -400,6 +434,14 @@ enum Commands {
         /// Search provider to configure (tavily, exa, linkup, perplexity)
         provider: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum EvidenceCommand {
+    /// List recent run evidence records
+    List,
+    /// Print the latest evidence HTML path
+    Latest,
 }
 
 #[derive(Subcommand, Debug)]
@@ -737,6 +779,31 @@ fn run_install_local(
     Ok(())
 }
 
+fn run_evidence_command(command: Option<&EvidenceCommand>) -> imp_core::Result<()> {
+    let records =
+        imp_core::run_evidence::read_index_records(imp_core::storage::global_run_index_path())?;
+    match command.unwrap_or(&EvidenceCommand::List) {
+        EvidenceCommand::List => {
+            for record in records.iter().rev().take(20) {
+                let status = record.status.as_deref().unwrap_or("running");
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    record.run_id,
+                    status,
+                    record.cwd.display(),
+                    record.evidence_html_path.display()
+                );
+            }
+        }
+        EvidenceCommand::Latest => {
+            if let Some(record) = records.last() {
+                println!("{}", record.evidence_html_path.display());
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn run() {
     let cli = Cli::parse();
 
@@ -854,6 +921,13 @@ pub async fn run() {
             }
             Commands::Usage { command } => {
                 if let Err(e) = usage_report::run_usage_command(command) {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
+            Commands::Evidence { command } => {
+                if let Err(e) = run_evidence_command(command.as_ref()) {
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
@@ -1054,6 +1128,7 @@ fn search_provider_from_name(name: &str) -> Option<SearchProvider> {
         "exa" => Some(SearchProvider::Exa),
         "linkup" => Some(SearchProvider::Linkup),
         "perplexity" => Some(SearchProvider::Perplexity),
+        "github" => Some(SearchProvider::GitHub),
         _ => None,
     }
 }
@@ -1064,6 +1139,7 @@ fn search_provider_docs_url(provider: SearchProvider) -> &'static str {
         SearchProvider::Exa => "https://dashboard.exa.ai/api-keys",
         SearchProvider::Linkup => "https://app.linkup.so/api-keys",
         SearchProvider::Perplexity => "https://www.perplexity.ai/settings/api",
+        SearchProvider::GitHub => "https://github.com/settings/tokens",
     }
 }
 
@@ -1965,6 +2041,8 @@ async fn run_headless_mode(
             .as_ref()
             .map(|thinking| parse_thinking_level(thinking)),
         max_turns: cli.max_turns.or(config.max_turns),
+        autonomy_mode: cli.autonomy,
+        verification_gates: cli_verification_gates(&cli.verify),
         max_tokens: cli.max_tokens.or(config.max_tokens),
         system_prompt: cli.system_prompt.clone(),
         no_tools: cli.no_tools,
@@ -2058,12 +2136,33 @@ fn emit_startup_timing(timer: &mut StartupTimer, stage: StartupStage) {
 }
 
 fn format_timing_event(timing: &TimingEvent) -> String {
+    let llm = timing
+        .since_llm_request_start_ms
+        .map(|ms| format!(" llm={ms}ms"))
+        .unwrap_or_default();
+    let duration = timing
+        .duration_ms
+        .map(|ms| format!(" duration={ms}ms"))
+        .unwrap_or_default();
+    let label = timing
+        .label
+        .as_ref()
+        .map(|label| format!(" label={label}"))
+        .unwrap_or_default();
+    let success = timing
+        .success
+        .map(|success| format!(" success={success}"))
+        .unwrap_or_default();
+
     format!(
-        "[timing turn={} stage={} turn={}ms llm={}ms]",
+        "[timing turn={} stage={} turn={}ms{}{}{}{}]",
         timing.turn,
         timing.stage.as_str(),
         timing.since_turn_start_ms,
-        timing.since_llm_request_start_ms,
+        llm,
+        duration,
+        label,
+        success,
     )
 }
 
@@ -2080,6 +2179,16 @@ async fn run_reserved_mana_namespace_command(
         "`imp mana {target}{rendered_args}` is reserved for a future mana-aware operator command. For now, use `mana {target}{rendered_args}` directly or `imp mana <unit-id>` for single-unit worker execution."
     )
     .into())
+}
+
+fn cli_verification_gates(commands: &[String]) -> Vec<VerificationGate> {
+    commands
+        .iter()
+        .enumerate()
+        .map(|(index, command)| {
+            VerificationGate::command(format!("cli-verify-{}", index + 1), command.clone())
+        })
+        .collect()
 }
 
 fn determine_headless_output_mode(cli_mode: &str, stdout_is_terminal: bool) -> HeadlessOutputMode {
@@ -2163,7 +2272,7 @@ fn print_headless_human_event(
                 eprintln!("{}", format_timing_event(timing));
             }
         }
-        AgentEvent::AgentEnd { usage, cost } => {
+        AgentEvent::AgentEnd { usage, cost, .. } => {
             eprintln!(
                 "\n[tokens: ↑{} ↓{} | cost: ${:.4}]",
                 usage.input_tokens, usage.output_tokens, cost.total
@@ -2180,7 +2289,7 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
         AgentEvent::AgentStart { model, timestamp } => {
             json!({ "type": "agent_start", "model": model, "timestamp": timestamp })
         }
-        AgentEvent::AgentEnd { usage, cost } => {
+        AgentEvent::AgentEnd { usage, cost, .. } => {
             json!({ "type": "agent_end", "usage": usage, "cost": cost })
         }
         AgentEvent::TurnStart { index } => json!({ "type": "turn_start", "index": index }),
@@ -2212,11 +2321,13 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
         AgentEvent::ToolExecutionEnd {
             tool_call_id,
             result,
+            provenance,
         } => {
             json!({
                 "type": "tool_execution_end",
                 "tool_call_id": tool_call_id,
                 "result": result,
+                "provenance": provenance,
             })
         }
         AgentEvent::Timing { timing } => json!({
@@ -2225,8 +2336,35 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
             "stage": timing.stage.as_str(),
             "since_turn_start_ms": timing.since_turn_start_ms,
             "since_llm_request_start_ms": timing.since_llm_request_start_ms,
+            "duration_ms": timing.duration_ms,
+            "label": timing.label,
+            "success": timing.success,
+        }),
+        AgentEvent::RecoveryCheckpoint { checkpoint } => json!({
+            "type": "recovery_checkpoint",
+            "checkpoint": checkpoint,
         }),
         AgentEvent::Warning { message } => json!({ "type": "warning", "message": message }),
+        AgentEvent::EvidenceWritten { path } => json!({
+            "type": "evidence_written",
+            "path": path.display().to_string(),
+        }),
+        AgentEvent::VerificationStarted { gate } => json!({
+            "type": "verification_started",
+            "gate": gate,
+        }),
+        AgentEvent::VerificationCompleted {
+            gate,
+            closeout_effect,
+        } => json!({
+            "type": "verification_completed",
+            "gate": gate,
+            "closeout_effect": closeout_effect,
+        }),
+        AgentEvent::PolicyChecked { record } => json!({
+            "type": "policy_checked",
+            "record": record,
+        }),
         AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
         AgentEvent::ToolOutputDelta { .. } => return Ok(()), // handled in TUI only
     };
@@ -2822,10 +2960,15 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             "model": model,
             "timestamp": timestamp,
         }),
-        AgentEvent::AgentEnd { usage, cost } => json!({
+        AgentEvent::AgentEnd {
+            usage,
+            cost,
+            status,
+        } => json!({
             "type": "agent_end",
             "usage": usage,
             "cost": cost,
+            "status": status,
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
             "cache_read_tokens": usage.cache_read_tokens,
@@ -2859,6 +3002,7 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
         AgentEvent::ToolExecutionEnd {
             tool_call_id,
             result,
+            provenance,
         } => json!({
             "type": "tool_execution_end",
             "tool_call_id": tool_call_id,
@@ -2867,6 +3011,7 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             "content": result.content,
             "details": result.details,
             "timestamp": result.timestamp,
+            "provenance": provenance,
         }),
         AgentEvent::Timing { timing } => json!({
             "type": "timing",
@@ -2874,10 +3019,37 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             "stage": timing.stage.as_str(),
             "since_turn_start_ms": timing.since_turn_start_ms,
             "since_llm_request_start_ms": timing.since_llm_request_start_ms,
+            "duration_ms": timing.duration_ms,
+            "label": timing.label,
+            "success": timing.success,
+        }),
+        AgentEvent::RecoveryCheckpoint { checkpoint } => json!({
+            "type": "recovery_checkpoint",
+            "checkpoint": checkpoint,
         }),
         AgentEvent::Warning { message } => {
             json!({ "type": "warning", "message": message })
         }
+        AgentEvent::EvidenceWritten { path } => json!({
+            "type": "evidence_written",
+            "path": path.display().to_string(),
+        }),
+        AgentEvent::VerificationStarted { gate } => json!({
+            "type": "verification_started",
+            "gate": gate,
+        }),
+        AgentEvent::VerificationCompleted {
+            gate,
+            closeout_effect,
+        } => json!({
+            "type": "verification_completed",
+            "gate": gate,
+            "closeout_effect": closeout_effect,
+        }),
+        AgentEvent::PolicyChecked { record } => json!({
+            "type": "policy_checked",
+            "record": record,
+        }),
         AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
         AgentEvent::ToolOutputDelta { tool_call_id, text } => {
             json!({ "type": "tool_output_delta", "tool_call_id": tool_call_id, "text": text })
@@ -2951,6 +3123,55 @@ async fn emit_protocol_error(stdout_tx: &mpsc::Sender<Value>, error: impl Into<S
         .await;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrintOutputMode {
+    Text,
+    Json,
+}
+
+impl PrintOutputMode {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "text" | "human" => Ok(Self::Text),
+            "json" => Ok(Self::Json),
+            other => Err(format!("unknown --output mode `{other}`; use text or json")),
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+struct PrintJsonOutcome {
+    status: String,
+    final_text: String,
+    policy_violations: Vec<PrintPolicyViolation>,
+    tool_calls: Vec<PrintToolCall>,
+    usage: Option<PrintUsage>,
+    cost: Option<PrintCost>,
+}
+
+#[derive(Debug, Serialize)]
+struct PrintPolicyViolation {
+    tool: String,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PrintToolCall {
+    tool: String,
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PrintUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct PrintCost {
+    total: f64,
+}
+
 async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut startup_timer = StartupTimer::new(cli.verbose);
     emit_startup_timing(&mut startup_timer, StartupStage::ProcessStart);
@@ -2975,6 +3196,19 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         SessionChoice::New
     };
 
+    let mut run_policy = imp_core::policy::RunPolicy::default();
+    for tool in &cli.allow_tools {
+        run_policy = run_policy.allow_tool(tool);
+    }
+    for tool in &cli.deny_tools {
+        run_policy = run_policy.deny_tool(tool);
+    }
+    for pattern in &cli.allow_writes {
+        run_policy = run_policy.allow_write(pattern);
+    }
+    for pattern in &cli.deny_writes {
+        run_policy = run_policy.deny_write(pattern);
+    }
     let mut options = SessionOptions {
         cwd: cwd.clone(),
         model: cli.model.clone(),
@@ -2985,9 +3219,12 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
             .as_ref()
             .map(|thinking| parse_thinking_level(thinking)),
         max_turns: cli.max_turns.or(config.max_turns),
+        autonomy_mode: cli.autonomy,
+        verification_gates: cli_verification_gates(&cli.verify),
         max_tokens: cli.max_tokens.or(config.max_tokens),
         system_prompt: cli.system_prompt.clone(),
         no_tools: cli.no_tools,
+        run_policy,
         session: session_choice,
         ..Default::default()
     };
@@ -3011,19 +3248,36 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
 
     let mut printed_trailing_newline = false;
 
+    let print_output_mode = PrintOutputMode::parse(&cli.output)?;
+    let json_output = print_output_mode == PrintOutputMode::Json;
+    let mut json_outcome = PrintJsonOutcome {
+        status: "done".to_string(),
+        ..Default::default()
+    };
+    let mut active_tool: Option<String> = None;
+
     while let Some(event) = session.recv_event().await {
         match event {
             AgentEvent::MessageDelta { delta } => match delta {
                 StreamEvent::TextDelta { text } => {
-                    print!("{text}");
-                    printed_trailing_newline = false;
+                    if json_output {
+                        json_outcome.final_text.push_str(&text);
+                    } else {
+                        print!("{text}");
+                        printed_trailing_newline = false;
+                    }
                 }
-                StreamEvent::ThinkingDelta { text } => eprint!("{text}"),
+                StreamEvent::ThinkingDelta { text } => {
+                    if !json_output {
+                        eprint!("{text}")
+                    }
+                }
                 _ => {}
             },
             AgentEvent::ToolExecutionStart {
                 tool_name, args, ..
             } if !cli.no_tools => {
+                active_tool = Some(tool_name.clone());
                 let summary = match tool_name.as_str() {
                     "bash" => args
                         .get("command")
@@ -3042,47 +3296,79 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
                         .to_string(),
                     _ => String::new(),
                 };
-                if summary.is_empty() {
-                    eprintln!("[tool: {tool_name}]");
-                } else {
-                    eprintln!("[tool: {tool_name} {summary}]");
-                }
-            }
-            AgentEvent::ToolExecutionEnd { result, .. } if !cli.no_tools => {
-                if result.is_error {
-                    let text: String = result
-                        .content
-                        .iter()
-                        .filter_map(|b| match b {
-                            imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
-                    if !text.is_empty() {
-                        eprintln!("[error: {}]", truncate_chars_with_suffix(&text, 100, ""));
+                if !json_output {
+                    if summary.is_empty() {
+                        eprintln!("[tool: {tool_name}]");
+                    } else {
+                        eprintln!("[tool: {tool_name} {summary}]");
                     }
                 }
             }
+            AgentEvent::ToolExecutionEnd { result, .. } if !cli.no_tools => {
+                let tool_name = active_tool.take().unwrap_or_else(|| "unknown".to_string());
+                let status = if result.is_error { "error" } else { "ok" }.to_string();
+                let text: String = result
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if json_output {
+                    if result.is_error && text.contains("run policy") {
+                        json_outcome.status = "policy_denied".to_string();
+                        json_outcome.policy_violations.push(PrintPolicyViolation {
+                            tool: tool_name.clone(),
+                            reason: text.clone(),
+                        });
+                    }
+                    json_outcome.tool_calls.push(PrintToolCall {
+                        tool: tool_name,
+                        status,
+                    });
+                } else if result.is_error && !text.is_empty() {
+                    eprintln!("[error: {}]", truncate_chars_with_suffix(&text, 100, ""));
+                }
+            }
             AgentEvent::TurnEnd { .. } => {
-                if !printed_trailing_newline {
+                if !json_output && !printed_trailing_newline {
                     println!();
                     printed_trailing_newline = true;
                 }
             }
             AgentEvent::Error { error } => {
-                eprintln!("Error: {}", format_error_for_display(&error));
+                json_outcome.status = "failed".to_string();
+                if json_output {
+                    if !json_outcome.final_text.is_empty() {
+                        json_outcome.final_text.push('\n');
+                    }
+                    json_outcome
+                        .final_text
+                        .push_str(&format_error_for_display(&error));
+                } else {
+                    eprintln!("Error: {}", format_error_for_display(&error));
+                }
             }
             AgentEvent::Timing { timing } => {
                 if cli.verbose {
                     eprintln!("{}", format_timing_event(&timing));
                 }
             }
-            AgentEvent::AgentEnd { usage, cost } => {
-                eprintln!(
-                    "\n[tokens: ↑{} ↓{} | cost: ${:.4}]",
-                    usage.input_tokens, usage.output_tokens, cost.total
-                );
+            AgentEvent::AgentEnd { usage, cost, .. } => {
+                if json_output {
+                    json_outcome.usage = Some(PrintUsage {
+                        input_tokens: usage.input_tokens,
+                        output_tokens: usage.output_tokens,
+                    });
+                    json_outcome.cost = Some(PrintCost { total: cost.total });
+                } else {
+                    eprintln!(
+                        "\n[tokens: ↑{} ↓{} | cost: ${:.4}]",
+                        usage.input_tokens, usage.output_tokens, cost.total
+                    );
+                }
             }
             _ => {}
         }
@@ -3092,6 +3378,10 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         .wait()
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+    if json_output {
+        println!("{}", serde_json::to_string(&json_outcome)?);
+    }
 
     Ok(())
 }
@@ -3917,6 +4207,8 @@ async fn build_chat_session(
             .as_ref()
             .map(|thinking| parse_thinking_level(thinking)),
         max_turns: cli.max_turns.or(config.max_turns),
+        autonomy_mode: cli.autonomy,
+        verification_gates: cli_verification_gates(&cli.verify),
         max_tokens: cli.max_tokens.or(config.max_tokens),
         system_prompt: cli.system_prompt.clone(),
         no_tools: cli.no_tools,
@@ -4234,7 +4526,7 @@ async fn run_chat_prompt(
                     eprintln!("{}", format_timing_event(&timing));
                 }
             }
-            AgentEvent::AgentEnd { usage: _, cost } => {
+            AgentEvent::AgentEnd { usage: _, cost, .. } => {
                 clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
                 eprintln!("{}", turn_summary.summary_line(cost.total));
                 break;
@@ -4524,9 +4816,6 @@ async fn run_interactive(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ref thinking) = cli.thinking {
             runner.app_mut().thinking_level = parse_thinking_level(thinking);
         }
-        if cli.max_turns.is_some() {
-            runner.app_mut().max_turns_override = cli.max_turns;
-        }
 
         runner.run_guarded().await.map_err(Into::into)
     }
@@ -4612,9 +4901,16 @@ mod tests {
             session: None,
             no_session: false,
             tools: None,
+            allow_tools: Vec::new(),
+            deny_tools: Vec::new(),
+            allow_writes: Vec::new(),
+            deny_writes: Vec::new(),
             no_tools: false,
             system_prompt: None,
             mode: "interactive".to_string(),
+            autonomy: None,
+            verify: Vec::new(),
+            output: "text".to_string(),
             max_turns: None,
             max_tokens: None,
             verbose: false,
@@ -4709,6 +5005,47 @@ mod tests {
         unit.updated_at = unit.created_at;
         unit.to_file(&mana_dir.join(format!("{id}-{title_slug}.md")))
             .unwrap();
+    }
+
+    #[test]
+    fn cli_parses_autonomy_mode_flag() {
+        let cli = Cli::try_parse_from(["imp", "--autonomy", "allow-all-local", "fix it"])
+            .expect("parse autonomy flag");
+        assert_eq!(cli.autonomy, Some(AutonomyMode::AllowAllLocal));
+        assert_eq!(cli.args, vec!["fix it".to_string()]);
+    }
+
+    #[test]
+    fn cli_rejects_unknown_autonomy_mode() {
+        let err = match Cli::try_parse_from(["imp", "--autonomy", "dangerous", "fix it"]) {
+            Ok(_) => panic!("unknown autonomy mode should fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn cli_parses_verify_command_gates() {
+        let cli = Cli::try_parse_from([
+            "imp",
+            "--verify",
+            "cargo test -p imp-core",
+            "--verify",
+            "cargo fmt --check",
+            "fix it",
+        ])
+        .expect("parse verify gates");
+        let gates = cli_verification_gates(&cli.verify);
+        assert_eq!(gates.len(), 2);
+        assert_eq!(gates[0].id, "cli-verify-1");
+        assert_eq!(
+            gates[0]
+                .command
+                .as_ref()
+                .map(|command| command.command.as_str()),
+            Some("cargo test -p imp-core")
+        );
+        assert_eq!(gates[1].id, "cli-verify-2");
     }
 
     #[test]
@@ -4808,6 +5145,8 @@ mod tests {
             system_prompt: None,
             thinking: Some(ThinkingLevel::Off),
             max_turns: Some(2),
+            autonomy_mode: None,
+            verification_gates: Vec::new(),
             max_tokens: None,
             no_tools: false,
             mana_dir_override: Some(temp.path().join(".mana")),
@@ -4869,6 +5208,8 @@ mod tests {
             system_prompt: None,
             thinking: Some(ThinkingLevel::Off),
             max_turns: Some(1),
+            autonomy_mode: None,
+            verification_gates: Vec::new(),
             max_tokens: None,
             no_tools: true,
             mana_dir_override: Some(temp.path().join(".mana")),
@@ -5483,13 +5824,53 @@ mod tests {
             cache_write: 0.0001875,
             total: 0.0107175,
         };
-        let event = AgentEvent::AgentEnd { usage, cost };
+        let event = AgentEvent::AgentEnd {
+            usage,
+            cost,
+            status: imp_core::agent::RunFinalStatus::Done {
+                reason: imp_core::agent::StopReason::WorkCompleted,
+            },
+        };
         let json = rpc_agent_event_to_json(&event);
         assert_eq!(json["type"], "agent_end");
         assert_eq!(json["input_tokens"], 1000);
         assert_eq!(json["output_tokens"], 500);
         assert_eq!(json["cache_read_tokens"], 100);
         assert_eq!(json["cost_total"], 0.0107175);
+        assert_eq!(json["status"]["type"], "done");
+        assert_eq!(json["status"]["reason"], "work_completed");
+    }
+
+    #[test]
+    fn rpc_agent_event_agent_end_serializes_blocked_status() {
+        let event = AgentEvent::AgentEnd {
+            usage: imp_llm::Usage::default(),
+            cost: imp_llm::Cost::default(),
+            status: imp_core::agent::RunFinalStatus::Blocked {
+                reason: imp_core::agent::StopReason::ExecutionBlocked,
+                message: "verification failed".to_string(),
+            },
+        };
+        let json = rpc_agent_event_to_json(&event);
+        assert_eq!(json["type"], "agent_end");
+        assert_eq!(json["status"]["type"], "blocked");
+        assert_eq!(json["status"]["reason"], "execution_blocked");
+        assert_eq!(json["status"]["message"], "verification failed");
+    }
+
+    #[test]
+    fn rpc_agent_event_agent_end_serializes_failed_status() {
+        let event = AgentEvent::AgentEnd {
+            usage: imp_llm::Usage::default(),
+            cost: imp_llm::Cost::default(),
+            status: imp_core::agent::RunFinalStatus::Failed {
+                message: "provider error".to_string(),
+            },
+        };
+        let json = rpc_agent_event_to_json(&event);
+        assert_eq!(json["type"], "agent_end");
+        assert_eq!(json["status"]["type"], "failed");
+        assert_eq!(json["status"]["message"], "provider error");
     }
 
     #[test]
@@ -5499,7 +5880,10 @@ mod tests {
                 turn: 2,
                 stage: imp_core::TimingStage::FirstTextDelta,
                 since_turn_start_ms: 150,
-                since_llm_request_start_ms: 120,
+                since_llm_request_start_ms: Some(120),
+                duration_ms: Some(30),
+                label: Some("model".to_string()),
+                success: Some(true),
             },
         };
         let json = rpc_agent_event_to_json(&event);
@@ -5508,6 +5892,9 @@ mod tests {
         assert_eq!(json["stage"], "first_text_delta");
         assert_eq!(json["since_turn_start_ms"], 150);
         assert_eq!(json["since_llm_request_start_ms"], 120);
+        assert_eq!(json["duration_ms"], 30);
+        assert_eq!(json["label"], "model");
+        assert_eq!(json["success"], true);
     }
 
     #[test]
@@ -5522,8 +5909,11 @@ mod tests {
             id: "42".to_string(),
             title: "Fix the widget".to_string(),
             description: "The widget is broken.\nPlease fix it.".to_string(),
+            design: None,
             acceptance: Some("Widget tests pass".to_string()),
             verify: Some("cargo test -p imp-cli".to_string()),
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: Some("Check the edge case.".to_string()),
             decisions: vec!["Keep the CLI thin".to_string()],
             dependencies: Vec::new(),
@@ -5541,10 +5931,12 @@ mod tests {
         let prompt = imp_core::mana_worker::build_task_prompt(&assignment);
         let context = imp_core::mana_worker::build_task_context(&assignment);
 
-        assert!(prompt.starts_with("Task: Fix the widget"));
-        assert!(prompt.contains("Notes:\nCheck the edge case."));
-        assert!(prompt.contains("Previous attempts:"));
-        assert!(prompt.contains("Verify command: cargo test -p imp-cli"));
+        assert!(prompt.starts_with("# Mana worker assignment"));
+        assert!(prompt.contains("Title: Fix the widget"));
+        assert!(prompt.contains("## Task\nThe widget is broken."));
+        assert!(prompt.contains("## Current notes / prior context\nCheck the edge case."));
+        assert!(prompt.contains("## Previous attempts"));
+        assert!(prompt.contains("## Verification contract\nCommand: cargo test -p imp-cli"));
 
         assert_eq!(context.title, "Fix the widget");
         assert_eq!(context.acceptance.as_deref(), Some("Widget tests pass"));

@@ -32,13 +32,11 @@ pub enum AgentMode {
 }
 
 const WORKER_TOOLS: &[&str] = &[
-    "read", "scan", "web", "recall", "write", "edit", "shell", "git", "mana", "ask",
+    "read", "scan", "web", "recall", "write", "edit", "bash", "git", "mana", "ask_user",
 ];
-const ORCHESTRATOR_TOOLS: &[&str] = &[
-    "read", "scan", "web", "recall", "mana", "git", "ask", "spawn",
-];
-const PLANNER_TOOLS: &[&str] = &["read", "scan", "web", "recall", "git", "mana", "ask"];
-const REVIEWER_TOOLS: &[&str] = &["read", "scan", "web", "recall", "git", "ask"];
+const ORCHESTRATOR_TOOLS: &[&str] = &["read", "scan", "web", "recall", "mana", "git", "ask_user"];
+const PLANNER_TOOLS: &[&str] = &["read", "scan", "web", "recall", "git", "mana", "ask_user"];
+const REVIEWER_TOOLS: &[&str] = &["read", "scan", "web", "recall", "git", "ask_user"];
 const AUDITOR_TOOLS: &[&str] = &["read", "scan", "web", "recall", "git", "mana"];
 
 const WORKER_MANA_ACTIONS: &[&str] = &[
@@ -183,7 +181,7 @@ impl AgentMode {
                 Encode unresolved questions as decisions instead of burying ambiguity in prose. \
                 When the conversation itself is producing durable plans, architecture, migrations, or implementation structure, externalize that structure into mana during the conversation rather than waiting until the end. \
                 Prefer native mana actions, including scope-aware and append-style updates, over shell or direct file edits for maintaining the work graph. \
-                You may not read or write files directly — spawn worker agents via mana for all file work. \
+                You may not read or write files directly — create and dispatch mana units for all file work. \
                 Update units with concrete failure context and do not retry unchanged failed plans. \
                 You are responsible for unit structure, completeness, and verify quality.",
             ),
@@ -211,6 +209,28 @@ impl AgentMode {
             ),
         }
     }
+}
+
+/// Write tool overwrite safety policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteOverwritePolicy {
+    /// Allow overwrites but return warnings for unread/stale files.
+    #[default]
+    Warn,
+    /// Block overwrites unless the file was read in this session and is not stale.
+    RequireRead,
+    /// Block only stale overwrites; unread overwrites still warn.
+    BlockStale,
+    /// Block all overwrites. New file creation is still allowed.
+    Deny,
+}
+
+/// File write tool settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WriteConfig {
+    #[serde(default)]
+    pub overwrite_policy: WriteOverwritePolicy,
 }
 
 /// Shell backend selection for the Bash tool.
@@ -325,14 +345,92 @@ pub struct CommandSecretsConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
-    pub allowed: Vec<SecretEnvBindingPolicy>,
+    pub allowed: Vec<AllowedCommandSecret>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SecretEnvBindingPolicy {
-    pub provider: String,
-    pub field: String,
-    pub env: String,
+pub struct AllowedCommandSecret {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ManaScopePreference {
+    #[default]
+    Project,
+    Root,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManaRunConfig {
+    /// Whether native mana runs should return immediately by default.
+    #[serde(default = "default_enabled")]
+    pub background: bool,
+    /// Number of units to run in parallel by default.
+    #[serde(default = "default_mana_run_jobs")]
+    pub max_workers: u32,
+    /// Continue running other ready units after one unit fails.
+    #[serde(default)]
+    pub continue_after_failure: bool,
+    /// Review or evaluate units after a native run completes.
+    #[serde(default)]
+    pub review_after_run: bool,
+}
+
+impl Default for ManaRunConfig {
+    fn default() -> Self {
+        Self {
+            background: true,
+            max_workers: 4,
+            continue_after_failure: false,
+            review_after_run: false,
+        }
+    }
+}
+
+impl ManaRunConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+fn default_mana_run_jobs() -> u32 {
+    4
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManaConfig {
+    /// Default mana graph selection for native mana calls.
+    #[serde(default)]
+    pub scope: ManaScopePreference,
+    /// Whether successful mana close operations should auto-commit mana changes.
+    #[serde(default)]
+    pub auto_commit: bool,
+    /// Whether mana should close completed parent units after closing a child.
+    #[serde(default = "default_true")]
+    pub auto_close_parent: bool,
+    /// Default verify timeout, in seconds, for close/create/verify flows.
+    #[serde(default)]
+    pub verify_timeout: Option<u64>,
+    /// Native mana run defaults.
+    #[serde(default, skip_serializing_if = "ManaRunConfig::is_default")]
+    pub run: ManaRunConfig,
+}
+
+impl Default for ManaConfig {
+    fn default() -> Self {
+        Self {
+            scope: ManaScopePreference::Project,
+            auto_commit: false,
+            auto_close_parent: true,
+            verify_timeout: None,
+            run: ManaRunConfig::default(),
+        }
+    }
 }
 
 /// Top-level configuration.
@@ -369,6 +467,10 @@ pub struct Config {
     #[serde(default)]
     pub shell: ShellConfig,
 
+    /// Write tool settings.
+    #[serde(default)]
+    pub write: WriteConfig,
+
     /// Engineering guardrails — profile-aware guidance and post-write checks.
     #[serde(default)]
     pub guardrails: GuardrailConfig,
@@ -396,6 +498,10 @@ pub struct Config {
     /// Web tool settings.
     #[serde(default)]
     pub web: WebConfig,
+
+    /// Mana tool settings.
+    #[serde(default)]
+    pub mana: ManaConfig,
 
     /// Shipped Lua extension runtime policy.
     #[serde(default)]
@@ -571,6 +677,21 @@ pub struct UiConfig {
     /// Default: disabled.
     #[serde(default)]
     pub continue_policy: ContinuePolicy,
+
+    /// Maximum number of automatic Build-mode task turns before pausing.
+    /// Default: 20.
+    #[serde(default = "default_build_auto_turn_budget")]
+    pub build_auto_turn_budget: u32,
+
+    /// Maximum number of automatic Improve-mode research turns before pausing.
+    /// Default: 5.
+    #[serde(default = "default_improve_auto_turn_budget")]
+    pub improve_auto_turn_budget: u32,
+
+    /// Maximum number of `/loop` automatic turns before pausing.
+    /// 0 disables the imp-level loop cap. Default: 0.
+    #[serde(default)]
+    pub loop_turn_budget: u32,
 }
 
 fn default_tool_output_lines() -> usize {
@@ -597,6 +718,12 @@ fn default_mouse_scroll_lines() -> usize {
 fn default_keyboard_scroll_lines() -> usize {
     20
 }
+fn default_build_auto_turn_budget() -> u32 {
+    20
+}
+fn default_improve_auto_turn_budget() -> u32 {
+    5
+}
 
 impl Default for UiConfig {
     fn default() -> Self {
@@ -622,6 +749,9 @@ impl Default for UiConfig {
             show_context_usage: true,
             notify_on_agent_complete: true,
             continue_policy: ContinuePolicy::Disabled,
+            build_auto_turn_budget: default_build_auto_turn_budget(),
+            improve_auto_turn_budget: default_improve_auto_turn_budget(),
+            loop_turn_budget: 0,
         }
     }
 }
@@ -833,6 +963,9 @@ impl Config {
         }
         if other.web != WebConfig::default() {
             self.web = other.web;
+        }
+        if other.mana != ManaConfig::default() {
+            self.mana = other.mana;
         }
         if other.lua != LuaConfig::default() {
             self.lua = other.lua;
@@ -1117,7 +1250,6 @@ role = "assistant"
                 tools: None,
                 readonly: false,
                 instructions: None,
-                max_turns: None,
             },
         );
 
@@ -1132,7 +1264,6 @@ role = "assistant"
                         tools: None,
                         readonly: true,
                         instructions: None,
-                        max_turns: None,
                     },
                 );
                 m
@@ -1472,7 +1603,7 @@ model = "sonnet"
         let mode = AgentMode::Full;
         assert!(mode.allows_tool("anything"));
         assert!(mode.allows_tool("read"));
-        assert!(mode.allows_tool("shell"));
+        assert!(mode.allows_tool("bash"));
         assert!(mode.allows_tool("nonexistent_future_tool"));
         assert_eq!(mode.allowed_tool_names(), &[] as &[&str]);
     }
@@ -1486,8 +1617,7 @@ model = "sonnet"
         assert!(mode.allows_tool("git"));
         assert!(mode.allows_tool("recall"));
         assert!(mode.allows_tool("mana"));
-        assert!(mode.allows_tool("ask"));
-        assert!(mode.allows_tool("spawn"));
+        assert!(mode.allows_tool("ask_user"));
     }
 
     #[test]
@@ -1495,20 +1625,21 @@ model = "sonnet"
         let mode = AgentMode::Orchestrator;
         assert!(!mode.allows_tool("write"));
         assert!(!mode.allows_tool("edit"));
-        assert!(!mode.allows_tool("shell"));
+        assert!(!mode.allows_tool("bash"));
     }
 
     #[test]
-    fn non_orchestrator_modes_block_spawn() {
+    fn non_full_modes_block_removed_ask_agent() {
         for mode in [
             AgentMode::Worker,
+            AgentMode::Orchestrator,
             AgentMode::Planner,
             AgentMode::Reviewer,
             AgentMode::Auditor,
         ] {
             assert!(
-                !mode.allows_tool("spawn"),
-                "mode {mode:?} should block spawn"
+                !mode.allows_tool("ask_agent"),
+                "mode {mode:?} should block removed ask_agent"
             );
         }
     }

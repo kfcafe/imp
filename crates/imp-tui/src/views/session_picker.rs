@@ -19,6 +19,7 @@ pub struct SessionPickerState {
     pub filter: String,
     pub selected: usize,
     pub scroll_offset: usize,
+    pub loading: bool,
     preferred_cwd: Option<String>,
 }
 
@@ -30,10 +31,39 @@ impl SessionPickerState {
             filter: String::new(),
             selected: 0,
             scroll_offset: 0,
+            loading: false,
             preferred_cwd: preferred_cwd.map(|path| path.to_string_lossy().to_string()),
         };
         state.refresh_filter();
         state
+    }
+
+    pub fn loading(preferred_cwd: Option<&Path>) -> Self {
+        Self {
+            sessions: Vec::new(),
+            filtered_indices: Vec::new(),
+            filter: String::new(),
+            selected: 0,
+            scroll_offset: 0,
+            loading: true,
+            preferred_cwd: preferred_cwd.map(|path| path.to_string_lossy().to_string()),
+        }
+    }
+
+    pub fn finish_loading(&mut self, sessions: Vec<SessionInfo>) {
+        self.sessions = sessions;
+        self.selected = 0;
+        self.scroll_offset = 0;
+        self.loading = false;
+        self.refresh_filter();
+    }
+
+    pub fn fail_loading(&mut self) {
+        self.sessions.clear();
+        self.filtered_indices.clear();
+        self.selected = 0;
+        self.scroll_offset = 0;
+        self.loading = false;
     }
 
     pub fn move_up(&mut self) {
@@ -92,7 +122,11 @@ impl SessionPickerState {
         if needle.is_empty() {
             self.filtered_indices = (0..self.sessions.len()).collect();
             self.filtered_indices.sort_by(|idx_a, idx_b| {
-                compare_session_recency(&self.sessions[*idx_a], &self.sessions[*idx_b])
+                compare_session_default_order(
+                    &self.sessions[*idx_a],
+                    &self.sessions[*idx_b],
+                    self.preferred_cwd.as_deref(),
+                )
             });
         } else {
             let mut ranked: Vec<(i64, usize)> = self
@@ -165,6 +199,18 @@ impl Widget for SessionPickerView<'_> {
         };
         let list_area = columns[0];
         let preview_area = columns[1];
+
+        if self.state.loading {
+            let line = Line::from(Span::styled(
+                "  Loading sessions…",
+                self.theme.muted_style(),
+            ));
+            buf.set_line(list_area.x, list_area.y, &line, list_area.width);
+            if has_preview {
+                render_preview_empty(preview_area, buf, self.theme);
+            }
+            return;
+        }
 
         if self.state.filtered_indices.is_empty() {
             let msg = if self.state.filter.is_empty() {
@@ -360,10 +406,33 @@ fn render_session_preview(
     }
 }
 
+fn compare_session_default_order(
+    a: &SessionInfo,
+    b: &SessionInfo,
+    preferred_cwd: Option<&str>,
+) -> Ordering {
+    session_location_rank(b, preferred_cwd)
+        .cmp(&session_location_rank(a, preferred_cwd))
+        .then_with(|| compare_session_recency(a, b))
+}
+
 fn compare_session_recency(a: &SessionInfo, b: &SessionInfo) -> Ordering {
     b.updated_at
         .cmp(&a.updated_at)
         .then_with(|| b.created_at.cmp(&a.created_at))
+}
+
+fn session_location_rank(session: &SessionInfo, preferred_cwd: Option<&str>) -> i64 {
+    let Some(cwd) = preferred_cwd else { return 0 };
+    if session.cwd == cwd {
+        3
+    } else if path_related(&session.cwd, cwd) {
+        2
+    } else if project_name(&session.cwd) == project_name(cwd) {
+        1
+    } else {
+        0
+    }
 }
 
 fn session_score(session: &SessionInfo, needle: &str, preferred_cwd: Option<&str>) -> Option<i64> {
@@ -616,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn default_order_is_most_recent_first() {
+    fn default_order_prioritizes_current_cwd_then_recency() {
         let sessions = vec![
             make_session(
                 "old-local",
@@ -634,10 +703,23 @@ mod tests {
                 "prompt",
                 99,
             ),
+            make_session(
+                "new-local",
+                Some("local"),
+                Some("newer local session"),
+                "/tmp/tower/imp",
+                "prompt",
+                30,
+            ),
         ];
 
         let state = SessionPickerState::new(sessions, Some(Path::new("/tmp/tower/imp")));
-        assert_eq!(state.selected_session().unwrap().id, "new-remote");
+        let ordered_ids = state
+            .visible_sessions()
+            .map(|(_, session)| session.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ordered_ids, vec!["new-local", "old-local", "new-remote"]);
     }
 
     #[test]

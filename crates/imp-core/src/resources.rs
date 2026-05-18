@@ -255,6 +255,33 @@ pub fn extract_description(content: &str) -> String {
         .collect()
 }
 
+/// Return markdown content without leading YAML frontmatter.
+pub fn strip_frontmatter(content: &str) -> &str {
+    let Some(rest) = content.strip_prefix("---\n") else {
+        return content;
+    };
+
+    match rest.find("\n---") {
+        Some(end) => rest[end + "\n---".len()..].trim_start_matches(['\n', '\r']),
+        None => content,
+    }
+}
+
+/// Render a skill body for explicit slash-command invocation.
+pub fn render_skill_invocation(name: &str, content: &str, args: &str) -> String {
+    let body = strip_frontmatter(content).trim();
+    let args = args.trim();
+    let body = if args.is_empty() {
+        body.to_string()
+    } else if body.contains("$ARGUMENTS") {
+        body.replace("$ARGUMENTS", args)
+    } else {
+        format!("{body}\n\nARGUMENTS: {args}")
+    };
+
+    format!("Use the `{name}` skill.\n\n{body}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

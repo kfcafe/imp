@@ -1,109 +1,52 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use futures::{future::join_all, StreamExt};
 use imp_llm::{
-    AssistantMessage, ContentBlock, Context, Cost, Message, Model, RequestOptions, StopReason,
-    StreamEvent, ThinkingLevel, Usage,
+    AssistantMessage, ContentBlock, Message, Model, StopReason as LlmStopReason, ThinkingLevel,
+    Usage,
 };
+#[cfg(test)]
+use imp_llm::{Context, RequestOptions, StreamEvent};
 use tokio::sync::mpsc;
 
 use imp_llm::provider::RetryPolicy;
 
 use crate::config::{AgentMode, Config, ContextConfig, ContinuePolicy};
-use crate::error::Result;
-use crate::guardrails::{self, GuardrailConfig, GuardrailLevel, GuardrailProfile};
+use crate::guardrails::{GuardrailConfig, GuardrailProfile};
 use crate::hooks::{HookBackgroundEvent, HookEvent, HookRunner};
-use crate::mana_review::{ManaReviewState, TurnManaReview, TurnManaReviewAccumulator};
+use crate::mana_review::{
+    ManaMutationAction, ManaMutationRecord, ManaReviewScope, ManaReviewScopeKind, ManaReviewState,
+    ManaUnitSnapshot, TurnManaReview, TurnManaReviewAccumulator,
+};
+use crate::policy::RunPolicy;
 use crate::roles::Role;
 use crate::tools::{LuaToolLoader, ToolRegistry};
-use crate::ui::NotifyLevel;
+use crate::trace::TraceWriter;
+use crate::workflow::WorkflowContract;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimingStage {
-    LlmRequestStart,
-    FirstStreamEvent,
-    FirstTextDelta,
-    FirstToolCall,
-    MessageEnd,
-}
+mod events;
+mod loop_policy;
+mod loop_state;
+mod mana_loop;
+#[cfg(not(test))]
+pub(crate) use mana_loop::ManaPolicyDecision;
+#[cfg(test)]
+pub(crate) use mana_loop::{evaluate_mana_policy, ManaPolicyDecision};
+mod recovery;
+mod run_loop;
+mod tool_execution;
 
-impl TimingStage {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::LlmRequestStart => "llm_request_start",
-            Self::FirstStreamEvent => "first_stream_event",
-            Self::FirstTextDelta => "first_text_delta",
-            Self::FirstToolCall => "first_tool_call",
-            Self::MessageEnd => "message_end",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TimingEvent {
-    pub turn: u32,
-    pub stage: TimingStage,
-    pub since_turn_start_ms: u64,
-    pub since_llm_request_start_ms: u64,
-}
-
-/// Events emitted by the agent during execution.
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
-    AgentStart {
-        model: String,
-        timestamp: u64,
-    },
-    AgentEnd {
-        usage: Usage,
-        cost: Cost,
-    },
-    TurnStart {
-        index: u32,
-    },
-    TurnAssessment {
-        index: u32,
-        assessment: NextActionAssessment,
-    },
-    TurnEnd {
-        index: u32,
-        message: AssistantMessage,
-        mana_review: TurnManaReview,
-    },
-    MessageStart {
-        message: Message,
-    },
-    MessageDelta {
-        delta: StreamEvent,
-    },
-    MessageEnd {
-        message: Message,
-    },
-    ToolExecutionStart {
-        tool_call_id: String,
-        tool_name: String,
-        args: serde_json::Value,
-    },
-    ToolOutputDelta {
-        tool_call_id: String,
-        text: String,
-    },
-    ToolExecutionEnd {
-        tool_call_id: String,
-        result: imp_llm::ToolResultMessage,
-    },
-    Warning {
-        message: String,
-    },
-    Timing {
-        timing: TimingEvent,
-    },
-    Error {
-        error: String,
-    },
-}
+pub use events::{
+    AgentEvent, RecoveryCheckpoint, RecoveryCheckpointKind, TimingEvent, TimingStage,
+};
+pub use loop_state::{
+    ContinueReason, LoopDecision, PlannedToolCall, RunFinalStatus, StopReason, ToolExecutionMode,
+    ToolPlan, ToolRisk, TurnPhase, TurnState,
+};
+pub use recovery::{
+    IncompleteToolRecovery, IncompleteToolState, RecoveryLedger, RecoveryReconciliation,
+};
 
 /// Commands sent to the agent (from UI or orchestrator).
 #[derive(Debug, Clone)]
@@ -113,233 +56,12 @@ pub enum AgentCommand {
     FollowUp(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum NextAction {
-    Continue {
-        prompt: String,
-        reason: ContinueReason,
-    },
-    Stop {
-        reason: NextActionStopReason,
-    },
-}
+mod turn_assessment;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContinueReason {
-    ExternalizationNeeded,
-    HighConfidenceVisibleNextStep,
-    ExecutionDebt,
-}
-
-impl ContinueReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::ExternalizationNeeded => "externalization_needed",
-            Self::HighConfidenceVisibleNextStep => "high_confidence_visible_next_step",
-            Self::ExecutionDebt => "execution_debt",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NextActionStopReason {
-    NoAutomaticFollowUp,
-    NoProgress,
-    RepeatedAction,
-    UserBlocker,
-    ExecutionBlocked,
-    DecompositionCompleted,
-    WorkCompleted,
-}
-
-impl NextActionStopReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::NoAutomaticFollowUp => "no_automatic_follow_up",
-            Self::NoProgress => "no_progress",
-            Self::RepeatedAction => "repeated_action",
-            Self::UserBlocker => "user_blocker",
-            Self::ExecutionBlocked => "execution_blocked",
-            Self::DecompositionCompleted => "decomposition_completed",
-            Self::WorkCompleted => "work_completed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeEvidence {
-    repeated_action: bool,
-    execution_stop_reason: Option<NextActionStopReason>,
-    work_completed: bool,
-    execution_debt: bool,
-    execution_evidence: bool,
-    planning_only_progress: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ManaEvidence {
-    stop_reason: Option<NextActionStopReason>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TextFallbackEvidence {
-    planner_stop_reason: Option<NextActionStopReason>,
-    execution_stop_reason: Option<NextActionStopReason>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ContinueRecommendation {
-    prompt: String,
-    reason: ContinueReason,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NextActionAssessment {
-    pub runtime: NextActionRuntimeEvidence,
-    pub mana: NextActionManaEvidence,
-    pub text_fallback: NextActionTextFallbackEvidence,
-    pub continue_recommendation: Option<NextActionContinueRecommendation>,
-    pub chosen_action: NextActionDebugView,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NextActionRuntimeEvidence {
-    pub repeated_action: bool,
-    pub execution_stop_reason: Option<String>,
-    pub work_completed: bool,
-    pub execution_debt: bool,
-    pub execution_evidence: bool,
-    pub planning_only_progress: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NextActionManaEvidence {
-    pub stop_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NextActionTextFallbackEvidence {
-    pub planner_stop_reason: Option<String>,
-    pub execution_stop_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NextActionContinueRecommendation {
-    pub prompt: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NextActionDebugView {
-    Continue { prompt: String, reason: String },
-    Stop { reason: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PostTurnAssessment {
-    runtime: RuntimeEvidence,
-    mana: ManaEvidence,
-    text_fallback: TextFallbackEvidence,
-    continue_recommendation: Option<ContinueRecommendation>,
-}
-
-impl PostTurnAssessment {
-    fn into_next_action(self) -> NextAction {
-        if self.runtime.repeated_action {
-            return NextAction::Stop {
-                reason: NextActionStopReason::RepeatedAction,
-            };
-        }
-
-        if let Some(reason) = self.runtime.execution_stop_reason {
-            return NextAction::Stop { reason };
-        }
-
-        if self.runtime.work_completed {
-            return NextAction::Stop {
-                reason: NextActionStopReason::WorkCompleted,
-            };
-        }
-
-        if let Some(reason) = self.mana.stop_reason {
-            return NextAction::Stop { reason };
-        }
-
-        if let Some(reason) = self.text_fallback.planner_stop_reason {
-            return NextAction::Stop { reason };
-        }
-
-        if let Some(reason) = self.text_fallback.execution_stop_reason {
-            return NextAction::Stop { reason };
-        }
-
-        if let Some(continue_recommendation) = self.continue_recommendation {
-            return NextAction::Continue {
-                prompt: continue_recommendation.prompt,
-                reason: continue_recommendation.reason,
-            };
-        }
-
-        if self.runtime.planning_only_progress {
-            return NextAction::Stop {
-                reason: NextActionStopReason::NoProgress,
-            };
-        }
-
-        NextAction::Stop {
-            reason: NextActionStopReason::NoAutomaticFollowUp,
-        }
-    }
-
-    fn debug_view(&self) -> NextActionAssessment {
-        let chosen_action = match self.clone().into_next_action() {
-            NextAction::Continue { prompt, reason } => NextActionDebugView::Continue {
-                prompt,
-                reason: reason.as_str().to_string(),
-            },
-            NextAction::Stop { reason } => NextActionDebugView::Stop {
-                reason: reason.as_str().to_string(),
-            },
-        };
-
-        NextActionAssessment {
-            runtime: NextActionRuntimeEvidence {
-                repeated_action: self.runtime.repeated_action,
-                execution_stop_reason: self
-                    .runtime
-                    .execution_stop_reason
-                    .map(|reason| reason.as_str().to_string()),
-                work_completed: self.runtime.work_completed,
-                execution_debt: self.runtime.execution_debt,
-                execution_evidence: self.runtime.execution_evidence,
-                planning_only_progress: self.runtime.planning_only_progress,
-            },
-            mana: NextActionManaEvidence {
-                stop_reason: self
-                    .mana
-                    .stop_reason
-                    .map(|reason| reason.as_str().to_string()),
-            },
-            text_fallback: NextActionTextFallbackEvidence {
-                planner_stop_reason: self
-                    .text_fallback
-                    .planner_stop_reason
-                    .map(|reason| reason.as_str().to_string()),
-                execution_stop_reason: self
-                    .text_fallback
-                    .execution_stop_reason
-                    .map(|reason| reason.as_str().to_string()),
-            },
-            continue_recommendation: self.continue_recommendation.clone().map(|recommendation| {
-                NextActionContinueRecommendation {
-                    prompt: recommendation.prompt,
-                    reason: recommendation.reason.as_str().to_string(),
-                }
-            }),
-            chosen_action,
-        }
-    }
-}
+use turn_assessment::{
+    ContinueRecommendation, ManaEvidence, PostTurnAssessment, RuntimeEvidence, TextFallbackEvidence,
+};
+pub use turn_assessment::{NextActionAssessment, NextActionDebugView};
 
 /// The core agent — runs the ReAct loop (reason, act, observe).
 pub struct Agent {
@@ -349,7 +71,6 @@ pub struct Agent {
     pub messages: Vec<Message>,
     pub system_prompt: String,
     pub cwd: PathBuf,
-    pub max_turns: u32,
     pub max_tokens: Option<u32>,
     pub role: Option<Role>,
     pub hooks: HookRunner,
@@ -364,11 +85,11 @@ pub struct Agent {
     pub retry_policy: RetryPolicy,
     /// Active agent mode — controls which tools are permitted.
     pub mode: AgentMode,
-    /// Whether a mana skill is available in discovered resources.
+    /// Whether the legacy mana reference skill is available as an optional fallback.
     pub has_mana_skill: bool,
-    /// Whether a mana-basics skill is available in discovered resources.
+    /// Whether the legacy mana-basics reference skill is available as an optional fallback.
     pub has_mana_basics_skill: bool,
-    /// Whether a mana-delegation skill is available in discovered resources.
+    /// Whether the legacy mana-delegation reference skill is available as an optional fallback.
     pub has_mana_delegation_skill: bool,
     /// Engineering guardrails config.
     pub guardrail_config: GuardrailConfig,
@@ -388,6 +109,8 @@ pub struct Agent {
     pub read_max_lines: usize,
     /// Cache options for LLM requests.
     pub cache_options: imp_llm::CacheOptions,
+    /// In-memory recovery checkpoints for this run. Session persistence can seed this ledger later.
+    pub recovery_ledger: Arc<std::sync::Mutex<RecoveryLedger>>,
     /// Tracks identical consecutive tool calls to detect loops.
     last_tool_call: std::sync::Arc<std::sync::Mutex<Option<RepeatedToolCallState>>>,
     /// Prevent repeated self-nudges for mana externalization in a single run.
@@ -402,6 +125,17 @@ pub struct Agent {
     turn_mana_review: Arc<std::sync::Mutex<TurnManaReviewAccumulator>>,
     /// Resolved runtime config for tool-specific policy checks.
     pub config: Arc<Config>,
+    /// Per-run tool/write policy layered on top of AgentMode.
+    pub run_policy: RunPolicy,
+    /// Verification gates declared for this run.
+    pub verification_gates: Vec<crate::workflow::VerificationGate>,
+
+    /// Lightweight workflow contract for this agent run. Initially informational; future runtime layers use it for policy, verification, and evidence.
+    pub workflow_contract: WorkflowContract,
+    /// Active trace writer for the current run artifact, if artifact creation succeeded.
+    trace_writer: Arc<Mutex<Option<TraceWriter>>>,
+    /// Active run artifact id for trace correlation.
+    run_id: Arc<Mutex<Option<String>>>,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_tx: mpsc::Sender<AgentCommand>,
@@ -454,8 +188,7 @@ impl Agent {
             tools: ToolRegistry::new(),
             messages: Vec::new(),
             system_prompt: String::new(),
-            cwd,
-            max_turns: 50,
+            cwd: cwd.clone(),
             max_tokens: None,
             role: None,
             hooks,
@@ -482,6 +215,7 @@ impl Agent {
                 extended_ttl: false,
                 global_scope: false,
             },
+            recovery_ledger: Arc::new(std::sync::Mutex::new(RecoveryLedger::new())),
             last_tool_call: Arc::new(std::sync::Mutex::new(None)),
             queued_mana_externalization_nudge: false,
             continue_policy: ContinuePolicy::Disabled,
@@ -489,6 +223,13 @@ impl Agent {
             queued_execution_debt_follow_up: false,
             turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
             config: Arc::new(Config::default()),
+            run_policy: RunPolicy::default(),
+            workflow_contract: WorkflowContract::implicit_from(
+                crate::workflow::ImplicitWorkflowContractInput::prompt("").cwd(&cwd),
+            ),
+            verification_gates: Vec::new(),
+            trace_writer: Arc::new(Mutex::new(None)),
+            run_id: Arc::new(Mutex::new(None)),
             lua_tool_loader: None,
 
             event_tx,
@@ -504,450 +245,6 @@ impl Agent {
         };
 
         (agent, handle)
-    }
-
-    /// Run the agent loop with an initial prompt.
-    pub async fn run(&mut self, prompt: String) -> Result<()> {
-        self.emit(AgentEvent::AgentStart {
-            model: self.model.meta.id.clone(),
-            timestamp: imp_llm::now(),
-        })
-        .await;
-        self.hooks
-            .fire(&HookEvent::OnAgentStart { prompt: &prompt })
-            .await;
-
-        self.messages.push(Message::user(&prompt));
-
-        self.cancel_token
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        let mut turn: u32 = 0;
-        let mut total_usage = Usage::default();
-        let mut cancelled = false;
-        let mut queued_follow_ups: std::collections::VecDeque<String> =
-            std::collections::VecDeque::new();
-        let mut queued_pre_turn_follow_ups: std::collections::VecDeque<String> =
-            std::collections::VecDeque::new();
-
-        if let Some(nudge) = mana_skill_follow_up_hint(
-            &prompt,
-            self.mode,
-            !self.tools.is_empty(),
-            self.has_mana_skill,
-            self.has_mana_basics_skill,
-            self.has_mana_delegation_skill,
-        ) {
-            queued_pre_turn_follow_ups.push_back(nudge.to_string());
-        }
-
-        loop {
-            if turn >= self.max_turns {
-                self.emit(AgentEvent::Error {
-                    error: format!("Max turns exceeded ({})", self.max_turns),
-                })
-                .await;
-                let cost = total_usage.cost(&self.model.meta.pricing);
-                self.emit(AgentEvent::AgentEnd {
-                    usage: total_usage,
-                    cost,
-                })
-                .await;
-                return Err(crate::error::Error::MaxTurns(self.max_turns));
-            }
-
-            if turn > 0 {
-                if let Some(follow_up) = queued_pre_turn_follow_ups.pop_front() {
-                    self.messages.push(Message::user(&follow_up));
-                }
-            }
-
-            // Check for commands between turns (non-blocking)
-            while let Ok(cmd) = self.command_rx.try_recv() {
-                match cmd {
-                    AgentCommand::Cancel => {
-                        self.cancel_token
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
-                        cancelled = true;
-                        break;
-                    }
-                    AgentCommand::Steer(msg) => {
-                        self.messages.push(Message::user(&msg));
-                    }
-                    AgentCommand::FollowUp(msg) => queued_follow_ups.push_back(msg),
-                }
-            }
-
-            if cancelled {
-                break;
-            }
-
-            self.emit(AgentEvent::TurnStart { index: turn }).await;
-            if let Ok(mut review) = self.turn_mana_review.lock() {
-                review.begin_turn(turn);
-            }
-            let turn_started_at = Instant::now();
-
-            let mut usage = crate::context::context_usage(&self.messages, &self.model);
-            if usage.ratio >= self.context_config.observation_mask_threshold {
-                crate::context::mask_observations(
-                    &mut self.messages,
-                    self.context_config.mask_window,
-                );
-                self.hooks
-                    .fire(&HookEvent::OnContextThreshold { ratio: usage.ratio })
-                    .await;
-                // Masking can materially reduce context size, so any subsequent
-                // logic must use fresh usage rather than the pre-masking snapshot.
-                usage = crate::context::context_usage(&self.messages, &self.model);
-            }
-
-            // Context management is observation-mask only. Full conversation
-            // compaction has been removed because the rewrite-based behavior
-            // was too error-prone to keep in the runtime.
-
-            // Build context and options for the LLM
-            let context = Context {
-                messages: self.messages.clone(),
-            };
-
-            let options = RequestOptions {
-                thinking_level: self.thinking_level,
-                // Use configured output cap when present; otherwise let providers
-                // choose their own sensible default output budget.
-                max_tokens: self.max_tokens,
-                temperature: None,
-                system_prompt: self.system_prompt.clone(),
-                tools: self.tools.definitions(),
-                cache_options: self.cache_options.clone(),
-                effort: None,
-            };
-
-            self.hooks.fire(&HookEvent::BeforeLlmCall).await;
-
-            // Pre-flight OAuth token refresh: if we have an auth store and the
-            // token is expired, refresh it before making the API call. This
-            // avoids wasting a round-trip on a guaranteed 401.
-            if let Some(ref auth_store) = self.auth_store {
-                let mut store = auth_store.lock().await;
-                if store.is_oauth_expired("anthropic") {
-                    match store.resolve_with_refresh("anthropic").await {
-                        Ok(new_key) => {
-                            self.api_key = new_key;
-                        }
-                        Err(e) => {
-                            let message = format!(
-                                "OAuth token refresh failed before request: {e}. Continuing with existing credentials."
-                            );
-                            let _ = self.ui.notify(&message, NotifyLevel::Warning).await;
-                        }
-                    }
-                }
-            }
-
-            // Stream the LLM response with retry on transient startup failures.
-            let llm_request_started_at = Instant::now();
-            self.emit_timing(
-                turn,
-                TimingStage::LlmRequestStart,
-                turn_started_at,
-                llm_request_started_at,
-            )
-            .await;
-            let model = clone_model(&self.model);
-            let context = context.clone();
-            let options = options.clone();
-            let api_key = self.api_key.clone();
-            let mut stream = crate::retry::stream_with_retry(
-                move || {
-                    model
-                        .provider
-                        .stream(&model, context.clone(), options.clone(), &api_key)
-                },
-                self.retry_policy.clone(),
-            );
-
-            let mut ordered_content: Vec<ContentBlock> = Vec::new();
-            let mut tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
-            let mut assistant_msg: Option<AssistantMessage> = None;
-            let mut saw_first_stream_event = false;
-            let mut saw_first_text_delta = false;
-            let mut saw_first_tool_call = false;
-            let mut saw_provider_message_end = false;
-            let cancel_token = Arc::clone(&self.cancel_token);
-            cancel_token.store(false, std::sync::atomic::Ordering::Relaxed);
-
-            while let Some(event_result) = stream.next().await {
-                // Check for cancel during event processing
-                while let Ok(cmd) = self.command_rx.try_recv() {
-                    match cmd {
-                        AgentCommand::Cancel => {
-                            cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
-                            cancelled = true;
-                            break;
-                        }
-                        AgentCommand::Steer(msg) => {
-                            self.messages.push(Message::user(&msg));
-                        }
-                        AgentCommand::FollowUp(msg) => queued_follow_ups.push_back(msg),
-                    }
-                }
-
-                if cancelled {
-                    break;
-                }
-
-                match event_result {
-                    Ok(event) => {
-                        if !saw_first_stream_event {
-                            saw_first_stream_event = true;
-                            self.emit_timing(
-                                turn,
-                                TimingStage::FirstStreamEvent,
-                                turn_started_at,
-                                llm_request_started_at,
-                            )
-                            .await;
-                        }
-                        // Forward as delta
-                        self.emit(AgentEvent::MessageDelta {
-                            delta: event.clone(),
-                        })
-                        .await;
-
-                        match event {
-                            StreamEvent::TextDelta { text } => {
-                                if !saw_first_text_delta {
-                                    saw_first_text_delta = true;
-                                    self.emit_timing(
-                                        turn,
-                                        TimingStage::FirstTextDelta,
-                                        turn_started_at,
-                                        llm_request_started_at,
-                                    )
-                                    .await;
-                                }
-                                push_stream_text_block(&mut ordered_content, text);
-                            }
-                            StreamEvent::ThinkingDelta { text } => {
-                                push_stream_thinking_block(&mut ordered_content, text);
-                            }
-                            StreamEvent::ToolCall {
-                                id,
-                                name,
-                                arguments,
-                            } => {
-                                if !saw_first_tool_call {
-                                    saw_first_tool_call = true;
-                                    self.emit_timing(
-                                        turn,
-                                        TimingStage::FirstToolCall,
-                                        turn_started_at,
-                                        llm_request_started_at,
-                                    )
-                                    .await;
-                                }
-                                ordered_content.push(ContentBlock::ToolCall {
-                                    id: id.clone(),
-                                    name: name.clone(),
-                                    arguments: arguments.clone(),
-                                });
-                                tool_calls.push((id, name, arguments));
-                            }
-                            StreamEvent::MessageEnd { message } => {
-                                saw_provider_message_end = true;
-                                self.emit_timing(
-                                    turn,
-                                    TimingStage::MessageEnd,
-                                    turn_started_at,
-                                    llm_request_started_at,
-                                )
-                                .await;
-                                if let Some(ref usage) = message.usage {
-                                    total_usage.add(usage);
-                                }
-                                assistant_msg = Some(message);
-                            }
-                            StreamEvent::MessageStart { .. } => {}
-                            StreamEvent::Error { error } => {
-                                self.emit(AgentEvent::Error {
-                                    error: format!(
-                                        "Provider stream failed after partial output: {error}"
-                                    ),
-                                })
-                                .await;
-                                // Build a minimal error message to push
-                                let err_msg = AssistantMessage {
-                                    content: vec![ContentBlock::Text { text: error }],
-                                    usage: None,
-                                    stop_reason: StopReason::Error("Stream error".to_string()),
-                                    timestamp: imp_llm::now(),
-                                };
-                                self.messages.push(Message::Assistant(err_msg.clone()));
-                                let mana_review = self.finish_turn_mana_review(turn);
-                                self.emit(AgentEvent::TurnEnd {
-                                    index: turn,
-                                    message: err_msg,
-                                    mana_review,
-                                })
-                                .await;
-                                let cost = total_usage.cost(&self.model.meta.pricing);
-                                self.emit(AgentEvent::AgentEnd {
-                                    usage: total_usage,
-                                    cost,
-                                })
-                                .await;
-                                return Err(crate::error::Error::Llm(imp_llm::Error::Provider(
-                                    "Stream error".to_string(),
-                                )));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let error = match &e {
-                            imp_llm::Error::Stream(message) => {
-                                format!("Provider stream failed after partial output: {message}")
-                            }
-                            _ => e.to_string(),
-                        };
-                        self.emit(AgentEvent::Error {
-                            error: error.clone(),
-                        })
-                        .await;
-                        let cost = total_usage.cost(&self.model.meta.pricing);
-                        self.emit(AgentEvent::AgentEnd {
-                            usage: total_usage,
-                            cost,
-                        })
-                        .await;
-                        return Err(e.into());
-                    }
-                }
-            }
-
-            if cancelled {
-                // Emit TurnEnd with whatever we have so far
-                let partial = assistant_msg.unwrap_or_else(|| {
-                    build_assistant_message(&ordered_content, &tool_calls, None)
-                });
-                self.messages.push(Message::Assistant(partial.clone()));
-                let mana_review = self.finish_turn_mana_review(turn);
-                self.emit(AgentEvent::TurnEnd {
-                    index: turn,
-                    message: partial,
-                    mana_review,
-                })
-                .await;
-                break;
-            }
-
-            // Use the MessageEnd message if provided; otherwise the provider
-            // stream ended without a terminal completion event and should be
-            // treated as an error rather than silently synthesized as success.
-            let msg = match assistant_msg {
-                Some(message) => message,
-                None if !saw_provider_message_end => {
-                    let error = format!(
-                        "Provider stream ended unexpectedly before completing the message (missing terminal completion event after {} content block(s) and {} tool call(s))",
-                        ordered_content.len(),
-                        tool_calls.len()
-                    );
-                    self.emit(AgentEvent::Error {
-                        error: error.clone(),
-                    })
-                    .await;
-                    let cost = total_usage.cost(&self.model.meta.pricing);
-                    self.emit(AgentEvent::AgentEnd {
-                        usage: total_usage,
-                        cost,
-                    })
-                    .await;
-                    return Err(crate::error::Error::Llm(imp_llm::Error::Stream(error)));
-                }
-                None => build_assistant_message(&ordered_content, &tool_calls, None),
-            };
-
-            self.messages.push(Message::Assistant(msg.clone()));
-
-            if tool_calls.is_empty() {
-                // No tool calls — the model is done unless a queued follow-up exists.
-                let mana_review = self.finish_turn_mana_review(turn);
-                self.emit(AgentEvent::TurnEnd {
-                    index: turn,
-                    message: msg.clone(),
-                    mana_review: mana_review.clone(),
-                })
-                .await;
-
-                let assessment = self.assess_post_turn(&msg, &[], false, &mana_review);
-                self.emit(AgentEvent::TurnAssessment {
-                    index: turn,
-                    assessment: assessment.debug_view(),
-                })
-                .await;
-                let next_action = assessment.into_next_action();
-                self.enqueue_next_action(&mut queued_follow_ups, next_action);
-
-                if let Some(follow_up) = queued_follow_ups.pop_front() {
-                    self.messages.push(Message::user(&follow_up));
-                    turn += 1;
-                    continue;
-                }
-                break;
-            }
-
-            // Execute tool calls
-            let results = self.execute_tools(tool_calls, cancel_token).await;
-
-            for result in &results {
-                self.messages.push(Message::ToolResult(result.clone()));
-            }
-
-            let mana_review = self.finish_turn_mana_review(turn);
-            self.emit(AgentEvent::TurnEnd {
-                index: turn,
-                message: msg.clone(),
-                mana_review: mana_review.clone(),
-            })
-            .await;
-
-            let assessment = self.assess_post_turn(&msg, &results, true, &mana_review);
-            self.emit(AgentEvent::TurnAssessment {
-                index: turn,
-                assessment: assessment.debug_view(),
-            })
-            .await;
-            let next_action = assessment.into_next_action();
-            let should_stop_after_tool_turn = matches!(
-                next_action,
-                NextAction::Stop {
-                    reason: NextActionStopReason::RepeatedAction,
-                }
-            );
-            self.enqueue_next_action(&mut queued_follow_ups, next_action);
-
-            if let Some(follow_up) = queued_follow_ups.pop_front() {
-                self.messages.push(Message::user(&follow_up));
-            }
-
-            if should_stop_after_tool_turn {
-                break;
-            }
-
-            turn += 1;
-        }
-
-        let cost = total_usage.cost(&self.model.meta.pricing);
-        self.emit(AgentEvent::AgentEnd {
-            usage: total_usage,
-            cost,
-        })
-        .await;
-
-        if cancelled {
-            return Err(crate::error::Error::Cancelled);
-        }
-
-        Ok(())
     }
 
     fn assess_post_turn(
@@ -1024,31 +321,24 @@ impl Agent {
         }
     }
 
-    fn enqueue_next_action(
-        &mut self,
-        queued_follow_ups: &mut std::collections::VecDeque<String>,
-        next_action: NextAction,
-    ) {
-        match next_action {
-            NextAction::Continue { prompt, reason } => {
-                match reason {
-                    ContinueReason::ExternalizationNeeded => {
-                        self.queued_mana_externalization_nudge = true;
-                    }
-                    ContinueReason::HighConfidenceVisibleNextStep => {
-                        self.queued_confidence_continue_nudge = true;
-                    }
-                    ContinueReason::ExecutionDebt => {
-                        self.queued_execution_debt_follow_up = true;
-                    }
-                }
-                queued_follow_ups.push_back(prompt);
+    fn mark_continue_reason(&mut self, reason: ContinueReason) {
+        match reason {
+            ContinueReason::ExternalizationNeeded => {
+                self.queued_mana_externalization_nudge = true;
             }
-            NextAction::Stop { .. } => {}
+            ContinueReason::HighConfidenceVisibleNextStep => {
+                self.queued_confidence_continue_nudge = true;
+            }
+            ContinueReason::ExecutionDebt => {
+                self.queued_execution_debt_follow_up = true;
+            }
+            ContinueReason::ToolResultsNeedInterpretation
+            | ContinueReason::QueuedUserFollowUp
+            | ContinueReason::RecoveryContinuation => {}
         }
     }
 
-    async fn emit(&self, event: AgentEvent) {
+    pub(crate) async fn emit(&self, event: AgentEvent) {
         // Fire corresponding hooks for lifecycle events
         match &event {
             AgentEvent::AgentEnd { .. } => {
@@ -1068,7 +358,29 @@ impl Agent {
             }
             _ => {}
         }
+        self.write_trace_event(&event);
         let _ = self.event_tx.send(event).await;
+    }
+
+    fn write_trace_event(&self, event: &AgentEvent) {
+        let Some(run_id) = self.run_id.lock().ok().and_then(|run_id| run_id.clone()) else {
+            return;
+        };
+        let mut trace_event = event.to_trace_event(run_id);
+        if let Some(workflow_id) = self
+            .workflow_contract
+            .id
+            .as_ref()
+            .or(self.workflow_contract.mana_unit_ref.as_ref())
+        {
+            trace_event = trace_event.with_workflow_id(workflow_id.clone());
+        }
+        if let Ok(mut writer) = self.trace_writer.lock() {
+            if let Some(writer) = writer.as_mut() {
+                let _ = writer.write_event(trace_event);
+                let _ = writer.flush();
+            }
+        }
     }
 
     async fn emit_timing(
@@ -1076,317 +388,84 @@ impl Agent {
         turn: u32,
         stage: TimingStage,
         turn_started_at: Instant,
-        llm_request_started_at: Instant,
+        llm_request_started_at: Option<Instant>,
+    ) {
+        self.emit_timing_with_details(
+            turn,
+            stage,
+            turn_started_at,
+            llm_request_started_at,
+            None,
+            None,
+            None,
+        )
+        .await;
+    }
+
+    async fn emit_timing_with_details(
+        &self,
+        turn: u32,
+        stage: TimingStage,
+        turn_started_at: Instant,
+        llm_request_started_at: Option<Instant>,
+        duration_ms: Option<u64>,
+        label: Option<String>,
+        success: Option<bool>,
     ) {
         let now = Instant::now();
         let timing = TimingEvent {
             turn,
             stage,
             since_turn_start_ms: now.duration_since(turn_started_at).as_millis() as u64,
-            since_llm_request_start_ms: now.duration_since(llm_request_started_at).as_millis()
-                as u64,
+            since_llm_request_start_ms: llm_request_started_at
+                .map(|started_at| now.duration_since(started_at).as_millis() as u64),
+            duration_ms,
+            label,
+            success,
         };
+        self.write_trace_event(&AgentEvent::Timing {
+            timing: timing.clone(),
+        });
         let _ = self.event_tx.send(AgentEvent::Timing { timing }).await;
     }
 
-    /// Execute tool calls from a single assistant message.
-    async fn execute_tools(
-        &self,
-        calls: Vec<(String, String, serde_json::Value)>,
-        cancel_token: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Vec<imp_llm::ToolResultMessage> {
-        let mut readonly = Vec::new();
-        let mut mutable = Vec::new();
-
-        for (index, (id, name, args)) in calls.into_iter().enumerate() {
-            if self.tools.get(&name).is_some_and(|tool| tool.is_readonly()) {
-                readonly.push((index, id, name, args));
-            } else {
-                mutable.push((index, id, name, args));
-            }
+    pub async fn emit_recovery_checkpoint(&self, checkpoint: RecoveryCheckpoint) {
+        if let Ok(mut ledger) = self.recovery_ledger.lock() {
+            ledger.record(checkpoint.clone());
         }
-
-        let mut results = join_all(readonly.into_iter().map(|(index, id, name, args)| {
-            let cancel_token = Arc::clone(&cancel_token);
-            async move {
-                let result = self.execute_one_tool(&id, &name, args, cancel_token).await;
-                (index, result)
-            }
-        }))
-        .await;
-
-        for (index, id, name, args) in mutable {
-            let result = self
-                .execute_one_tool(&id, &name, args, Arc::clone(&cancel_token))
-                .await;
-            results.push((index, result));
-        }
-
-        results.sort_by_key(|(index, _)| *index);
-        results.into_iter().map(|(_, result)| result).collect()
+        self.write_trace_event(&AgentEvent::RecoveryCheckpoint {
+            checkpoint: checkpoint.clone(),
+        });
+        let _ = self
+            .event_tx
+            .send(AgentEvent::RecoveryCheckpoint { checkpoint })
+            .await;
     }
 
-    fn repeated_tool_call_check(
-        &self,
-        call_id: &str,
-        tool_name: &str,
-        args: &serde_json::Value,
-    ) -> RepeatedToolCallCheck {
-        let args_json = serde_json::to_string(args).unwrap_or_else(|_| "<unserializable>".into());
-        let mut state = match self.last_tool_call.lock() {
-            Ok(s) => s,
-            Err(_) => return RepeatedToolCallCheck::Ok,
-        };
-
-        let consecutive = match state.as_mut() {
-            Some(prev) if prev.tool_name == tool_name && prev.args_json == args_json => {
-                prev.consecutive += 1;
-                prev.consecutive
-            }
-            _ => {
-                *state = Some(RepeatedToolCallState {
-                    tool_name: tool_name.to_string(),
-                    args_json,
-                    consecutive: 1,
-                });
-                1
-            }
-        };
-
-        if consecutive == 3 {
-            return RepeatedToolCallCheck::Warn(format!(
-                "Warning: identical tool call repeated 3 times in a row for '{tool_name}'. The result may not have changed. Consider using the information you already have or trying a different action."
-            ));
+    fn recovery_checkpoint(
+        turn: u32,
+        kind: RecoveryCheckpointKind,
+        tool_call_id: Option<String>,
+        tool_name: Option<String>,
+        args_hash: Option<String>,
+        success: Option<bool>,
+        error_class: Option<String>,
+    ) -> RecoveryCheckpoint {
+        RecoveryCheckpoint {
+            version: 1,
+            turn,
+            kind,
+            tool_call_id,
+            tool_name,
+            args_hash,
+            success,
+            error_class,
+            timestamp: imp_llm::now(),
         }
-
-        if consecutive >= 4 {
-            return RepeatedToolCallCheck::Block(
-                crate::tools::ToolOutput::error(format!(
-                    "Blocked: identical tool call repeated {consecutive} times in a row for '{tool_name}'. The result likely has not changed. Use the information you already have or try a different action."
-                ))
-                .into_tool_result(call_id, tool_name),
-            );
-        }
-
-        RepeatedToolCallCheck::Ok
     }
 
-    async fn execute_one_tool(
-        &self,
-        call_id: &str,
-        tool_name: &str,
-        args: serde_json::Value,
-        cancel_token: Arc<std::sync::atomic::AtomicBool>,
-    ) -> imp_llm::ToolResultMessage {
-        let repeat_check = self.repeated_tool_call_check(call_id, tool_name, &args);
-        if let RepeatedToolCallCheck::Block(loop_result) = repeat_check {
-            self.emit(AgentEvent::ToolExecutionStart {
-                tool_call_id: call_id.to_string(),
-                tool_name: tool_name.to_string(),
-                args: args.clone(),
-            })
-            .await;
-            self.emit(AgentEvent::ToolExecutionEnd {
-                tool_call_id: call_id.to_string(),
-                result: loop_result.clone(),
-            })
-            .await;
-            return loop_result;
-        }
-
-        self.emit(AgentEvent::ToolExecutionStart {
-            tool_call_id: call_id.to_string(),
-            tool_name: tool_name.to_string(),
-            args: args.clone(),
-        })
-        .await;
-
-        let before_results = self
-            .hooks
-            .fire(&HookEvent::BeforeToolCall {
-                tool_name,
-                args: &args,
-            })
-            .await;
-
-        // Execution-time mode guard — reject tools not permitted by the active mode.
-        if !self.mode.allows_tool(tool_name) {
-            let reason = format!(
-                "Tool '{tool_name}' is not available in {} mode",
-                format!("{:?}", self.mode).to_lowercase()
-            );
-            let result =
-                crate::tools::ToolOutput::error(reason).into_tool_result(call_id, tool_name);
-            self.emit(AgentEvent::ToolExecutionEnd {
-                tool_call_id: call_id.to_string(),
-                result: result.clone(),
-            })
-            .await;
-            return result;
-        }
-
-        if let Some(blocking_result) = before_results.into_iter().find(|result| result.block) {
-            let reason = blocking_result
-                .reason
-                .unwrap_or_else(|| format!("Tool call blocked by hook: {tool_name}"));
-            let result =
-                crate::tools::ToolOutput::error(reason).into_tool_result(call_id, tool_name);
-            self.emit(AgentEvent::ToolExecutionEnd {
-                tool_call_id: call_id.to_string(),
-                result: result.clone(),
-            })
-            .await;
-            return result;
-        }
-
-        if tool_name == "bash" {
-            if let Some(command) = args.get("command").and_then(|v| v.as_str()) {
-                if let Some(hint) = mana_bash_equivalent_hint(command) {
-                    let result =
-                        crate::tools::ToolOutput::error(hint).into_tool_result(call_id, tool_name);
-                    self.emit(AgentEvent::ToolExecutionEnd {
-                        tool_call_id: call_id.to_string(),
-                        result: result.clone(),
-                    })
-                    .await;
-                    return result;
-                }
-            }
-        }
-
-        // Validate args against the tool's JSON schema before execution so the
-        // model can self-correct on bad types or missing required fields.
-        if let Some(tool) = self.tools.get(tool_name) {
-            let schema = tool.parameters();
-            if let Err(e) = crate::tools::validate_tool_args(&schema, &args) {
-                let result = crate::tools::ToolOutput::error(e.to_string())
-                    .into_tool_result(call_id, tool_name);
-                self.emit(AgentEvent::ToolExecutionEnd {
-                    tool_call_id: call_id.to_string(),
-                    result: result.clone(),
-                })
-                .await;
-                return result;
-            }
-        }
-
-        let mut result = match self.tools.get(tool_name) {
-            Some(tool) => {
-                let (update_tx, mut update_rx) = mpsc::channel(64);
-                let ctx = crate::tools::ToolContext {
-                    cwd: self.cwd.clone(),
-                    cancelled: Arc::clone(&cancel_token),
-                    update_tx,
-                    command_tx: self.command_tx.clone(),
-                    ui: self.ui.clone(),
-                    file_cache: self.file_cache.clone(),
-                    checkpoint_state: self.checkpoint_state.clone(),
-                    file_tracker: self.file_tracker.clone(),
-                    anchor_store: self.anchor_store.clone(),
-                    lua_tool_loader: self.lua_tool_loader.clone(),
-                    mode: self.mode,
-                    read_max_lines: self.read_max_lines,
-                    turn_mana_review: self.turn_mana_review.clone(),
-                    config: self.config.clone(),
-                };
-
-                // Forward tool output deltas to event stream
-                let event_tx = self.event_tx.clone();
-                let delta_call_id = call_id.to_string();
-                let forwarder = tokio::spawn(async move {
-                    while let Some(update) = update_rx.recv().await {
-                        for block in &update.content {
-                            if let imp_llm::ContentBlock::Text { text } = block {
-                                let _ = event_tx
-                                    .send(AgentEvent::ToolOutputDelta {
-                                        tool_call_id: delta_call_id.clone(),
-                                        text: text.clone(),
-                                    })
-                                    .await;
-                            }
-                        }
-                    }
-                });
-
-                let exec_result = match tool.execute(call_id, args.clone(), ctx).await {
-                    Ok(output) => output.into_tool_result(call_id, tool_name),
-                    Err(e) => crate::tools::ToolOutput::error(e.to_string())
-                        .into_tool_result(call_id, tool_name),
-                };
-                forwarder.await.ok();
-                exec_result
-            }
-            None => crate::tools::ToolOutput::error(format!("Unknown tool: {tool_name}"))
-                .into_tool_result(call_id, tool_name),
-        };
-
-        let after_results = self
-            .hooks
-            .fire(&HookEvent::AfterToolCall {
-                tool_name,
-                result: &result,
-            })
-            .await;
-
-        if let Some(modified_content) = after_results
-            .into_iter()
-            .filter_map(|hook_result| hook_result.modified_content)
-            .next_back()
-        {
-            result.content = modified_content;
-        }
-
-        if !result.is_error && matches!(tool_name, "write" | "edit" | "multi_edit") {
-            if let Some(path) = extract_file_path(self.cwd.as_path(), &args) {
-                self.hooks
-                    .fire(&HookEvent::AfterFileWrite {
-                        file: path.as_path(),
-                    })
-                    .await;
-
-                // Run guardrail after-write checks when enabled
-                if let Some(profile) = self.guardrail_profile {
-                    if self.guardrail_config.should_check_path(&path) {
-                        let check_results = guardrails::run_after_write_checks(
-                            &self.guardrail_config,
-                            profile,
-                            &self.cwd,
-                        )
-                        .await;
-
-                        if !check_results.is_empty() {
-                            let level = self.guardrail_config.effective_level();
-                            let msg = guardrails::format_check_results(&check_results, level);
-                            if !msg.is_empty() && msg != "Guardrail checks passed." {
-                                // Append guardrail output to the tool result
-                                result.content.push(imp_llm::ContentBlock::Text {
-                                    text: format!("\n\n{msg}"),
-                                });
-                                if level == GuardrailLevel::Enforce
-                                    && check_results.iter().any(|r| !r.success)
-                                {
-                                    result.is_error = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        self.emit(AgentEvent::ToolExecutionEnd {
-            tool_call_id: call_id.to_string(),
-            result: result.clone(),
-        })
-        .await;
-
-        if let RepeatedToolCallCheck::Warn(warning) = repeat_check {
-            result.content.push(imp_llm::ContentBlock::Text {
-                text: format!("\n\n{warning}"),
-            });
-        }
-
-        result
+    fn tool_args_hash(args: &serde_json::Value) -> String {
+        format!("{:016x}", crate::tools::stable_hash(args.to_string()))
     }
 
     fn finish_turn_mana_review(&self, turn: u32) -> TurnManaReview {
@@ -1458,10 +537,10 @@ fn should_queue_execution_debt_follow_up(
 fn should_queue_mana_externalization_follow_up(
     message: &AssistantMessage,
     mode: AgentMode,
-    has_mana_skill: bool,
+    _has_mana_skill: bool,
     already_queued: bool,
 ) -> bool {
-    if already_queued || !has_mana_skill {
+    if already_queued {
         return false;
     }
 
@@ -1477,32 +556,48 @@ fn should_queue_mana_externalization_follow_up(
     }
 
     let text = assistant_message_text(message);
-    if text.trim().is_empty() {
-        return false;
-    }
+    durable_mana_externalization_signal(&text)
+}
 
+fn durable_mana_externalization_signal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    let planning_signal = [
-        "plan",
-        "phase",
-        "rollout",
-        "decompose",
-        "break",
-        "split",
-        "architecture",
-        "migration",
-        "follow-up",
-        "next step",
-        "next steps",
+    let durable_state_signal = [
+        "acceptance",
+        "architecture decision",
+        "blocker",
+        "blocked by",
         "dependency",
         "dependencies",
-        "verify",
-        "acceptance",
+        "durable",
+        "follow-up work",
+        "handoff",
+        "migration",
+        "orchestration",
+        "parallel",
+        "phase 1",
+        "phase 2",
+        "verify gate",
+        "worker",
+        "workers",
     ]
     .iter()
     .any(|needle| lower.contains(needle));
 
-    planning_signal
+    let explicit_mana_signal = [
+        "create mana",
+        "create a mana",
+        "externalize",
+        "mana unit",
+        "mana units",
+        "record this",
+        "save this plan",
+        "split this into units",
+        "turn this into mana",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+
+    durable_state_signal || explicit_mana_signal
 }
 
 fn mana_externalization_follow_up_text() -> &'static str {
@@ -1584,6 +679,134 @@ fn execution_debt_follow_up_text() -> &'static str {
     "You have recorded or planned work, but the requested outcome is not satisfied yet. Continue working until the user's requested outcome is satisfied, or until concrete evidence shows it cannot be completed. Do not stop merely because you recorded a plan, updated mana, or completed one intermediate step."
 }
 
+fn mana_result_action(result: &imp_llm::ToolResultMessage) -> Option<&str> {
+    if result.tool_name != "mana" {
+        return None;
+    }
+
+    result
+        .details
+        .get("action")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            result
+                .details
+                .get("mana_loop_policy")
+                .and_then(|policy| policy.get("action"))
+                .and_then(|value| value.as_str())
+        })
+}
+
+fn mana_review_scope_from_result(result: &imp_llm::ToolResultMessage) -> ManaReviewScope {
+    let display = result
+        .details
+        .get("path")
+        .or_else(|| result.details.get("mana_dir"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("auto")
+        .to_string();
+
+    ManaReviewScope {
+        kind: if display == "auto" {
+            ManaReviewScopeKind::None
+        } else {
+            ManaReviewScopeKind::ExplicitPath
+        },
+        display,
+    }
+}
+
+fn unit_snapshot_from_value(value: &serde_json::Value) -> Option<ManaUnitSnapshot> {
+    serde_json::from_value(value.clone()).ok()
+}
+
+fn unit_snapshot_from_result(result: &imp_llm::ToolResultMessage) -> Option<ManaUnitSnapshot> {
+    result
+        .details
+        .get("unit")
+        .and_then(unit_snapshot_from_value)
+}
+
+fn mana_mutation_action(action: &str) -> Option<ManaMutationAction> {
+    match action {
+        "create" => Some(ManaMutationAction::Create),
+        "close" => Some(ManaMutationAction::Close),
+        "update" => Some(ManaMutationAction::Update),
+        "notes_append" => Some(ManaMutationAction::NotesAppend),
+        "decision_add" => Some(ManaMutationAction::DecisionAdd),
+        "decision_resolve" => Some(ManaMutationAction::DecisionResolve),
+        "reopen" => Some(ManaMutationAction::Reopen),
+        "fail" => Some(ManaMutationAction::Fail),
+        "delete" => Some(ManaMutationAction::Delete),
+        "dep_add" => Some(ManaMutationAction::DepAdd),
+        "dep_remove" => Some(ManaMutationAction::DepRemove),
+        "fact_create" => Some(ManaMutationAction::FactCreate),
+        _ => None,
+    }
+}
+
+fn mutation_record_from_mana_result(
+    result: &imp_llm::ToolResultMessage,
+) -> Option<ManaMutationRecord> {
+    if result.is_error || result.tool_name != "mana" {
+        return None;
+    }
+
+    let action_name = mana_result_action(result)?;
+    let action = mana_mutation_action(action_name)?;
+    let after_unit = unit_snapshot_from_result(result);
+    let deleted_unit = if action == ManaMutationAction::Delete {
+        let id = result.details.get("id")?.as_str()?.to_string();
+        let title = result
+            .details
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or(&id)
+            .to_string();
+        Some(crate::mana_review::ManaUnitRef::new(id, title, None))
+    } else {
+        None
+    };
+
+    if after_unit.is_none()
+        && deleted_unit.is_none()
+        && !matches!(
+            action,
+            ManaMutationAction::DepAdd | ManaMutationAction::DepRemove
+        )
+    {
+        return None;
+    }
+
+    Some(ManaMutationRecord {
+        action,
+        scope: mana_review_scope_from_result(result),
+        before_unit: None,
+        after_unit,
+        deleted_unit,
+        parent_unit: None,
+        related_unit: None,
+        field_changes: Vec::new(),
+        notes_appended: Vec::new(),
+        decision_events: Vec::new(),
+    })
+}
+
+fn record_mana_mutation_results(
+    turn_mana_review: &std::sync::Arc<std::sync::Mutex<TurnManaReviewAccumulator>>,
+    tool_results: &[imp_llm::ToolResultMessage],
+) {
+    let Ok(mut review) = turn_mana_review.lock() else {
+        return;
+    };
+
+    for result in tool_results {
+        if let Some(record) = mutation_record_from_mana_result(result) {
+            review.push(record);
+        }
+    }
+}
+
 fn tool_results_indicate_repeated_action(tool_results: &[imp_llm::ToolResultMessage]) -> bool {
     tool_results.iter().any(|result| {
         result.is_error
@@ -1599,7 +822,7 @@ fn tool_results_indicate_repeated_action(tool_results: &[imp_llm::ToolResultMess
 fn tool_results_indicate_execution_blocker(
     tool_results: &[imp_llm::ToolResultMessage],
     mode: AgentMode,
-) -> Option<NextActionStopReason> {
+) -> Option<StopReason> {
     if !matches!(
         mode,
         AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker
@@ -1617,11 +840,11 @@ fn tool_results_indicate_execution_blocker(
         if action == Some("verify")
             && result.details.get("passed").and_then(|v| v.as_bool()) == Some(false)
         {
-            return Some(NextActionStopReason::ExecutionBlocked);
+            return Some(StopReason::ExecutionBlocked);
         }
 
-        if result.tool_name == "ask" && !result.is_error {
-            return Some(NextActionStopReason::UserBlocker);
+        if result.tool_name == "ask_user" && !result.is_error {
+            return Some(StopReason::UserBlocker);
         }
 
         if result.tool_name == "bash" || result.tool_name == "shell" {
@@ -1644,13 +867,13 @@ fn tool_results_indicate_execution_blocker(
             if looks_like_check
                 && (timed_out || cancelled || exit_code.is_some_and(|code| code != 0))
             {
-                return Some(NextActionStopReason::ExecutionBlocked);
+                return Some(StopReason::ExecutionBlocked);
             }
 
             if saw_edit_like_success
                 && (timed_out || cancelled || exit_code.is_some_and(|code| code != 0))
             {
-                return Some(NextActionStopReason::ExecutionBlocked);
+                return Some(StopReason::ExecutionBlocked);
             }
         }
     }
@@ -1672,10 +895,18 @@ fn tool_results_indicate_execution_debt(
     tool_results.iter().any(|result| {
         !result.is_error
             && result.tool_name == "mana"
-            && matches!(
-                result.details.get("action").and_then(|v| v.as_str()),
-                Some("create" | "update" | "notes_append" | "decision_add" | "dep_add" | "claim")
-            )
+            && result
+                .details
+                .get("action")
+                .and_then(|v| v.as_str())
+                .is_some_and(|action| {
+                    matches!(
+                        mana_loop::classify_mana_action(action),
+                        mana_loop::ManaActionClass::ProgressCheckpoint
+                            | mana_loop::ManaActionClass::GraphMutation
+                            | mana_loop::ManaActionClass::DecisionFact
+                    )
+                })
     })
 }
 
@@ -1698,10 +929,17 @@ fn tool_results_indicate_execution_evidence(
         match result.tool_name.as_str() {
             "write" | "edit" | "multi_edit" | "openrouter_secret_run" => true,
             "bash" | "shell" => true,
-            "mana" => matches!(
-                result.details.get("action").and_then(|v| v.as_str()),
-                Some("run" | "verify" | "close" | "fail")
-            ),
+            "mana" => result
+                .details
+                .get("action")
+                .and_then(|v| v.as_str())
+                .is_some_and(|action| {
+                    matches!(
+                        mana_loop::classify_mana_action(action),
+                        mana_loop::ManaActionClass::Lifecycle
+                            | mana_loop::ManaActionClass::Orchestration
+                    )
+                }),
             _ => false,
         }
     })
@@ -1767,12 +1005,9 @@ fn tool_results_indicate_work_completed(
     saw_edit_like_success && saw_successful_check
 }
 
-fn mana_review_stop_reason(
-    mana_review: &TurnManaReview,
-    mode: AgentMode,
-) -> Option<NextActionStopReason> {
+fn mana_review_stop_reason(mana_review: &TurnManaReview, mode: AgentMode) -> Option<StopReason> {
     match mana_review.state {
-        ManaReviewState::NeedsDecision => Some(NextActionStopReason::UserBlocker),
+        ManaReviewState::NeedsDecision => Some(StopReason::UserBlocker),
         ManaReviewState::Changed if matches!(mode, AgentMode::Planner) => {
             if !mana_review.proposed_children.is_empty()
                 || !mana_review.touched_units.is_empty()
@@ -1780,7 +1015,7 @@ fn mana_review_stop_reason(
                 || !mana_review.notes_appended.is_empty()
                 || !mana_review.decision_events.is_empty()
             {
-                Some(NextActionStopReason::DecompositionCompleted)
+                Some(StopReason::DecompositionCompleted)
             } else {
                 None
             }
@@ -1789,10 +1024,7 @@ fn mana_review_stop_reason(
     }
 }
 
-fn planner_stop_reason(
-    message: &AssistantMessage,
-    mode: AgentMode,
-) -> Option<NextActionStopReason> {
+fn planner_stop_reason(message: &AssistantMessage, mode: AgentMode) -> Option<StopReason> {
     if !matches!(mode, AgentMode::Planner) {
         return None;
     }
@@ -1800,10 +1032,7 @@ fn planner_stop_reason(
     classify_stop_reason_from_text(message, true)
 }
 
-fn execution_stop_reason(
-    message: &AssistantMessage,
-    mode: AgentMode,
-) -> Option<NextActionStopReason> {
+fn execution_stop_reason(message: &AssistantMessage, mode: AgentMode) -> Option<StopReason> {
     if !matches!(
         mode,
         AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker
@@ -1812,9 +1041,7 @@ fn execution_stop_reason(
     }
 
     match classify_stop_reason_from_text(message, false) {
-        Some(
-            reason @ (NextActionStopReason::UserBlocker | NextActionStopReason::WorkCompleted),
-        ) => Some(reason),
+        Some(reason @ (StopReason::UserBlocker | StopReason::WorkCompleted)) => Some(reason),
         _ => None,
     }
 }
@@ -1822,7 +1049,7 @@ fn execution_stop_reason(
 fn classify_stop_reason_from_text(
     message: &AssistantMessage,
     planner_mode: bool,
-) -> Option<NextActionStopReason> {
+) -> Option<StopReason> {
     let text = assistant_message_text(message);
     if text.trim().is_empty() {
         return None;
@@ -1842,7 +1069,7 @@ fn classify_stop_reason_from_text(
     .iter()
     .any(|needle| lower.contains(needle));
     if blocker_signal {
-        return Some(NextActionStopReason::UserBlocker);
+        return Some(StopReason::UserBlocker);
     }
 
     if planner_mode {
@@ -1857,7 +1084,7 @@ fn classify_stop_reason_from_text(
         .iter()
         .any(|needle| lower.contains(needle));
         if decomposition_complete_signal {
-            return Some(NextActionStopReason::DecompositionCompleted);
+            return Some(StopReason::DecompositionCompleted);
         }
     } else {
         let work_complete_signal = [
@@ -1872,7 +1099,7 @@ fn classify_stop_reason_from_text(
         .iter()
         .any(|needle| lower.contains(needle));
         if work_complete_signal {
-            return Some(NextActionStopReason::WorkCompleted);
+            return Some(StopReason::WorkCompleted);
         }
     }
 
@@ -1887,9 +1114,9 @@ fn build_assistant_message(
     usage: Option<Usage>,
 ) -> AssistantMessage {
     let stop_reason = if tool_calls.is_empty() {
-        StopReason::EndTurn
+        LlmStopReason::EndTurn
     } else {
-        StopReason::ToolUse
+        LlmStopReason::ToolUse
     };
 
     AssistantMessage {
@@ -1942,8 +1169,8 @@ fn mana_skill_follow_up_hint(
     prompt: &str,
     mode: AgentMode,
     tools_available: bool,
-    has_mana_skill: bool,
-    has_mana_basics_skill: bool,
+    _has_mana_skill: bool,
+    _has_mana_basics_skill: bool,
     _has_mana_delegation_skill: bool,
 ) -> Option<&'static str> {
     if !tools_available {
@@ -1953,17 +1180,14 @@ fn mana_skill_follow_up_hint(
     let lower = prompt.to_ascii_lowercase();
 
     let orchestration_signal = [
-        "spawn",
-        "delegate",
         "decompose",
         "decomposition",
         "split this",
         "break this up",
         "break it up",
         "parallel",
-        "spawn workers",
-        "spawn worker",
-        "worker spawn",
+        "parallel helper",
+        "bounded helper",
         "orchestrate",
         "orchestration",
         "create a unit",
@@ -1981,8 +1205,6 @@ fn mana_skill_follow_up_hint(
         "mana update",
         "mana create",
         "mana run",
-        "unit",
-        "units",
     ]
     .iter()
     .any(|needle| lower.contains(needle));
@@ -1991,20 +1213,10 @@ fn mana_skill_follow_up_hint(
         AgentMode::Full | AgentMode::Orchestrator | AgentMode::Planner
             if orchestration_signal || mana_signal =>
         {
-            if has_mana_skill {
-                Some("Before you continue: load `mana` with `read` and follow it for unit design, decomposition, retries, and worker handoff.")
-            } else {
-                None
-            }
+            Some("Before you continue: use native mana `guide` or `template` actions if you need extra help with unit design, decomposition, retries, or worker handoff.")
         }
         AgentMode::Worker | AgentMode::Auditor if mana_signal => {
-            if has_mana_basics_skill {
-                Some("Before you continue: load `mana-basics` with `read` and follow the allowed native mana workflow for this mode.")
-            } else if has_mana_skill {
-                Some("Before you continue: load `mana` with `read` and follow the allowed native mana workflow for this mode.")
-            } else {
-                None
-            }
+            Some("Before you continue: use the native mana tool and stay within this mode's allowed mana workflow. Use the `guide` action if you need help.")
         }
         _ => None,
     }
@@ -2013,6 +1225,8 @@ fn mana_skill_follow_up_hint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::turn_assessment::NextAction;
+    use crate::builder::AgentBuilder;
     use std::pin::Pin;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -2025,6 +1239,7 @@ mod tests {
     use imp_llm::auth::{ApiKey, AuthStore};
     use imp_llm::model::{Capabilities, ModelMeta, ModelPricing};
     use imp_llm::provider::Provider;
+    use imp_llm::ToolResultMessage;
     use tokio::sync::{Mutex, Notify};
 
     /// A mock provider that returns pre-programmed responses.
@@ -2135,7 +1350,7 @@ mod tests {
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
                     }),
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: LlmStopReason::EndTurn,
                     timestamp: 1000,
                 },
             },
@@ -2171,7 +1386,7 @@ mod tests {
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
                     }),
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: LlmStopReason::ToolUse,
                     timestamp: 1000,
                 },
             },
@@ -2210,7 +1425,7 @@ mod tests {
                     cache_read_tokens: 0,
                     cache_write_tokens: 0,
                 }),
-                stop_reason: StopReason::ToolUse,
+                stop_reason: LlmStopReason::ToolUse,
                 timestamp: 1000,
             },
         });
@@ -2230,7 +1445,7 @@ mod tests {
                 arguments: args,
             }],
             usage: None,
-            stop_reason: StopReason::ToolUse,
+            stop_reason: LlmStopReason::ToolUse,
             timestamp: imp_llm::now(),
         })
     }
@@ -2551,7 +1766,7 @@ mod tests {
                     text: "Verify failed.".to_string(),
                 }],
                 usage: None,
-                stop_reason: StopReason::EndTurn,
+                stop_reason: LlmStopReason::EndTurn,
                 timestamp: 0,
             },
             &[imp_llm::ToolResultMessage {
@@ -2619,6 +1834,315 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_run_artifacts_writes_trace_and_evidence_packet() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let provider = Arc::new(MockProvider::new(vec![text_response("done", 10, 5)]));
+        let model = test_model(provider);
+        let (mut agent, _handle) = AgentBuilder::new(
+            Config::default(),
+            temp.path().to_path_buf(),
+            model,
+            String::new(),
+        )
+        .verify_command("printf verify-ok", true)
+        .build()
+        .unwrap();
+        agent.workflow_contract.autonomy_mode = crate::workflow::AutonomyMode::AllowAll;
+
+        agent.run("Do the work".to_string()).await.unwrap();
+
+        let runs_dir = temp.path().join(".imp").join("runs");
+        let mut runs = std::fs::read_dir(&runs_dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        let run_dir = runs.pop().unwrap().path();
+        let trace = std::fs::read_to_string(run_dir.join("trace.jsonl")).unwrap();
+        assert!(trace.contains("agent.start"));
+        assert!(trace.contains("agent.end"));
+        let evidence = std::fs::read_to_string(run_dir.join("evidence.md")).unwrap();
+        assert!(evidence.contains("# Evidence Packet"));
+        assert!(evidence.contains("Do the work"));
+        assert!(evidence.contains("**Autonomy:** allow-all"));
+        assert!(evidence.contains("allow-all mode was active"));
+        assert!(evidence.contains("hard-rail bypass: none recorded"));
+        assert!(evidence.contains("policy.checked trace events"));
+        assert!(evidence.contains("trace.jsonl"));
+        assert!(evidence.contains("verify-ok"));
+        assert!(evidence.contains("passed"));
+        assert!(run_dir.join("verification/verify-1/status.json").exists());
+        assert!(run_dir.join("workflow-contract.json").exists());
+    }
+
+    #[tokio::test]
+    async fn default_safe_compatibility_allows_readonly_tool() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_read",
+                "echo",
+                serde_json::json!({"text": "hello"}),
+                100,
+                30,
+            ),
+            text_response("done", 100, 10),
+        ]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(EchoTool));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Echo hello".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let policy = first_policy_record(&events).expect("policy checked");
+        assert_eq!(policy.autonomy_mode, crate::workflow::AutonomyMode::Safe);
+        assert!(policy.decision.is_allowed());
+        let result = first_tool_result(&events).expect("tool end event");
+        assert!(!result.is_error);
+        assert_eq!(
+            tool_result_text(&Message::ToolResult(result.clone())),
+            Some("echo: hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn default_safe_compatibility_allows_write_tool() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_write",
+                "write",
+                serde_json::json!({"data": "hello"}),
+                100,
+                30,
+            ),
+            text_response("done", 100, 10),
+        ]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(WriteTool));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Write hello".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let policy = first_policy_record(&events).expect("policy checked");
+        assert_eq!(policy.autonomy_mode, crate::workflow::AutonomyMode::Safe);
+        assert!(policy.decision.is_allowed());
+        let result = first_tool_result(&events).expect("tool end event");
+        assert!(!result.is_error);
+        assert_eq!(
+            tool_result_text(&Message::ToolResult(result.clone())),
+            Some("wrote: hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn default_safe_compatibility_preserves_run_policy_tool_deny() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_echo",
+                "echo",
+                serde_json::json!({"text": "hello"}),
+                100,
+                30,
+            ),
+            text_response("done", 100, 10),
+        ]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(EchoTool));
+        agent.run_policy = crate::policy::RunPolicy::new().deny_tool("echo");
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Echo hello".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let policy = first_policy_record(&events).expect("policy checked");
+        assert_eq!(policy.autonomy_mode, crate::workflow::AutonomyMode::Safe);
+        assert!(matches!(
+            policy.decision,
+            crate::reference_monitor::ToolPolicyDecision::Deny { .. }
+        ));
+        let result = first_tool_result(&events).expect("tool end event");
+        assert!(result.is_error);
+        assert_eq!(
+            tool_result_text(&Message::ToolResult(result.clone())),
+            Some("Tool `echo` denied by run policy.")
+        );
+    }
+
+    #[tokio::test]
+    async fn default_safe_compatibility_preserves_agent_mode_tool_deny() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_write",
+                "write",
+                serde_json::json!({"data": "hello"}),
+                100,
+                30,
+            ),
+            text_response("done", 100, 10),
+        ]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Reviewer;
+        agent.tools.register(Arc::new(WriteTool));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Write hello".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let policy = first_policy_record(&events).expect("policy checked");
+        assert_eq!(policy.autonomy_mode, crate::workflow::AutonomyMode::Safe);
+        assert!(matches!(
+            policy.decision,
+            crate::reference_monitor::ToolPolicyDecision::Deny { .. }
+        ));
+        let result = first_tool_result(&events).expect("tool end event");
+        assert!(result.is_error);
+        assert_eq!(
+            tool_result_text(&Message::ToolResult(result.clone())),
+            Some("Tool 'write' is not available in reviewer mode")
+        );
+    }
+
+    fn first_policy_record(
+        events: &[AgentEvent],
+    ) -> Option<&crate::reference_monitor::PolicyTraceRecord> {
+        events.iter().find_map(|event| match event {
+            AgentEvent::PolicyChecked { record } => Some(record),
+            _ => None,
+        })
+    }
+
+    fn first_tool_result(events: &[AgentEvent]) -> Option<&ToolResultMessage> {
+        events.iter().find_map(|event| match event {
+            AgentEvent::ToolExecutionEnd { result, .. } => Some(result),
+            _ => None,
+        })
+    }
+
+    #[tokio::test]
+    async fn tool_execution_policy_routes_run_policy_deny_through_reference_monitor() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_1",
+                "echo",
+                serde_json::json!({"text": "hello"}),
+                100,
+                30,
+            ),
+            text_response("done", 100, 10),
+        ]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(EchoTool));
+        agent.run_policy = crate::policy::RunPolicy::new().deny_tool("echo");
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Echo hello".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let policy_event = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::PolicyChecked { record } => Some(record),
+                _ => None,
+            })
+            .expect("policy checked event");
+        assert_eq!(policy_event.tool_name, "echo");
+        assert!(policy_event.args_hash.is_some());
+        assert!(matches!(
+            policy_event.decision,
+            crate::reference_monitor::ToolPolicyDecision::Deny { .. }
+        ));
+
+        let result = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolExecutionEnd { result, .. } => Some(result),
+                _ => None,
+            })
+            .expect("tool end event");
+        assert!(result.is_error);
+        assert_eq!(
+            tool_result_text(&Message::ToolResult(result.clone())),
+            Some("Tool `echo` denied by run policy.")
+        );
+
+        let checkpoint = events.iter().rev().find_map(|event| match event {
+            AgentEvent::RecoveryCheckpoint { checkpoint } => checkpoint.error_class.as_deref(),
+            _ => None,
+        });
+        assert_eq!(checkpoint, Some("run_policy_blocked"));
+    }
+
+    #[tokio::test]
+    async fn tool_execution_policy_routes_agent_mode_deny_through_reference_monitor() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_1",
+                "write",
+                serde_json::json!({"data": "hello"}),
+                100,
+                30,
+            ),
+            text_response("done", 100, 10),
+        ]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Reviewer;
+        agent.tools.register(Arc::new(WriteTool));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Write hello".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let policy_event = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::PolicyChecked { record } => Some(record),
+                _ => None,
+            })
+            .expect("policy checked event");
+        assert_eq!(policy_event.tool_name, "write");
+        assert_eq!(
+            policy_event.autonomy_mode,
+            crate::workflow::AutonomyMode::default()
+        );
+        assert!(matches!(
+            policy_event.decision,
+            crate::reference_monitor::ToolPolicyDecision::Deny { .. }
+        ));
+
+        let result = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolExecutionEnd { result, .. } => Some(result),
+                _ => None,
+            })
+            .expect("tool end event");
+        assert!(result.is_error);
+        assert_eq!(
+            tool_result_text(&Message::ToolResult(result.clone())),
+            Some("Tool 'write' is not available in reviewer mode")
+        );
+
+        let checkpoint = events.iter().rev().find_map(|event| match event {
+            AgentEvent::RecoveryCheckpoint { checkpoint } => checkpoint.error_class.as_deref(),
+            _ => None,
+        });
+        assert_eq!(checkpoint, Some("mode_blocked"));
+    }
+
+    #[tokio::test]
     async fn emits_turn_assessment_event_for_execution_blocker() {
         let provider = Arc::new(MockProvider::new(vec![
             tool_call_response(
@@ -2635,7 +2159,6 @@ mod tests {
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.mode = AgentMode::Full;
         agent.tools.register(Arc::new(crate::tools::bash::BashTool));
-        agent.tools.register_alias("bash", "shell");
 
         let events_task = tokio::spawn(collect_events(handle));
         agent.run("Run the check".to_string()).await.unwrap();
@@ -2694,7 +2217,7 @@ mod tests {
                             cache_read_tokens: 0,
                             cache_write_tokens: 0,
                         }),
-                        stop_reason: StopReason::ToolUse,
+                        stop_reason: LlmStopReason::ToolUse,
                         timestamp: 1000,
                     },
                 },
@@ -2737,18 +2260,18 @@ mod tests {
         let assessment = PostTurnAssessment {
             runtime: RuntimeEvidence {
                 repeated_action: false,
-                execution_stop_reason: Some(NextActionStopReason::ExecutionBlocked),
+                execution_stop_reason: Some(StopReason::ExecutionBlocked),
                 work_completed: true,
                 execution_debt: false,
                 execution_evidence: false,
                 planning_only_progress: false,
             },
             mana: ManaEvidence {
-                stop_reason: Some(NextActionStopReason::DecompositionCompleted),
+                stop_reason: Some(StopReason::DecompositionCompleted),
             },
             text_fallback: TextFallbackEvidence {
-                planner_stop_reason: Some(NextActionStopReason::DecompositionCompleted),
-                execution_stop_reason: Some(NextActionStopReason::WorkCompleted),
+                planner_stop_reason: Some(StopReason::DecompositionCompleted),
+                execution_stop_reason: Some(StopReason::WorkCompleted),
             },
             continue_recommendation: Some(ContinueRecommendation {
                 prompt: "continue".to_string(),
@@ -2759,7 +2282,7 @@ mod tests {
         assert_eq!(
             assessment.into_next_action(),
             NextAction::Stop {
-                reason: NextActionStopReason::ExecutionBlocked,
+                reason: StopReason::ExecutionBlocked,
             }
         );
     }
@@ -2893,7 +2416,7 @@ mod tests {
 
         assert_eq!(
             tool_results_indicate_execution_blocker(&[result], AgentMode::Full),
-            Some(NextActionStopReason::ExecutionBlocked)
+            Some(StopReason::ExecutionBlocked)
         );
     }
 
@@ -2901,7 +2424,7 @@ mod tests {
     fn tool_results_indicate_execution_blocker_detects_ask_tool_as_user_blocker() {
         let result = imp_llm::ToolResultMessage {
             tool_call_id: "call_ask".to_string(),
-            tool_name: "ask".to_string(),
+            tool_name: "ask_user".to_string(),
             content: vec![ContentBlock::Text {
                 text: "blue".to_string(),
             }],
@@ -2912,7 +2435,7 @@ mod tests {
 
         assert_eq!(
             tool_results_indicate_execution_blocker(&[result], AgentMode::Full),
-            Some(NextActionStopReason::UserBlocker)
+            Some(StopReason::UserBlocker)
         );
     }
 
@@ -2994,7 +2517,7 @@ mod tests {
 
         assert_eq!(
             mana_review_stop_reason(&review, AgentMode::Planner),
-            Some(NextActionStopReason::UserBlocker)
+            Some(StopReason::UserBlocker)
         );
     }
 
@@ -3029,7 +2552,7 @@ mod tests {
 
         assert_eq!(
             mana_review_stop_reason(&review, AgentMode::Planner),
-            Some(NextActionStopReason::DecompositionCompleted)
+            Some(StopReason::DecompositionCompleted)
         );
     }
 
@@ -3127,7 +2650,7 @@ mod tests {
                             cache_read_tokens: 0,
                             cache_write_tokens: 0,
                         }),
-                        stop_reason: StopReason::ToolUse,
+                        stop_reason: LlmStopReason::ToolUse,
                         timestamp: 1000,
                     },
                 },
@@ -3195,7 +2718,7 @@ mod tests {
                             cache_read_tokens: 0,
                             cache_write_tokens: 0,
                         }),
-                        stop_reason: StopReason::ToolUse,
+                        stop_reason: LlmStopReason::ToolUse,
                         timestamp: 1000,
                     },
                 },
@@ -3369,11 +2892,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn single_text_turn_with_max_turns_one_and_no_tools_exits_cleanly() {
+    async fn single_text_turn_with_no_tools_exits_cleanly() {
         let provider = Arc::new(MockProvider::new(vec![text_response("SMOKE_OK", 50, 10)]));
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.max_turns = 1;
         agent.mode = AgentMode::Worker;
         agent.has_mana_basics_skill = true;
         agent.tools.retain(|_| false);
@@ -3408,22 +2930,29 @@ mod tests {
         let timings: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
-                AgentEvent::Timing { timing } => Some(*timing),
+                AgentEvent::Timing { timing } => Some(timing.clone()),
                 _ => None,
             })
             .collect();
 
-        assert!(timings.len() >= 4);
-        assert_eq!(timings[0].stage, TimingStage::LlmRequestStart);
-        assert_eq!(timings[1].stage, TimingStage::FirstStreamEvent);
-        assert_eq!(timings[2].stage, TimingStage::FirstTextDelta);
+        assert!(timings.len() >= 7);
+        assert_eq!(timings[0].stage, TimingStage::ContextAssemblyStart);
+        assert_eq!(timings[1].stage, TimingStage::ContextAssemblyEnd);
+        assert_eq!(timings[2].stage, TimingStage::LlmRequestStart);
+        assert_eq!(timings[3].stage, TimingStage::FirstStreamEvent);
+        assert_eq!(timings[4].stage, TimingStage::FirstTextDelta);
         assert!(timings
             .iter()
             .any(|timing| timing.stage == TimingStage::MessageEnd));
+        assert!(timings
+            .iter()
+            .any(|timing| timing.stage == TimingStage::PostTurnAssessmentEnd));
 
         for timing in timings {
             assert_eq!(timing.turn, 0);
-            assert!(timing.since_turn_start_ms >= timing.since_llm_request_start_ms);
+            if let Some(since_llm_request_start_ms) = timing.since_llm_request_start_ms {
+                assert!(timing.since_turn_start_ms >= since_llm_request_start_ms);
+            }
         }
     }
 
@@ -3447,7 +2976,7 @@ mod tests {
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
                     }),
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: LlmStopReason::EndTurn,
                     timestamp: 1000,
                 },
             }),
@@ -3505,7 +3034,7 @@ mod tests {
                             cache_read_tokens: 0,
                             cache_write_tokens: 0,
                         }),
-                        stop_reason: StopReason::EndTurn,
+                        stop_reason: LlmStopReason::EndTurn,
                         timestamp: 1000,
                     },
                 }),
@@ -4112,7 +3641,6 @@ mod tests {
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.tools.register(Arc::new(crate::tools::bash::BashTool));
-        agent.tools.register_alias("bash", "shell");
 
         agent.run("Run a shell command".to_string()).await.unwrap();
 
@@ -4172,11 +3700,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn single_text_turn_with_max_turns_one_exits_cleanly() {
+    async fn single_text_turn_exits_cleanly() {
         let provider = Arc::new(MockProvider::new(vec![text_response("SMOKE_OK", 50, 10)]));
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.max_turns = 1;
 
         let events_task = tokio::spawn(collect_events(handle));
         let result = agent.run("Reply once and stop".to_string()).await;
@@ -4192,58 +3719,6 @@ mod tests {
             e,
             AgentEvent::Error { error } if error.contains("Max turns exceeded")
         )));
-    }
-
-    // ── Test 5: Max turns exceeded ─────────────────────────────────
-
-    #[tokio::test]
-    async fn agent_max_turns_exceeded() {
-        // Each turn will call a tool, forcing the loop to continue
-        let responses: Vec<Vec<StreamEvent>> = (0..5)
-            .map(|i| {
-                tool_call_response(
-                    &format!("call_{i}"),
-                    "echo",
-                    serde_json::json!({"text": format!("turn {i}")}),
-                    50,
-                    10,
-                )
-            })
-            .collect();
-
-        let provider = Arc::new(MockProvider::new(responses));
-        let model = test_model(provider);
-        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.tools.register(Arc::new(EchoTool));
-        agent.max_turns = 3; // Will exceed after 3 turns (0, 1, 2)
-
-        let events_task = tokio::spawn(collect_events(handle));
-        let result = agent.run("Loop forever".to_string()).await;
-        drop(agent);
-
-        assert!(matches!(result, Err(crate::error::Error::MaxTurns(3))));
-
-        let events = events_task.await.unwrap();
-
-        // Should have error event about max turns
-        let has_error = events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::Error { error } if error.contains("Max turns")));
-        assert!(has_error);
-
-        // Should still have AgentEnd
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
-
-        // Verify usage accumulated for the 3 turns that did execute
-        if let Some(AgentEvent::AgentEnd { usage, .. }) = events
-            .iter()
-            .find(|e| matches!(e, AgentEvent::AgentEnd { .. }))
-        {
-            assert_eq!(usage.input_tokens, 150); // 3 * 50
-            assert_eq!(usage.output_tokens, 30); // 3 * 10
-        }
     }
 
     // ── Test 6: Unknown tool → error result → model self-corrects ──
@@ -4413,6 +3888,10 @@ mod tests {
                 AgentEvent::ToolExecutionStart { .. } => "ToolExecStart",
                 AgentEvent::ToolExecutionEnd { .. } => "ToolExecEnd",
                 AgentEvent::Warning { .. } => "Warning",
+                AgentEvent::EvidenceWritten { .. } => "EvidenceWritten",
+                AgentEvent::VerificationStarted { .. } => "VerificationStarted",
+                AgentEvent::VerificationCompleted { .. } => "VerificationCompleted",
+                AgentEvent::PolicyChecked { .. } => "PolicyChecked",
                 AgentEvent::Error { .. } => "Error",
                 _ => "Other",
             })
@@ -4584,7 +4063,7 @@ mod tests {
 
         let events = events_task.await.unwrap();
 
-        if let Some(AgentEvent::AgentEnd { usage, cost }) = events
+        if let Some(AgentEvent::AgentEnd { usage, cost, .. }) = events
             .iter()
             .find(|e| matches!(e, AgentEvent::AgentEnd { .. }))
         {
@@ -4940,7 +4419,7 @@ mod integration {
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
                     }),
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: LlmStopReason::EndTurn,
                     timestamp: 1000,
                 },
             },
@@ -4976,7 +4455,7 @@ mod integration {
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
                     }),
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: LlmStopReason::ToolUse,
                     timestamp: 1000,
                 },
             },
@@ -4991,7 +4470,6 @@ mod integration {
         agent.tools.register(Arc::new(ReadTool));
         agent.tools.register(Arc::new(EditTool));
         agent.tools.register(Arc::new(BashTool));
-        agent.tools.register_alias("bash", "shell");
         (agent, handle)
     }
 

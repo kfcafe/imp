@@ -43,6 +43,7 @@ use crate::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use crate::builder::AgentBuilder;
 use crate::config::{AgentMode, Config};
 use crate::error::{Error, Result};
+use crate::policy::RunPolicy;
 use crate::session::{SessionCheckpointRecord, SessionEntry, SessionManager};
 use crate::storage;
 use crate::system_prompt::{Fact, TaskContext};
@@ -65,6 +66,7 @@ pub enum SessionChoice {
 }
 
 use crate::tools::LuaToolLoader;
+use crate::workflow::{AutonomyMode, VerificationGate};
 
 /// Configuration for creating an `ImpSession`.
 ///
@@ -93,6 +95,12 @@ pub struct SessionOptions {
     /// Agent mode (full, worker, orchestrator, …).
     pub mode: Option<AgentMode>,
 
+    /// Autonomy mode for workflow/runtime policy. Defaults to safe.
+    pub autonomy_mode: Option<AutonomyMode>,
+
+    /// Verification gates declared by CLI/config/user input.
+    pub verification_gates: Vec<VerificationGate>,
+
     /// Maximum turns before the agent stops.
     pub max_turns: Option<u32>,
 
@@ -119,6 +127,9 @@ pub struct SessionOptions {
     /// pass `None` to skip Lua extensions.
     pub lua_loader: Option<LuaToolLoader>,
 
+    /// Per-run tool/write policy layered on top of AgentMode.
+    pub run_policy: RunPolicy,
+
     /// Custom UI implementation. Defaults to `NullInterface`.
     pub ui: Option<Arc<dyn UserInterface>>,
 
@@ -141,6 +152,8 @@ impl Default for SessionOptions {
             api_key: None,
             thinking: None,
             mode: None,
+            autonomy_mode: None,
+            verification_gates: Vec::new(),
             max_turns: None,
             max_tokens: None,
             system_prompt: None,
@@ -149,6 +162,7 @@ impl Default for SessionOptions {
             task: None,
             facts: Vec::new(),
             lua_loader: None,
+            run_policy: RunPolicy::default(),
             ui: None,
             auth_path: None,
             context_prefill: Vec::new(),
@@ -337,6 +351,11 @@ impl ImpSession {
         if let Some(lua_loader) = options.lua_loader {
             builder = builder.lua_tool_loader(move |policy, tools| lua_loader(policy, tools));
         }
+        if let Some(autonomy_mode) = options.autonomy_mode {
+            builder = builder.autonomy_mode(autonomy_mode);
+        }
+        builder = builder.verification_gates(options.verification_gates.clone());
+        builder = builder.run_policy(options.run_policy.clone());
 
         let (mut agent, handle) = builder.build()?;
 
@@ -346,19 +365,11 @@ impl ImpSession {
 
         if options.no_tools {
             agent.thinking_level = config.thinking.unwrap_or(ThinkingLevel::Off);
-            if let Some(max_turns) = options.max_turns.or(config.max_turns) {
-                agent.max_turns = max_turns;
-            }
             if let Some(max_tokens) = options.max_tokens.or(config.max_tokens) {
                 agent.max_tokens = Some(max_tokens);
             }
-        } else {
-            if let Some(max_turns) = options.max_turns {
-                agent.max_turns = max_turns;
-            }
-            if let Some(max_tokens) = options.max_tokens {
-                agent.max_tokens = Some(max_tokens);
-            }
+        } else if let Some(max_tokens) = options.max_tokens {
+            agent.max_tokens = Some(max_tokens);
         }
         if let Some(ui) = &options.ui {
             agent.ui = Arc::clone(ui);
@@ -1277,8 +1288,11 @@ mod tests {
             task: Some(TaskContext {
                 title: "Test task".into(),
                 description: "Verify headless prompt assembly".into(),
+                design: None,
                 acceptance: Some("Prompt includes task guidance".into()),
                 verify: None,
+                verify_timeout_secs: None,
+                fail_first: false,
                 notes: None,
                 attempts: vec![],
                 dependencies: vec![],
@@ -1746,6 +1760,7 @@ mod tests {
                 details: json!({"exit_code": 0}),
                 timestamp: 999,
             },
+            provenance: None,
         });
 
         assert_eq!(persisted, vec!["tool result"]);

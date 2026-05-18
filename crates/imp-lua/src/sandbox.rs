@@ -63,6 +63,7 @@ pub struct LuaCallContext {
     pub lua_tool_loader: Option<imp_core::tools::LuaToolLoader>,
     pub mode: AgentMode,
     pub read_max_lines: usize,
+    pub run_policy: imp_core::policy::RunPolicy,
     pub config: Arc<Config>,
 }
 
@@ -85,7 +86,30 @@ impl LuaCallContext {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 imp_core::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            run_policy: self.run_policy.clone(),
             config: Arc::clone(&self.config),
+            supporting_provenance: Vec::new(),
+        }
+    }
+}
+
+impl From<ToolContext> for LuaCallContext {
+    fn from(ctx: ToolContext) -> Self {
+        Self {
+            cwd: ctx.cwd,
+            cancelled: ctx.cancelled,
+            update_tx: ctx.update_tx,
+            command_tx: ctx.command_tx,
+            ui: ctx.ui,
+            file_cache: ctx.file_cache,
+            checkpoint_state: ctx.checkpoint_state,
+            file_tracker: ctx.file_tracker,
+            anchor_store: ctx.anchor_store,
+            lua_tool_loader: ctx.lua_tool_loader,
+            mode: ctx.mode,
+            read_max_lines: ctx.read_max_lines,
+            run_policy: ctx.run_policy,
+            config: ctx.config,
         }
     }
 }
@@ -316,6 +340,25 @@ impl LuaRuntime {
     /// Returns `Ok(Some(text))` if the command returned a string or value.
     /// Returns `Err` if the command handler or name wasn't found.
     pub fn execute_command(&self, name: &str, args: &str) -> Result<Option<String>, LuaError> {
+        self.execute_command_with_context(name, args, None)
+    }
+
+    /// Execute a registered command with an optional host call context.
+    pub fn execute_command_with_context(
+        &self,
+        name: &str,
+        args: &str,
+        call_ctx: Option<LuaCallContext>,
+    ) -> Result<Option<String>, LuaError> {
+        if let Some(ctx) = call_ctx {
+            self.set_call_context(ctx);
+        }
+        let result = self.execute_command_inner(name, args);
+        self.clear_call_context();
+        result
+    }
+
+    fn execute_command_inner(&self, name: &str, args: &str) -> Result<Option<String>, LuaError> {
         let commands = self.commands.lock().unwrap();
         let handle = commands
             .iter()
@@ -350,6 +393,16 @@ impl LuaRuntime {
             .unwrap()
             .iter()
             .map(|c| c.name.clone())
+            .collect()
+    }
+
+    /// Get command names with descriptions for menus and discovery.
+    pub fn command_summaries(&self) -> Vec<(String, String)> {
+        self.commands
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| (c.name.clone(), c.description.clone()))
             .collect()
     }
 

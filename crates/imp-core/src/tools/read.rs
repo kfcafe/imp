@@ -7,6 +7,8 @@ use super::{suggest_similar_files, truncate_head, Tool, ToolContext, ToolOutput}
 use crate::error::Result;
 
 const MAX_BYTES: usize = 50_000;
+const MAX_TEXT_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
 
@@ -21,15 +23,23 @@ impl Tool for ReadTool {
         "Read File"
     }
     fn description(&self) -> &str {
-        "Read a file with stable line-oriented output. Supports offset/limit and images."
+        "Read a file with stable line-oriented output. Supports start_line/end_line ranges, anchors, and images."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string" },
-                "offset": { "type": "number" },
-                "limit": { "type": "number" },
+                "start_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-indexed first line to read."
+                },
+                "end_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-indexed inclusive last line to read."
+                },
                 "anchors": {
                     "type": "boolean",
                     "description": "When true, include opaque per-line anchors for stale-safe anchored edits. Anchors are session-local integrity markers, not security tokens."
@@ -58,6 +68,7 @@ impl Tool for ReadTool {
         }
 
         let path = super::resolve_path(&ctx.cwd, raw_path);
+        let range = parse_line_range(&params)?;
 
         if !path.exists() {
             let suggestions = suggest_similar_files(&ctx.cwd, raw_path);
@@ -71,11 +82,27 @@ impl Tool for ReadTool {
             return Ok(ToolOutput::error(msg));
         }
 
+        if path.is_dir() {
+            return Ok(ToolOutput::error(format!(
+                "Path is a directory, not a file: {}",
+                path.display()
+            )));
+        }
+
         // Check for image files
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             if IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
                 return read_image(&path).await;
             }
+        }
+
+        let metadata = tokio::fs::metadata(&path).await?;
+        if metadata.len() > MAX_TEXT_BYTES && range.is_none() {
+            return Ok(ToolOutput::error(format!(
+                "File is too large to read without a line range: {} ({} bytes). Use start_line/end_line to read a smaller range.",
+                path.display(),
+                metadata.len()
+            )));
         }
 
         // Read raw bytes and check for binary
@@ -90,13 +117,14 @@ impl Tool for ReadTool {
 
         let content = String::from_utf8_lossy(&bytes).into_owned();
 
-        // Apply offset/limit
-        let offset = params["offset"].as_u64().map(|v| v as usize);
-        let limit = params["limit"].as_u64().map(|v| v as usize);
+        // Apply line range.
         let include_anchors = params["anchors"].as_bool().unwrap_or(false);
 
-        let sliced = apply_offset_limit(&content, offset, limit);
-        let start_line = offset.unwrap_or(1);
+        let sliced = apply_line_range(&content, range);
+        let start_line = range.map(|r| r.start).unwrap_or(1);
+        let requested_end_line = range.and_then(|r| r.end);
+        let total_file_lines = content.lines().count();
+        let line_ending = detect_line_ending(&content);
 
         // Apply truncation
         let max_lines = ctx.read_max_lines;
@@ -159,33 +187,112 @@ impl Tool for ReadTool {
         Ok(ToolOutput {
             content: vec![imp_llm::ContentBlock::Text { text: output }],
             details: json!({
+                "action": "read",
                 "path": path.display().to_string(),
+                "start_line": start_line,
+                "end_line": if result.output_lines == 0 { start_line.saturating_sub(1) } else { start_line + result.output_lines - 1 },
+                "requested_end_line": requested_end_line,
                 "truncated": result.truncated,
                 "lines": result.output_lines,
-                "total_lines": result.total_lines,
+                "total_lines": total_file_lines,
+                "range_total_lines": result.total_lines,
+                "bytes": result.output_bytes,
+                "total_bytes": metadata.len(),
+                "range_total_bytes": result.total_bytes,
+                "temp_file": result.temp_file.as_ref().map(|path| path.display().to_string()),
+                "encoding": "utf-8-lossy",
+                "line_ending": line_ending,
                 "anchors": anchors_json,
+                "anchor_count": anchors_json.as_array().map(|anchors| anchors.len()).unwrap_or(0),
             }),
             is_error: false,
         })
     }
 }
 
-fn apply_offset_limit(content: &str, offset: Option<usize>, limit: Option<usize>) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    let start = offset.map(|o| o.saturating_sub(1)).unwrap_or(0); // 1-indexed to 0-indexed
-    let end = match limit {
-        Some(l) => (start + l).min(lines.len()),
-        None => lines.len(),
-    };
+#[derive(Clone, Copy)]
+struct LineRange {
+    start: usize,
+    end: Option<usize>,
+}
 
+fn parse_line_range(params: &serde_json::Value) -> Result<Option<LineRange>> {
+    let start_line = parse_positive_usize(params.get("start_line"), "start_line")?;
+    let end_line = parse_positive_usize(params.get("end_line"), "end_line")?;
+
+    if let (Some(start), Some(end)) = (start_line, end_line) {
+        if start > end {
+            return Err(crate::error::Error::Tool(
+                "start_line must be <= end_line".to_string(),
+            ));
+        }
+    }
+
+    Ok(match (start_line, end_line) {
+        (None, None) => None,
+        (Some(start), end) => Some(LineRange { start, end }),
+        (None, Some(end)) => Some(LineRange {
+            start: 1,
+            end: Some(end),
+        }),
+    })
+}
+
+fn parse_positive_usize(value: Option<&serde_json::Value>, field: &str) -> Result<Option<usize>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(number) = value.as_u64() else {
+        return Err(crate::error::Error::Tool(format!(
+            "{field} must be a positive integer"
+        )));
+    };
+    if number == 0 {
+        return Err(crate::error::Error::Tool(format!("{field} must be >= 1")));
+    }
+    Ok(Some(number as usize))
+}
+
+fn apply_line_range(content: &str, range: Option<LineRange>) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let start = range
+        .map(|range| range.start.saturating_sub(1))
+        .unwrap_or(0);
     if start >= lines.len() {
         return String::new();
     }
+    let end = range
+        .and_then(|range| range.end)
+        .map(|end| end.min(lines.len()))
+        .unwrap_or(lines.len());
 
     lines[start..end].join("\n")
 }
 
+fn detect_line_ending(content: &str) -> &'static str {
+    if content.contains("\r\n") {
+        "crlf"
+    } else if content.contains('\r') {
+        "cr"
+    } else {
+        "lf"
+    }
+}
+
 async fn read_image(path: &Path) -> Result<ToolOutput> {
+    let metadata = tokio::fs::metadata(path).await?;
+    if metadata.len() > MAX_IMAGE_BYTES {
+        return Ok(ToolOutput::error(format!(
+            "Image is too large to read: {} ({} bytes, max {} bytes)",
+            path.display(),
+            metadata.len(),
+            MAX_IMAGE_BYTES
+        )));
+    }
+
     let bytes = tokio::fs::read(path).await?;
     let ext = path
         .extension()
@@ -217,9 +324,11 @@ async fn read_image(path: &Path) -> Result<ToolOutput> {
             data,
         }],
         details: json!({
+            "action": "read",
             "path": path.display().to_string(),
             "media_type": media_type,
             "bytes": bytes.len(),
+            "total_bytes": metadata.len(),
         }),
         is_error: false,
     })
@@ -320,6 +429,8 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         }
     }
 
@@ -342,7 +453,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_offset_limit() {
+    async fn read_start_end_lines() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("data.txt");
         std::fs::write(&file, "a\nb\nc\nd\ne\n").unwrap();
@@ -351,7 +462,7 @@ mod tests {
         let result = tool
             .execute(
                 "c2",
-                json!({"path": "data.txt", "offset": 2, "limit": 2}),
+                json!({"path": "data.txt", "start_line": 2, "end_line": 3}),
                 test_ctx(dir.path()),
             )
             .await
@@ -363,6 +474,8 @@ mod tests {
         assert!(text.contains("c"));
         assert!(!text.contains("a"));
         assert!(!text.contains("d"));
+        assert_eq!(result.details["start_line"], 2);
+        assert_eq!(result.details["end_line"], 3);
     }
 
     #[tokio::test]
@@ -537,7 +650,7 @@ mod tests {
         let result = tool
             .execute(
                 "c-anchors",
-                json!({"path": "anchored.txt", "offset": 2, "limit": 1, "anchors": true}),
+                json!({"path": "anchored.txt", "start_line": 2, "end_line": 2, "anchors": true}),
                 ctx.clone(),
             )
             .await

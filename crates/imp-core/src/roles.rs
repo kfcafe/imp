@@ -10,7 +10,6 @@ pub struct RoleDef {
     #[serde(default)]
     pub readonly: bool,
     pub instructions: Option<String>,
-    pub max_turns: Option<u32>,
 }
 
 /// Resolved role ready for use.
@@ -22,7 +21,6 @@ pub struct Role {
     pub tool_set: ToolSet,
     pub readonly: bool,
     pub instructions: Option<String>,
-    pub max_turns: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,7 +50,6 @@ impl Role {
             tool_set,
             readonly: def.readonly,
             instructions: def.instructions.clone(),
-            max_turns: def.max_turns,
         }
     }
 }
@@ -68,7 +65,6 @@ pub fn builtin_roles() -> Vec<(&'static str, RoleDef)> {
                 tools: None,
                 readonly: false,
                 instructions: None,
-                max_turns: None,
             },
         ),
         (
@@ -84,7 +80,6 @@ pub fn builtin_roles() -> Vec<(&'static str, RoleDef)> {
                 ]),
                 readonly: true,
                 instructions: Some("Explore and summarize. Do not modify files.".into()),
-                max_turns: Some(20),
             },
         ),
         (
@@ -95,7 +90,6 @@ pub fn builtin_roles() -> Vec<(&'static str, RoleDef)> {
                 tools: None,
                 readonly: true,
                 instructions: None,
-                max_turns: Some(10),
             },
         ),
     ]

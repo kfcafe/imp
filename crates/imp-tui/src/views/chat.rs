@@ -34,6 +34,7 @@ pub enum MessageRole {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DisplayAssistantBlock {
     Text(String),
+    ThoughtDuration { seconds: u64 },
     ToolCall { id: String },
 }
 
@@ -159,6 +160,18 @@ impl DisplayMessage {
 
     pub fn push_assistant_text_delta(&mut self, text: &str) {
         self.add_assistant_text_block(text);
+    }
+
+    pub fn push_assistant_thought_duration(&mut self, seconds: u64) {
+        let seconds = seconds.max(1);
+        if matches!(
+            self.assistant_blocks.last(),
+            Some(DisplayAssistantBlock::ThoughtDuration { .. })
+        ) {
+            return;
+        }
+        self.assistant_blocks
+            .push(DisplayAssistantBlock::ThoughtDuration { seconds });
     }
 
     pub fn push_assistant_tool_call(&mut self, tool_call: DisplayToolCall) {
@@ -506,6 +519,64 @@ pub fn clamped_scroll_offset_for_total_lines(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn scroll_offset_for_message_at_top(
+    messages: &[DisplayMessage],
+    theme: &Theme,
+    highlighter: &Highlighter,
+    chat_area: Rect,
+    message_index: usize,
+    tick: u64,
+    tool_focus: Option<usize>,
+    word_wrap: bool,
+    chat_tool_display: ChatToolDisplay,
+    thinking_lines: usize,
+    show_timestamps: bool,
+    animation_level: AnimationLevel,
+    activity_state: AnimationState,
+) -> usize {
+    if message_index >= messages.len() {
+        return 0;
+    }
+
+    let total_lines = build_chat_render_data(
+        messages,
+        theme,
+        highlighter,
+        chat_area.width as usize,
+        tick,
+        tool_focus,
+        word_wrap,
+        chat_tool_display,
+        thinking_lines,
+        show_timestamps,
+        animation_level,
+        activity_state,
+    )
+    .lines
+    .len();
+    let anchor_line = build_chat_render_data(
+        &messages[..message_index],
+        theme,
+        highlighter,
+        chat_area.width as usize,
+        tick,
+        tool_focus,
+        word_wrap,
+        chat_tool_display,
+        thinking_lines,
+        show_timestamps,
+        animation_level,
+        activity_state,
+    )
+    .lines
+    .len();
+
+    let visible_height = chat_area.height as usize;
+    let offset = total_lines.saturating_sub(visible_height + anchor_line);
+    clamp_scroll_offset_to_view(total_lines, visible_height, offset)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn clamped_scroll_offset(
     messages: &[DisplayMessage],
     theme: &Theme,
@@ -678,6 +749,16 @@ fn build_chat_lines(
                                     }
                                 }
                             }
+                            DisplayAssistantBlock::ThoughtDuration { seconds } => {
+                                all_lines.extend(wrap_text_with_prefix(
+                                    &format!("  thought for {}", format_duration_seconds(*seconds)),
+                                    &[],
+                                    &[],
+                                    theme.muted_style(),
+                                    width,
+                                    word_wrap,
+                                ));
+                            }
                             DisplayAssistantBlock::ToolCall { id } => {
                                 let focused = tool_focus == Some(tool_call_counter);
                                 tool_call_counter += 1;
@@ -804,6 +885,22 @@ fn build_chat_lines(
     (all_lines, tool_line_indices)
 }
 
+fn format_duration_seconds(seconds: u64) -> String {
+    match seconds {
+        0 | 1 => "1 second".to_string(),
+        2..=59 => format!("{seconds} seconds"),
+        _ => {
+            let minutes = seconds / 60;
+            let remaining_seconds = seconds % 60;
+            if remaining_seconds == 0 {
+                format!("{minutes}m")
+            } else {
+                format!("{minutes}m {remaining_seconds}s")
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_tool_call_chat_lines(
     all_lines: &mut Vec<Line<'static>>,
@@ -823,7 +920,7 @@ fn push_tool_call_chat_lines(
     }
 
     let is_running = tc.output.is_none() && !tc.is_error;
-    let rail = vec![Span::styled("  │".to_string(), theme.muted_style())];
+    let rail = vec![Span::styled("  ".to_string(), theme.muted_style())];
     let header = tc.header_line_animated_focused(theme, tick, focused, animation_level);
     let header_lines = wrap_line_with_prefix(&header, &rail, &rail, width, word_wrap);
     let header_start = all_lines.len();
@@ -839,16 +936,24 @@ fn push_tool_call_chat_lines(
     if is_running && !tc.streaming_lines.is_empty() {
         for line in &tc.streaming_lines {
             let content = Line::from(Span::styled(format!("    {line}"), theme.muted_style()));
-            all_lines.extend(wrap_line_with_prefix(
-                &content, &rail, &rail, width, word_wrap,
-            ));
+            let line_start = all_lines.len();
+            let wrapped = wrap_line_with_prefix(&content, &rail, &rail, width, word_wrap);
+            for offset in 0..wrapped.len() {
+                tool_line_indices.push((line_start + offset, tc.id.clone()));
+            }
+            all_lines.extend(wrapped);
         }
     }
 
     if tc.expanded {
         let output_lines = styled_tool_output_lines(tc, highlighter, theme, tc.name == "read");
         for line in output_lines.into_iter().take(50) {
-            all_lines.extend(wrap_line_with_prefix(&line, &rail, &rail, width, word_wrap));
+            let line_start = all_lines.len();
+            let wrapped = wrap_line_with_prefix(&line, &rail, &rail, width, word_wrap);
+            for offset in 0..wrapped.len() {
+                tool_line_indices.push((line_start + offset, tc.id.clone()));
+            }
+            all_lines.extend(wrapped);
         }
     }
 }
@@ -1022,8 +1127,6 @@ fn format_timestamp(ts: u64) -> String {
     format!("{h:02}:{m:02}")
 }
 
-/// Build a click map: Vec<(screen_y, tool_call_id)> for each tool call header
-/// line that is visible in the chat area.
 pub fn build_text_surface_from_lines(
     lines: &[Line<'_>],
     chat_area: Rect,
@@ -1073,6 +1176,37 @@ pub fn build_text_surface(
     );
 
     build_text_surface_from_lines(&render.lines, chat_area, scroll_offset)
+}
+
+/// Build a click map from already-rendered chat lines.
+pub fn build_click_map_from_rendered_lines(
+    lines: &[Line<'_>],
+    chat_area: Rect,
+    scroll_offset: usize,
+) -> Vec<(u16, String)> {
+    let total_lines = lines.len();
+    let window = visible_line_window(total_lines, chat_area.height as usize, scroll_offset);
+    let mut result = Vec::new();
+
+    for line_index in window.start..window.end {
+        let plain = line_to_plain_text(&lines[line_index]);
+        let Some(rest) = plain
+            .strip_prefix("▸ ")
+            .or_else(|| plain.strip_prefix("▾ "))
+        else {
+            continue;
+        };
+        let Some(id) = rest.strip_prefix('#') else {
+            continue;
+        };
+        let id = id.split_whitespace().next().unwrap_or_default();
+        if !id.is_empty() {
+            let screen_y = chat_area.y + (line_index - window.start) as u16;
+            result.push((screen_y, id.to_string()));
+        }
+    }
+
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1245,6 +1379,86 @@ mod tests {
     }
 
     #[test]
+    fn build_click_map_from_rendered_lines_finds_visible_tool_headers() {
+        let lines = vec![
+            Line::from("hello"),
+            Line::from("▸ #tool-1 read src/main.rs"),
+            Line::from("world"),
+        ];
+        let map = build_click_map_from_rendered_lines(&lines, Rect::new(0, 10, 80, 3), 0);
+        assert_eq!(map, vec![(11, "tool-1".to_string())]);
+    }
+
+    #[test]
+    fn build_click_map_from_rendered_lines_respects_scroll_window() {
+        let lines = vec![
+            Line::from("before"),
+            Line::from("▸ #tool-1 read src/main.rs"),
+            Line::from("middle"),
+            Line::from("▾ #tool-2 bash cargo test"),
+        ];
+        let map = build_click_map_from_rendered_lines(&lines, Rect::new(0, 5, 80, 2), 0);
+        assert_eq!(map, vec![(6, "tool-2".to_string())]);
+    }
+
+    #[test]
+    fn assistant_blocks_preserve_thought_duration_tool_thought_order() {
+        let display = DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: vec![make_tool("tc-1")],
+            assistant_blocks: vec![
+                DisplayAssistantBlock::ThoughtDuration { seconds: 5 },
+                DisplayAssistantBlock::ToolCall { id: "tc-1".into() },
+                DisplayAssistantBlock::ThoughtDuration { seconds: 20 },
+                DisplayAssistantBlock::Text("Done".into()),
+            ],
+            is_streaming: false,
+            timestamp: 0,
+        };
+
+        let theme = Theme::default();
+        let highlighter = Highlighter::new();
+        let (lines, _) = build_chat_lines(
+            &[display],
+            &theme,
+            &highlighter,
+            80,
+            0,
+            None,
+            true,
+            ChatToolDisplay::Interleaved,
+            5,
+            false,
+            AnimationLevel::Minimal,
+            AnimationState::Idle,
+        );
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        let first_thought_idx = rendered
+            .iter()
+            .position(|line| line.contains("thought for 5 seconds"))
+            .unwrap();
+        let tool_idx = rendered
+            .iter()
+            .position(|line| line.contains("read") && line.contains("src/main.rs"))
+            .unwrap();
+        let second_thought_idx = rendered
+            .iter()
+            .position(|line| line.contains("thought for 20 seconds"))
+            .unwrap();
+        let text_idx = rendered
+            .iter()
+            .position(|line| line.contains("Done"))
+            .unwrap();
+
+        assert!(first_thought_idx < tool_idx);
+        assert!(tool_idx < second_thought_idx);
+        assert!(second_thought_idx < text_idx);
+    }
+
+    #[test]
     fn assistant_blocks_preserve_text_tool_text_order() {
         let assistant = imp_llm::Message::Assistant(imp_llm::AssistantMessage {
             content: vec![
@@ -1363,6 +1577,42 @@ mod tests {
             .iter()
             .any(|line| line.contains("read") && line.contains("src/main.rs")));
         assert!(!rendered.iter().any(|line| line.contains("fn main() {}")));
+    }
+
+    #[test]
+    fn focused_tool_call_shows_arrow_in_summary_mode() {
+        let theme = Theme::default();
+        let highlighter = Highlighter::new();
+        let messages = vec![DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: vec![make_tool("tc-1")],
+            assistant_blocks: vec![DisplayAssistantBlock::ToolCall { id: "tc-1".into() }],
+            is_streaming: false,
+            timestamp: 0,
+        }];
+
+        let (lines, visible_tools) = build_chat_lines(
+            &messages,
+            &theme,
+            &highlighter,
+            80,
+            0,
+            Some(0),
+            true,
+            ChatToolDisplay::Summary,
+            5,
+            false,
+            AnimationLevel::Minimal,
+            AnimationState::Idle,
+        );
+
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(visible_tools.len(), 1);
+        assert!(rendered.iter().any(|line| line.contains("▸")
+            && line.contains("read")
+            && line.contains("src/main.rs")));
     }
 
     #[test]

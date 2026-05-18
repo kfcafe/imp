@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::animation::{activity_label, format_elapsed, ActivitySurface, AnimationState};
+use crate::animation::{
+    activity_label, format_elapsed, queued_glyph, ActivitySurface, AnimationState,
+};
 use imp_core::config::AnimationLevel;
 use imp_llm::ThinkingLevel;
 use ratatui::buffer::Buffer;
@@ -13,6 +15,28 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::theme::Theme;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowMode {
+    Normal,
+    Improve,
+}
+
+impl WorkflowMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            WorkflowMode::Normal => "",
+            WorkflowMode::Improve => "IMPROVE",
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            WorkflowMode::Normal => "Normal",
+            WorkflowMode::Improve => "Improve",
+        }
+    }
+}
+
 /// Multi-line editor state with cursor management.
 #[derive(Debug, Clone)]
 pub struct EditorState {
@@ -23,6 +47,7 @@ pub struct EditorState {
     pub history: Vec<String>,
     pub history_idx: Option<usize>,
     pub scroll_offset: usize,
+    paste_ranges: Vec<std::ops::Range<usize>>,
 }
 
 impl EditorState {
@@ -43,20 +68,37 @@ impl EditorState {
             history: Vec::new(),
             history_idx: None,
             scroll_offset: 0,
+            paste_ranges: Vec::new(),
         }
     }
 
     pub fn insert_char(&mut self, c: char) {
         self.normalize_cursor();
+        let at = self.cursor;
         self.content.insert(self.cursor, c);
         self.cursor += c.len_utf8();
+        self.record_insert(at, c.len_utf8());
         self.update_position();
     }
 
     pub fn insert_newline(&mut self) {
         self.normalize_cursor();
+        let at = self.cursor;
         self.content.insert(self.cursor, '\n');
         self.cursor += 1;
+        self.record_insert(at, 1);
+        self.update_position();
+    }
+
+    pub fn insert_paste(&mut self, text: &str) {
+        self.normalize_cursor();
+        let start = self.cursor;
+        self.content.insert_str(self.cursor, text);
+        self.cursor += text.len();
+        self.record_insert(start, text.len());
+        if crate::views::chat::pasted_block_summary(text).is_some() {
+            self.paste_ranges.push(start..self.cursor);
+        }
         self.update_position();
     }
 
@@ -65,6 +107,7 @@ impl EditorState {
         if self.cursor > 0 {
             let prev = prev_char_boundary(&self.content, self.cursor);
             self.content.drain(prev..self.cursor);
+            self.record_delete(prev..self.cursor);
             self.cursor = prev;
             self.update_position();
         }
@@ -75,6 +118,7 @@ impl EditorState {
         if self.cursor < self.content.len() {
             let next = next_char_boundary(&self.content, self.cursor);
             self.content.drain(self.cursor..next);
+            self.record_delete(self.cursor..next);
             self.update_position();
         }
     }
@@ -181,6 +225,7 @@ impl EditorState {
         let start = self.cursor;
         self.move_word_left();
         self.content.drain(self.cursor..start);
+        self.record_delete(self.cursor..start);
         self.update_position();
     }
 
@@ -191,6 +236,7 @@ impl EditorState {
             before.rfind('\n').map(|p| p + 1).unwrap_or(0)
         };
         self.content.drain(line_start..self.cursor);
+        self.record_delete(line_start..self.cursor);
         self.cursor = line_start;
         self.update_position();
     }
@@ -202,23 +248,52 @@ impl EditorState {
             self.cursor + after.find('\n').unwrap_or(after.len())
         };
         self.content.drain(self.cursor..line_end);
+        self.record_delete(self.cursor..line_end);
         self.update_position();
     }
 
     pub fn clear(&mut self) {
         self.content.clear();
+        self.paste_ranges.clear();
         self.cursor = 0;
         self.update_position();
     }
 
     pub fn set_content(&mut self, text: &str) {
         self.content = text.to_string();
+        self.paste_ranges.clear();
         self.cursor = self.content.len();
         self.update_position();
     }
 
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    fn record_insert(&mut self, at: usize, len: usize) {
+        for range in &mut self.paste_ranges {
+            if range.start >= at {
+                range.start += len;
+                range.end += len;
+            } else if range.end > at {
+                range.end += len;
+            }
+        }
+    }
+
+    fn record_delete(&mut self, deleted: std::ops::Range<usize>) {
+        let len = deleted.end.saturating_sub(deleted.start);
+        self.paste_ranges.retain_mut(|range| {
+            let overlaps = range.start < deleted.end && range.end > deleted.start;
+            if overlaps {
+                return false;
+            }
+            if range.start >= deleted.end {
+                range.start = range.start.saturating_sub(len);
+                range.end = range.end.saturating_sub(len);
+            }
+            true
+        });
     }
 
     pub fn is_empty(&self) -> bool {
@@ -230,9 +305,14 @@ impl EditorState {
     }
 
     pub fn visual_line_count_with_summary(&self, inner_width: u16, summarize_paste: bool) -> usize {
-        editor_display_lines(&self.content, inner_width, summarize_paste)
-            .len()
-            .max(1)
+        editor_display_lines(
+            &self.content,
+            &self.paste_ranges,
+            inner_width,
+            summarize_paste,
+        )
+        .len()
+        .max(1)
     }
 
     pub fn visual_line_count(&self, inner_width: u16) -> usize {
@@ -327,7 +407,7 @@ pub struct EditorView<'a> {
     cwd: &'a str,
     session_name: &'a str,
     is_streaming: bool,
-    has_queued: bool,
+    queued_preview: Option<String>,
     current_context_tokens: u32,
     context_window: u32,
     show_context_usage: bool,
@@ -337,6 +417,13 @@ pub struct EditorView<'a> {
     tick: u64,
     animation_level: AnimationLevel,
     activity_state: AnimationState,
+    _workflow_mode: WorkflowMode,
+    mana_scope_label: Option<String>,
+    mana_run_label: Option<String>,
+    build_loop_label: Option<String>,
+    improve_status_label: Option<String>,
+    loop_label: Option<String>,
+    git_label: Option<String>,
 }
 
 impl<'a> EditorView<'a> {
@@ -350,7 +437,7 @@ impl<'a> EditorView<'a> {
             cwd: "",
             session_name: "",
             is_streaming: false,
-            has_queued: false,
+            queued_preview: None,
             current_context_tokens: 0,
             context_window: 0,
             show_context_usage: true,
@@ -360,6 +447,13 @@ impl<'a> EditorView<'a> {
             tick: 0,
             animation_level: AnimationLevel::Minimal,
             activity_state: AnimationState::Idle,
+            _workflow_mode: WorkflowMode::Normal,
+            mana_scope_label: None,
+            mana_run_label: None,
+            build_loop_label: None,
+            improve_status_label: None,
+            loop_label: None,
+            git_label: None,
         }
     }
 
@@ -396,8 +490,8 @@ impl<'a> EditorView<'a> {
         self
     }
 
-    pub fn queued(mut self, has_queued: bool) -> Self {
-        self.has_queued = has_queued;
+    pub fn queued(mut self, preview: Option<String>) -> Self {
+        self.queued_preview = preview;
         self
     }
 
@@ -422,6 +516,41 @@ impl<'a> EditorView<'a> {
         self.activity_state = state;
         self
     }
+
+    pub fn workflow_mode(mut self, mode: WorkflowMode) -> Self {
+        self._workflow_mode = mode;
+        self
+    }
+
+    pub fn mana_scope_label(mut self, label: Option<String>) -> Self {
+        self.mana_scope_label = label;
+        self
+    }
+
+    pub fn mana_run_label(mut self, label: Option<String>) -> Self {
+        self.mana_run_label = label;
+        self
+    }
+
+    pub fn build_loop_label(mut self, label: Option<String>) -> Self {
+        self.build_loop_label = label;
+        self
+    }
+
+    pub fn improve_status_label(mut self, label: Option<String>) -> Self {
+        self.improve_status_label = label;
+        self
+    }
+
+    pub fn loop_label(mut self, label: Option<String>) -> Self {
+        self.loop_label = label;
+        self
+    }
+
+    pub fn git_label(mut self, label: Option<String>) -> Self {
+        self.git_label = label;
+        self
+    }
 }
 
 impl Widget for EditorView<'_> {
@@ -430,24 +559,22 @@ impl Widget for EditorView<'_> {
             return;
         }
 
-        let prompt_activity_state = if self.has_queued {
+        let prompt_activity_state = if self.queued_preview.is_some() {
             AnimationState::Queued
         } else {
             self.activity_state
         };
 
-        let border_style = superbar_border_style(
-            self.theme,
-            self.thinking_level,
-            prompt_activity_state,
-            self.tick,
-            self.animation_level,
-        );
+        let border_style = superbar_border_style(self.theme, self.thinking_level);
 
         let top_left = build_identity_label(self.cwd, self.session_name, area.width);
         let top_right = build_top_right_label(self.turn_elapsed, self.theme);
-        let bottom_left =
-            build_bottom_left_label(prompt_activity_state, self.tick, self.animation_level);
+        let bottom_left = build_bottom_left_label(
+            self._workflow_mode,
+            self.mana_scope_label.as_deref(),
+            self.mana_run_label.as_deref(),
+            self.build_loop_label.as_deref(),
+        );
         let activity =
             editor_activity_label(prompt_activity_state, self.tick, self.animation_level);
 
@@ -500,8 +627,14 @@ impl Widget for EditorView<'_> {
                 context_style,
             );
         }
+        if let Some(git) = self.git_label.as_deref() {
+            push_part(git.to_string(), self.theme.muted_style());
+        }
         if let Some(queue) = queue_label {
             push_part(queue, self.theme.warning_style());
+        }
+        if let Some(loop_label) = self.loop_label.as_deref() {
+            push_part(loop_label.to_string(), self.theme.warning_style());
         }
         if !activity.is_empty() {
             push_part(activity, self.theme.muted_style());
@@ -518,31 +651,65 @@ impl Widget for EditorView<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
+        let mut content_inner = inner;
+        if let Some(status) = self.improve_status_label.as_deref() {
+            if inner.height > 1 {
+                let status_y = content_inner.y;
+                buf.set_line(
+                    content_inner.x,
+                    status_y,
+                    &Line::from(Span::styled(status.to_string(), self.theme.accent_style())),
+                    content_inner.width,
+                );
+                content_inner.y = content_inner.y.saturating_add(1);
+                content_inner.height = content_inner.height.saturating_sub(1);
+            }
+        }
+        if let Some(preview) = self.queued_preview.as_deref() {
+            if inner.height > 1 {
+                let queue_y = inner.y + inner.height - 1;
+                let label = format!("{} queued {}", queued_glyph(), preview);
+                buf.set_line(
+                    inner.x,
+                    queue_y,
+                    &Line::from(Span::styled(label, self.theme.warning_style())),
+                    inner.width,
+                );
+                content_inner.height = content_inner.height.saturating_sub(1);
+            }
+        }
+
         // Render editor content using wrapped visual lines so auto-grow and cursor math stay aligned.
-        let lines = editor_display_lines(&self.state.content, inner.width, self.summarize_paste)
-            .into_iter()
-            .skip(self.state.scroll_offset)
-            .take(inner.height as usize)
-            .collect::<Vec<_>>();
+        let lines = editor_display_lines(
+            &self.state.content,
+            &self.state.paste_ranges,
+            content_inner.width,
+            self.summarize_paste,
+        )
+        .into_iter()
+        .skip(self.state.scroll_offset)
+        .take(content_inner.height as usize)
+        .collect::<Vec<_>>();
 
         for (idx, line) in lines.iter().enumerate() {
-            if idx >= inner.height as usize {
+            if idx >= content_inner.height as usize {
                 break;
             }
             buf.set_line(
-                inner.x,
-                inner.y + idx as u16,
+                content_inner.x,
+                content_inner.y + idx as u16,
                 &Line::raw(line.clone()),
-                inner.width,
+                content_inner.width,
             );
         }
 
         // Placeholder text when empty and not streaming
-        if self.state.content.is_empty() && !self.is_streaming {
-            let placeholder = "Ask anything… ⇧↵ newline  @file attach context  / palette  : shell";
+        if self.state.content.is_empty() && !self.is_streaming && content_inner.height > 0 {
+            let placeholder =
+                "Ask anything… ⇧↵ newline  @file attach context  / palette  ! or : shell  :cd cwd";
             buf.set_string(
-                inner.x,
-                inner.y,
+                content_inner.x,
+                content_inner.y,
                 placeholder,
                 Style::default().fg(Color::DarkGray),
             );
@@ -552,14 +719,75 @@ impl Widget for EditorView<'_> {
 
 // --- Helpers ---
 
-fn editor_display_lines(text: &str, inner_width: u16, summarize_paste: bool) -> Vec<String> {
-    if summarize_paste {
-        if let Some(summary) = crate::views::chat::pasted_block_summary(text) {
-            return wrapped_lines_for_width(&summary, inner_width);
-        }
+fn editor_display_lines(
+    text: &str,
+    paste_ranges: &[std::ops::Range<usize>],
+    inner_width: u16,
+    summarize_paste: bool,
+) -> Vec<String> {
+    if !summarize_paste || paste_ranges.is_empty() {
+        return wrapped_lines_for_width(text, inner_width);
     }
 
-    wrapped_lines_for_width(text, inner_width)
+    let mut display = String::new();
+    let mut cursor = 0usize;
+    let mut ranges = paste_ranges
+        .iter()
+        .filter(|range| {
+            range.start < range.end
+                && range.end <= text.len()
+                && text.is_char_boundary(range.start)
+                && text.is_char_boundary(range.end)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|range| range.start);
+
+    for range in ranges {
+        if range.start < cursor {
+            continue;
+        }
+        display.push_str(&text[cursor..range.start]);
+        let pasted = &text[range.clone()];
+        if let Some(summary) = pasted_inline_summary(pasted) {
+            display.push_str(&summary);
+        } else {
+            display.push_str(pasted);
+        }
+        cursor = range.end;
+    }
+    display.push_str(&text[cursor..]);
+
+    wrapped_lines_for_width(&display, inner_width)
+}
+
+fn pasted_inline_summary(text: &str) -> Option<String> {
+    crate::views::chat::pasted_block_summary(text)?;
+    let first = text.lines().find(|line| !line.trim().is_empty())?.trim();
+    let preview = truncate_display_width(first, 48);
+    let extra_lines = text.lines().count().saturating_sub(1);
+    Some(format!("[{preview} + {extra_lines} lines]"))
+}
+
+fn truncate_display_width(text: &str, max_width: usize) -> String {
+    if display_width(text) <= max_width {
+        return text.to_string();
+    }
+
+    let suffix = "…";
+    let target = max_width.saturating_sub(display_width(suffix));
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_width = char_display_width(ch);
+        if width + ch_width > target {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out.push_str(suffix);
+    out
 }
 
 fn build_identity_label(cwd: &str, session_name: &str, area_width: u16) -> Vec<Span<'static>> {
@@ -583,16 +811,24 @@ fn build_top_right_label(turn_elapsed: Option<Duration>, theme: &Theme) -> Vec<S
 }
 
 fn build_bottom_left_label(
-    activity_state: AnimationState,
-    tick: u64,
-    animation_level: AnimationLevel,
+    _workflow_mode: WorkflowMode,
+    mana_scope_label: Option<&str>,
+    mana_run_label: Option<&str>,
+    build_loop_label: Option<&str>,
 ) -> Vec<Span<'static>> {
-    let label = editor_activity_label(activity_state, tick, animation_level);
-    if label.is_empty() {
-        Vec::new()
-    } else {
-        vec![Span::raw(label)]
+    let mut spans = Vec::new();
+    if let Some(scope) = mana_scope_label.filter(|scope| !scope.trim().is_empty()) {
+        spans.push(Span::raw(scope.to_string()));
     }
+    if let Some(run) = mana_run_label.filter(|label| !label.trim().is_empty()) {
+        spans.push(Span::raw(" · "));
+        spans.push(Span::raw(run.to_string()));
+    }
+    if let Some(loop_state) = build_loop_label.filter(|label| !label.trim().is_empty()) {
+        spans.push(Span::raw(" · "));
+        spans.push(Span::raw(loop_state.to_string()));
+    }
+    spans
 }
 
 fn editor_activity_label(
@@ -611,86 +847,8 @@ fn editor_activity_label(
     }
 }
 
-fn superbar_border_style(
-    theme: &Theme,
-    thinking_level: ThinkingLevel,
-    activity_state: AnimationState,
-    tick: u64,
-    animation_level: AnimationLevel,
-) -> Style {
-    let color = superbar_border_color(theme, thinking_level, activity_state, tick, animation_level);
-    let mut style = Style::default().fg(color);
-    if superbar_border_is_animated(activity_state, animation_level) {
-        style = style.add_modifier(ratatui::style::Modifier::BOLD);
-    }
-    style
-}
-
-fn superbar_border_is_animated(
-    activity_state: AnimationState,
-    animation_level: AnimationLevel,
-) -> bool {
-    if animation_level == AnimationLevel::None {
-        return false;
-    }
-
-    !matches!(
-        activity_state,
-        AnimationState::Idle | AnimationState::Thinking | AnimationState::WaitingForResponse
-    )
-}
-
-fn superbar_border_color(
-    theme: &Theme,
-    thinking_level: ThinkingLevel,
-    activity_state: AnimationState,
-    tick: u64,
-    animation_level: AnimationLevel,
-) -> Color {
-    let base = theme.thinking_border_color(thinking_level);
-    if !superbar_border_is_animated(activity_state, animation_level) {
-        return base;
-    }
-
-    let target = match activity_state {
-        AnimationState::Idle => base,
-        AnimationState::WaitingForResponse => theme.muted,
-        AnimationState::Thinking => theme.accent,
-        AnimationState::ExecutingTools { .. } => theme.warning,
-        AnimationState::Streaming => theme.success,
-        AnimationState::Queued => theme.warning,
-    };
-
-    let pulse = match animation_level {
-        AnimationLevel::None => 0.0,
-        AnimationLevel::Minimal => {
-            const PULSE: [f32; 4] = [0.10, 0.22, 0.34, 0.22];
-            PULSE[(tick / 4) as usize % PULSE.len()]
-        }
-        AnimationLevel::Spinner => {
-            const PULSE: [f32; 6] = [0.16, 0.32, 0.50, 0.68, 0.50, 0.32];
-            PULSE[(tick / 2) as usize % PULSE.len()]
-        }
-    };
-
-    mix_color(base, target, pulse)
-}
-
-fn mix_color(base: Color, target: Color, amount: f32) -> Color {
-    let amount = amount.clamp(0.0, 1.0);
-    match (base, target) {
-        (Color::Rgb(br, bg, bb), Color::Rgb(tr, tg, tb)) => Color::Rgb(
-            mix_channel(br, tr, amount),
-            mix_channel(bg, tg, amount),
-            mix_channel(bb, tb, amount),
-        ),
-        _ if amount >= 0.5 => target,
-        _ => base,
-    }
-}
-
-fn mix_channel(base: u8, target: u8, amount: f32) -> u8 {
-    (base as f32 + (target as f32 - base as f32) * amount).round() as u8
+fn superbar_border_style(theme: &Theme, thinking_level: ThinkingLevel) -> Style {
+    Style::default().fg(theme.thinking_border_color(thinking_level))
 }
 
 fn abbreviate_home(path: &str) -> String {
@@ -810,36 +968,7 @@ pub fn wrapped_lines_for_width(text: &str, inner_width: u16) -> Vec<String> {
             continue;
         }
 
-        let mut current = String::new();
-        let mut current_width = 0usize;
-
-        for ch in logical.chars() {
-            let ch_width = char_display_width(ch);
-
-            if !current.is_empty() && current_width + ch_width > width {
-                out.push(current);
-                current = String::new();
-                current_width = 0;
-            }
-
-            if current.is_empty() && ch_width > width {
-                out.push(ch.to_string());
-                continue;
-            }
-
-            current.push(ch);
-            current_width += ch_width;
-
-            if current_width == width {
-                out.push(current);
-                current = String::new();
-                current_width = 0;
-            }
-        }
-
-        if !current.is_empty() {
-            out.push(current);
-        }
+        wrap_logical_line(logical, width, &mut out);
     }
 
     if out.is_empty() {
@@ -849,50 +978,92 @@ pub fn wrapped_lines_for_width(text: &str, inner_width: u16) -> Vec<String> {
     out
 }
 
+fn wrap_logical_line(logical: &str, width: usize, out: &mut Vec<String>) {
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    let mut last_whitespace_byte = None;
+
+    for ch in logical.chars() {
+        let ch_width = char_display_width(ch);
+
+        if !current.is_empty() && current_width + ch_width > width {
+            if let Some(split_byte) = last_whitespace_byte {
+                let next = current[split_byte..].trim_start().to_string();
+                let line = current[..split_byte].trim_end().to_string();
+
+                if !line.is_empty() {
+                    out.push(line);
+                }
+
+                current = next;
+                current_width = display_width(&current);
+                last_whitespace_byte = last_whitespace_byte_in(&current);
+            } else {
+                out.push(current);
+                current = String::new();
+                current_width = 0;
+                last_whitespace_byte = None;
+            }
+        }
+
+        if current.is_empty() && ch_width > width {
+            out.push(ch.to_string());
+            continue;
+        }
+
+        current.push(ch);
+        current_width += ch_width;
+
+        if ch.is_whitespace() {
+            last_whitespace_byte = Some(current.len());
+        }
+
+        if current_width == width {
+            if let Some(split_byte) = last_whitespace_byte {
+                let next = current[split_byte..].trim_start().to_string();
+                let line = current[..split_byte].trim_end().to_string();
+
+                if !line.is_empty() {
+                    out.push(line);
+                }
+
+                current = next;
+                current_width = display_width(&current);
+                last_whitespace_byte = last_whitespace_byte_in(&current);
+            } else {
+                out.push(current);
+                current = String::new();
+                current_width = 0;
+                last_whitespace_byte = None;
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        out.push(current);
+    }
+}
+
+fn display_width(text: &str) -> usize {
+    text.chars().map(char_display_width).sum()
+}
+
+fn last_whitespace_byte_in(text: &str) -> Option<usize> {
+    text.char_indices()
+        .filter_map(|(idx, ch)| ch.is_whitespace().then_some(idx + ch.len_utf8()))
+        .last()
+}
+
 pub fn cursor_visual_position_for_text(
     text: &str,
     cursor: usize,
     inner_width: u16,
 ) -> (usize, usize) {
-    let width = inner_width.max(1) as usize;
-    let mut row = 0usize;
-    let mut col = 0usize;
-    let mut byte = 0usize;
-
-    for ch in text.chars() {
-        if byte >= cursor {
-            break;
-        }
-
-        if ch == '\n' {
-            row += 1;
-            col = 0;
-            byte += ch.len_utf8();
-            continue;
-        }
-
-        let ch_width = char_display_width(ch);
-
-        if col > 0 && col + ch_width > width {
-            row += 1;
-            col = 0;
-        }
-
-        if col == 0 && ch_width > width {
-            row += 1;
-            col = 0;
-            byte += ch.len_utf8();
-            continue;
-        }
-
-        col += ch_width;
-        byte += ch.len_utf8();
-
-        if col == width {
-            row += 1;
-            col = 0;
-        }
-    }
+    let cursor = clamp_cursor_to_boundary(text, cursor);
+    let before_cursor = &text[..cursor];
+    let lines = wrapped_lines_for_width(before_cursor, inner_width);
+    let row = lines.len().saturating_sub(1);
+    let col = lines.last().map(|line| display_width(line)).unwrap_or(0);
 
     (row, col)
 }
@@ -929,6 +1100,35 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_lines_prefer_word_boundaries() {
+        assert_eq!(
+            wrapped_lines_for_width("hello world", 8),
+            vec!["hello".to_string(), "world".to_string()]
+        );
+    }
+
+    #[test]
+    fn wrapped_lines_split_words_that_exceed_width() {
+        assert_eq!(
+            wrapped_lines_for_width("superlongword", 5),
+            vec!["super".to_string(), "longw".to_string(), "ord".to_string()]
+        );
+    }
+
+    #[test]
+    fn cursor_position_tracks_word_boundary_wraps() {
+        assert_eq!(
+            cursor_visual_position_for_text("hello world", 11, 8),
+            (1, 5)
+        );
+    }
+
+    #[test]
+    fn cursor_position_tracks_partially_wrapped_word() {
+        assert_eq!(cursor_visual_position_for_text("hello world", 9, 8), (1, 3));
+    }
+
+    #[test]
     fn visual_line_count_includes_soft_wraps() {
         let mut editor = EditorState::new();
         editor.set_content("abcdefghij");
@@ -937,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn visual_line_count_with_paste_summary_uses_summary_height() {
+    fn typed_long_code_is_not_summarized() {
         let mut editor = EditorState::new();
         editor.set_content(
             &(1..=25)
@@ -946,7 +1146,33 @@ mod tests {
                 .join("\n"),
         );
 
-        assert_eq!(editor.visual_line_count_with_summary(80, true), 1);
+        assert_eq!(editor.visual_line_count_with_summary(80, true), 25);
+    }
+
+    #[test]
+    fn pasted_code_summary_preserves_surrounding_prompt_text() {
+        let mut editor = EditorState::new();
+        editor.set_content("please inspect:\n");
+        editor.insert_paste(
+            &(1..=5)
+                .map(|i| format!("fn example_{i}() {{}}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        editor.insert_newline();
+        editor.insert_char('t');
+        editor.insert_char('h');
+        editor.insert_char('x');
+
+        assert_eq!(
+            editor_display_lines(&editor.content, &editor.paste_ranges, 80, true),
+            vec![
+                "please inspect:".to_string(),
+                "[fn example_1() {} + 4 lines]".to_string(),
+                "thx".to_string(),
+            ]
+        );
+        assert!(editor.content().contains("fn example_5() {}"));
     }
 
     #[test]
@@ -1015,17 +1241,21 @@ mod tests {
     }
 
     #[test]
-    fn bottom_left_label_uses_live_run_state() {
+    fn bottom_left_label_uses_live_run_state_without_activity() {
         let rendered = build_bottom_left_label(
-            AnimationState::ExecutingTools { active_tools: 2 },
-            0,
-            AnimationLevel::Minimal,
+            WorkflowMode::Normal,
+            Some("364 Test scope"),
+            Some("run run-1 running"),
+            None,
         );
         let text: String = rendered
             .into_iter()
             .map(|span| span.content.into_owned())
             .collect();
-        assert!(text.contains("working"));
+        assert!(!text.contains("BUILD"));
+        assert!(text.contains("364 Test scope"));
+        assert!(text.contains("run run-1 running"));
+        assert!(!text.contains("working"));
     }
 
     #[test]
@@ -1041,54 +1271,24 @@ mod tests {
 
     #[test]
     fn bottom_left_label_hides_thinking_state() {
-        let rendered =
-            build_bottom_left_label(AnimationState::Thinking, 0, AnimationLevel::Minimal);
-        assert!(rendered.is_empty());
+        let rendered = build_bottom_left_label(WorkflowMode::Normal, None, None, None);
+        let text: String = rendered
+            .into_iter()
+            .map(|span| span.content.into_owned())
+            .collect();
+        assert_eq!(text, "");
     }
 
     #[test]
-    fn superbar_border_color_stays_base_when_idle() {
+    fn superbar_border_style_stays_static_when_active() {
         let theme = Theme::default();
-        let color = superbar_border_color(
-            &theme,
-            ThinkingLevel::Medium,
-            AnimationState::Idle,
-            0,
-            AnimationLevel::Spinner,
+        let idle = superbar_border_style(&theme, ThinkingLevel::Medium);
+        let active = superbar_border_style(&theme, ThinkingLevel::Medium);
+        assert_eq!(idle, active);
+        assert_eq!(
+            idle.fg,
+            Some(theme.thinking_border_color(ThinkingLevel::Medium))
         );
-        assert_eq!(color, theme.thinking_border_color(ThinkingLevel::Medium));
-    }
-
-    #[test]
-    fn superbar_border_color_stays_base_when_thinking() {
-        let theme = Theme::default();
-        let color = superbar_border_color(
-            &theme,
-            ThinkingLevel::Medium,
-            AnimationState::Thinking,
-            6,
-            AnimationLevel::Spinner,
-        );
-        assert_eq!(color, theme.thinking_border_color(ThinkingLevel::Medium));
-    }
-
-    #[test]
-    fn superbar_border_color_pulses_when_active() {
-        let theme = Theme::default();
-        let early = superbar_border_color(
-            &theme,
-            ThinkingLevel::Medium,
-            AnimationState::ExecutingTools { active_tools: 1 },
-            0,
-            AnimationLevel::Spinner,
-        );
-        let peak = superbar_border_color(
-            &theme,
-            ThinkingLevel::Medium,
-            AnimationState::ExecutingTools { active_tools: 1 },
-            6,
-            AnimationLevel::Spinner,
-        );
-        assert_ne!(early, peak);
+        assert!(!idle.add_modifier.contains(ratatui::style::Modifier::BOLD));
     }
 }

@@ -24,6 +24,7 @@ brew tap kfcafe/tap && brew install imp
 - [Architecture](#architecture)
 - [Development](#development)
 - [CLI Reference](#cli-reference)
+- [License](#license)
 
 ---
 
@@ -457,6 +458,30 @@ Limited/stubbed:
 
 imp should notify and ask before running Bun install commands; it must not install dependencies silently during import.
 
+## Slash-command Skills
+
+Discovered skills are directly invocable from the slash menu. A skill at `.imp/skills/deploy/SKILL.md` or `~/.config/imp/skills/deploy/SKILL.md` creates `/deploy` unless a built-in or Lua command already uses that name. Use `/skill:deploy` to explicitly invoke the skill when a name is ambiguous.
+
+Invoking a skill inserts its `SKILL.md` instructions into the prompt for the next agent turn. YAML frontmatter is stripped. `$ARGUMENTS` is replaced with everything after the command name; if arguments are provided and `$ARGUMENTS` is absent, imp appends `ARGUMENTS: ...`.
+
+Lua extensions remain the path for executable slash behavior with deterministic host-side effects:
+
+```
+.imp/skills/deploy/SKILL.md   # agent instructions and usage notes
+.imp/lua/deploy.lua           # optional executable /deploy behavior
+```
+
+```lua
+imp.register_command("deploy", {
+    description = "Deploy the current project",
+    handler = function(args)
+        return imp.exec("./scripts/deploy " .. (args or "")).stdout
+    end
+})
+```
+
+Lua-registered commands are shown in the TUI slash command menu with their descriptions and can be run as `/deploy ...`.
+
 ### Hooks
 
 Shell hook commands support placeholder interpolation. Quote placeholders that may contain shell-sensitive text, for example `'{command}'` or `"{command}"`, so imp can escape the value as one shell argument before executing `sh -c`.
@@ -578,6 +603,14 @@ bash tools/run-stress.sh
 See `tools/README.md` for requirements and caveats.
 
 ---
+
+## License
+
+imp is licensed under the Mozilla Public License 2.0 (MPL-2.0).
+
+You may use imp commercially, embed it in proprietary products, build private tools around it, and use it internally. If you modify imp's MPL-covered source files and distribute those modified files or binaries built from them, those modified imp files must remain available under MPL-2.0. Separate applications, plugins, integrations, and larger works that use imp may remain under their own licenses.
+
+See [LICENSE](LICENSE) for the full license text.
 
 ## CLI Reference
 

@@ -1,7 +1,7 @@
 //! Web tool — search the web and read pages.
 //!
 //! Single tool with two actions:
-//! - `search`: query a search API (Tavily, Exa, Linkup, or Perplexity)
+//! - `search`: query a search API (Tavily, Exa, Linkup, or Perplexity), or GitHub when `sources` includes `github`
 //! - `read`: fetch a URL and extract readable content natively
 //!
 //! Search provider is config-driven (`[web] search_provider = "tavily"`).
@@ -12,7 +12,10 @@ pub mod search;
 pub mod types;
 pub mod youtube;
 
+mod github;
+
 use async_trait::async_trait;
+use imp_llm::ContentBlock;
 use reqwest::Client;
 use serde_json::json;
 use std::sync::OnceLock;
@@ -60,8 +63,26 @@ impl Tool for WebTool {
                 "action": { "type": "string", "enum": ["search", "read"] },
                 "query": { "type": "string" },
                 "url": { "type": "string" },
-                "provider": { "type": "string", "enum": ["tavily", "exa", "linkup", "perplexity"] },
-                "maxResults": { "type": "number" }
+                "max_results": { "type": "integer", "minimum": 1, "maximum": 20 },
+                "sources": {
+                    "type": "array",
+                    "items": { "type": "string", "enum": ["web", "github"] },
+                    "description": "Optional search source. Use ['github'] for read-only GitHub repository search."
+                },
+                "github": {
+                    "type": "object",
+                    "properties": {
+                        "type": { "type": "string", "enum": ["repositories", "issues", "pull_requests", "code", "releases"] },
+                        "owner": { "type": "string" },
+                        "repo": { "type": "string" },
+                        "org": { "type": "string" },
+                        "language": { "type": "string" },
+                        "topic": { "type": "string" },
+                        "min_stars": { "type": "integer", "minimum": 0 },
+                        "updated_since": { "type": "string", "description": "ISO date such as 2025-01-01" }
+                    },
+                    "additionalProperties": false
+                }
             },
             "required": ["action"]
         })
@@ -89,14 +110,35 @@ impl Tool for WebTool {
 async fn execute_search(params: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
     let query = match params["query"].as_str() {
         Some(q) if !q.is_empty() => q,
-        _ => return Ok(ToolOutput::error("Missing 'query' parameter")),
+        _ => return Ok(ToolOutput::error("web search requires query")),
     };
 
-    let max_results = params["maxResults"]
-        .as_u64()
-        .map(|n| n as usize)
-        .unwrap_or(5)
-        .min(20);
+    let max_results = max_results_from_params(&params);
+
+    if should_search_github(&params) {
+        let response =
+            match github::search(http_client(), query, max_results, params.get("github")).await {
+                Ok(resp) => resp,
+                Err(e) => return Ok(ToolOutput::error(e.to_string())),
+            };
+
+        return Ok(ToolOutput {
+            content: vec![ContentBlock::Text {
+                text: truncate_output(format_search_response(&response, query)),
+            }],
+            details: json!({
+                "action": "search",
+                "source": "github",
+                "provider": response.provider.name(),
+                "query": query,
+                "max_results": max_results,
+                "results_count": response.results.len(),
+                "has_answer": response.answer.is_some(),
+                "results": response.results,
+            }),
+            is_error: false,
+        });
+    }
 
     let provider = resolve_provider(&params, ctx);
 
@@ -105,23 +147,47 @@ async fn execute_search(params: serde_json::Value, ctx: &ToolContext) -> Result<
         Err(e) => return Ok(ToolOutput::error(e.to_string())),
     };
 
-    Ok(ToolOutput::text(truncate_output(format_search_response(
-        &response, query,
-    ))))
+    Ok(ToolOutput {
+        content: vec![ContentBlock::Text {
+            text: truncate_output(format_search_response(&response, query)),
+        }],
+        details: json!({
+            "action": "search",
+            "provider": response.provider.name(),
+            "query": query,
+            "max_results": max_results,
+            "results_count": response.results.len(),
+            "has_answer": response.answer.is_some(),
+            "results": response.results,
+        }),
+        is_error: false,
+    })
 }
 
-fn resolve_provider(params: &serde_json::Value, ctx: &ToolContext) -> SearchProvider {
-    // Explicit param override
-    if let Some(name) = params["provider"].as_str() {
-        match name {
-            "tavily" => return SearchProvider::Tavily,
-            "exa" => return SearchProvider::Exa,
-            "linkup" => return SearchProvider::Linkup,
-            "perplexity" => return SearchProvider::Perplexity,
-            _ => {}
-        }
-    }
+fn max_results_from_params(params: &serde_json::Value) -> usize {
+    params
+        .get("max_results")
+        .or_else(|| params.get("maxResults"))
+        .and_then(|value| value.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(5)
+        .clamp(1, 20)
+}
 
+fn should_search_github(params: &serde_json::Value) -> bool {
+    params
+        .get("sources")
+        .and_then(|value| value.as_array())
+        .is_some_and(|sources| {
+            sources.iter().any(|source| {
+                source
+                    .as_str()
+                    .is_some_and(|s| s.eq_ignore_ascii_case("github"))
+            })
+        })
+}
+
+fn resolve_provider(_params: &serde_json::Value, ctx: &ToolContext) -> SearchProvider {
     // Env-driven default: IMP_WEB_PROVIDER=exa
     if let Ok(env_provider) = std::env::var("IMP_WEB_PROVIDER") {
         match env_provider.to_lowercase().as_str() {
@@ -192,8 +258,37 @@ fn format_search_response(response: &types::SearchResponse, query: &str) -> Stri
 async fn execute_read(params: serde_json::Value) -> Result<ToolOutput> {
     let url = match params["url"].as_str() {
         Some(u) if !u.is_empty() => u,
-        _ => return Ok(ToolOutput::error("Missing 'url' parameter")),
+        _ => return Ok(ToolOutput::error("web read requires url")),
     };
+
+    if github::is_github_url(url) {
+        let gh = match github::read_url(http_client(), url).await {
+            Ok(read) => read,
+            Err(e) => return Ok(ToolOutput::error(e.to_string())),
+        };
+        let mut output = format!(
+            "# {}\nURL: {}\nSource: GitHub ({})\n\n---\n\n",
+            gh.title, gh.url, gh.kind
+        );
+        output.push_str("<web_content>\n");
+        output.push_str(&gh.text);
+        output.push_str("\n</web_content>");
+        return Ok(ToolOutput {
+            content: vec![ContentBlock::Text {
+                text: truncate_output(output),
+            }],
+            details: json!({
+                "action": "read",
+                "source": "github",
+                "kind": gh.kind,
+                "title": gh.title,
+                "url": gh.url,
+                "content_length": gh.text.len(),
+                "github": gh.details,
+            }),
+            is_error: false,
+        });
+    }
 
     let page = match read::fetch_and_extract(http_client(), url).await {
         Ok(page) => page,
@@ -236,7 +331,26 @@ async fn execute_read(params: serde_json::Value) -> Result<ToolOutput> {
     output.push_str(&page.text);
     output.push_str("\n</web_content>");
 
-    Ok(ToolOutput::text(truncate_output(output)))
+    Ok(ToolOutput {
+        content: vec![ContentBlock::Text {
+            text: truncate_output(output),
+        }],
+        details: json!({
+            "action": "read",
+            "requested_url": page.requested_url,
+            "final_url": page.url,
+            "status_code": page.status_code,
+            "content_type": page.content_type,
+            "format_received": page.format_received.name(),
+            "was_redirected": page.was_redirected,
+            "raw_body_bytes": page.raw_body_bytes,
+            "content_length": page.content_length,
+            "quality": page.quality.name(),
+            "quality_reasons": page.quality_reasons,
+            "diagnostics": page.diagnostics,
+        }),
+        is_error: false,
+    })
 }
 
 // ── output truncation ───────────────────────────────────────────────
@@ -281,6 +395,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn schema_hides_provider_and_uses_max_results() {
+        let schema = WebTool.parameters();
+        let properties = schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("max_results"));
+        assert!(!properties.contains_key("maxResults"));
+        assert!(!properties.contains_key("provider"));
+    }
+
+    #[test]
     fn resolve_provider_prefers_env_over_config() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".imp")).unwrap();
@@ -313,7 +436,9 @@ mod tests {
             turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            run_policy: Default::default(),
             config: std::sync::Arc::new(crate::config::Config::default()),
+            supporting_provenance: Vec::new(),
         };
 
         let provider = resolve_provider(&serde_json::json!({}), &ctx);
@@ -326,6 +451,17 @@ mod tests {
     }
 
     #[test]
+    fn max_results_accepts_legacy_camel_case() {
+        let modern = serde_json::json!({"max_results": 7});
+        let legacy = serde_json::json!({"maxResults": 8});
+        let clamped = serde_json::json!({"max_results": 99});
+
+        assert_eq!(max_results_from_params(&modern), 7);
+        assert_eq!(max_results_from_params(&legacy), 8);
+        assert_eq!(max_results_from_params(&clamped), 20);
+    }
+
+    #[test]
     fn format_search_with_answer() {
         let response = types::SearchResponse {
             results: vec![types::SearchResult {
@@ -333,6 +469,9 @@ mod tests {
                 url: "https://rust-lang.org".into(),
                 snippet: Some("A systems programming language".into()),
                 date: None,
+                source_type: None,
+                kind: None,
+                metadata: None,
             }],
             answer: Some("Rust is a systems programming language.".into()),
             provider: SearchProvider::Tavily,

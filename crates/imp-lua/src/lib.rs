@@ -106,8 +106,10 @@ mod tests {
             turn_mana_review: Arc::new(std::sync::Mutex::new(
                 imp_core::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            run_policy: Default::default(),
             config: Arc::new(imp_core::config::Config::default()),
             lua_tool_loader: None,
+            supporting_provenance: Vec::new(),
         }
     }
 
@@ -466,6 +468,25 @@ mod tests {
     }
 
     #[test]
+    fn exec_with_args_runs_command_without_shell_joining() {
+        let rt = make_runtime();
+        rt.set_allow_shell_exec(true);
+        rt.exec(
+            r#"
+            local result = imp.exec("sh", { "-lc", "printf '%s' \"$1\"", "--", "hello world" })
+            _test_stdout = result.stdout
+            _test_exit = result.exit_code
+        "#,
+        )
+        .unwrap();
+
+        let stdout: String = rt.lua().globals().get("_test_stdout").unwrap();
+        let exit_code: i32 = rt.lua().globals().get("_test_exit").unwrap();
+        assert_eq!(stdout, "hello world");
+        assert_eq!(exit_code, 0);
+    }
+
+    #[test]
     fn exec_with_cwd() {
         let rt = make_runtime();
         rt.set_allow_shell_exec(true);
@@ -503,6 +524,64 @@ mod tests {
         assert!(is_nil);
     }
 
+    // ── imp.ui ─────────────────────────────────────────────────
+
+    #[test]
+    fn imp_ui_confirm_returns_nil_without_call_context() {
+        let rt = make_runtime();
+        rt.exec(
+            r#"
+            _confirm_result = imp.ui.confirm("Proceed?", "No UI should be unavailable")
+            _is_nil = (_confirm_result == nil)
+        "#,
+        )
+        .unwrap();
+
+        let is_nil: bool = rt.lua().globals().get("_is_nil").unwrap();
+        assert!(is_nil);
+    }
+
+    #[test]
+    fn imp_ui_request_reports_unavailable_without_call_context() {
+        let rt = make_runtime();
+        rt.exec(
+            r#"
+            _ui_result = imp.ui.request({ kind = "confirm", title = "Proceed?" })
+        "#,
+        )
+        .unwrap();
+
+        let result: mlua::Table = rt.lua().globals().get("_ui_result").unwrap();
+        let ok: bool = result.get("ok").unwrap();
+        let reason: String = result.get("reason").unwrap();
+        assert!(!ok);
+        assert_eq!(reason, "unavailable");
+    }
+
+    #[test]
+    fn lua_command_can_call_imp_ui_confirm_safely_headless() {
+        let rt = make_runtime();
+        rt.exec(
+            r#"
+            imp.register_command("confirm-test", {
+                handler = function(args)
+                    local yes = imp.ui.confirm("Proceed?", args)
+                    if yes == nil then
+                        return "unavailable"
+                    end
+                    return tostring(yes)
+                end
+            })
+        "#,
+        )
+        .unwrap();
+
+        let output = rt
+            .execute_command_with_context("confirm-test", "headless", Some(test_ctx().into()))
+            .unwrap();
+        assert_eq!(output.as_deref(), Some("unavailable"));
+    }
+
     // ── Hot reload ──────────────────────────────────────────────
 
     #[test]
@@ -520,8 +599,9 @@ mod tests {
         "#,
         );
 
+        let policy = make_policy();
         // First load
-        let (rt1, exts1) = reload(user_dir.path(), None).unwrap();
+        let (rt1, exts1) = reload(user_dir.path(), None, &policy).unwrap();
         assert_eq!(rt1.hook_count(), 1);
         assert_eq!(rt1.tool_count(), 1);
         assert_eq!(exts1.len(), 1);
@@ -539,7 +619,7 @@ mod tests {
         );
 
         // Reload — old state is dropped, new state picks up changes
-        let (rt2, exts2) = reload(user_dir.path(), None).unwrap();
+        let (rt2, exts2) = reload(user_dir.path(), None, &policy).unwrap();
         assert_eq!(rt2.hook_count(), 2);
         assert_eq!(rt2.tool_count(), 2);
         assert_eq!(exts2.len(), 1);
@@ -547,6 +627,22 @@ mod tests {
         let tool_names = rt2.tool_names();
         assert!(tool_names.contains(&"tool_a".to_string()));
         assert!(tool_names.contains(&"tool_b".to_string()));
+    }
+
+    #[test]
+    fn hot_reload_applies_capability_policy() {
+        let user_dir = TempDir::new().unwrap();
+        let lua_dir = user_dir.path().join("lua");
+        std::fs::create_dir_all(&lua_dir).unwrap();
+        write_lua(&lua_dir, "ext.lua", "-- extension present");
+
+        let mut policy = make_policy();
+        policy.allow_shell_exec = true;
+
+        let (rt, _exts) = reload(user_dir.path(), None, &policy).unwrap();
+        assert!(rt
+            .allow_shell_exec()
+            .load(std::sync::atomic::Ordering::Relaxed));
     }
 
     // ── Error handling ──────────────────────────────────────────
@@ -947,6 +1043,7 @@ mod tests {
             anchor_store: Arc::new(imp_core::tools::AnchorStore::new()),
             mode: imp_core::config::AgentMode::Full,
             read_max_lines: 500,
+            run_policy: Default::default(),
             lua_tool_loader: None,
             config: Arc::new(imp_core::config::Config::default()),
         }

@@ -3,7 +3,6 @@ pub mod bash;
 pub mod edit;
 pub mod extend;
 pub mod git;
-pub mod imp;
 pub mod lua;
 pub mod mana;
 pub mod memory;
@@ -14,6 +13,7 @@ pub mod scan;
 pub mod session_search;
 pub mod shell;
 pub mod web;
+pub mod worktree;
 pub mod write;
 
 use std::collections::hash_map::DefaultHasher;
@@ -31,6 +31,8 @@ use crate::config::AgentMode;
 use crate::config::LuaCapabilityPolicy;
 use crate::error::Result;
 use crate::mana_review::TurnManaReviewAccumulator;
+use crate::reference_monitor::ToolMetadata;
+use crate::trust::Provenance;
 use crate::ui::UserInterface;
 
 /// Resolve a user-provided path: expands `~` to home dir, resolves relative paths against cwd.
@@ -69,6 +71,11 @@ pub trait Tool: Send + Sync {
 
     /// Whether this tool only reads (no side effects).
     fn is_readonly(&self) -> bool;
+
+    /// Metadata used by the runtime reference monitor.
+    fn policy_metadata(&self) -> ToolMetadata {
+        ToolMetadata::for_tool_name(self.name(), self.is_readonly())
+    }
 
     /// Execute the tool.
     async fn execute(
@@ -220,6 +227,10 @@ pub struct ToolContext {
     pub turn_mana_review: Arc<std::sync::Mutex<TurnManaReviewAccumulator>>,
     /// Resolved runtime config for tool-specific policy checks.
     pub config: Arc<crate::config::Config>,
+    /// Per-run tool/write policy layered on top of AgentMode.
+    pub run_policy: crate::policy::RunPolicy,
+    /// Supporting provenance for content that motivates durable writes in this tool call.
+    pub supporting_provenance: Vec<Provenance>,
 }
 
 /// In-session file content cache. Avoids re-reading files that haven't changed.
@@ -450,6 +461,13 @@ impl ToolContext {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    pub fn check_write_path(&self, path: &Path) -> std::result::Result<(), String> {
+        match self.run_policy.check_write_path(&self.cwd, path) {
+            crate::policy::WritePolicyDecision::Allowed => Ok(()),
+            crate::policy::WritePolicyDecision::Denied(reason) => Err(reason),
+        }
+    }
 }
 
 /// Result of a tool execution.
@@ -527,6 +545,15 @@ impl ToolRegistry {
     /// tool definitions so models see the canonical surface only.
     pub fn register_alias(&mut self, alias: impl Into<String>, canonical: impl Into<String>) {
         self.aliases.insert(alias.into(), canonical.into());
+    }
+
+    pub fn extend(&mut self, other: ToolRegistry) {
+        for tool in other.tools.into_values() {
+            self.register(tool);
+        }
+        for (alias, canonical) in other.aliases {
+            self.register_alias(alias, canonical);
+        }
     }
 
     /// Get a tool by canonical name or compatibility alias.
@@ -622,6 +649,11 @@ impl ToolRegistry {
             .collect();
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
+    }
+
+    /// Lookup reference monitor metadata by canonical name or alias.
+    pub fn policy_metadata(&self, name: &str) -> Option<ToolMetadata> {
+        self.get(name).map(|tool| tool.policy_metadata())
     }
 
     /// Number of registered tools.

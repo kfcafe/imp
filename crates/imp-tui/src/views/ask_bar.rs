@@ -206,13 +206,18 @@ impl AskState {
         }
     }
 
-    /// Quick-select by number (1-9).
+    /// Toggle or quick-select by number (1-9).
     pub fn quick_select(&mut self, n: usize) -> bool {
-        if n > 0 && n <= self.options.len() && !self.input_active {
-            self.cursor = n - 1;
-            true
-        } else {
+        if n == 0 || n > self.options.len() || self.input_active {
+            return false;
+        }
+
+        self.cursor = n - 1;
+        if self.mode == AskMode::MultiSelect {
+            self.toggle_current();
             false
+        } else {
+            true
         }
     }
 
@@ -630,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn quick_select() {
+    fn quick_select_confirms_single_select() {
         let opts = vec![
             AskOption {
                 label: "A".into(),
@@ -647,6 +652,27 @@ mod tests {
 
         assert!(state.quick_select(2));
         assert_eq!(state.cursor, 1);
+    }
+
+    #[test]
+    fn quick_select_toggles_multi_select_without_confirming() {
+        let opts = vec![
+            AskOption {
+                label: "A".into(),
+                description: None,
+                checked: false,
+            },
+            AskOption {
+                label: "B".into(),
+                description: None,
+                checked: false,
+            },
+        ];
+        let mut state = AskState::new("Pick".into(), String::new(), opts, true);
+
+        assert!(!state.quick_select(2));
+        assert_eq!(state.cursor, 1);
+        assert!(state.options[1].checked);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 
 use crate::system_prompt::Fact;
+use crate::trust::{Provenance, TrustedContext};
 
 const MAX_RELEVANT_FACTS: usize = 8;
 const MAX_FACT_TEXT_CHARS: usize = 160;
@@ -16,10 +17,12 @@ const MAX_WARNING_TEXT_CHARS: usize = 120;
 ///
 /// Facts remain a distinct verified-fact seam. Dynamic status-like project
 /// memory is carried separately as a compact optional text block.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SessionPromptContext {
     pub facts: Vec<Fact>,
+    pub fact_provenance: Vec<TrustedContext<String>>,
     pub project_memory_status: Option<String>,
+    pub project_memory_status_provenance: Option<TrustedContext<String>>,
 }
 
 pub fn load_session_prompt_context(cwd: &Path) -> SessionPromptContext {
@@ -43,9 +46,29 @@ fn load_session_prompt_context_from_mana_dir(
 ) -> Result<SessionPromptContext, String> {
     let memory = mana_core::api::memory_context(mana_dir).map_err(|err| err.to_string())?;
 
+    let facts = map_relevant_facts(&memory);
+    let fact_provenance = facts
+        .iter()
+        .map(|fact| {
+            TrustedContext::new(
+                fact.text.clone(),
+                Provenance::mana_record(crate::trust::ManaRecordKind::Fact, "relevant-fact"),
+            )
+        })
+        .collect();
+    let project_memory_status = format_project_memory_status(&memory);
+    let project_memory_status_provenance = project_memory_status.clone().map(|status| {
+        TrustedContext::new(
+            status,
+            Provenance::mana_record(crate::trust::ManaRecordKind::Note, "project-memory-status"),
+        )
+    });
+
     Ok(SessionPromptContext {
-        facts: map_relevant_facts(&memory),
-        project_memory_status: format_project_memory_status(&memory),
+        facts,
+        fact_provenance,
+        project_memory_status,
+        project_memory_status_provenance,
     })
 }
 
@@ -55,9 +78,21 @@ fn load_task_prompt_context_from_mana_dir(
 ) -> Result<SessionPromptContext, String> {
     let memory = mana_core::api::memory_context(mana_dir).map_err(|err| err.to_string())?;
 
+    let facts = map_task_relevant_facts(&memory, task_paths);
+    let fact_provenance = facts
+        .iter()
+        .map(|fact| {
+            TrustedContext::new(
+                fact.text.clone(),
+                Provenance::mana_record(crate::trust::ManaRecordKind::Fact, "task-relevant-fact"),
+            )
+        })
+        .collect();
     Ok(SessionPromptContext {
-        facts: map_task_relevant_facts(&memory, task_paths),
+        facts,
+        fact_provenance,
         project_memory_status: None,
+        project_memory_status_provenance: None,
     })
 }
 
@@ -273,7 +308,7 @@ mod tests {
 
         let mut stale = Unit::new(
             "2",
-            "A very long fact title that should be truncated before it reaches the prompt because prompt context should stay bounded and selective for interactive startup",
+            "A very long fact title that should be truncated before it reaches the prompt because prompt context should stay bounded and selective for interactive startup and this suffix forces truncation",
         );
         stale.last_verified = None;
 

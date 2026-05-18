@@ -1,6 +1,7 @@
 use imp_core::config::{AnimationLevel, SidebarStyle, ToolOutputDisplay, UiConfig};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use serde_json::Value;
@@ -368,6 +369,14 @@ pub fn build_stream_lines(
         let focused = selected == Some(idx);
         let header = tc.header_line_animated_focused(theme, tick, focused, animation_level);
         all_lines.push(header);
+        if focused && width > 0 {
+            all_lines.push(Line::from(Span::styled(
+                "▸ inspector".to_string(),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
 
         let output_lines = styled_output_lines(tc, ui_config, highlighter, theme, width);
         for line in output_lines {
@@ -382,6 +391,50 @@ pub fn build_stream_lines(
     all_lines
 }
 
+fn scroll_position_indicator(total: usize, visible: usize, start: usize) -> Option<String> {
+    if total <= visible || visible == 0 {
+        return None;
+    }
+
+    let above = start;
+    let below = total.saturating_sub(start + visible);
+    let mut parts = Vec::new();
+    if above > 0 {
+        parts.push(format!("↑{above}"));
+    }
+    if below > 0 {
+        parts.push(format!("↓{below}"));
+    }
+    (!parts.is_empty()).then(|| format!(" {} ", parts.join(" ")))
+}
+
+fn render_scroll_position_indicator(
+    lines: &[Line<'_>],
+    theme: &Theme,
+    area: Rect,
+    buf: &mut Buffer,
+    scroll: usize,
+) {
+    let total = lines.len();
+    let visible = area.height as usize;
+    let start = scroll.min(total.saturating_sub(visible));
+    let Some(indicator) = scroll_position_indicator(total, visible, start) else {
+        return;
+    };
+
+    let iw = indicator.len() as u16;
+    if area.width > iw {
+        let ix = area.x + area.width - iw;
+        let iy = area.y + area.height.saturating_sub(1);
+        buf.set_line(
+            ix,
+            iy,
+            &Line::from(Span::styled(indicator, theme.muted_style())),
+            iw,
+        );
+    }
+}
+
 pub fn render_stream_from_lines(
     lines: &[Line<'_>],
     theme: &Theme,
@@ -389,25 +442,8 @@ pub fn render_stream_from_lines(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let total = render_scrolled_lines(lines, area, buf, scroll);
-    let visible = area.height as usize;
-    let start = scroll.min(total.saturating_sub(visible));
-
-    if total > visible && visible > 0 {
-        let pct = ((start + visible).min(total) * 100) / total;
-        let indicator = format!(" {pct}% ");
-        let iw = indicator.len() as u16;
-        if area.width > iw {
-            let ix = area.x + area.width - iw;
-            let iy = area.y + area.height.saturating_sub(1);
-            buf.set_line(
-                ix,
-                iy,
-                &Line::from(Span::styled(indicator, theme.muted_style())),
-                iw,
-            );
-        }
-    }
+    render_scrolled_lines(lines, area, buf, scroll);
+    render_scroll_position_indicator(lines, theme, area, buf, scroll);
 }
 
 /// Render the sidebar as a single chronological stream of tool calls
@@ -470,11 +506,19 @@ fn render_list(
         let row = area.y + i as u16;
         let header = tc.header_line_animated_focused(theme, tick, focused, animation_level);
         buf.set_line(area.x, row, &header, area.width);
+        if focused && area.width > 0 {
+            buf.set_string(
+                area.x,
+                row,
+                "▸",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
     }
 
-    if total > visible && visible > 0 {
-        let pct = ((start + visible).min(total) * 100) / total;
-        let indicator = format!("{pct}%");
+    if let Some(indicator) = scroll_position_indicator(total, visible, start) {
         let iw = indicator.len() as u16;
         if area.width > iw {
             let ix = area.x + area.width - iw;
@@ -529,6 +573,41 @@ pub fn build_detail_text_surface_from_plain_lines(
     )
 }
 
+pub fn thinking_detail_render_data(
+    thinking: &str,
+    theme: &Theme,
+    content_w: usize,
+    word_wrap: bool,
+) -> SidebarDetailRenderData {
+    let header = Line::from(vec![
+        Span::styled("╭─", theme.muted_style()),
+        Span::styled(
+            " thinking trace ",
+            theme.accent_style().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("─╮", theme.muted_style()),
+    ]);
+    let body: Vec<Line<'static>> = if thinking.trim().is_empty() {
+        vec![Line::from(Span::styled(
+            "No streamed thinking trace",
+            theme.muted_style(),
+        ))]
+    } else {
+        thinking
+            .lines()
+            .map(|line| Line::from(Span::styled(line.to_string(), theme.muted_style())))
+            .collect()
+    };
+    let mut lines = vec![header];
+    if word_wrap && content_w > 0 {
+        lines.extend(wrap_styled_lines(&body, content_w.saturating_sub(2)));
+    } else {
+        lines.extend(body);
+    }
+    let plain_lines = lines.iter().map(line_to_plain_text).collect();
+    SidebarDetailRenderData { lines, plain_lines }
+}
+
 pub fn build_detail_text_surface(
     tc: Option<&DisplayToolCall>,
     area: Rect,
@@ -557,25 +636,8 @@ pub fn render_detail_from_lines(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let total = render_scrolled_lines(lines, area, buf, scroll);
-
-    if total > area.height as usize && area.height > 0 {
-        let visible = area.height as usize;
-        let start = scroll.min(total.saturating_sub(visible));
-        let pct = ((start + visible).min(total) * 100) / total;
-        let indicator = format!(" {pct}% ");
-        let iw = indicator.len() as u16;
-        if area.width > iw {
-            let ix = area.x + area.width - iw;
-            let iy = area.y + area.height.saturating_sub(1);
-            buf.set_line(
-                ix,
-                iy,
-                &Line::from(Span::styled(indicator, theme.muted_style())),
-                iw,
-            );
-        }
-    }
+    render_scrolled_lines(lines, area, buf, scroll);
+    render_scroll_position_indicator(lines, theme, area, buf, scroll);
 }
 
 fn render_detail(
@@ -680,13 +742,13 @@ fn tool_input_summary_rows(tc: &DisplayToolCall) -> Vec<String> {
                 "reason", "run_id",
             ],
         ),
-        "ask" => {
-            summarize_named_fields(args, &["question", "options", "allowOther", "multiSelect"])
-        }
+        "ask_user" => summarize_named_fields(
+            args,
+            &["question", "choices", "allow_other", "multi_select"],
+        ),
         "web" => {
             summarize_named_fields(args, &["action", "query", "url", "provider", "maxResults"])
         }
-        "spawn" => summarize_named_fields(args, &["mode", "unit_id", "prompt", "timeout_secs"]),
         _ => summarize_object_fields(args),
     }
 }
@@ -936,161 +998,97 @@ fn line_to_plain_text(line: &Line<'_>) -> String {
 }
 fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
     let mut lines = Vec::new();
-
     let action = tc
         .details
         .get("action")
         .and_then(Value::as_str)
         .unwrap_or("");
+
     if !action.is_empty() {
-        lines.push(format!("action: {action}"));
+        lines.push("request".to_string());
+        lines.push(format!("  action {action}"));
 
         match action {
-            "create" => {
-                push_mana_detail_line(&mut lines, "title", tc.details.get("title"));
-                push_mana_detail_line(&mut lines, "description", tc.details.get("description"));
-                push_mana_detail_line(&mut lines, "verify", tc.details.get("verify"));
-                push_mana_detail_line(&mut lines, "priority", tc.details.get("priority"));
-                push_mana_detail_line(&mut lines, "parent", tc.details.get("parent"));
-                push_mana_detail_line(&mut lines, "deps", tc.details.get("deps"));
-                push_mana_detail_line(&mut lines, "labels", tc.details.get("labels"));
-            }
-            "update" => {
-                push_mana_detail_line(&mut lines, "id", tc.details.get("id"));
-                push_mana_detail_line(&mut lines, "status", tc.details.get("status"));
-                push_mana_detail_line(&mut lines, "title", tc.details.get("title"));
-                push_mana_detail_line(&mut lines, "description", tc.details.get("description"));
-                push_mana_detail_line(&mut lines, "priority", tc.details.get("priority"));
-                push_mana_detail_line(&mut lines, "notes", tc.details.get("notes"));
-            }
-            "run" => {
-                push_mana_detail_line(&mut lines, "id", tc.details.get("id"));
-                push_mana_detail_line(&mut lines, "scope", tc.details.get("scope"));
-                push_mana_detail_line(&mut lines, "target", tc.details.get("target"));
-                push_mana_detail_line(&mut lines, "jobs", tc.details.get("jobs"));
-                push_mana_detail_line(&mut lines, "background", tc.details.get("background"));
-                push_mana_detail_line(&mut lines, "dry_run", tc.details.get("dry_run"));
-                push_mana_detail_line(&mut lines, "review", tc.details.get("review"));
-                push_mana_detail_line(&mut lines, "timeout", tc.details.get("timeout"));
-                push_mana_detail_line(&mut lines, "idle_timeout", tc.details.get("idle_timeout"));
-                if let Some(runtime) = tc.details.get("runtime") {
-                    push_mana_detail_line(&mut lines, "runtime", Some(runtime));
-                }
-            }
+            "create" => push_mana_request_fields(
+                &mut lines,
+                tc,
+                &[
+                    "title",
+                    "description",
+                    "verify",
+                    "priority",
+                    "parent",
+                    "deps",
+                    "labels",
+                ],
+            ),
+            "update" => push_mana_request_fields(
+                &mut lines,
+                tc,
+                &["id", "status", "title", "description", "priority", "notes"],
+            ),
+            "run" => push_mana_request_fields(
+                &mut lines,
+                tc,
+                &[
+                    "id",
+                    "run_id",
+                    "scope",
+                    "target",
+                    "jobs",
+                    "background",
+                    "dry_run",
+                    "review",
+                    "timeout",
+                    "idle_timeout",
+                    "runtime",
+                ],
+            ),
             "close" | "reopen" | "fail" => {
-                push_mana_detail_line(&mut lines, "id", tc.details.get("id"));
-                push_mana_detail_line(&mut lines, "reason", tc.details.get("reason"));
-                if let Some(unit) = tc.details.get("unit") {
-                    push_mana_detail_line(&mut lines, "unit", Some(unit));
-                }
+                push_mana_request_fields(&mut lines, tc, &["id", "reason", "unit"])
             }
-            "notes_append" | "decision_add" | "decision_resolve" => {
-                push_mana_detail_line(&mut lines, "id", tc.details.get("id"));
-                push_mana_detail_line(&mut lines, "notes", tc.details.get("notes"));
-                push_mana_detail_line(&mut lines, "description", tc.details.get("description"));
-                push_mana_detail_line(
-                    &mut lines,
-                    "resolve_decisions",
-                    tc.details.get("resolve_decisions"),
-                );
-                if let Some(unit) = tc.details.get("unit") {
-                    push_mana_detail_line(&mut lines, "unit", Some(unit));
-                }
-            }
+            "notes_append" | "decision_add" | "decision_resolve" => push_mana_request_fields(
+                &mut lines,
+                tc,
+                &["id", "notes", "description", "resolve_decisions", "unit"],
+            ),
             "dep_add" | "dep_remove" => {
-                push_mana_detail_line(&mut lines, "from_id", tc.details.get("from_id"));
-                push_mana_detail_line(&mut lines, "dep_id", tc.details.get("dep_id"));
+                push_mana_request_fields(&mut lines, tc, &["from_id", "dep_id"])
             }
-            "delete" => {
-                push_mana_detail_line(&mut lines, "id", tc.details.get("id"));
-                push_mana_detail_line(&mut lines, "title", tc.details.get("title"));
-            }
-            "fact_create" => {
-                push_mana_detail_line(&mut lines, "unit_id", tc.details.get("unit_id"));
-                if let Some(unit) = tc.details.get("unit") {
-                    push_mana_detail_line(&mut lines, "unit", Some(unit));
-                }
-            }
-            _ => {
-                for key in ["id", "run_id", "reason", "by", "status", "count"] {
-                    push_mana_detail_line(&mut lines, key, tc.details.get(key));
-                }
-            }
+            "delete" => push_mana_request_fields(&mut lines, tc, &["id", "title"]),
+            "fact_create" => push_mana_request_fields(&mut lines, tc, &["unit_id", "unit"]),
+            _ => push_mana_request_fields(
+                &mut lines,
+                tc,
+                &["id", "run_id", "reason", "by", "status", "count"],
+            ),
         }
+    }
 
-        if !lines.is_empty() {
-            lines.push(String::new());
+    if has_live_mana_output(tc) {
+        push_blank_if_needed(&mut lines);
+        lines.push("live output".to_string());
+        if !tc.streaming_output.is_empty() {
+            lines.extend(tc.streaming_output.lines().map(|line| format!("  {line}")));
+        } else {
+            lines.extend(tc.streaming_lines.iter().map(|line| format!("  {line}")));
         }
     }
 
     if let Some(view) = tc.details.get("view") {
         if let Some(summary) = view.get("summary") {
+            push_blank_if_needed(&mut lines);
             lines.push("summary".to_string());
-            lines.push(format!(
-                "  total={}  done={}  failed={}  awaiting-verify={}  skipped={}",
-                summary
-                    .get("total_units")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                summary
-                    .get("total_closed")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                summary
-                    .get("total_failed")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                summary
-                    .get("total_awaiting_verify")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                summary
-                    .get("total_skipped")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0)
-            ));
+            lines.push(format!("  {}", format_mana_summary(summary)));
         }
 
         if let Some(units) = view.get("units").and_then(Value::as_array) {
             if !units.is_empty() {
-                if !lines.is_empty() {
-                    lines.push(String::new());
-                }
+                push_blank_if_needed(&mut lines);
                 lines.push("units".to_string());
             }
             for unit in units {
-                let status = unit
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("queued");
-                let marker = match status {
-                    "running" => "▶",
-                    "done" => "✓",
-                    "failed" => "✗",
-                    "blocked" => "!",
-                    _ => "…",
-                };
-                let id = unit.get("id").and_then(Value::as_str).unwrap_or("?");
-                let title = unit.get("title").and_then(Value::as_str).unwrap_or("");
-                lines.push(format!("  {marker} {id}  {title}"));
-
-                let mut meta = Vec::new();
-                meta.push(format!("status={status}"));
-                if let Some(round) = unit.get("round").and_then(Value::as_u64) {
-                    meta.push(format!("wave={round}"));
-                }
-                if let Some(agent) = unit.get("agent").and_then(Value::as_str) {
-                    meta.push(format!("agent={agent}"));
-                }
-                if let Some(duration) = unit.get("duration_secs").and_then(Value::as_u64) {
-                    meta.push(format!("duration={}s", duration));
-                }
-                if let Some(error) = unit.get("error").and_then(Value::as_str) {
-                    meta.push(format!("error={error}"));
-                }
-                if !meta.is_empty() {
-                    lines.push(format!("    {}", meta.join("  ")));
-                }
+                push_mana_unit_lines(&mut lines, unit);
             }
         }
     } else if !tc.streaming_output.is_empty() {
@@ -1105,6 +1103,95 @@ fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
         vec!["Running…".to_string()]
     } else {
         lines
+    }
+}
+
+fn has_live_mana_output(tc: &DisplayToolCall) -> bool {
+    tc.output.is_none() && (!tc.streaming_output.is_empty() || !tc.streaming_lines.is_empty())
+}
+
+fn push_blank_if_needed(lines: &mut Vec<String>) {
+    if !lines.is_empty() && lines.last().is_some_and(|line| !line.is_empty()) {
+        lines.push(String::new());
+    }
+}
+
+fn push_mana_request_fields(lines: &mut Vec<String>, tc: &DisplayToolCall, keys: &[&str]) {
+    for key in keys {
+        push_mana_detail_line(lines, key, tc.details.get(*key));
+    }
+}
+
+fn format_mana_summary(summary: &Value) -> String {
+    let total = summary
+        .get("total_units")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let closed = summary
+        .get("total_closed")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let failed = summary
+        .get("total_failed")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let awaiting = summary
+        .get("total_awaiting_verify")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let skipped = summary
+        .get("total_skipped")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    let mut parts = vec![format!("{total} units")];
+    if closed > 0 {
+        parts.push(format!("{closed} done"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    }
+    if awaiting > 0 {
+        parts.push(format!("{awaiting} verify"));
+    }
+    if skipped > 0 {
+        parts.push(format!("{skipped} skipped"));
+    }
+    parts.join(" · ")
+}
+
+fn push_mana_unit_lines(lines: &mut Vec<String>, unit: &Value) {
+    let status = unit
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("queued");
+    let marker = match status {
+        "running" => "▶",
+        "done" => "✓",
+        "failed" => "✗",
+        "blocked" => "!",
+        _ => "…",
+    };
+    let id = unit.get("id").and_then(Value::as_str).unwrap_or("?");
+    let title = unit.get("title").and_then(Value::as_str).unwrap_or("");
+    lines.push(format!("  {marker} {id} · {title}"));
+
+    let mut meta = Vec::new();
+    meta.push(status.to_string());
+    if let Some(round) = unit.get("round").and_then(Value::as_u64) {
+        meta.push(format!("wave {round}"));
+    }
+    if let Some(agent) = unit.get("agent").and_then(Value::as_str) {
+        meta.push(agent.to_string());
+    }
+    if let Some(duration) = unit.get("duration_secs").and_then(Value::as_u64) {
+        meta.push(format!("{duration}s"));
+    }
+    if !meta.is_empty() {
+        lines.push(format!("    {}", meta.join(" · ")));
+    }
+    if let Some(error) = unit.get("error").and_then(Value::as_str) {
+        lines.push(format!("    error: {error}"));
     }
 }
 
@@ -1164,7 +1251,7 @@ fn push_mana_detail_line(lines: &mut Vec<String>, key: &str, value: Option<&Valu
         }
     };
     if !rendered.is_empty() {
-        lines.push(format!("{key}: {rendered}"));
+        lines.push(format!("  {key} {rendered}"));
     }
 }
 
@@ -1346,20 +1433,20 @@ mod tests {
         };
 
         let lines = format_mana_output(&tc);
-        assert_eq!(lines[0], "action: run");
-        assert!(lines.iter().any(|l| l == "jobs: 4"));
-        assert!(lines.iter().any(|l| l == "background: true"));
+        assert_eq!(lines[0], "request");
+        assert!(lines.iter().any(|l| l == "  action run"));
+        assert!(lines.iter().any(|l| l == "  jobs 4"));
+        assert!(lines.iter().any(|l| l == "  background true"));
         assert!(lines.iter().any(|l| l == "summary"));
         assert!(lines
             .iter()
-            .any(|l| l.contains("total=3  done=2  failed=1  awaiting-verify=0  skipped=0")));
+            .any(|l| l.contains("3 units · 2 done · 1 failed")));
+        assert!(!lines.iter().any(|l| l.contains("verify")));
         assert!(lines.iter().any(|l| l == "units"));
-        assert!(lines.iter().any(|l| l.contains("✓ 1.1  First")));
-        assert!(lines
-            .iter()
-            .any(|l| l.contains("status=done  wave=1  duration=8s")));
-        assert!(lines.iter().any(|l| l.contains("✗ 1.2  Second")));
-        assert!(lines.iter().any(|l| l.contains("status=failed  wave=1")));
+        assert!(lines.iter().any(|l| l.contains("✓ 1.1 · First")));
+        assert!(lines.iter().any(|l| l.contains("done · wave 1 · 8s")));
+        assert!(lines.iter().any(|l| l.contains("✗ 1.2 · Second")));
+        assert!(lines.iter().any(|l| l.contains("failed · wave 1")));
     }
 
     #[test]
@@ -1393,9 +1480,9 @@ mod tests {
         };
 
         let lines = format_mana_output(&tc);
-        assert!(lines.iter().any(|l| l == "scope: targets 1, 2"));
-        assert!(lines.iter().any(|l| l == "target: explicit: 1, 2"));
-        assert!(lines.iter().any(|l| l == "runtime: imp · sonnet"));
+        assert!(lines.iter().any(|l| l == "  scope targets 1, 2"));
+        assert!(lines.iter().any(|l| l == "  target explicit: 1, 2"));
+        assert!(lines.iter().any(|l| l == "  runtime imp · sonnet"));
     }
 
     #[test]
@@ -1423,10 +1510,12 @@ mod tests {
         };
 
         let lines = format_mana_output(&tc);
-        assert!(lines.iter().any(|l| l == "action: decision_add"));
-        assert!(lines.iter().any(|l| l == "id: 1"));
-        assert!(lines.iter().any(|l| l == "description: Choose retry limit"));
-        assert!(lines.iter().any(|l| l == "unit: 1 · Test unit · open"));
+        assert!(lines.iter().any(|l| l == "  action decision_add"));
+        assert!(lines.iter().any(|l| l == "  id 1"));
+        assert!(lines
+            .iter()
+            .any(|l| l == "  description Choose retry limit"));
+        assert!(lines.iter().any(|l| l == "  unit 1 · Test unit · open"));
         assert!(lines
             .iter()
             .any(|l| l.contains("mana delta: decision added on 1 · Test unit")));
@@ -1606,7 +1695,7 @@ mod tests {
             .into_iter()
             .map(|line| line.spans.into_iter().map(|span| span.content).collect())
             .collect();
-        assert!(plain[0].starts_with("   1 │ "));
+        assert!(plain[0].starts_with("  1│"));
         assert!(plain[0].contains("fn main()"));
     }
 

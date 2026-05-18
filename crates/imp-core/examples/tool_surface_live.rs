@@ -1,6 +1,5 @@
 use std::time::Instant;
 
-use futures::StreamExt;
 use imp_core::builder::AgentBuilder;
 use imp_core::config::Config;
 use imp_core::tools::{

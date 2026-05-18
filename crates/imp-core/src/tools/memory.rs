@@ -5,6 +5,7 @@ use super::{Tool, ToolContext, ToolOutput};
 use crate::error::Result;
 use crate::memory::MemoryStore;
 use crate::storage;
+use crate::trust::RiskLabel;
 
 const DEFAULT_MEMORY_LIMIT: usize = 2200;
 const DEFAULT_USER_LIMIT: usize = 1400;
@@ -62,7 +63,7 @@ impl Tool for MemoryTool {
         &self,
         _call_id: &str,
         params: serde_json::Value,
-        _ctx: ToolContext,
+        ctx: ToolContext,
     ) -> Result<ToolOutput> {
         let action = params["action"].as_str().unwrap_or("");
         let target = params["target"].as_str().unwrap_or("");
@@ -97,6 +98,27 @@ impl Tool for MemoryTool {
                         "Missing required parameter: content (for 'add' action)",
                     ));
                 }
+                if ctx
+                    .supporting_provenance
+                    .iter()
+                    .any(|provenance| provenance.is_low_trust())
+                {
+                    return Ok(ToolOutput::error(
+                        "Low-trust context cannot be written to durable memory without explicit user adoption.",
+                    ));
+                }
+                if ctx.supporting_provenance.iter().any(|provenance| {
+                    provenance.risk.iter().any(|risk| {
+                        matches!(
+                            risk,
+                            RiskLabel::PossiblePromptInjection | RiskLabel::SecretAdjacent
+                        )
+                    })
+                }) {
+                    return Ok(ToolOutput::error(
+                        "Risk-labeled context cannot be written to durable memory without review.",
+                    ));
+                }
                 store.add(content)?
             }
             "replace" => {
@@ -110,6 +132,15 @@ impl Tool for MemoryTool {
                 if content.is_empty() {
                     return Ok(ToolOutput::error(
                         "Missing required parameter: content (for 'replace' action)",
+                    ));
+                }
+                if ctx
+                    .supporting_provenance
+                    .iter()
+                    .any(|provenance| provenance.is_low_trust())
+                {
+                    return Ok(ToolOutput::error(
+                        "Low-trust context cannot replace durable memory without explicit user adoption.",
                     ));
                 }
                 store.replace(old_text, content)?
@@ -166,6 +197,8 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         }
     }
 
@@ -197,5 +230,28 @@ mod tests {
             .await
             .unwrap();
         assert!(r.is_error);
+    }
+    #[tokio::test]
+    async fn memory_tool_blocks_low_trust_durable_writes() {
+        let tool = MemoryTool;
+        let mut ctx = test_ctx();
+        ctx.supporting_provenance
+            .push(crate::trust::Provenance::external_web(
+                "https://example.com",
+            ));
+
+        let result = tool
+            .execute(
+                "c4",
+                json!({"action": "add", "target": "memory", "content": "remember this"}),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.iter().any(|block| {
+            matches!(block, imp_llm::ContentBlock::Text { text } if text.contains("Low-trust context"))
+        }));
     }
 }

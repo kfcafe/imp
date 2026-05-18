@@ -2,18 +2,27 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::{SinkExt, StreamExt};
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
+
+use tokio_tungstenite::{connect_async, tungstenite::Message as WebSocketMessage};
+use tungstenite::client::IntoClientRequest;
 
 use crate::auth::{ApiKey, AuthStore};
 use crate::error::{Error, Result};
 use crate::message::{AssistantMessage, ContentBlock, Message, StopReason};
 use crate::model::{Model, ModelMeta};
-use crate::provider::{Context, Provider, RequestOptions, ThinkingLevel, ToolDefinition};
+use crate::provider::{
+    CancellationMode, Context, ContinuationMode, PersistentSessionMode, Provider, RequestOptions,
+    ResumabilityMode, ThinkingLevel, ToolDefinition, TransportCapabilities,
+};
 use crate::stream::StreamEvent;
 use crate::usage::Usage;
 
 const API_URL: &str = "https://api.openai.com/v1/responses";
+const WS_URL: &str = "wss://api.openai.com/v1/responses";
+const PERSISTENT_TRANSPORT_ENV: &str = "IMP_OPENAI_PERSISTENT_TRANSPORT";
 
 // ---------------------------------------------------------------------------
 // OpenAI Responses API wire-format types (request)
@@ -54,7 +63,7 @@ struct ApiReasoning {
 // OpenAI Responses API wire-format types (SSE response)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct SseEvent {
     #[serde(rename = "type")]
     event_type: String,
@@ -68,7 +77,7 @@ struct SseEvent {
     output_index: Option<usize>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct SseResponse {
     #[serde(default)]
     model: Option<String>,
@@ -78,7 +87,7 @@ struct SseResponse {
     usage: Option<SseUsage>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct SseOutputItem {
     #[serde(rename = "type")]
     item_type: String,
@@ -164,6 +173,29 @@ impl OpenAiProvider {
         Self {
             client: super::streaming_http_client(),
             models: builtin_models(),
+        }
+    }
+
+    fn persistent_transport_enabled() -> bool {
+        Self::persistent_transport_enabled_value(
+            std::env::var(PERSISTENT_TRANSPORT_ENV).ok().as_deref(),
+        )
+    }
+
+    fn persistent_transport_enabled_value(value: Option<&str>) -> bool {
+        value
+            .map(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn persistent_transport_capabilities() -> TransportCapabilities {
+        TransportCapabilities {
+            request_response: true,
+            streaming: true,
+            continuation: ContinuationMode::ProviderManagedId,
+            persistent_session: PersistentSessionMode::WebSocket,
+            cancellation: CancellationMode::DropLocalStream,
+            resumability: ResumabilityMode::ResumeProviderState,
         }
     }
 
@@ -418,6 +450,10 @@ fn push_thinking_block(content: &mut Vec<ContentBlock>, text: String) {
 }
 
 fn process_sse_event(event: SseEvent, state: &mut StreamState) -> Vec<StreamEvent> {
+    process_openai_stream_event(event, state)
+}
+
+fn process_openai_stream_event(event: SseEvent, state: &mut StreamState) -> Vec<StreamEvent> {
     let mut out = Vec::new();
 
     match event.event_type.as_str() {
@@ -690,6 +726,142 @@ fn stream_response(
     )
 }
 
+fn stream_response_websocket(
+    api_key: String,
+    request: ApiRequest,
+) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> {
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+
+    tokio::spawn(async move {
+        let mut ws_request = match WS_URL.into_client_request() {
+            Ok(request) => request,
+            Err(error) => {
+                let _ = tx.unbounded_send(Err(Error::Provider(format!(
+                    "failed to build OpenAI websocket request: {error}"
+                ))));
+                return;
+            }
+        };
+
+        let headers = ws_request.headers_mut();
+        let auth_value = match format!("Bearer {api_key}").parse() {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = tx.unbounded_send(Err(Error::Provider(format!(
+                    "failed to build OpenAI websocket auth header: {error}"
+                ))));
+                return;
+            }
+        };
+        headers.insert("authorization", auth_value);
+
+        let (mut socket, _) = match connect_async(ws_request).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                let _ = tx.unbounded_send(Err(Error::Provider(format!(
+                    "OpenAI websocket connection failed before streaming; stateless fallback is available by unsetting {PERSISTENT_TRANSPORT_ENV}: {error}"
+                ))));
+                return;
+            }
+        };
+
+        let mut payload = match serde_json::to_value(request) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = tx.unbounded_send(Err(Error::Serialization(error)));
+                return;
+            }
+        };
+        if let serde_json::Value::Object(ref mut map) = payload {
+            map.remove("stream");
+            map.insert("store".to_string(), serde_json::Value::Bool(false));
+            map.insert(
+                "type".to_string(),
+                serde_json::Value::String("response.create".to_string()),
+            );
+        }
+
+        if let Err(error) = socket
+            .send(WebSocketMessage::Text(payload.to_string().into()))
+            .await
+        {
+            let _ = tx.unbounded_send(Err(Error::Provider(format!(
+                "OpenAI websocket send failed before streaming; stateless fallback is available by unsetting {PERSISTENT_TRANSPORT_ENV}: {error}"
+            ))));
+            return;
+        }
+
+        let mut state = StreamState::new();
+        while let Some(message) = socket.next().await {
+            let message = match message {
+                Ok(message) => message,
+                Err(error) => {
+                    let _ = tx.unbounded_send(Err(Error::Stream(format!(
+                        "OpenAI websocket stream error: {error}"
+                    ))));
+                    return;
+                }
+            };
+
+            let text = match message {
+                WebSocketMessage::Text(text) => text,
+                WebSocketMessage::Binary(bytes) => match String::from_utf8(bytes.to_vec()) {
+                    Ok(text) => text.into(),
+                    Err(error) => {
+                        let _ = tx.unbounded_send(Err(Error::Stream(format!(
+                            "OpenAI websocket sent non-UTF8 binary event: {error}"
+                        ))));
+                        return;
+                    }
+                },
+                WebSocketMessage::Ping(bytes) => {
+                    let _ = socket.send(WebSocketMessage::Pong(bytes)).await;
+                    continue;
+                }
+                WebSocketMessage::Pong(_) => continue,
+                WebSocketMessage::Close(_) => break,
+                WebSocketMessage::Frame(_) => continue,
+            };
+
+            let event: SseEvent = match serde_json::from_str(&text) {
+                Ok(event) => event,
+                Err(error) => {
+                    let _ = tx.unbounded_send(Err(Error::Stream(format!(
+                        "Failed to parse OpenAI websocket event: {error}"
+                    ))));
+                    return;
+                }
+            };
+
+            if event.event_type == "error" {
+                let _ = tx.unbounded_send(Err(Error::Provider(
+                    "OpenAI websocket returned an error event".to_string(),
+                )));
+                return;
+            }
+
+            for stream_event in process_openai_stream_event(event, &mut state) {
+                if tx.unbounded_send(Ok(stream_event)).is_err() {
+                    return;
+                }
+            }
+
+            if state.finished {
+                let _ = socket.close(None).await;
+                return;
+            }
+        }
+
+        if !state.finished {
+            let _ = tx.unbounded_send(Err(Error::Stream(
+                "OpenAI websocket ended before response.completed".into(),
+            )));
+        }
+    });
+
+    Box::pin(rx)
+}
+
 #[async_trait]
 impl Provider for OpenAiProvider {
     fn stream(
@@ -700,9 +872,13 @@ impl Provider for OpenAiProvider {
         api_key: &str,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> {
         let request = build_request(model, context, options);
-        let client = self.client.clone();
         let api_key = api_key.to_string();
-        stream_response(client, api_key, request)
+        if Self::persistent_transport_enabled() {
+            stream_response_websocket(api_key, request)
+        } else {
+            let client = self.client.clone();
+            stream_response(client, api_key, request)
+        }
     }
 
     async fn resolve_auth(&self, auth: &AuthStore) -> Result<ApiKey> {
@@ -715,6 +891,14 @@ impl Provider for OpenAiProvider {
 
     fn models(&self) -> &[ModelMeta] {
         &self.models
+    }
+
+    fn transport_capabilities(&self) -> TransportCapabilities {
+        if Self::persistent_transport_enabled() {
+            Self::persistent_transport_capabilities()
+        } else {
+            TransportCapabilities::default()
+        }
     }
 }
 
@@ -1114,5 +1298,78 @@ mod tests {
         let mut state = StreamState::new();
         let events = process_sse_event(event, &mut state);
         assert!(events.is_empty());
+    }
+    #[test]
+    fn openai_transport_capabilities_are_stateless_by_default() {
+        assert!(!OpenAiProvider::persistent_transport_enabled_value(None));
+        assert!(!OpenAiProvider::persistent_transport_enabled_value(Some(
+            "0"
+        )));
+
+        let capabilities = TransportCapabilities::default();
+
+        assert_eq!(capabilities, TransportCapabilities::default());
+        assert_eq!(capabilities.persistent_session, PersistentSessionMode::None);
+        assert_eq!(capabilities.continuation, ContinuationMode::None);
+        assert_eq!(capabilities.resumability, ResumabilityMode::RestartRequest);
+    }
+
+    #[test]
+    fn openai_transport_capabilities_are_persistent_only_when_enabled() {
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(OpenAiProvider::persistent_transport_enabled_value(Some(
+                value
+            )));
+        }
+
+        let capabilities = OpenAiProvider::persistent_transport_capabilities();
+
+        assert_eq!(
+            capabilities.persistent_session,
+            PersistentSessionMode::WebSocket
+        );
+        assert_eq!(
+            capabilities.continuation,
+            ContinuationMode::ProviderManagedId
+        );
+        assert_eq!(
+            capabilities.resumability,
+            ResumabilityMode::ResumeProviderState
+        );
+        assert!(capabilities.streaming);
+    }
+
+    #[test]
+    fn openai_websocket_payload_is_redacted_and_uses_create_event_type() {
+        let model_meta = ModelMeta {
+            id: "gpt-5.4".into(),
+            provider: "openai".into(),
+            name: "GPT-5.4".into(),
+            context_window: 400_000,
+            max_output_tokens: 32_768,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities::default(),
+        };
+        let model = Model {
+            meta: model_meta,
+            provider: Arc::new(OpenAiProvider::new()),
+        };
+        let request = build_request(&model, Context::default(), RequestOptions::default());
+        let mut payload = serde_json::to_value(request).unwrap();
+        if let serde_json::Value::Object(ref mut map) = payload {
+            map.remove("stream");
+            map.insert("store".to_string(), serde_json::Value::Bool(false));
+            map.insert(
+                "type".to_string(),
+                serde_json::Value::String("response.create".to_string()),
+            );
+        }
+
+        assert_eq!(payload["type"], "response.create");
+        assert_eq!(payload["store"], false);
+        assert!(payload.get("stream").is_none());
+        let encoded = serde_json::to_string(&payload).unwrap();
+        assert!(!encoded.contains("previous_response_id"));
+        assert!(!encoded.contains("session_id"));
     }
 }

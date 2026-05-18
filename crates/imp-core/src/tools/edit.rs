@@ -19,50 +19,46 @@ impl Tool for EditTool {
         "Edit File"
     }
     fn description(&self) -> &str {
-        "Canonical edit tool. Edit a file with exact find/replace, anchored range replacement, or a validated multi-edit transaction via edits[]."
+        "Edit files by exact replacement, anchored range, or edits[] transaction."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Path for single-file exact/anchored edits, or default path for transaction edits. Per-edit path may override this inside edits[]." },
-                "oldText": { "type": "string", "description": "Text to replace for exact/fuzzy single-edit mode" },
-                "newText": { "type": "string", "description": "Replacement text for exact/fuzzy single-edit mode" },
-                "dryRun": {
+                "path": { "type": "string", "description": "File path or default edits[] path" },
+                "old_text": { "type": "string", "description": "Text to replace" },
+                "new_text": { "type": "string", "description": "Replacement text" },
+                "dry_run": {
                     "type": "boolean",
-                    "description": "Return the diff and metadata without writing the file"
+                    "description": "Dry run; return diff only"
                 },
-                "expectedOccurrences": {
+                "expected_occurrences": {
                     "type": "integer",
-                    "description": "Require this many exact oldText matches before editing; useful with 1 to prevent ambiguous replacements"
+                    "description": "Required exact old_text match count"
                 },
-                "replaceAll": {
+                "replace_all": {
                     "type": "boolean",
-                    "description": "Replace all exact oldText matches instead of only the first match"
+                    "description": "Replace all exact matches"
                 },
-                "anchorStart": {
+                "anchor_start": {
                     "type": "string",
-                    "description": "Start anchor emitted by read with anchors=true for anchored range replacement"
+                    "description": "Start anchor from read(anchors=true)"
                 },
-                "anchorEnd": {
+                "anchor_end": {
                     "type": "string",
-                    "description": "Optional end anchor emitted by read with anchors=true. Defaults to anchorStart."
-                },
-                "replacement": {
-                    "type": "string",
-                    "description": "Replacement text for anchored edit mode"
+                    "description": "Optional end anchor"
                 },
                 "edits": {
                     "type": "array",
-                    "description": "Validated transaction edits handled by the canonical edit tool. Each edit supports oldText, newText, and optional path for multi-file transactions.",
+                    "description": "Transactional edits[]",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "path": { "type": "string", "description": "Optional per-edit path for multi-file transactions" },
-                            "oldText": { "type": "string" },
-                            "newText": { "type": "string" }
+                            "path": { "type": "string", "description": "Per-edit path" },
+                            "old_text": { "type": "string" },
+                            "new_text": { "type": "string" }
                         },
-                        "required": ["oldText", "newText"]
+                        "required": ["old_text", "new_text"]
                     }
                 }
             },
@@ -87,12 +83,13 @@ impl Tool for EditTool {
         }
 
         let raw_path = params["path"].as_str().unwrap_or("");
-        let old_text = params["oldText"].as_str().unwrap_or("");
-        let new_text = params["newText"].as_str().unwrap_or("");
-        let dry_run = params["dryRun"].as_bool().unwrap_or(false);
-        let replace_all = params["replaceAll"].as_bool().unwrap_or(false);
+        let old_text = get_str_param(&params, "old_text", "oldText").unwrap_or("");
+        let new_text = get_str_param(&params, "new_text", "newText").unwrap_or("");
+        let dry_run = get_bool_param(&params, "dry_run", "dryRun").unwrap_or(false);
+        let replace_all = get_bool_param(&params, "replace_all", "replaceAll").unwrap_or(false);
         let expected_occurrences = params
-            .get("expectedOccurrences")
+            .get("expected_occurrences")
+            .or_else(|| params.get("expectedOccurrences"))
             .and_then(|v| v.as_u64())
             .map(|v| v as usize);
 
@@ -102,14 +99,17 @@ impl Tool for EditTool {
 
         let path = super::resolve_path(&ctx.cwd, raw_path);
 
-        if params.get("anchorStart").and_then(|v| v.as_str()).is_some() {
+        if get_str_param(&params, "anchor_start", "anchorStart").is_some() {
             return execute_anchor_edit(&path, raw_path, &params, ctx).await;
         }
 
         if old_text.is_empty() {
-            return Ok(ToolOutput::error("Missing required parameter: oldText"));
+            return Ok(ToolOutput::error("Missing required parameter: old_text"));
         }
 
+        if let Err(error) = ctx.check_write_path(&path) {
+            return Ok(ToolOutput::error(error));
+        }
         if !path.exists() {
             let suggestions = suggest_similar_files(&ctx.cwd, raw_path);
             let mut msg = format!("File not found: {}", path.display());
@@ -150,7 +150,7 @@ impl Tool for EditTool {
         if let Some(expected) = expected_occurrences {
             if exact_occurrences != expected {
                 return Ok(ToolOutput::error(format!(
-                    "Expected {expected} exact occurrence(s) of oldText in {raw_path}, found {exact_occurrences}. No changes made."
+                    "Expected {expected} exact occurrence(s) of old_text in {raw_path}, found {exact_occurrences}. No changes made."
                 )));
             }
         }
@@ -211,6 +211,8 @@ impl Tool for EditTool {
         Ok(ToolOutput {
             content: vec![imp_llm::ContentBlock::Text { text: msg }],
             details: json!({
+                "action": "edit",
+                "mode": "single",
                 "path": path.display().to_string(),
                 "fuzzy_match": was_fuzzy,
                 "dry_run": dry_run,
@@ -223,23 +225,46 @@ impl Tool for EditTool {
     }
 }
 
+fn get_str_param<'a>(
+    params: &'a serde_json::Value,
+    primary: &str,
+    legacy: &str,
+) -> Option<&'a str> {
+    params
+        .get(primary)
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get(legacy).and_then(|v| v.as_str()))
+}
+
+fn get_bool_param(params: &serde_json::Value, primary: &str, legacy: &str) -> Option<bool> {
+    params
+        .get(primary)
+        .and_then(|v| v.as_bool())
+        .or_else(|| params.get(legacy).and_then(|v| v.as_bool()))
+}
+
 async fn execute_anchor_edit(
     path: &Path,
     raw_path: &str,
     params: &serde_json::Value,
     ctx: ToolContext,
 ) -> Result<ToolOutput> {
-    let Some(anchor_start_id) = params["anchorStart"].as_str() else {
-        return Ok(ToolOutput::error("Missing required parameter: anchorStart"));
-    };
-    let anchor_end_id = params["anchorEnd"].as_str().unwrap_or(anchor_start_id);
-    let Some(replacement) = params["replacement"].as_str() else {
+    let Some(anchor_start_id) = get_str_param(params, "anchor_start", "anchorStart") else {
         return Ok(ToolOutput::error(
-            "Missing required parameter: replacement for anchored edit mode",
+            "Missing required parameter: anchor_start",
         ));
     };
-    let dry_run = params["dryRun"].as_bool().unwrap_or(false);
+    let anchor_end_id = get_str_param(params, "anchor_end", "anchorEnd").unwrap_or(anchor_start_id);
+    let Some(replacement) = get_str_param(params, "new_text", "replacement") else {
+        return Ok(ToolOutput::error(
+            "Missing required parameter: new_text for anchored edit mode",
+        ));
+    };
+    let dry_run = get_bool_param(params, "dry_run", "dryRun").unwrap_or(false);
 
+    if let Err(error) = ctx.check_write_path(path) {
+        return Ok(ToolOutput::error(error));
+    }
     if !path.exists() {
         let suggestions = suggest_similar_files(&ctx.cwd, raw_path);
         let mut msg = format!("File not found: {}", path.display());
@@ -339,6 +364,8 @@ async fn execute_anchor_edit(
     Ok(ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text: msg }],
         details: json!({
+            "action": "edit",
+            "mode": "anchored",
             "path": path.display().to_string(),
             "dry_run": dry_run,
             "anchored": true,
@@ -421,6 +448,8 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         }
     }
 
@@ -729,7 +758,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert!(text.contains("oldText"));
+        assert!(text.contains("old_text"));
     }
 
     #[tokio::test]
@@ -849,8 +878,8 @@ mod tests {
                 "c-anchor",
                 json!({
                     "path": "anchored.txt",
-                    "anchorStart": anchors[0].id,
-                    "replacement": "BETA",
+                    "anchor_start": anchors[0].id,
+                    "new_text": "BETA",
                 }),
                 ctx.clone(),
             )
@@ -867,6 +896,17 @@ mod tests {
             Some("alpha\nbeta\ngamma\n")
         );
         assert_eq!(result.details["anchored"], true);
+        assert_eq!(result.details["action"], "edit");
+        assert_eq!(result.details["mode"], "anchored");
+        assert_eq!(result.details["start_line"], 2);
+        assert_eq!(result.details["end_line"], 2);
+        assert!(
+            result.details["refreshed_anchors"]
+                .as_array()
+                .unwrap()
+                .len()
+                >= 3
+        );
     }
 
     #[tokio::test]
@@ -889,8 +929,8 @@ mod tests {
                 "c-anchor-stale",
                 json!({
                     "path": "stale.txt",
-                    "anchorStart": anchors[0].id,
-                    "replacement": "BETA",
+                    "anchor_start": anchors[0].id,
+                    "new_text": "BETA",
                 }),
                 ctx,
             )
@@ -924,9 +964,9 @@ mod tests {
                 "c-anchor-dry",
                 json!({
                     "path": "dry-anchor.txt",
-                    "anchorStart": anchors[0].id,
-                    "replacement": "BETA",
-                    "dryRun": true,
+                    "anchor_start": anchors[0].id,
+                    "new_text": "BETA",
+                    "dry_run": true,
                 }),
                 ctx.clone(),
             )

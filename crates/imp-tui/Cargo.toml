@@ -26,6 +26,7 @@ async-trait.workspace = true
 syntect = "5"
 unicode-width = "0.2"
 imp-lua.workspace = true
+mana-core.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

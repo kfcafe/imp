@@ -38,6 +38,8 @@ pub enum GuardrailProfile {
     Go,
     /// Elixir starter profile.
     Elixir,
+    /// Kotlin starter profile.
+    Kotlin,
 }
 
 impl GuardrailProfile {
@@ -53,6 +55,7 @@ impl GuardrailProfile {
             Self::C => GUIDANCE_C,
             Self::Go => GUIDANCE_GO,
             Self::Elixir => GUIDANCE_ELIXIR,
+            Self::Kotlin => GUIDANCE_KOTLIN,
         }
     }
 
@@ -75,6 +78,7 @@ impl GuardrailProfile {
                 "mix compile --warnings-as-errors",
                 "mix test",
             ],
+            Self::Kotlin => &[],
         }
     }
 
@@ -86,6 +90,9 @@ impl GuardrailProfile {
             ProjectKind::Cargo => Self::Rust,
             ProjectKind::Go => Self::Go,
             ProjectKind::Elixir { .. } => Self::Elixir,
+            ProjectKind::Kotlin { .. } | ProjectKind::Gradle { .. } | ProjectKind::Maven => {
+                Self::Kotlin
+            }
             ProjectKind::Node { .. } => Self::TypeScript,
             ProjectKind::CMake | ProjectKind::Meson | ProjectKind::Make => Self::C,
             _ => Self::Generic,
@@ -354,6 +361,15 @@ const GUIDANCE_ELIXIR: &str = "\
 - Leave formatting and compilation warnings-free.
 ";
 
+const GUIDANCE_KOTLIN: &str = "\
+- Keep control flow straightforward and easy to follow.
+- Prefer val over var; keep mutation local and obvious.
+- Treat nullability as part of the design — avoid !! outside tests or impossible states.
+- Use structured concurrency; avoid GlobalScope and do not swallow CancellationException.
+- Keep Gradle/Maven verification project-specific and use ./gradlew when available.
+- Leave formatting, lint, and tests clean for the touched module.
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,6 +479,31 @@ after_write = ["zig fmt --check .", "zig build"]
         assert_eq!(
             config.resolve_effective_profile(dir.path()),
             GuardrailProfile::Elixir
+        );
+    }
+
+    #[test]
+    fn guardrail_auto_profile_resolves_kotlin_gradle() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("settings.gradle.kts"),
+            "pluginManagement {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("build.gradle.kts"),
+            "plugins { kotlin(\"jvm\") version \"2.0.0\" }\n",
+        )
+        .unwrap();
+
+        let config = GuardrailConfig {
+            profile: Some(GuardrailProfile::Auto),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config.resolve_effective_profile(dir.path()),
+            GuardrailProfile::Kotlin
         );
     }
 

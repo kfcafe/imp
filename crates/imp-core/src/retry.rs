@@ -12,8 +12,14 @@ pub fn is_retryable(err: &imp_llm::Error) -> bool {
     match err {
         // Rate limit — always retry; the provider says to wait.
         imp_llm::Error::RateLimited { .. } => true,
-        // HTTP transport failures: check what kind of reqwest error it is.
-        imp_llm::Error::Http(e) => e.is_connect() || e.is_timeout() || e.is_request(),
+        // HTTP transport/body failures: check what kind of reqwest error it is.
+        // `bytes_stream()` surfaces truncated or malformed compressed response
+        // bodies as decode errors (for example: "error decoding response body").
+        // Those are usually transient provider/proxy failures and are safe to
+        // retry before any meaningful stream event has been emitted.
+        imp_llm::Error::Http(e) => {
+            e.is_connect() || e.is_timeout() || e.is_request() || e.is_decode() || e.is_body()
+        }
         // Stream errors are transient (connection reset, partial read, etc.).
         imp_llm::Error::Stream(_) => true,
         // Provider errors may carry an HTTP status in the message. Check for 5xx.
@@ -197,6 +203,34 @@ mod tests {
     fn stream_error_is_retryable() {
         let err = imp_llm::Error::Stream("connection reset".into());
         assert!(is_retryable(&err));
+    }
+
+    #[tokio::test]
+    async fn http_decode_error_is_retryable() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request_buf = [0u8; 1024];
+            let _ = socket.read(&mut request_buf).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 999\r\n\r\nnot-g")
+                .await
+                .unwrap();
+        });
+
+        let err = reqwest::get(format!("http://{addr}"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap_err();
+
+        assert!(err.is_decode() || err.is_body());
+        assert!(is_retryable(&imp_llm::Error::Http(err)));
     }
 
     #[test]

@@ -1,25 +1,31 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use mana::commands::agents::{agents_file_path, load_agents};
 use mana::commands::logs::find_all_logs;
 use mana::commands::next::ScoredUnit;
 use mana::commands::run::{NativeRunParams, RunSummary, RunTarget, RunUnitStatus, RunView};
-use mana::stream::StreamEvent;
+use mana::stream::{self, StreamEvent};
 use mana_core::ops::claim::ClaimParams;
+use mana_core::ops::run as mana_run_core;
 use mana_core::unit::{OnFailAction, UnitType};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::{truncate_head, Tool, ToolContext, ToolOutput, ToolUpdate};
+use super::{truncate_head, Tool, ToolContext, ToolOutput};
 use crate::error::Result;
+use crate::mana_worker::{self, WorkerRunOptions, WorkerStatus};
 use crate::ui::{NotifyLevel, WidgetContent};
 const MAX_OUTPUT_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
+const DEFAULT_LIST_LIMIT: usize = 20;
+const MAX_LIST_LIMIT: usize = 50;
 const MAX_STORED_RUN_EVENTS: usize = 64;
 const MAX_PERSISTED_RUN_LOG_LINES: usize = 50;
 const FINISHED_RUN_TTL_MS: u128 = 60 * 60 * 1000;
+const INTERRUPTED_RUN_STALE_MS: u128 = 6 * 60 * 60 * 1000;
 
 fn find_mana_dir(cwd: &Path) -> std::result::Result<std::path::PathBuf, String> {
     mana_core::discovery::find_mana_dir(cwd).map_err(|e| e.to_string())
@@ -29,6 +35,8 @@ fn resolve_mana_dir(
     cwd: &Path,
     params: &serde_json::Value,
 ) -> std::result::Result<std::path::PathBuf, String> {
+    // Transitional compatibility: runtime still accepts legacy alias fields even though
+    // the model-facing schema advertises only canonical `scope` and `path`.
     let scope = params
         .get("scope")
         .and_then(|v| v.as_str())
@@ -64,6 +72,19 @@ fn resolve_mana_dir(
     }
 }
 
+fn normalize_runtime_value(mut runtime: serde_json::Value) -> serde_json::Value {
+    if runtime
+        .get("direct_agent")
+        .and_then(serde_json::Value::as_str)
+        == Some("pi")
+    {
+        if let Some(map) = runtime.as_object_mut() {
+            map.insert("direct_agent".to_string(), json!("imp"));
+        }
+    }
+    runtime
+}
+
 fn json_output(value: &impl serde::Serialize) -> ToolOutput {
     match serde_json::to_string_pretty(value) {
         Ok(json) => ToolOutput {
@@ -73,13 +94,6 @@ fn json_output(value: &impl serde::Serialize) -> ToolOutput {
         },
         Err(e) => ToolOutput::error(format!("Failed to serialize: {e}")),
     }
-}
-
-fn send_update(ctx: &ToolContext, text: impl Into<String>, details: serde_json::Value) {
-    let _ = ctx.update_tx.try_send(ToolUpdate {
-        content: vec![imp_llm::ContentBlock::Text { text: text.into() }],
-        details,
-    });
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,11 +132,12 @@ impl From<&NativeRunParams> for NativeRunParamsView {
 struct NativeRunState {
     run_id: String,
     scope: String,
-    background: bool,
     status: String,
     error: Option<String>,
     started_at_ms: u128,
     finished_at_ms: Option<u128>,
+    #[serde(default)]
+    last_event_at_ms: u128,
     args: NativeRunParamsView,
     runtime: Option<serde_json::Value>,
     summary: RunSummary,
@@ -132,15 +147,15 @@ struct NativeRunState {
 }
 
 impl NativeRunState {
-    fn new(run_id: String, scope: String, background: bool, args: &NativeRunParams) -> Self {
+    fn new(run_id: String, scope: String, args: &NativeRunParams) -> Self {
         Self {
             run_id,
             scope,
-            background,
             status: "starting".to_string(),
             error: None,
             started_at_ms: unix_time_ms(),
             finished_at_ms: None,
+            last_event_at_ms: unix_time_ms(),
             args: NativeRunParamsView::from(args),
             runtime: None,
             summary: RunSummary {
@@ -161,6 +176,7 @@ impl NativeRunState {
 
     fn apply_event(&mut self, event: &StreamEvent) {
         self.event_count += 1;
+        self.last_event_at_ms = unix_time_ms();
         if let Some(line) = stream_event_line(event) {
             self.log_lines.push(line);
             trim_log_lines(&mut self.log_lines, MAX_STORED_RUN_EVENTS);
@@ -179,7 +195,8 @@ impl NativeRunState {
                 self.summary.total_rounds = *total_rounds;
                 self.runtime = runtime
                     .as_ref()
-                    .and_then(|value| serde_json::to_value(value).ok());
+                    .and_then(|value| serde_json::to_value(value).ok())
+                    .map(normalize_runtime_value);
                 self.units = units
                     .iter()
                     .map(|info| RunUnitStatus {
@@ -208,7 +225,8 @@ impl NativeRunState {
                 if runtime.is_some() {
                     self.runtime = runtime
                         .as_ref()
-                        .and_then(|value| serde_json::to_value(value).ok());
+                        .and_then(|value| serde_json::to_value(value).ok())
+                        .map(normalize_runtime_value);
                 }
             }
             StreamEvent::RoundStart { total_rounds, .. } => {
@@ -293,21 +311,26 @@ impl NativeRunState {
     }
 
     fn finish_with_view(&mut self, view: &RunView) {
+        let now = unix_time_ms();
         self.summary = view.summary.clone();
         self.units = view.units.clone();
         self.runtime = view
             .runtime
             .as_ref()
-            .and_then(|value| serde_json::to_value(value).ok());
+            .and_then(|value| serde_json::to_value(value).ok())
+            .map(normalize_runtime_value);
         self.status = "finished".to_string();
         self.error = None;
-        self.finished_at_ms = Some(unix_time_ms());
+        self.finished_at_ms = Some(now);
+        self.last_event_at_ms = now;
     }
 
     fn fail(&mut self, error: String) {
+        let now = unix_time_ms();
         self.status = "failed".to_string();
         self.error = Some(error.clone());
-        self.finished_at_ms = Some(unix_time_ms());
+        self.finished_at_ms = Some(now);
+        self.last_event_at_ms = now;
         self.log_lines.push(error);
         trim_log_lines(&mut self.log_lines, MAX_STORED_RUN_EVENTS);
     }
@@ -326,11 +349,11 @@ struct ManaRunStore {
 }
 
 impl ManaRunStore {
-    fn start_run(&mut self, scope: String, background: bool, args: &NativeRunParams) -> String {
+    fn start_run(&mut self, scope: String, args: &NativeRunParams) -> String {
         self.next_id += 1;
         let run_id = format!("run-{}", self.next_id);
         self.runs
-            .push(NativeRunState::new(run_id.clone(), scope, background, args));
+            .push(NativeRunState::new(run_id.clone(), scope, args));
         self.trim_history();
         run_id
     }
@@ -364,6 +387,7 @@ impl ManaRunStore {
         };
 
         store.discard_expired_finished_runs();
+        store.classify_stale_unfinished_runs();
         store.trim_history();
         store
     }
@@ -374,6 +398,28 @@ impl ManaRunStore {
             Some(finished_at_ms) => finished_at_ms >= cutoff,
             None => true,
         });
+    }
+
+    fn classify_stale_unfinished_runs(&mut self) {
+        let cutoff = unix_time_ms().saturating_sub(INTERRUPTED_RUN_STALE_MS);
+        for run in &mut self.runs {
+            if (run.status == "starting" || run.status == "running")
+                && run.finished_at_ms.is_none()
+                && run.last_event_at_ms > 0
+                && run.last_event_at_ms < cutoff
+            {
+                run.status = "interrupted".to_string();
+                run.error = Some(
+                    "Run state is stale after process restart or lost background worker; inspect logs before rerun".to_string(),
+                );
+                run.finished_at_ms = Some(run.last_event_at_ms);
+                run.log_lines.push(
+                    "Run marked interrupted: stale persisted running state after reload"
+                        .to_string(),
+                );
+                trim_log_lines(&mut run.log_lines, MAX_STORED_RUN_EVENTS);
+            }
+        }
     }
 
     fn update_with_event(&mut self, run_id: &str, event: &StreamEvent) {
@@ -624,6 +670,7 @@ fn update_run_store_with_event(
 ) {
     if let Ok(mut store) = store.lock() {
         store.update_with_event(run_id, event);
+        store.persist();
     }
 }
 
@@ -641,54 +688,49 @@ fn fail_run_in_store(store: &std::sync::Mutex<ManaRunStore>, run_id: &str, error
     }
 }
 
-fn run_summary_lines(view: &RunView) -> Vec<String> {
-    let mut lines = vec![format!(
-        "Mana run: {} total · {} done · {} failed · {} candidate complete / awaiting verify · {} skipped",
-        view.summary.total_units,
-        view.summary.total_closed,
-        view.summary.total_failed,
-        view.summary.total_awaiting_verify,
-        view.summary.total_skipped
-    )];
-
-    for unit in &view.units {
-        let marker = match unit.status.as_str() {
-            "running" => "▶",
-            "done" => "✓",
-            "failed" => "✗",
-            "blocked" => "!",
-            _ => "…",
-        };
-        let mut extras = Vec::new();
-        if let Some(round) = unit.round {
-            extras.push(format!("wave {round}"));
-        }
-        if let Some(agent) = &unit.agent {
-            extras.push(agent.clone());
-        }
-        if let Some(duration) = unit.duration_secs {
-            extras.push(format!("{}s", duration));
-        }
-        let extra_suffix = if extras.is_empty() {
-            String::new()
-        } else {
-            format!("  {}", extras.join(" · "))
-        };
-        lines.push(format!(
-            "{marker} {}  {}  {}{}",
-            unit.id, unit.title, unit.status, extra_suffix
-        ));
-    }
-
-    lines
-}
-
 fn mana_widget_lines(summary: impl Into<String>, detail: Option<String>) -> WidgetContent {
     let mut lines = vec![summary.into()];
     if let Some(detail) = detail {
         lines.push(detail);
     }
     WidgetContent::Lines(lines)
+}
+
+fn mana_run_widget_lines(
+    run_id: &str,
+    scope: &str,
+    state: Option<&NativeRunState>,
+) -> WidgetContent {
+    let Some(state) = state else {
+        return mana_widget_lines(
+            format!("mana {run_id}: starting"),
+            Some(format!("{scope} · waiting for first event")),
+        );
+    };
+
+    let summary = format!(
+        "mana {}: {} · {}/{} done · {} failed",
+        state.run_id,
+        state.status,
+        state.summary.total_closed,
+        state.summary.total_units,
+        state.summary.total_failed
+    );
+    let mut detail = vec![format!(
+        "{} · {} events · {}s elapsed",
+        state.scope,
+        state.event_count,
+        unix_time_ms().saturating_sub(state.started_at_ms) / 1000
+    )];
+    if let Some(active) = state.units.iter().find(|unit| unit.status == "running") {
+        detail.push(format!("running {} {}", active.id, active.title));
+    } else if let Some(queued) = state.units.iter().find(|unit| unit.status == "queued") {
+        detail.push(format!("queued {} {}", queued.id, queued.title));
+    }
+    if let Some(last) = state.log_lines.last() {
+        detail.push(last.clone());
+    }
+    mana_widget_lines(summary, Some(detail.join(" · ")))
 }
 
 async fn set_mana_delta_widget(
@@ -729,6 +771,14 @@ fn target_from_params(params: &serde_json::Value) -> Result<RunTarget> {
     }
 
     Ok(RunTarget::AllReady)
+}
+
+fn target_ids_from_run_target(target: &RunTarget) -> Vec<String> {
+    match target {
+        RunTarget::Unit(id) => vec![id.clone()],
+        RunTarget::Explicit(ids) => ids.clone(),
+        RunTarget::AllReady => Vec::new(),
+    }
 }
 
 fn scope_from_target(target: &RunTarget) -> String {
@@ -850,6 +900,307 @@ fn parse_on_fail(value: &serde_json::Value) -> Result<Option<OnFailAction>> {
     }
 }
 
+fn parent_placement_details(
+    parent: Option<&str>,
+    parent_reason: Option<&str>,
+) -> serde_json::Value {
+    match (parent, parent_reason) {
+        (Some(parent), Some(reason)) if !reason.trim().is_empty() => json!({
+            "parent": parent,
+            "parent_reason": reason,
+            "warning": null,
+            "hint": "Parent placement was explained explicitly.",
+        }),
+        (Some(parent), _) => json!({
+            "parent": parent,
+            "parent_reason": null,
+            "warning": "parent_reason_missing",
+            "hint": "Before creating follow-up work under the active epic, confirm it belongs to that product/scope. If this is a workflow, reliability, or cross-cutting issue, attach it to a matching epic or create one instead.",
+        }),
+        (None, _) => json!({
+            "parent": null,
+            "parent_reason": null,
+            "warning": null,
+            "hint": "No parent selected. For durable multi-step work, choose or create the matching epic before adding child tasks.",
+        }),
+    }
+}
+
+fn mana_close_force_reason_error(id: &str) -> ToolOutput {
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text {
+            text: format!(
+                "mana close {id} with force=true requires reason with equivalent verify evidence"
+            ),
+        }],
+        details: json!({
+            "action": "close",
+            "id": id,
+            "ok": false,
+            "force": true,
+            "missing": ["reason"],
+            "hint": "When stored verify is stale or invalid, rerun equivalent checks and close with force=true plus a reason that names the passing commands/evidence.",
+            "example": {
+                "action": "close",
+                "id": id,
+                "force": true,
+                "reason": "Equivalent verify passed: cargo test -p imp-core mana -- --nocapture; commit abc123"
+            }
+        }),
+        is_error: true,
+    }
+}
+
+fn mana_close_error_output(id: &str, error: String) -> ToolOutput {
+    let verify_related = is_close_verify_error(&error);
+    let hint = if verify_related {
+        Some(
+            "If the stored verify command is stale or invalid, run equivalent focused checks, then close with force=true and reason containing the passing commands/evidence.",
+        )
+    } else {
+        None
+    };
+    let text = match hint {
+        Some(hint) => format!("{error}\n\nRecovery: {hint}"),
+        None => error.clone(),
+    };
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "action": "close",
+            "id": id,
+            "ok": false,
+            "error": error,
+            "verify_related": verify_related,
+            "recovery_hint": hint,
+            "force_requires_reason": true,
+        }),
+        is_error: true,
+    }
+}
+
+fn is_close_verify_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("verify")
+        || lower.contains("verification")
+        || lower.contains("exit")
+        || lower.contains("command")
+        || lower.contains("timed out")
+}
+
+fn mana_validation_error(
+    action: &str,
+    missing: Vec<&'static str>,
+    invalid: Vec<&'static str>,
+    hint: &'static str,
+    canonical_fields: Vec<&'static str>,
+) -> ToolOutput {
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text {
+            text: format!("mana {action} validation failed: {hint}"),
+        }],
+        details: json!({
+            "action": action,
+            "ok": false,
+            "missing": missing,
+            "invalid": invalid,
+            "hint": hint,
+            "canonical_fields": canonical_fields,
+        }),
+        is_error: true,
+    }
+}
+
+fn has_text(params: &serde_json::Value, field: &str) -> bool {
+    parse_optional_string(&params[field]).is_some()
+}
+
+fn has_nonempty_csv(params: &serde_json::Value, field: &str) -> bool {
+    parse_csv_strings(&params[field], field)
+        .map(|values| !values.is_empty())
+        .unwrap_or(false)
+}
+
+fn validate_mana_action(action: &str, params: &serde_json::Value) -> Option<ToolOutput> {
+    let missing = |fields: Vec<&'static str>, hint: &'static str, canonical: Vec<&'static str>| {
+        Some(mana_validation_error(
+            action,
+            fields,
+            Vec::new(),
+            hint,
+            canonical,
+        ))
+    };
+
+    if params.get("path").is_some() && params.get("paths").is_none() {
+        match action {
+            "create" | "update" | "fact_create" => {
+                return Some(mana_validation_error(
+                    action,
+                    Vec::new(),
+                    vec!["path"],
+                    "Use path for project/.mana location; use paths to attach relevant files to units.",
+                    vec!["path", "paths"],
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    match action {
+        "show" | "claim" | "release" | "close" | "reopen" | "verify" | "fail" | "delete" => {
+            if !has_text(params, "id") {
+                return missing(vec!["id"], "Provide the unit id.", vec!["id"]);
+            }
+        }
+        "create" => {
+            if !has_text(params, "title") {
+                return missing(
+                    vec!["title"],
+                    "create requires title. Before creating, check list/show for an existing relevant unit; update or notes_append when the durable state belongs there. For executable tasks, include description, acceptance, and verify.",
+                    vec!["title", "description", "acceptance", "verify", "paths"],
+                );
+            }
+        }
+        "update" => {
+            if !has_text(params, "id") {
+                return missing(
+                    vec!["id"],
+                    "update requires the unit id to modify.",
+                    vec!["id"],
+                );
+            }
+        }
+        "notes_append" => {
+            let mut fields = Vec::new();
+            if !has_text(params, "id") {
+                fields.push("id");
+            }
+            if !has_text(params, "notes") {
+                fields.push("notes");
+            }
+            if !fields.is_empty() {
+                return missing(
+                    fields,
+                    "notes_append requires id and notes; use notes for durable progress/context.",
+                    vec!["id", "notes"],
+                );
+            }
+        }
+        "decision_add" => {
+            let mut fields = Vec::new();
+            if !has_text(params, "id") {
+                fields.push("id");
+            }
+            if !has_text(params, "description") && !has_nonempty_csv(params, "decisions") {
+                fields.push("description");
+            }
+            if !fields.is_empty() {
+                return missing(
+                    fields,
+                    "decision_add requires id and description/decisions for scope, architecture, or sequencing choices.",
+                    vec!["id", "description", "decisions"],
+                );
+            }
+        }
+        "decision_resolve" => {
+            let mut fields = Vec::new();
+            if !has_text(params, "id") {
+                fields.push("id");
+            }
+            if !has_nonempty_csv(params, "resolve_decisions") {
+                fields.push("resolve_decisions");
+            }
+            if !fields.is_empty() {
+                return missing(
+                    fields,
+                    "decision_resolve requires id and resolve_decisions.",
+                    vec!["id", "resolve_decisions"],
+                );
+            }
+        }
+        "dep_add" | "dep_remove" => {
+            let mut fields = Vec::new();
+            if !has_text(params, "from_id") {
+                fields.push("from_id");
+            }
+            if !has_text(params, "dep_id") {
+                fields.push("dep_id");
+            }
+            if !fields.is_empty() {
+                return missing(
+                    fields,
+                    "Dependency edits require from_id and dep_id.",
+                    vec!["from_id", "dep_id"],
+                );
+            }
+        }
+        "fact_create" => {
+            let mut fields = Vec::new();
+            if !has_text(params, "title") {
+                fields.push("title");
+            }
+            if !has_text(params, "verify") {
+                fields.push("verify");
+            }
+            if !fields.is_empty() {
+                return missing(
+                    fields,
+                    "fact_create requires title and verify so the fact is re-checkable.",
+                    vec!["title", "verify", "paths"],
+                );
+            }
+        }
+        "logs" => {
+            if !has_text(params, "id") && !has_text(params, "run_id") {
+                return missing(
+                    vec!["id"],
+                    "logs requires id or run_id.",
+                    vec!["id", "run_id"],
+                );
+            }
+        }
+        "reparent" => {
+            if !has_text(params, "id") {
+                return missing(
+                    vec!["id"],
+                    "reparent requires id and parent.",
+                    vec!["id", "parent", "reason"],
+                );
+            }
+            if params.get("parent").is_none() {
+                return missing(
+                    vec!["parent"],
+                    "reparent requires the new parent id. Root detach can be added as a separate explicit action later.",
+                    vec!["id", "parent", "reason"],
+                );
+            }
+        }
+        "run_state" | "evaluate" => {
+            if !has_text(params, "run_id") {
+                return missing(
+                    vec!["run_id"],
+                    "run_state/evaluate requires run_id from mana action=run.",
+                    vec!["run_id"],
+                );
+            }
+        }
+        "run" => {
+            if params.get("target").is_some() && params.get("targets").is_none() {
+                return Some(mana_validation_error(
+                    action,
+                    Vec::new(),
+                    vec!["target"],
+                    "Use targets for explicit unit ids; target is an internal run concept.",
+                    vec!["targets", "id"],
+                ));
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
 fn parse_unit_kind(value: &serde_json::Value) -> Result<Option<UnitType>> {
     let Some(raw) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
@@ -857,26 +1208,23 @@ fn parse_unit_kind(value: &serde_json::Value) -> Result<Option<UnitType>> {
 
     match raw {
         "epic" => Ok(Some(UnitType::Epic)),
-        "task" | "job" => Ok(Some(UnitType::Task)),
+        "task" => Ok(Some(UnitType::Task)),
+        // Transitional compatibility: accept legacy `job` at runtime, but keep it out
+        // of the model-facing schema so new calls converge on `task`.
+        "job" => Ok(Some(UnitType::Task)),
         "fact" => Ok(Some(UnitType::Fact)),
         other => Err(crate::error::Error::Tool(format!(
-            "type must be one of: epic, task, fact (legacy alias: job; got {other})"
+            "kind must be one of: epic, task, fact (legacy runtime alias: job; got {other})"
         ))),
     }
 }
 
-fn background_run_started_output(
-    scope: &str,
-    run_id: &str,
-    run_args: &NativeRunParams,
-) -> ToolOutput {
-    let text = format!(
-        "Started native mana orchestration in background for {scope} as {run_id}. Mana will coordinate the run and dispatch imp workers underneath. Use mana(action=\"run_state\", run_id=\"{run_id}\") for orchestration status, mana(action=\"logs\", run_id=\"{run_id}\") for recent native events, and mana(action=\"agents\") / mana(action=\"logs\", id=...) for worker output."
-    );
+fn run_started_output(scope: &str, run_id: &str, run_args: &NativeRunParams) -> ToolOutput {
+    let text = format!("Started native mana orchestration for {scope} as {run_id}.");
     ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text }],
         details: json!({
-            "background": true,
+            "action": "run",
             "run_id": run_id,
             "scope": scope,
             "target": match &run_args.target {
@@ -888,9 +1236,361 @@ fn background_run_started_output(
             "loop": run_args.loop_mode,
             "dry_run": run_args.dry_run,
             "review": run_args.review,
+            "timeout": run_args.timeout,
+            "idle_timeout": run_args.idle_timeout,
+            "status": "started",
+            "next": {
+                "state": format!("mana(action=\\\"run_state\\\", run_id=\\\"{run_id}\\\")"),
+                "logs": format!("mana(action=\\\"logs\\\", run_id=\\\"{run_id}\\\")")
+            }
         }),
         is_error: false,
     }
+}
+
+fn runtime_info_for_run(
+    _args: &NativeRunParams,
+    ctx: &ToolContext,
+) -> mana::commands::run::RunRuntimeInfo {
+    mana::commands::run::RunRuntimeInfo {
+        direct_agent: Some("imp".to_string()),
+        model: ctx.config.model.clone(),
+    }
+}
+
+fn stream_runtime_info_for_run(
+    args: &NativeRunParams,
+    ctx: &ToolContext,
+) -> stream::RunRuntimeInfo {
+    runtime_info_for_run(args, ctx).into()
+}
+
+fn core_filter_from_native(target: &RunTarget) -> std::result::Result<Option<&str>, String> {
+    match target {
+        RunTarget::AllReady => Ok(None),
+        RunTarget::Unit(id) => Ok(Some(id.as_str())),
+        RunTarget::Explicit(ids) if ids.is_empty() => Ok(None),
+        RunTarget::Explicit(ids) if ids.len() == 1 => Ok(Some(ids[0].as_str())),
+        RunTarget::Explicit(_) => Err(
+            "native mana run does not yet support multiple explicit targets; run one target at a time"
+                .to_string(),
+        ),
+    }
+}
+
+fn validate_native_run_target(target: &RunTarget) -> std::result::Result<(), String> {
+    match target {
+        RunTarget::Explicit(ids) if ids.len() > 1 => Err(
+            "native mana run does not yet support multiple explicit targets; run one target at a time"
+                .to_string(),
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn mana_workspace_root(mana_dir: &Path, fallback: &Path) -> PathBuf {
+    mana_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| fallback.to_path_buf())
+}
+
+#[derive(Debug)]
+struct DirectUnitOutcome {
+    event: StreamEvent,
+    status: RunUnitStatus,
+}
+
+fn worker_options_for_native_unit(
+    unit: &mana_run_core::ReadyUnit,
+    run_args: &NativeRunParams,
+    workspace_root: PathBuf,
+    mana_dir: PathBuf,
+    ctx: &ToolContext,
+) -> WorkerRunOptions {
+    WorkerRunOptions {
+        cwd: workspace_root,
+        model_override: None,
+        model: unit.model.clone().or_else(|| ctx.config.model.clone()),
+        provider: None,
+        api_key: None,
+        thinking: ctx.config.thinking,
+        max_turns: Some(run_args.timeout),
+        autonomy_mode: None,
+        verification_gates: Vec::new(),
+        max_tokens: None,
+        system_prompt: None,
+        no_tools: false,
+        mana_dir_override: Some(mana_dir),
+        defer_verify: false,
+        lua_loader: ctx.lua_tool_loader.clone(),
+    }
+}
+
+async fn run_direct_unit(
+    unit: mana_run_core::ReadyUnit,
+    round: usize,
+    mana_dir: PathBuf,
+    workspace_root: PathBuf,
+    run_args: NativeRunParams,
+    ctx: ToolContext,
+) -> DirectUnitOutcome {
+    let started = Instant::now();
+    let assignment = match mana_worker::load_assignment_with_mana_dir(
+        &workspace_root,
+        &unit.id,
+        Some(&mana_dir),
+    ) {
+        Ok(assignment) => assignment,
+        Err(error) => {
+            let error = error.to_string();
+            return DirectUnitOutcome {
+                event: StreamEvent::UnitDone {
+                    id: unit.id.clone(),
+                    success: false,
+                    duration_secs: started.elapsed().as_secs(),
+                    error: Some(error.clone()),
+                    total_tokens: None,
+                    total_cost: None,
+                    tool_count: None,
+                    turns: None,
+                    failure_summary: Some(error.clone()),
+                },
+                status: RunUnitStatus {
+                    id: unit.id,
+                    title: unit.title,
+                    status: "failed".to_string(),
+                    round: Some(round),
+                    agent: Some("imp".to_string()),
+                    model: None,
+                    duration_secs: Some(started.elapsed().as_secs()),
+                    tool_count: None,
+                    turns: None,
+                    failure_summary: Some(error.clone()),
+                    error: Some(error),
+                },
+            };
+        }
+    };
+    let options = worker_options_for_native_unit(&unit, &run_args, workspace_root, mana_dir, &ctx);
+    let outcome = mana_worker::run_worker_assignment(assignment, options).await;
+    let duration_secs = started.elapsed().as_secs();
+    let (success, error, tool_count, turns, failure_summary, model) = match outcome {
+        Ok(outcome) => {
+            let success = matches!(
+                outcome.result.status,
+                WorkerStatus::Completed | WorkerStatus::AwaitingVerify
+            );
+            (
+                success,
+                outcome.result.error.clone(),
+                Some(outcome.result.tool_count),
+                Some(outcome.result.turns),
+                outcome.result.summary.clone(),
+                outcome.result.model.clone(),
+            )
+        }
+        Err(error) => {
+            let error = error.to_string();
+            (false, Some(error.clone()), None, None, Some(error), None)
+        }
+    };
+    let status = RunUnitStatus {
+        id: unit.id.clone(),
+        title: unit.title,
+        status: if success { "done" } else { "failed" }.to_string(),
+        round: Some(round),
+        agent: Some("imp".to_string()),
+        model,
+        duration_secs: Some(duration_secs),
+        tool_count,
+        turns,
+        failure_summary: failure_summary.clone(),
+        error: error.clone(),
+    };
+    DirectUnitOutcome {
+        event: StreamEvent::UnitDone {
+            id: unit.id,
+            success,
+            duration_secs,
+            error,
+            total_tokens: None,
+            total_cost: None,
+            tool_count,
+            turns,
+            failure_summary,
+        },
+        status,
+    }
+}
+
+async fn run_native_imp_orchestration(
+    mana_dir: PathBuf,
+    run_args: NativeRunParams,
+    ctx: ToolContext,
+    run_store: Arc<std::sync::Mutex<ManaRunStore>>,
+    run_id: String,
+) -> std::result::Result<RunView, String> {
+    let started = Instant::now();
+    let runtime = runtime_info_for_run(&run_args, &ctx);
+    let stream_runtime = stream_runtime_info_for_run(&run_args, &ctx);
+    validate_native_run_target(&run_args.target)?;
+    let core_filter = core_filter_from_native(&run_args.target)?;
+    let plan = mana_run_core::compute_run_plan(&mana_dir, core_filter, run_args.dry_run)
+        .map_err(|error| error.to_string())?;
+    let total_rounds = plan.waves.len();
+    let all_units: Vec<_> = plan
+        .waves
+        .iter()
+        .enumerate()
+        .flat_map(|(wave_index, wave)| {
+            wave.units.iter().map(move |unit| stream::UnitInfo {
+                id: unit.id.clone(),
+                title: unit.title.clone(),
+                round: wave_index + 1,
+            })
+        })
+        .collect();
+    let run_start = StreamEvent::RunStart {
+        parent_id: scope_from_target(&run_args.target),
+        total_units: all_units.len(),
+        total_rounds,
+        units: all_units,
+        runtime: Some(stream_runtime.clone()),
+    };
+    update_run_store_with_event(&run_store, &run_id, &run_start);
+
+    if run_args.dry_run {
+        let summary = RunSummary {
+            total_units: plan.total_units,
+            total_rounds,
+            duration_secs: started.elapsed().as_secs(),
+            ..RunSummary::default()
+        };
+        let view = RunView {
+            summary,
+            units: run_state_snapshot(&run_store, Some(&run_id))
+                .map(|state| state.units)
+                .unwrap_or_default(),
+            events: vec![run_start],
+            runtime: Some(runtime),
+        };
+        finish_run_in_store(&run_store, &run_id, &view);
+        return Ok(view);
+    }
+
+    let workspace_root = mana_workspace_root(&mana_dir, &ctx.cwd);
+    let mut events = vec![run_start];
+    let mut total_closed = 0usize;
+    let mut total_failed = 0usize;
+    let mut final_units = Vec::new();
+    let max_jobs = run_args.jobs.max(1) as usize;
+
+    for (wave_index, wave) in plan.waves.into_iter().enumerate() {
+        let round = wave_index + 1;
+        let round_start = StreamEvent::RoundStart {
+            round,
+            total_rounds,
+            unit_count: wave.units.len(),
+        };
+        update_run_store_with_event(&run_store, &run_id, &round_start);
+        events.push(round_start);
+
+        let mut success_count = 0usize;
+        let mut failed_count = 0usize;
+        let mut pending = wave.units.into_iter();
+        loop {
+            if ctx.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("native mana run cancelled".to_string());
+            }
+            let batch: Vec<_> = pending.by_ref().take(max_jobs).collect();
+            if batch.is_empty() {
+                break;
+            }
+            let mut handles = Vec::with_capacity(batch.len());
+            for unit in batch {
+                let unit_start = StreamEvent::UnitStart {
+                    id: unit.id.clone(),
+                    title: unit.title.clone(),
+                    round,
+                    file_overlaps: None,
+                    attempt: None,
+                    priority: Some(unit.priority),
+                };
+                update_run_store_with_event(&run_store, &run_id, &unit_start);
+                events.push(unit_start);
+                handles.push(tokio::spawn(run_direct_unit(
+                    unit,
+                    round,
+                    mana_dir.clone(),
+                    workspace_root.clone(),
+                    run_args.clone(),
+                    ctx.clone(),
+                )));
+            }
+            for handle in handles {
+                let outcome = handle
+                    .await
+                    .map_err(|error| format!("native mana worker task failed: {error}"))?;
+                let success = matches!(outcome.status.status.as_str(), "done");
+                if success {
+                    success_count += 1;
+                    total_closed += 1;
+                } else {
+                    failed_count += 1;
+                    total_failed += 1;
+                }
+                update_run_store_with_event(&run_store, &run_id, &outcome.event);
+                events.push(outcome.event);
+                final_units.push(outcome.status);
+            }
+            if failed_count > 0 && !run_args.keep_going {
+                break;
+            }
+        }
+        let round_end = StreamEvent::RoundEnd {
+            round,
+            success_count,
+            failed_count,
+        };
+        update_run_store_with_event(&run_store, &run_id, &round_end);
+        events.push(round_end);
+        if failed_count > 0 && !run_args.keep_going {
+            break;
+        }
+    }
+
+    let duration_secs = started.elapsed().as_secs();
+    let run_end = StreamEvent::RunEnd {
+        total_success: total_closed,
+        total_closed,
+        total_failed,
+        total_abandoned: 0,
+        total_awaiting_verify: 0,
+        total_skipped: plan.blocked.len(),
+        duration_secs,
+    };
+    update_run_store_with_event(&run_store, &run_id, &run_end);
+    events.push(run_end);
+
+    let summary = RunSummary {
+        total_units: final_units.len(),
+        total_rounds,
+        total_closed,
+        total_failed,
+        total_abandoned: 0,
+        total_awaiting_verify: 0,
+        total_skipped: plan.blocked.len(),
+        duration_secs,
+    };
+    let view = RunView {
+        summary,
+        units: final_units,
+        events,
+        runtime: Some(runtime),
+    };
+    finish_run_in_store(&run_store, &run_id, &view);
+    Ok(view)
 }
 
 fn spawn_background_run(
@@ -910,33 +1610,68 @@ fn spawn_background_run(
             Some(&format!("mana orchestration: running {scope}")),
         )
         .await;
-        ui.set_widget(
-            "mana",
-            Some(mana_widget_lines(
-                format!("orchestrating {scope}"),
-                Some(format!(
-                    "native mana tool → mana orchestration → imp workers · inspect with mana run_state/logs (run_id={run_id})"
-                )),
-            )),
+        ui.set_widget("mana", Some(mana_run_widget_lines(&run_id, &scope, None)))
+            .await;
+
+        let run_store_for_progress = run_store.clone();
+        let run_id_for_progress = run_id.clone();
+        let scope_for_progress = scope.clone();
+        let ui_for_progress = ui.clone();
+        let progress_task = tokio::spawn(async move {
+            let started = Instant::now();
+            let mut interval = tokio::time::interval(Duration::from_millis(750));
+            loop {
+                interval.tick().await;
+                let state = run_state_snapshot(&run_store_for_progress, Some(&run_id_for_progress));
+                if let Some(state) = state.as_ref() {
+                    let status = format!(
+                        "mana {}: {} · {}/{} done · {} failed",
+                        run_id_for_progress,
+                        state.status,
+                        state.summary.total_closed,
+                        state.summary.total_units,
+                        state.summary.total_failed
+                    );
+                    ui_for_progress.set_status("mana", Some(&status)).await;
+                    ui_for_progress
+                        .set_widget(
+                            "mana",
+                            Some(mana_run_widget_lines(
+                                &run_id_for_progress,
+                                &scope_for_progress,
+                                Some(state),
+                            )),
+                        )
+                        .await;
+                    if state.finished_at_ms.is_some()
+                        || matches!(state.status.as_str(), "finished" | "failed" | "interrupted")
+                    {
+                        break;
+                    }
+                } else if started.elapsed() > Duration::from_secs(5) {
+                    ui_for_progress
+                        .set_status(
+                            "mana",
+                            Some(&format!("mana {run_id_for_progress}: waiting for events")),
+                        )
+                        .await;
+                }
+            }
+        });
+
+        let result = run_native_imp_orchestration(
+            mana_dir,
+            run_args,
+            ctx,
+            run_store.clone(),
+            run_id.clone(),
         )
         .await;
 
-        let run_store_for_sink = run_store.clone();
-        let run_id_for_sink = run_id.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            mana::commands::run::run_with_stream_capture_and_sink(
-                &mana_dir,
-                run_args,
-                Some(Arc::new(move |event| {
-                    update_run_store_with_event(&run_store_for_sink, &run_id_for_sink, &event);
-                })),
-            )
-        })
-        .await;
+        progress_task.abort();
 
         match result {
-            Ok(Ok(view)) => {
-                finish_run_in_store(&run_store, &run_id, &view);
+            Ok(view) => {
                 let summary = format!(
                     "mana orchestration: {scope} finished · {} done · {} failed",
                     view.summary.total_closed, view.summary.total_failed
@@ -973,7 +1708,7 @@ fn spawn_background_run(
                     ui_clear.set_status("mana", None).await;
                 });
             }
-            Ok(Err(err)) => {
+            Err(err) => {
                 let message = format!("mana orchestration: {scope} failed: {err}");
                 fail_run_in_store(&run_store, &run_id, message.clone());
                 ui.set_status("mana", Some(&message)).await;
@@ -988,23 +1723,275 @@ fn spawn_background_run(
                         .await;
                 }
             }
-            Err(join_err) => {
-                let message = format!("mana orchestration: {scope} task failed: {join_err}");
-                fail_run_in_store(&run_store, &run_id, message.clone());
-                ui.set_status("mana", Some(&message)).await;
-                ui.set_widget("mana", Some(mana_widget_lines(message.clone(), None)))
-                    .await;
-                ui.notify(&message, NotifyLevel::Error).await;
-                if !ui.has_ui() {
-                    let _ = command_tx
-                        .send(crate::agent::AgentCommand::FollowUp(format!(
-                            "Native mana orchestration background task failed for {scope}: {join_err}. Inspect with mana(action=\"run_state\") or mana(action=\"logs\", run_id=\"{run_id}\")."
-                        )))
-                        .await;
-                }
-            }
         }
     });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuideTopic {
+    Overview,
+    Task,
+    Epic,
+    Decision,
+    Notes,
+    Verify,
+    Orchestrate,
+    WorkerContext,
+}
+
+impl GuideTopic {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Task => "task",
+            Self::Epic => "epic",
+            Self::Decision => "decision",
+            Self::Notes => "notes",
+            Self::Verify => "verify",
+            Self::Orchestrate => "orchestrate",
+            Self::WorkerContext => "worker_context",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "overview" => Some(Self::Overview),
+            "task" => Some(Self::Task),
+            "epic" => Some(Self::Epic),
+            "decision" => Some(Self::Decision),
+            "notes" => Some(Self::Notes),
+            "verify" => Some(Self::Verify),
+            "orchestrate" => Some(Self::Orchestrate),
+            "worker_context" => Some(Self::WorkerContext),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemplateKind {
+    Epic,
+    Task,
+    Fact,
+}
+
+impl TemplateKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Epic => "epic",
+            Self::Task => "task",
+            Self::Fact => "fact",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "epic" => Some(Self::Epic),
+            "task" => Some(Self::Task),
+            "fact" => Some(Self::Fact),
+            _ => None,
+        }
+    }
+}
+
+fn parse_guide_topic(params: &serde_json::Value) -> Result<GuideTopic> {
+    let topic = parse_optional_string(&params["topic"]).unwrap_or_else(|| "overview".to_string());
+    GuideTopic::parse(&topic).ok_or_else(|| {
+        crate::error::Error::Tool(format!(
+            "Invalid mana guide topic '{topic}'. Use overview, task, epic, decision, notes, verify, orchestrate, or worker_context."
+        ))
+    })
+}
+
+fn parse_optional_guide_topic(params: &serde_json::Value) -> Result<Option<GuideTopic>> {
+    match parse_optional_string(&params["topic"]) {
+        Some(topic) => GuideTopic::parse(&topic).map(Some).ok_or_else(|| {
+            crate::error::Error::Tool(format!(
+                "Invalid mana template topic '{topic}'. Use overview, task, epic, decision, notes, verify, orchestrate, or worker_context."
+            ))
+        }),
+        None => Ok(None),
+    }
+}
+
+fn parse_template_kind(params: &serde_json::Value) -> Result<TemplateKind> {
+    let kind = parse_optional_string(&params["kind"]).unwrap_or_else(|| "task".to_string());
+    TemplateKind::parse(&kind).ok_or_else(|| {
+        crate::error::Error::Tool(format!(
+            "Invalid mana template kind '{kind}'. Use epic, task, or fact."
+        ))
+    })
+}
+
+fn topic_guidance(topic: GuideTopic) -> (&'static str, Vec<&'static str>, Vec<&'static str>) {
+    match topic {
+        GuideTopic::Overview => (
+            "Use mana when work needs durable scope, verification, dependencies, retries, or handoff; use direct edits for small one-pass changes.",
+            vec![
+                "Before creating, inspect existing relevant units with list/show and update or append notes when the new state belongs there.",
+                "Create epics for new durable goals and tasks for new executable units, not for routine progress on existing work.",
+                "Record decisions/notes when context should survive the turn.",
+                "Close only after the verify command or equivalent evidence passes.",
+            ],
+            vec![
+                "list status=in_progress",
+                "show id=...",
+                "update id=...",
+                "template kind=task",
+            ],
+        ),
+        GuideTopic::Task => (
+            "A task is a worker-ready executable spec with clear scope, acceptance, files, and a verify gate.",
+            vec![
+                "Title the outcome, not the activity.",
+                "Description should include current state, exact steps, edge cases, and non-goals.",
+                "Acceptance and verify define done.",
+            ],
+            vec![
+                "template kind=task",
+                "create kind=task title=... verify=...",
+            ],
+        ),
+        GuideTopic::Epic => (
+            "An epic is a durable feature/spec container that decomposes into executable child tasks.",
+            vec![
+                "Capture goal, constraints, architecture direction, and sequencing.",
+                "Keep implementation in child tasks with verify commands.",
+            ],
+            vec![
+                "template kind=epic",
+                "create kind=epic title=... feature=true",
+            ],
+        ),
+        GuideTopic::Decision => (
+            "Use decisions for scope, architecture, sequencing, and tradeoffs future workers should not relitigate.",
+            vec![
+                "Add decisions when a choice changes implementation direction.",
+                "Resolve decisions when the blocker is answered or superseded.",
+            ],
+            vec![
+                "decision_add id=... description=...",
+                "decision_resolve id=... resolve_decisions=...",
+            ],
+        ),
+        GuideTopic::Notes => (
+            "Use notes for durable progress, diagnosis, blockers, failed attempts, and retry changes.",
+            vec![
+                "Append concrete evidence, commands, files, and observed errors.",
+                "After failures, update notes before retrying with a changed plan.",
+            ],
+            vec!["notes_append id=... notes=..."],
+        ),
+        GuideTopic::Verify => (
+            "Verification is first-class: acceptance says what must be true; verify is the command/evidence that proves it.",
+            vec![
+                "Use fail_first for regression tasks where the check should fail before implementation.",
+                "Prefer narrow, repeatable commands over broad expensive checks.",
+                "If verify is wrong, record why and use equivalent evidence explicitly.",
+            ],
+            vec![
+                "create title=... acceptance=... verify=...",
+                "verify id=...",
+            ],
+        ),
+        GuideTopic::Orchestrate => (
+            "Orchestration runs ready tasks in dependency waves and returns run_id for state/log inspection.",
+            vec![
+                "Create dependencies before running parallel waves.",
+                "Use run_state/logs/agents to inspect active work.",
+                "Update failed units with new context before retrying.",
+            ],
+            vec![
+                "run targets=[...]",
+                "run_state run_id=...",
+                "logs run_id=...",
+            ],
+        ),
+        GuideTopic::WorkerContext => (
+            "Worker context is assembled from unit fields: title, description, acceptance, verify, paths, dependencies, notes, and decisions.",
+            vec![
+                "Write units so another agent can execute cold without guessing.",
+                "Put architecture or scope choices in decisions/notes, not transient chat.",
+            ],
+            vec!["show id=...", "notes_append id=... notes=..."],
+        ),
+    }
+}
+
+fn mana_guide_output(topic: GuideTopic) -> ToolOutput {
+    let (summary, guidance, next_actions) = topic_guidance(topic);
+    text_output(
+        format!(
+            "mana guide: {}\n{}\n- {}\nnext: {}",
+            topic.as_str(),
+            summary,
+            guidance.join("\n- "),
+            next_actions.join("; ")
+        ),
+        json!({
+            "action": "guide",
+            "topic": topic.as_str(),
+            "summary": summary,
+            "guidance": guidance,
+            "next_actions": next_actions,
+        }),
+    )
+}
+
+fn template_body(kind: TemplateKind, topic: Option<GuideTopic>) -> serde_json::Value {
+    match kind {
+        TemplateKind::Epic => json!({
+            "kind": "epic",
+            "title": "Outcome-oriented goal",
+            "description": "Goal, users, constraints, architecture direction, decomposition plan, and non-goals.",
+            "acceptance": "Child tasks cover implementation, verification, docs, and rollout risks.",
+            "feature": true,
+            "labels": ["feature"],
+        }),
+        TemplateKind::Task => json!({
+            "kind": "task",
+            "title": "Implement/fix concrete outcome",
+            "description": "Current state, exact steps, relevant files, edge cases, and scope boundaries. Include enough context for a cold worker.",
+            "acceptance": "Observable behavior or artifact that defines done.",
+            "verify": "targeted command that proves the task",
+            "paths": ["path/to/file"],
+            "fail_first": topic == Some(GuideTopic::Verify),
+        }),
+        TemplateKind::Fact => json!({
+            "kind": "fact",
+            "title": "Verifiable project claim",
+            "verify": "command that exits 0 while the claim remains true",
+            "ttl_days": 30,
+            "paths": ["path/to/evidence"],
+        }),
+    }
+}
+
+fn mana_template_output(kind: TemplateKind, topic: Option<GuideTopic>) -> ToolOutput {
+    let template = template_body(kind, topic);
+    let topic_text = topic.map(|topic| topic.as_str()).unwrap_or("general");
+    let summary = match kind {
+        TemplateKind::Epic => "Epic template for durable feature/spec containers.",
+        TemplateKind::Task => "Task template for worker-ready executable specs.",
+        TemplateKind::Fact => "Fact template for re-checkable project claims.",
+    };
+    text_output(
+        format!(
+            "mana template: {} ({})\n{}\n{}",
+            kind.as_str(),
+            topic_text,
+            summary,
+            serde_json::to_string_pretty(&template).unwrap_or_else(|_| template.to_string())
+        ),
+        json!({
+            "action": "template",
+            "kind": kind.as_str(),
+            "topic": topic_text,
+            "summary": summary,
+            "template": template,
+            "next_actions": ["create", "update", "notes_append"],
+        }),
+    )
 }
 
 fn text_output(text: String, details: serde_json::Value) -> ToolOutput {
@@ -1023,6 +2010,135 @@ fn run_state_snapshot(
         .lock()
         .ok()
         .and_then(|store| store.snapshot(run_id))
+}
+
+fn retry_guardrail_for_targets(
+    mana_dir: &Path,
+    target_ids: &[String],
+) -> Result<Option<serde_json::Value>> {
+    let mut blocked_units = Vec::new();
+    for id in target_ids {
+        let Ok(result) = mana_core::ops::show::get(mana_dir, id) else {
+            continue;
+        };
+        let unit = result.unit;
+        let Some(attempt) = unit.attempt_log.last() else {
+            continue;
+        };
+        if !matches!(
+            attempt.outcome,
+            mana_core::unit::types::AttemptOutcome::Failed
+        ) {
+            continue;
+        }
+        let Some(finished_at) = attempt.finished_at else {
+            continue;
+        };
+        if unit.updated_at <= finished_at {
+            blocked_units.push(json!({
+                "id": unit.id,
+                "title": unit.title,
+                "failed_at": finished_at,
+                "updated_at": unit.updated_at,
+                "last_failure": attempt.notes,
+            }));
+        }
+    }
+
+    if blocked_units.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(json!({
+        "retry_requires_unit_update": true,
+        "blocked_units": blocked_units,
+        "next_actions": [
+            "Inspect failed unit with mana action=show id=<unit>",
+            "Append notes with failure evidence and a changed retry plan",
+            "Retry only after updating the failed unit"
+        ],
+    })))
+}
+
+fn run_recovery_details(state: &NativeRunState) -> serde_json::Value {
+    let failed_units: Vec<_> = state
+        .units
+        .iter()
+        .filter(|unit| unit.status == "failed")
+        .map(|unit| {
+            json!({
+                "id": unit.id,
+                "title": unit.title,
+                "failure_summary": unit.failure_summary,
+                "error": unit.error,
+            })
+        })
+        .collect();
+    let running_units: Vec<_> = state
+        .units
+        .iter()
+        .filter(|unit| unit.status == "running")
+        .map(|unit| json!({ "id": unit.id, "title": unit.title, "agent": unit.agent }))
+        .collect();
+    let awaiting_verify_units: Vec<_> = state
+        .units
+        .iter()
+        .filter(|unit| unit.status == "awaiting_verify")
+        .map(|unit| json!({ "id": unit.id, "title": unit.title }))
+        .collect();
+    let interrupted = state.status == "interrupted";
+    let last_event_at_ms = if state.last_event_at_ms > 0 {
+        state.last_event_at_ms
+    } else {
+        state.finished_at_ms.unwrap_or(state.started_at_ms)
+    };
+    let mut next_actions = Vec::new();
+    let mut retry_requires_unit_update = false;
+
+    if interrupted {
+        next_actions.push(
+            "Run was marked interrupted/stale after reload; inspect logs before rerun".to_string(),
+        );
+        next_actions.push("Do not assume in-flight workers or tools are still running".to_string());
+    }
+    if !failed_units.is_empty() || state.status == "failed" || state.summary.total_failed > 0 {
+        retry_requires_unit_update = true;
+        next_actions.push("Inspect failed units with mana action=show id=<unit>".to_string());
+        next_actions.push(
+            "Append notes with the failure evidence and changed retry plan before rerun"
+                .to_string(),
+        );
+        next_actions
+            .push("Retry only after updating failed units; do not rerun unchanged".to_string());
+    }
+    if !awaiting_verify_units.is_empty() || state.summary.total_awaiting_verify > 0 {
+        next_actions.push("Verify candidate-complete units or close with equivalent evidence if stored verify is stale".to_string());
+    }
+    if state.status == "running" || state.status == "starting" || !running_units.is_empty() {
+        next_actions.push("Inspect logs/agents before assuming the run is stale".to_string());
+    }
+    if next_actions.is_empty() {
+        next_actions.push("No recovery action required".to_string());
+    }
+
+    json!({
+        "status": state.status,
+        "failed_units": failed_units,
+        "running_units": running_units,
+        "awaiting_verify_units": awaiting_verify_units,
+        "stale_workers": if interrupted { json!([{"run_id": state.run_id, "status": state.status}]) } else { json!([]) },
+        "last_event_at_ms": last_event_at_ms,
+        "next_actions": next_actions,
+        "retry_requires_unit_update": retry_requires_unit_update,
+    })
+}
+
+fn run_state_details(state: &NativeRunState) -> serde_json::Value {
+    let mut details = serde_json::to_value(state).unwrap_or(serde_json::Value::Null);
+    if let Some(object) = details.as_object_mut() {
+        object.insert("recovery".to_string(), run_recovery_details(state));
+    }
+    details
 }
 
 fn run_state_output(state: &NativeRunState) -> ToolOutput {
@@ -1044,6 +2160,12 @@ fn run_state_output(state: &NativeRunState) -> ToolOutput {
         state.summary.total_skipped
     ));
 
+    if state.status == "interrupted" {
+        lines.push(
+            "Interrupted: persisted running state is stale; inspect logs before rerun".to_string(),
+        );
+    }
+
     if !state.units.is_empty() {
         let preview = state
             .units
@@ -1058,18 +2180,27 @@ fn run_state_output(state: &NativeRunState) -> ToolOutput {
     if let Some(last) = state.log_lines.last() {
         lines.push(format!("Latest: {last}"));
     }
-    text_output(
-        lines.join("\n"),
-        serde_json::to_value(state).unwrap_or(serde_json::Value::Null),
-    )
+    let recovery = run_recovery_details(state);
+    if let Some(actions) = recovery["next_actions"].as_array() {
+        if let Some(first) = actions.first().and_then(|value| value.as_str()) {
+            lines.push(format!("Next: {first}"));
+        }
+    }
+    text_output(lines.join("\n"), run_state_details(state))
 }
 
 fn evaluate_run_output(state: &NativeRunState) -> ToolOutput {
     let headline = match state.status.as_str() {
         "starting" | "running" => {
-            format!("Native mana orchestration run {} is still running for {}.", state.run_id, state.scope)
+            format!(
+                "Native mana orchestration run {} is still running for {}.",
+                state.run_id, state.scope
+            )
         }
-        "failed" => format!("Native mana orchestration run {} failed for {}.", state.run_id, state.scope),
+        "failed" => format!(
+            "Native mana orchestration run {} failed for {}.",
+            state.run_id, state.scope
+        ),
         _ if state.summary.total_failed > 0 => format!(
             "Native mana orchestration run {} finished with {} failed unit(s).",
             state.run_id, state.summary.total_failed
@@ -1102,9 +2233,17 @@ fn evaluate_run_output(state: &NativeRunState) -> ToolOutput {
         .map(|line| format!("Latest: {line}"))
         .unwrap_or_else(|| "Latest: (no stream events captured yet)".to_string());
 
+    let recovery = run_recovery_details(state);
+    let next = recovery["next_actions"]
+        .as_array()
+        .and_then(|actions| actions.first())
+        .and_then(|value| value.as_str())
+        .map(|action| format!("Next: {action}"))
+        .unwrap_or_else(|| "Next: No recovery action required".to_string());
+
     text_output(
-        format!("{headline}\n{runtime}\n{latest}"),
-        serde_json::to_value(state).unwrap_or(serde_json::Value::Null),
+        format!("{headline}\n{runtime}\n{latest}\n{next}"),
+        run_state_details(state),
     )
 }
 
@@ -1170,6 +2309,76 @@ fn truncate_with_note(text: &str) -> String {
     output
 }
 
+fn compact_list_output(
+    entries: &[mana_core::index::IndexEntry],
+    requested_limit: Option<usize>,
+) -> ToolOutput {
+    let limit = requested_limit
+        .unwrap_or(DEFAULT_LIST_LIMIT)
+        .clamp(1, MAX_LIST_LIMIT);
+    let shown = entries.len().min(limit);
+    let units: Vec<_> = entries
+        .iter()
+        .take(limit)
+        .map(|entry| {
+            json!({
+                "id": entry.id,
+                "title": entry.title,
+                "status": entry.status,
+                "priority": entry.priority,
+                "kind": entry.kind,
+                "parent": entry.parent,
+                "labels": entry.labels,
+                "updated_at": entry.updated_at,
+                "claimed_by": entry.claimed_by,
+                "has_verify": entry.has_verify,
+                "attempts": entry.attempts,
+                "paths": entry.paths,
+            })
+        })
+        .collect();
+
+    let mut lines = vec![format!(
+        "mana list: showing {shown} of {} units. Prefer `show` + `update`/`notes_append` on an existing relevant unit before `create`.",
+        entries.len()
+    )];
+    for entry in entries.iter().take(limit) {
+        let parent = entry
+            .parent
+            .as_ref()
+            .map(|parent| format!(" parent={parent}"))
+            .unwrap_or_default();
+        let claimed = entry
+            .claimed_by
+            .as_ref()
+            .map(|claimed_by| format!(" claimed={claimed_by}"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "- {} P{} {:?} {:?}{}{} — {}",
+            entry.id, entry.priority, entry.status, entry.kind, parent, claimed, entry.title
+        ));
+    }
+    if entries.len() > shown {
+        lines.push(format!(
+            "[{} more omitted; narrow with status/parent/label/priority or request all only when needed]",
+            entries.len() - shown
+        ));
+    }
+
+    text_output(
+        lines.join("\n"),
+        json!({
+            "action": "list",
+            "total": entries.len(),
+            "shown": shown,
+            "limit": limit,
+            "truncated": entries.len() > shown,
+            "hint": "Prefer updating existing relevant units; use show id=... before create when unsure.",
+            "units": units,
+        }),
+    )
+}
+
 fn scored_units_to_text(units: &[ScoredUnit]) -> String {
     if units.is_empty() {
         return "No ready units. Create one with: mana create \"task\" --verify \"cmd\""
@@ -1232,7 +2441,7 @@ impl Tool for ManaTool {
         "Mana"
     }
     fn description(&self) -> &str {
-        "Native mana work coordination: inspect, update, create, and run units or orchestration state. Prefer it over bash for equivalent mana actions."
+        "Mana work graph operations. Use guide/template for detailed usage."
     }
     fn parameters(&self) -> serde_json::Value {
         let string_or_array = || {
@@ -1247,146 +2456,128 @@ impl Tool for ManaTool {
         let mut properties = serde_json::Map::new();
         properties.insert(
             "action".into(),
-            json!({ "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "run_state", "evaluate", "claim", "release", "logs", "agents", "next", "tree", "reopen", "verify", "fail", "delete", "dep_add", "dep_remove", "fact_create", "fact_verify", "notes_append", "decision_add", "decision_resolve"] }),
+            json!({ "type": "string", "enum": ["status", "list", "show", "create", "close", "update", "run", "run_state", "evaluate", "claim", "release", "logs", "agents", "next", "tree", "reopen", "verify", "fail", "delete", "dep_add", "dep_remove", "fact_create", "fact_verify", "notes_append", "decision_add", "decision_resolve", "reparent", "guide", "template"] }),
         );
         properties.insert("id".into(), json!({ "type": "string" }));
         properties.insert(
             "scope".into(),
-            json!({ "type": "string", "enum": ["auto", "project", "root"], "description": "Mana scope selection for this action" }),
-        );
-        properties.insert(
-            "mana_scope".into(),
-            json!({ "type": "string", "enum": ["auto", "project", "root"], "description": "Alias for scope" }),
+            json!({ "type": "string", "enum": ["auto", "project", "root"], "description": "auto|project|root" }),
         );
         properties.insert(
             "path".into(),
-            json!({ "type": "string", "description": "Explicit project directory or .mana directory to target for this action" }),
-        );
-        properties.insert(
-            "mana_dir".into(),
-            json!({ "type": "string", "description": "Alias for path; explicit .mana or project directory to target" }),
+            json!({ "type": "string", "description": "Project/.mana path" }),
         );
         properties.insert(
             "from_id".into(),
-            json!({ "type": "string", "description": "Source unit ID for dependency updates" }),
+            json!({ "type": "string", "description": "Source unit ID" }),
         );
         properties.insert(
             "dep_id".into(),
-            json!({ "type": "string", "description": "Dependency unit ID to add or remove" }),
+            json!({ "type": "string", "description": "Dependency unit ID" }),
         );
         properties.insert(
             "run_id".into(),
-            json!({ "type": "string", "description": "Native in-session mana run ID, returned by action=run" }),
+            json!({ "type": "string", "description": "Run ID from action=run" }),
         );
         properties.insert("title".into(), json!({ "type": "string" }));
         properties.insert(
+            "topic".into(),
+            json!({ "type": "string", "enum": ["overview", "task", "epic", "decision", "notes", "verify", "orchestrate", "worker_context"], "description": "guide/template topic" }),
+        );
+        properties.insert(
             "verify".into(),
-            json!({ "type": "string", "description": "Shell command, must exit 0" }),
+            json!({ "type": "string", "description": "Verify shell command" }),
         );
         properties.insert("description".into(), json!({ "type": "string" }));
         properties.insert(
             "acceptance".into(),
-            json!({ "type": "string", "description": "Concrete acceptance criteria for the unit" }),
+            json!({ "type": "string", "description": "Acceptance criteria" }),
         );
         properties.insert(
             "notes".into(),
-            json!({ "type": "string", "description": "Progress log or authoring notes" }),
+            json!({ "type": "string", "description": "Progress notes" }),
         );
         properties.insert(
             "design".into(),
-            json!({ "type": "string", "description": "Supplemental design context for the unit" }),
+            json!({ "type": "string", "description": "Design context" }),
         );
         properties.insert(
             "assignee".into(),
-            json!({ "type": "string", "description": "Assignee or owner for the unit" }),
+            json!({ "type": "string", "description": "Assignee/owner" }),
         );
         properties.insert("parent".into(), json!({ "type": "string" }));
+        properties.insert(
+            "parent_reason".into(),
+            json!({ "type": "string", "description": "Why this parent" }),
+        );
         let mut deps = string_or_array();
-        deps["description"] = json!("Dependency unit IDs as a comma-separated string or array");
+        deps["description"] = json!("Dependency IDs");
         properties.insert("deps".into(), deps);
         let mut produces = string_or_array();
-        produces["description"] = json!("Artifacts this unit produces");
+        produces["description"] = json!("Produced artifacts");
         properties.insert("produces".into(), produces);
         let mut requires = string_or_array();
-        requires["description"] = json!("Artifacts this unit requires");
+        requires["description"] = json!("Required artifacts");
         properties.insert("requires".into(), requires);
         let mut paths = string_or_array();
-        paths["description"] = json!("Relevant file paths for context/relevance");
+        paths["description"] = json!("Relevant paths");
         properties.insert("paths".into(), paths);
         let mut decisions = string_or_array();
-        decisions["description"] = json!("Blocking decisions to record on the unit");
+        decisions["description"] = json!("Blocking decisions");
         properties.insert("decisions".into(), decisions);
         let mut resolve_decisions = string_or_array();
-        resolve_decisions["description"] =
-            json!("Decision entries or indexes to resolve during update");
+        resolve_decisions["description"] = json!("Decision IDs/indexes to resolve");
         properties.insert("resolve_decisions".into(), resolve_decisions);
         properties.insert("status".into(), json!({ "type": "string" }));
         properties.insert("priority".into(), json!({ "type": "integer" }));
         let mut labels = string_or_array();
-        labels["description"] = json!("Labels as a comma-separated string or array");
+        labels["description"] = json!("Labels");
         properties.insert("labels".into(), labels);
         properties.insert(
-            "add_label".into(),
-            json!({ "type": "string", "description": "Single label to add during update" }),
-        );
-        properties.insert(
-            "remove_label".into(),
-            json!({ "type": "string", "description": "Single label to remove during update" }),
-        );
-        properties.insert(
             "kind".into(),
-            json!({ "type": "string", "enum": ["epic", "task", "fact", "job"], "description": "Explicit mana unit type (`job` is a legacy alias for `task`)" }),
+            json!({ "type": "string", "enum": ["epic", "task", "fact"], "description": "Unit type" }),
         );
         properties.insert(
             "feature".into(),
-            json!({ "type": "boolean", "description": "Whether the unit is a feature-level goal" }),
+            json!({ "type": "boolean", "description": "Feature-level goal" }),
         );
         properties.insert(
             "fail_first".into(),
-            json!({ "type": "boolean", "description": "Require verify to fail first at creation time" }),
+            json!({ "type": "boolean", "description": "Verify should fail first" }),
         );
         properties.insert(
             "verify_timeout".into(),
-            json!({ "type": "integer", "description": "Timeout in seconds for verify" }),
+            json!({ "type": "integer", "description": "Verify timeout seconds" }),
         );
         properties.insert(
             "on_fail".into(),
-            json!({ "description": "On-fail policy as a string like retry:3 / escalate:P1 or an object" }),
-        );
-        properties.insert(
-            "fact_title".into(),
-            json!({ "type": "string", "description": "Title for fact_create; falls back to title" }),
-        );
-        properties.insert(
-            "paths_csv".into(),
-            json!({ "type": "string", "description": "Comma-separated paths for fact_create convenience" }),
+            json!({ "description": "retry:3 or escalate:P1" }),
         );
         properties.insert(
             "ttl_days".into(),
-            json!({ "type": "integer", "description": "TTL in days for fact_create" }),
+            json!({ "type": "integer", "description": "Fact TTL days" }),
         );
         properties.insert(
             "pass_ok".into(),
-            json!({ "type": "boolean", "description": "Permit fact creation even if verify currently passes" }),
+            json!({ "type": "boolean", "description": "Allow passing fact verify" }),
         );
-        properties.insert("force".into(), json!({ "type": "boolean" }));
+        properties.insert(
+            "force".into(),
+            json!({ "type": "boolean", "description": "Bypass close verify with reason" }),
+        );
         properties.insert("reason".into(), json!({ "type": "string" }));
         properties.insert("all".into(), json!({ "type": "boolean" }));
         properties.insert(
             "by".into(),
-            json!({ "type": "string", "description": "Who is claiming the unit" }),
+            json!({ "type": "string", "description": "Claimer" }),
         );
         properties.insert(
             "count".into(),
-            json!({ "type": "integer", "description": "Number of next recommendations to return" }),
-        );
-        properties.insert(
-            "background".into(),
-            json!({ "type": "boolean", "description": "Run mana orchestration in the background and return immediately (default true unless dry_run=true)" }),
+            json!({ "type": "integer", "description": "Max results" }),
         );
         properties.insert(
             "targets".into(),
-            json!({ "type": "array", "items": { "type": "string" }, "description": "Explicit target unit IDs to run as a canonical target set" }),
+            json!({ "type": "array", "items": { "type": "string" }, "description": "Target unit IDs" }),
         );
         properties.insert("jobs".into(), json!({ "type": "integer" }));
         properties.insert("dry_run".into(), json!({ "type": "boolean" }));
@@ -1418,11 +2609,26 @@ impl Tool for ManaTool {
 
         let mode = ctx.mode;
 
+        match action {
+            "guide" => return Ok(mana_guide_output(parse_guide_topic(&params)?)),
+            "template" => {
+                return Ok(mana_template_output(
+                    parse_template_kind(&params)?,
+                    parse_optional_guide_topic(&params)?,
+                ));
+            }
+            _ => {}
+        }
+
         if !mode.allows_mana_action(action) {
             let mode_name = format!("{mode:?}").to_lowercase();
             return Ok(ToolOutput::error(format!(
                 "Mana action '{action}' is not available in {mode_name} mode"
             )));
+        }
+
+        if let Some(validation_error) = validate_mana_action(action, &params) {
+            return Ok(validation_error);
         }
 
         let mana_dir = resolve_mana_dir(&ctx.cwd, &params).map_err(crate::error::Error::Tool)?;
@@ -1443,7 +2649,10 @@ impl Tool for ManaTool {
                     include_closed: params["all"].as_bool().unwrap_or(false),
                 };
                 match mana_core::api::list_units(&mana_dir, &list_params) {
-                    Ok(entries) => Ok(json_output(&entries)),
+                    Ok(entries) => Ok(compact_list_output(
+                        &entries,
+                        params["count"].as_u64().map(|count| count as usize),
+                    )),
                     Err(e) => {
                         let message = format!("mana run failed: {e}");
                         ctx.ui
@@ -1451,7 +2660,7 @@ impl Tool for ManaTool {
                             .await;
                         ctx.ui.set_status("mana", Some(&message)).await;
                         Ok(ToolOutput::error(e.to_string()))
-                    },
+                    }
                 }
             }
             "show" => {
@@ -1501,13 +2710,19 @@ impl Tool for ManaTool {
                 };
                 match mana_core::api::create_unit(&mana_dir, create_params) {
                     Ok(result) => {
-                        let unit_value = serde_json::to_value(&result.unit)
-                            .unwrap_or(serde_json::Value::Null);
+                        let unit_value =
+                            serde_json::to_value(&result.unit).unwrap_or(serde_json::Value::Null);
                         let summary = unit_delta_label(&unit_value)
                             .map(|label| format!("mana delta: created {label}"))
                             .unwrap_or_else(|| "mana delta: created unit".to_string());
-                        let detail = parse_optional_string(&params["parent"])
-                            .map(|parent| format!("parent {parent}"));
+                        let parent = parse_optional_string(&params["parent"]);
+                        let parent_reason = parse_optional_string(&params["parent_reason"]);
+                        let detail = parent
+                            .as_ref()
+                            .map(|parent| match parent_reason.as_deref() {
+                                Some(reason) => format!("parent {parent}: {reason}"),
+                                None => format!("parent {parent}; parent_reason missing"),
+                            });
                         set_mana_delta_widget(&ctx, summary.clone(), detail).await;
                         Ok(text_output(
                             summary,
@@ -1518,6 +2733,8 @@ impl Tool for ManaTool {
                                 "verify": params["verify"],
                                 "priority": params["priority"],
                                 "parent": params["parent"],
+                                "parent_reason": params["parent_reason"],
+                                "placement": parent_placement_details(parent.as_deref(), parent_reason.as_deref()),
                                 "deps": params["deps"],
                                 "labels": params["labels"],
                                 "unit": unit_value,
@@ -1554,36 +2771,48 @@ impl Tool for ManaTool {
                 let id = params["id"]
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("close requires 'id'".into()))?;
+                let force = params["force"].as_bool().unwrap_or(false);
+                let reason = params["reason"].as_str().map(|s| s.to_string());
+                if force
+                    && reason
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .is_empty()
+                {
+                    return Ok(mana_close_force_reason_error(id));
+                }
                 let opts = mana_core::ops::close::CloseOpts {
-                    reason: params["reason"].as_str().map(|s| s.to_string()),
-                    force: params["force"].as_bool().unwrap_or(false),
+                    reason: reason.clone(),
+                    force,
                     defer_verify: false,
                 };
                 match mana_core::api::close_unit(&mana_dir, id, opts) {
                     Ok(outcome) => {
-                        let details = serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null);
+                        let details =
+                            serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null);
                         if let Some(unit) = details.get("unit") {
                             let summary = unit_delta_label(unit)
                                 .map(|label| format!("mana delta: closed {label}"))
                                 .unwrap_or_else(|| format!("mana delta: closed {id}"));
-                            set_mana_delta_widget(
-                                &ctx,
-                                summary,
-                                params["reason"].as_str().map(|s| s.to_string()),
-                            )
-                            .await;
+                            set_mana_delta_widget(&ctx, summary, reason.clone()).await;
                         }
                         let mut details_obj = details.as_object().cloned().unwrap_or_default();
                         details_obj.insert("action".into(), json!("close"));
-                        if let Some(reason) = params["reason"].as_str() {
+                        details_obj.insert("force".into(), json!(force));
+                        if let Some(reason) = reason.as_deref() {
                             details_obj.insert("reason".into(), json!(reason));
+                            if force {
+                                details_obj
+                                    .insert("equivalent_verify_evidence".into(), json!(reason));
+                            }
                         }
                         Ok(text_output(
                             format!("Closed unit {id}"),
                             serde_json::Value::Object(details_obj),
                         ))
                     }
-                    Err(e) => Ok(ToolOutput::error(e.to_string())),
+                    Err(e) => Ok(mana_close_error_output(id, e.to_string())),
                 }
             }
             "update" => {
@@ -1593,6 +2822,7 @@ impl Tool for ManaTool {
                 let decisions = parse_csv_strings(&params["decisions"], "decisions")?;
                 let resolve_decisions =
                     parse_csv_strings(&params["resolve_decisions"], "resolve_decisions")?;
+                let labels = parse_csv_strings(&params["labels"], "labels")?;
                 let update_params = mana_core::ops::update::UpdateParams {
                     title: parse_optional_string(&params["title"]),
                     description: parse_optional_string(&params["description"]),
@@ -1602,15 +2832,18 @@ impl Tool for ManaTool {
                     status: parse_optional_string(&params["status"]),
                     priority: params["priority"].as_u64().map(|p| p as u8),
                     assignee: parse_optional_string(&params["assignee"]),
-                    add_label: parse_optional_string(&params["add_label"]),
+                    add_label: labels
+                        .into_iter()
+                        .next()
+                        .or_else(|| parse_optional_string(&params["add_label"])),
                     remove_label: parse_optional_string(&params["remove_label"]),
                     decisions,
                     resolve_decisions,
                 };
                 match mana_core::api::update_unit(&mana_dir, id, update_params) {
                     Ok(result) => {
-                        let unit_value = serde_json::to_value(&result.unit)
-                            .unwrap_or(serde_json::Value::Null);
+                        let unit_value =
+                            serde_json::to_value(&result.unit).unwrap_or(serde_json::Value::Null);
                         let summary = unit_delta_label(&unit_value)
                             .map(|label| format!("mana delta: updated {label}"))
                             .unwrap_or_else(|| format!("mana delta: updated {id}"));
@@ -1639,11 +2872,12 @@ impl Tool for ManaTool {
                 }
             }
             "notes_append" => {
-                let id = params["id"]
-                    .as_str()
-                    .ok_or_else(|| crate::error::Error::Tool("notes_append requires 'id'".into()))?;
-                let note = parse_optional_string(&params["notes"])
-                    .ok_or_else(|| crate::error::Error::Tool("notes_append requires 'notes'".into()))?;
+                let id = params["id"].as_str().ok_or_else(|| {
+                    crate::error::Error::Tool("notes_append requires 'id'".into())
+                })?;
+                let note = parse_optional_string(&params["notes"]).ok_or_else(|| {
+                    crate::error::Error::Tool("notes_append requires 'notes'".into())
+                })?;
                 let update_params = mana_core::ops::update::UpdateParams {
                     title: None,
                     description: None,
@@ -1660,12 +2894,13 @@ impl Tool for ManaTool {
                 };
                 match mana_core::api::update_unit(&mana_dir, id, update_params) {
                     Ok(result) => {
-                        let unit_value = serde_json::to_value(&result.unit)
-                            .unwrap_or(serde_json::Value::Null);
+                        let unit_value =
+                            serde_json::to_value(&result.unit).unwrap_or(serde_json::Value::Null);
                         let summary = unit_delta_label(&unit_value)
                             .map(|label| format!("mana delta: notes appended on {label}"))
                             .unwrap_or_else(|| format!("mana delta: notes appended on {id}"));
-                        set_mana_delta_widget(&ctx, summary.clone(), Some("notes appended".into())).await;
+                        set_mana_delta_widget(&ctx, summary.clone(), Some("notes appended".into()))
+                            .await;
                         Ok(text_output(
                             summary,
                             json!({
@@ -1681,12 +2916,21 @@ impl Tool for ManaTool {
                 }
             }
             "decision_add" => {
-                let id = params["id"]
-                    .as_str()
-                    .ok_or_else(|| crate::error::Error::Tool("decision_add requires 'id'".into()))?;
+                let id = params["id"].as_str().ok_or_else(|| {
+                    crate::error::Error::Tool("decision_add requires 'id'".into())
+                })?;
                 let decision = parse_optional_string(&params["description"])
+                    .or_else(|| {
+                        parse_csv_strings(&params["decisions"], "decisions")
+                            .ok()
+                            .and_then(|mut decisions| decisions.drain(..).next())
+                    })
                     .or_else(|| parse_optional_string(&params["notes"]))
-                    .ok_or_else(|| crate::error::Error::Tool("decision_add requires 'description' or 'notes'".into()))?;
+                    .ok_or_else(|| {
+                        crate::error::Error::Tool(
+                            "decision_add requires 'description' or 'decisions'".into(),
+                        )
+                    })?;
                 let update_params = mana_core::ops::update::UpdateParams {
                     title: None,
                     description: None,
@@ -1703,12 +2947,13 @@ impl Tool for ManaTool {
                 };
                 match mana_core::api::update_unit(&mana_dir, id, update_params) {
                     Ok(result) => {
-                        let unit_value = serde_json::to_value(&result.unit)
-                            .unwrap_or(serde_json::Value::Null);
+                        let unit_value =
+                            serde_json::to_value(&result.unit).unwrap_or(serde_json::Value::Null);
                         let summary = unit_delta_label(&unit_value)
                             .map(|label| format!("mana delta: decision added on {label}"))
                             .unwrap_or_else(|| format!("mana delta: decision added on {id}"));
-                        set_mana_delta_widget(&ctx, summary.clone(), Some("decision added".into())).await;
+                        set_mana_delta_widget(&ctx, summary.clone(), Some("decision added".into()))
+                            .await;
                         Ok(text_output(
                             summary,
                             json!({
@@ -1724,10 +2969,11 @@ impl Tool for ManaTool {
                 }
             }
             "decision_resolve" => {
-                let id = params["id"]
-                    .as_str()
-                    .ok_or_else(|| crate::error::Error::Tool("decision_resolve requires 'id'".into()))?;
-                let resolve_decisions = parse_csv_strings(&params["resolve_decisions"], "resolve_decisions")?;
+                let id = params["id"].as_str().ok_or_else(|| {
+                    crate::error::Error::Tool("decision_resolve requires 'id'".into())
+                })?;
+                let resolve_decisions =
+                    parse_csv_strings(&params["resolve_decisions"], "resolve_decisions")?;
                 if resolve_decisions.is_empty() {
                     return Ok(ToolOutput::error(
                         "decision_resolve requires 'resolve_decisions'",
@@ -1749,12 +2995,17 @@ impl Tool for ManaTool {
                 };
                 match mana_core::api::update_unit(&mana_dir, id, update_params) {
                     Ok(result) => {
-                        let unit_value = serde_json::to_value(&result.unit)
-                            .unwrap_or(serde_json::Value::Null);
+                        let unit_value =
+                            serde_json::to_value(&result.unit).unwrap_or(serde_json::Value::Null);
                         let summary = unit_delta_label(&unit_value)
                             .map(|label| format!("mana delta: decision resolved on {label}"))
                             .unwrap_or_else(|| format!("mana delta: decision resolved on {id}"));
-                        set_mana_delta_widget(&ctx, summary.clone(), Some("decision resolved".into())).await;
+                        set_mana_delta_widget(
+                            &ctx,
+                            summary.clone(),
+                            Some("decision resolved".into()),
+                        )
+                        .await;
                         Ok(text_output(
                             summary,
                             json!({
@@ -1775,7 +3026,10 @@ impl Tool for ManaTool {
                     .ok_or_else(|| crate::error::Error::Tool("reopen requires 'id'".into()))?;
                 match mana_core::api::reopen_unit(&mana_dir, id) {
                     Ok(result) => {
-                        let summary = format!("mana delta: reopened {} ({})", result.unit.id, result.unit.title);
+                        let summary = format!(
+                            "mana delta: reopened {} ({})",
+                            result.unit.id, result.unit.title
+                        );
                         set_mana_delta_widget(&ctx, summary, Some("status=open".into())).await;
                         Ok(text_output(
                             format!("Reopened unit {} ({})", result.unit.id, result.unit.title),
@@ -1818,7 +3072,9 @@ impl Tool for ManaTool {
                             "unit_id": id,
                         }),
                     )),
-                    Ok(None) => Ok(ToolOutput::text(format!("Unit {id} has no verify command."))),
+                    Ok(None) => Ok(ToolOutput::text(format!(
+                        "Unit {id} has no verify command."
+                    ))),
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
                 }
             }
@@ -1826,10 +3082,14 @@ impl Tool for ManaTool {
                 let id = params["id"]
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("fail requires 'id'".into()))?;
-                match mana_core::api::fail_unit(&mana_dir, id, parse_optional_string(&params["reason"])) {
+                match mana_core::api::fail_unit(
+                    &mana_dir,
+                    id,
+                    parse_optional_string(&params["reason"]),
+                ) {
                     Ok(unit) => {
-                        let unit_value = serde_json::to_value(&unit)
-                            .unwrap_or(serde_json::Value::Null);
+                        let unit_value =
+                            serde_json::to_value(&unit).unwrap_or(serde_json::Value::Null);
                         let summary = unit_delta_label(&unit_value)
                             .map(|label| format!("mana delta: marked failed {label}"))
                             .unwrap_or_else(|| format!("mana delta: marked failed {id}"));
@@ -1858,7 +3118,8 @@ impl Tool for ManaTool {
                     .ok_or_else(|| crate::error::Error::Tool("delete requires 'id'".into()))?;
                 match mana_core::api::delete_unit(&mana_dir, id) {
                     Ok(result) => {
-                        let summary = format!("mana delta: deleted {} ({})", result.id, result.title);
+                        let summary =
+                            format!("mana delta: deleted {} ({})", result.id, result.title);
                         set_mana_delta_widget(&ctx, summary.clone(), None).await;
                         Ok(text_output(
                             format!("Deleted unit {} ({})", result.id, result.title),
@@ -1869,18 +3130,24 @@ impl Tool for ManaTool {
                 }
             }
             "dep_add" => {
-                let from_id = params["from_id"]
-                    .as_str()
-                    .ok_or_else(|| crate::error::Error::Tool("dep_add requires 'from_id'".into()))?;
+                let from_id = params["from_id"].as_str().ok_or_else(|| {
+                    crate::error::Error::Tool("dep_add requires 'from_id'".into())
+                })?;
                 let dep_id = params["dep_id"]
                     .as_str()
                     .ok_or_else(|| crate::error::Error::Tool("dep_add requires 'dep_id'".into()))?;
                 match mana_core::api::add_dep(&mana_dir, from_id, dep_id) {
                     Ok(result) => {
-                        let summary = format!("mana delta: dependency added {} -> {}", result.from_id, result.to_id);
+                        let summary = format!(
+                            "mana delta: dependency added {} -> {}",
+                            result.from_id, result.to_id
+                        );
                         set_mana_delta_widget(&ctx, summary.clone(), None).await;
                         Ok(text_output(
-                            format!("Added dependency: {} depends on {}", result.from_id, result.to_id),
+                            format!(
+                                "Added dependency: {} depends on {}",
+                                result.from_id, result.to_id
+                            ),
                             json!({ "action": "dep_add", "from_id": result.from_id, "dep_id": result.to_id }),
                         ))
                     }
@@ -1888,18 +3155,24 @@ impl Tool for ManaTool {
                 }
             }
             "dep_remove" => {
-                let from_id = params["from_id"]
-                    .as_str()
-                    .ok_or_else(|| crate::error::Error::Tool("dep_remove requires 'from_id'".into()))?;
-                let dep_id = params["dep_id"]
-                    .as_str()
-                    .ok_or_else(|| crate::error::Error::Tool("dep_remove requires 'dep_id'".into()))?;
+                let from_id = params["from_id"].as_str().ok_or_else(|| {
+                    crate::error::Error::Tool("dep_remove requires 'from_id'".into())
+                })?;
+                let dep_id = params["dep_id"].as_str().ok_or_else(|| {
+                    crate::error::Error::Tool("dep_remove requires 'dep_id'".into())
+                })?;
                 match mana_core::api::remove_dep(&mana_dir, from_id, dep_id) {
                     Ok(result) => {
-                        let summary = format!("mana delta: dependency removed {} -> {}", result.from_id, result.to_id);
+                        let summary = format!(
+                            "mana delta: dependency removed {} -> {}",
+                            result.from_id, result.to_id
+                        );
                         set_mana_delta_widget(&ctx, summary.clone(), None).await;
                         Ok(text_output(
-                            format!("Removed dependency: {} no longer depends on {}", result.from_id, result.to_id),
+                            format!(
+                                "Removed dependency: {} no longer depends on {}",
+                                result.from_id, result.to_id
+                            ),
                             json!({ "action": "dep_remove", "from_id": result.from_id, "dep_id": result.to_id }),
                         ))
                     }
@@ -1907,27 +3180,38 @@ impl Tool for ManaTool {
                 }
             }
             "fact_create" => {
-                let title = parse_optional_string(&params["fact_title"])
-                    .or_else(|| parse_optional_string(&params["title"]))
-                    .ok_or_else(|| crate::error::Error::Tool("fact_create requires 'fact_title' or 'title'".into()))?;
-                let verify = parse_optional_string(&params["verify"])
-                    .ok_or_else(|| crate::error::Error::Tool("fact_create requires 'verify'".into()))?;
-                let paths_csv = parse_optional_string(&params["paths_csv"])
-                    .or_else(|| {
-                        let paths = parse_csv_strings(&params["paths"], "paths").ok()?;
-                        if paths.is_empty() { None } else { Some(paths.join(",")) }
-                    });
+                let title = parse_optional_string(&params["title"])
+                    .or_else(|| parse_optional_string(&params["fact_title"]))
+                    .ok_or_else(|| {
+                        crate::error::Error::Tool("fact_create requires 'title'".into())
+                    })?;
+                let verify = parse_optional_string(&params["verify"]).ok_or_else(|| {
+                    crate::error::Error::Tool("fact_create requires 'verify'".into())
+                })?;
+                // Transitional compatibility: runtime still accepts legacy `paths_csv`, but
+                // the model-facing schema advertises only canonical `paths`.
+                let fact_paths = parse_optional_string(&params["paths_csv"]).or_else(|| {
+                    let paths = parse_csv_strings(&params["paths"], "paths").ok()?;
+                    if paths.is_empty() {
+                        None
+                    } else {
+                        Some(paths.join(","))
+                    }
+                });
                 let fact_params = mana_core::ops::fact::FactParams {
                     title,
                     verify,
                     description: parse_optional_string(&params["description"]),
-                    paths: paths_csv,
+                    paths: fact_paths,
                     ttl_days: params["ttl_days"].as_i64(),
                     pass_ok: params["pass_ok"].as_bool().unwrap_or(true),
                 };
                 match mana_core::api::create_fact(&mana_dir, fact_params) {
                     Ok(result) => {
-                        let summary = format!("mana delta: created fact {} ({})", result.unit_id, result.unit.title);
+                        let summary = format!(
+                            "mana delta: created fact {} ({})",
+                            result.unit_id, result.unit.title
+                        );
                         set_mana_delta_widget(&ctx, summary.clone(), Some("fact".into())).await;
                         Ok(text_output(
                             format!("Created fact {} ({})", result.unit_id, result.unit.title),
@@ -1989,9 +3273,9 @@ impl Tool for ManaTool {
                     )));
                 }
 
-                let id = params["id"]
-                    .as_str()
-                    .ok_or_else(|| crate::error::Error::Tool("logs requires 'id' or 'run_id'".into()))?;
+                let id = params["id"].as_str().ok_or_else(|| {
+                    crate::error::Error::Tool("logs requires 'id' or 'run_id'".into())
+                })?;
                 match find_all_logs(id) {
                     Ok(paths) if paths.is_empty() => Ok(ToolOutput::text(format!(
                         "No logs for unit {id}. Has it been dispatched with mana run?"
@@ -2003,8 +3287,9 @@ impl Tool for ManaTool {
                                 .file_name()
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("unknown");
-                            let body = std::fs::read_to_string(path)
-                                .unwrap_or_else(|e| format!("(error reading {}: {e})", path.display()));
+                            let body = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                                format!("(error reading {}: {e})", path.display())
+                            });
                             sections.push(format!("═══ {filename} ═══\n\n{body}"));
                         }
                         let text = truncate_with_note(&sections.join("\n\n"));
@@ -2017,6 +3302,39 @@ impl Tool for ManaTool {
                 Ok(agents) => Ok(json_output(&agents)),
                 Err(e) => Ok(ToolOutput::error(e.to_string())),
             },
+            "reparent" => {
+                let id = params["id"]
+                    .as_str()
+                    .ok_or_else(|| crate::error::Error::Tool("reparent requires 'id'".into()))?;
+                let parent = parse_optional_string(&params["parent"]);
+                let reason = parse_optional_string(&params["reason"])
+                    .or_else(|| parse_optional_string(&params["parent_reason"]));
+                let unit_path = mana_core::discovery::find_unit_file(&mana_dir, id)
+                    .map_err(|error| crate::error::Error::Tool(error.to_string()))?;
+                let mut unit = mana_core::unit::Unit::from_file(&unit_path)
+                    .map_err(|error| crate::error::Error::Tool(error.to_string()))?;
+                let old_parent = unit.parent.clone();
+                unit.parent = parent.clone();
+                unit.updated_at = chrono::Utc::now();
+                unit.to_file(&unit_path)
+                    .map_err(|error| crate::error::Error::Tool(error.to_string()))?;
+                let summary = format!(
+                    "mana delta: reparented {id} from {} to {}",
+                    old_parent.as_deref().unwrap_or("<root>"),
+                    parent.as_deref().unwrap_or("<root>")
+                );
+                set_mana_delta_widget(&ctx, summary.clone(), reason.clone()).await;
+                Ok(text_output(
+                    summary,
+                    json!({
+                        "action": "reparent",
+                        "id": id,
+                        "old_parent": old_parent,
+                        "new_parent": parent,
+                        "reason": reason,
+                    }),
+                ))
+            }
             "run_state" | "evaluate" => {
                 let run_id = params["run_id"].as_str();
                 match run_state_snapshot(&self.run_store, run_id) {
@@ -2083,9 +3401,11 @@ impl Tool for ManaTool {
                             visited.len()
                         }
 
-                        fn score_unit(entry: &mana_core::index::IndexEntry, unblock_count: usize) -> f64 {
-                            let priority_score =
-                                (5u8.saturating_sub(entry.priority)) as f64 * 10.0;
+                        fn score_unit(
+                            entry: &mana_core::index::IndexEntry,
+                            unblock_count: usize,
+                        ) -> f64 {
+                            let priority_score = (5u8.saturating_sub(entry.priority)) as f64 * 10.0;
                             let unblock_score = (unblock_count as f64 * 5.0).min(50.0);
                             let age_days = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -2104,17 +3424,16 @@ impl Tool for ManaTool {
                             .map(|entry| {
                                 let transitive_count =
                                     count_transitive_unblocks(&entry.id, &reverse_deps);
-                                let unblocks = reverse_deps
-                                    .get(&entry.id)
-                                    .cloned()
-                                    .unwrap_or_default();
+                                let unblocks =
+                                    reverse_deps.get(&entry.id).cloned().unwrap_or_default();
                                 let score = score_unit(entry, transitive_count);
                                 let now_days = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_secs()
                                     / 86_400;
-                                let created_days = entry.created_at.timestamp().max(0) as u64 / 86_400;
+                                let created_days =
+                                    entry.created_at.timestamp().max(0) as u64 / 86_400;
                                 let age_days = now_days.saturating_sub(created_days);
                                 ScoredUnit {
                                     id: entry.id.clone(),
@@ -2136,8 +3455,7 @@ impl Tool for ManaTool {
                         scored.truncate(count);
                         Ok(text_output(
                             scored_units_to_text(&scored),
-                            serde_json::to_value(&scored)
-                                .unwrap_or(serde_json::Value::Null),
+                            serde_json::to_value(&scored).unwrap_or(serde_json::Value::Null),
                         ))
                     }
                     Err(e) => Ok(ToolOutput::error(e.to_string())),
@@ -2195,9 +3513,10 @@ impl Tool for ManaTool {
                 Ok(text_output(text, json!({ "root": id })))
             }
             "run" => {
+                let requested_jobs = params["jobs"].as_u64().unwrap_or(4) as u32;
                 let run_params = NativeRunParams {
                     target: target_from_params(&params)?,
-                    jobs: params["jobs"].as_u64().unwrap_or(4) as u32,
+                    jobs: requested_jobs.max(1),
                     dry_run: params["dry_run"].as_bool().unwrap_or(false),
                     loop_mode: params["loop"].as_bool().unwrap_or(false),
                     keep_going: params["keep_going"].as_bool().unwrap_or(false),
@@ -2206,98 +3525,38 @@ impl Tool for ManaTool {
                     json_stream: true,
                     review: params["review"].as_bool().unwrap_or(false),
                 };
-                let background = params["background"].as_bool().unwrap_or(!run_params.dry_run);
+                let target_ids = target_ids_from_run_target(&run_params.target);
+                if !target_ids.is_empty() {
+                    if let Some(guardrail) = retry_guardrail_for_targets(&mana_dir, &target_ids)? {
+                        return Ok(ToolOutput {
+                            content: vec![imp_llm::ContentBlock::Text {
+                                text: "mana run blocked: failed units must be updated before retry"
+                                    .to_string(),
+                            }],
+                            details: guardrail,
+                            is_error: true,
+                        });
+                    }
+                }
                 let scope = scope_from_target(&run_params.target);
                 let run_id = {
                     let mut store = self.run_store.lock().map_err(|_| {
                         crate::error::Error::Tool("mana run state lock poisoned".into())
                     })?;
-                    let run_id = store.start_run(scope.clone(), background, &run_params);
+                    let run_id = store.start_run(scope.clone(), &run_params);
                     store.persist();
                     run_id
                 };
 
-                if background {
-                    let started = background_run_started_output(&scope, &run_id, &run_params);
-                    spawn_background_run(
-                        mana_dir.clone(),
-                        run_params,
-                        ctx,
-                        self.run_store.clone(),
-                        run_id,
-                    );
-                    return Ok(started);
-                }
-
-                send_update(
-                    &ctx,
-                    format!("Starting mana run {run_id}..."),
-                    json!({"kind": "mana_run_status", "status": "starting", "run_id": run_id, "scope": scope}),
-                );
-                ctx.ui
-                    .set_widget(
-                        "mana",
-                        Some(mana_widget_lines(
-                            format!("running mana ({run_id})"),
-                            Some(format!("native foreground orchestration · {scope}")),
-                        )),
-                    )
-                    .await;
-                ctx.ui.set_status("mana", Some("mana: running")).await;
-
-                let run_store = self.run_store.clone();
-                let run_id_for_sink = run_id.clone();
-                let update_tx = ctx.update_tx.clone();
-                match mana::commands::run::run_with_stream_capture_and_sink(
-                    &mana_dir,
+                let started = run_started_output(&scope, &run_id, &run_params);
+                spawn_background_run(
+                    mana_dir.clone(),
                     run_params,
-                    Some(Arc::new(move |event| {
-                        update_run_store_with_event(&run_store, &run_id_for_sink, &event);
-                        if let Some(line) = stream_event_line(&event) {
-                            let _ = update_tx.try_send(ToolUpdate {
-                                content: vec![imp_llm::ContentBlock::Text { text: line }],
-                                details: serde_json::to_value(&event)
-                                    .unwrap_or(serde_json::Value::Null),
-                            });
-                        }
-                    })),
-                ) {
-                    Ok(view) => {
-                        finish_run_in_store(&self.run_store, &run_id, &view);
-                        for line in run_summary_lines(&view) {
-                            send_update(
-                                &ctx,
-                                line,
-                                json!({"kind": "mana_run_view", "run_id": run_id, "scope": scope, "view": view}),
-                            );
-                        }
-                        let summary = format!(
-                            "mana finished · {} done · {} failed",
-                            view.summary.total_closed, view.summary.total_failed
-                        );
-                        ctx.ui
-                            .set_widget("mana", Some(mana_widget_lines(summary.clone(), Some(scope.clone()))))
-                            .await;
-                        ctx.ui.set_status("mana", Some(&summary)).await;
-                        Ok(ToolOutput {
-                            content: run_summary_lines(&view)
-                                .into_iter()
-                                .map(|text| imp_llm::ContentBlock::Text { text })
-                                .collect(),
-                            details: json!({
-                                "run_id": run_id,
-                                "scope": scope,
-                                "runtime": view.runtime,
-                                "view": serde_json::to_value(&view).unwrap_or(serde_json::Value::Null)
-                            }),
-                            is_error: false,
-                        })
-                    }
-                    Err(e) => {
-                        fail_run_in_store(&self.run_store, &run_id, e.to_string());
-                        Ok(ToolOutput::error(e.to_string()))
-                    }
-                }
+                    ctx,
+                    self.run_store.clone(),
+                    run_id,
+                );
+                return Ok(started);
             }
             other => Ok(ToolOutput::error(format!(
                 "Unknown action: {other}. Use: status, list, show, create, close, update, run, run_state, evaluate, claim, release, logs, agents, next, tree, reopen, verify, fail, delete, dep_add, dep_remove, fact_create, fact_verify, notes_append, decision_add, decision_resolve"
@@ -2314,7 +3573,15 @@ mod tests {
     use serde_json::json;
     use tokio::sync::mpsc;
 
-    use super::{evaluate_run_output, stream_event_line, ManaRunStore, ManaTool, NativeRunState};
+    use super::{
+        compact_list_output, evaluate_run_output, mana_close_error_output,
+        mana_close_force_reason_error, mana_guide_output, mana_run_core, mana_template_output,
+        parent_placement_details, parse_guide_topic, parse_template_kind,
+        retry_guardrail_for_targets, run_state_output, runtime_info_for_run, stream_event_line,
+        target_ids_from_run_target, unix_time_ms, validate_mana_action, validate_native_run_target,
+        worker_options_for_native_unit, GuideTopic, ManaRunStore, ManaTool, NativeRunState,
+        RunTarget, RunUnitStatus, TemplateKind, INTERRUPTED_RUN_STALE_MS,
+    };
     use crate::tools::{FileCache, FileTracker, Tool, ToolContext, ToolUpdate};
     use crate::ui::{NotifyLevel, NullInterface, WidgetContent};
 
@@ -2410,6 +3677,8 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
 
         let tool = ManaTool::default();
@@ -2477,6 +3746,8 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         (ctx, tempfile::tempdir().unwrap())
     }
@@ -2519,6 +3790,8 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         (ctx, tempfile::tempdir().unwrap(), widgets)
     }
@@ -2654,6 +3927,327 @@ mod tests {
         assert_eq!(unit["verify_timeout"], 12);
     }
 
+    #[test]
+    fn parent_placement_details_warns_when_parent_reason_missing() {
+        let details = parent_placement_details(Some("304"), None);
+
+        assert_eq!(details["parent"], json!("304"));
+        assert_eq!(details["warning"], json!("parent_reason_missing"));
+        assert!(details["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("confirm it belongs"));
+    }
+
+    #[test]
+    fn parent_placement_details_accepts_explicit_reason() {
+        let details = parent_placement_details(
+            Some("313"),
+            Some("This is workflow reliability work, not tool schema audit."),
+        );
+
+        assert_eq!(details["warning"], serde_json::Value::Null);
+        assert_eq!(
+            details["parent_reason"],
+            json!("This is workflow reliability work, not tool schema audit.")
+        );
+    }
+
+    #[test]
+    fn close_force_requires_reason_with_evidence() {
+        let output = mana_close_force_reason_error("313.2");
+
+        assert!(output.is_error);
+        assert_eq!(output.details["action"], json!("close"));
+        assert_eq!(output.details["missing"], json!(["reason"]));
+        assert!(output
+            .text_content()
+            .unwrap_or_default()
+            .contains("equivalent verify evidence"));
+    }
+
+    #[test]
+    fn close_verify_errors_include_recovery_hint() {
+        let output = mana_close_error_output(
+            "313.2",
+            "Verify command failed during close: cargo test -p imp-core one two --no-run"
+                .to_string(),
+        );
+
+        assert!(output.is_error);
+        assert_eq!(output.details["verify_related"], json!(true));
+        assert_eq!(output.details["force_requires_reason"], json!(true));
+        let hint = output.details["recovery_hint"].as_str().unwrap_or_default();
+        assert!(hint.contains("equivalent focused checks"));
+    }
+
+    #[test]
+    fn close_non_verify_errors_stay_plain() {
+        let output = mana_close_error_output("313.2", "Unit not found".to_string());
+
+        assert!(output.is_error);
+        assert_eq!(output.details["verify_related"], json!(false));
+        assert!(output.details["recovery_hint"].is_null());
+        assert_eq!(output.text_content().unwrap_or_default(), "Unit not found");
+    }
+
+    #[test]
+    fn mana_guide_outputs_concise_structured_topic() {
+        let output = mana_guide_output(GuideTopic::Verify);
+
+        assert!(!output.is_error);
+        assert_eq!(output.details["action"], json!("guide"));
+        assert_eq!(output.details["topic"], json!("verify"));
+        assert!(output.details["guidance"].as_array().unwrap().len() <= 3);
+        assert!(output
+            .text_content()
+            .unwrap_or_default()
+            .contains("mana guide: verify"));
+    }
+
+    #[test]
+    fn mana_overview_guide_prefers_update_before_create() {
+        let output = mana_guide_output(GuideTopic::Overview);
+        let text = output.text_content().unwrap_or_default();
+
+        assert!(text.contains("Before creating"));
+        assert!(text.contains("update"));
+        assert!(text.contains("notes"));
+    }
+
+    #[test]
+    fn compact_list_output_caps_and_guides_toward_existing_units() {
+        let now = chrono::Utc::now();
+        let entries: Vec<mana_core::index::IndexEntry> = (0..60)
+            .map(|i| mana_core::index::IndexEntry {
+                id: format!("330.{i}"),
+                title: format!("Task {i}"),
+                status: mana_core::unit::Status::Open,
+                priority: 1,
+                parent: Some("330".to_string()),
+                dependencies: Vec::new(),
+                labels: vec!["mana".to_string()],
+                assignee: None,
+                updated_at: now,
+                produces: Vec::new(),
+                requires: Vec::new(),
+                has_verify: true,
+                verify: Some("cargo test".to_string()),
+                created_at: now,
+                claimed_by: None,
+                attempts: 0,
+                paths: vec!["crates/imp-core/src/tools/mana.rs".to_string()],
+                kind: mana_core::unit::UnitType::Task,
+                feature: false,
+                has_decisions: false,
+            })
+            .collect();
+
+        let output = compact_list_output(&entries, Some(100));
+        let text = output.text_content().unwrap_or_default();
+
+        assert!(!output.is_error);
+        assert_eq!(output.details["total"], json!(60));
+        assert_eq!(output.details["shown"], json!(50));
+        assert_eq!(output.details["limit"], json!(50));
+        assert_eq!(output.details["truncated"], json!(true));
+        assert_eq!(output.details["units"].as_array().unwrap().len(), 50);
+        assert!(text.contains("Prefer `show` + `update`/`notes_append`"));
+        assert!(text.contains("10 more omitted"));
+        assert!(!text.contains("verify\":\"cargo test"));
+    }
+
+    #[test]
+    fn create_validation_hint_prefers_existing_unit_when_title_missing() {
+        let output = validate_mana_action("create", &json!({}))
+            .expect("create without title should fail validation");
+
+        assert!(output.is_error);
+        assert!(output
+            .text_content()
+            .unwrap_or_default()
+            .contains("Before creating, check list/show"));
+    }
+
+    #[test]
+    fn mana_template_outputs_task_template() {
+        let output = mana_template_output(TemplateKind::Task, Some(GuideTopic::Verify));
+
+        assert!(!output.is_error);
+        assert_eq!(output.details["action"], json!("template"));
+        assert_eq!(output.details["kind"], json!("task"));
+        assert_eq!(output.details["template"]["fail_first"], json!(true));
+        assert!(output.details["template"]["verify"].is_string());
+    }
+
+    #[test]
+    fn mana_guide_and_template_validate_topic_and_kind() {
+        assert!(parse_guide_topic(&json!({ "topic": "orchestrate" })).is_ok());
+        assert!(parse_guide_topic(&json!({ "topic": "bad" }))
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid mana guide topic"));
+        assert!(parse_template_kind(&json!({ "kind": "fact" })).is_ok());
+        assert!(parse_template_kind(&json!({ "kind": "job" }))
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid mana template kind"));
+    }
+
+    #[test]
+    fn mana_schema_uses_canonical_fields_only() {
+        let schema = ManaTool::default().parameters();
+        let properties = schema["properties"].as_object().unwrap();
+
+        assert!(properties.contains_key("action"));
+        assert!(properties.contains_key("id"));
+        assert!(properties.contains_key("run_id"));
+        assert!(properties.contains_key("title"));
+        assert!(properties.contains_key("description"));
+        assert!(properties.contains_key("acceptance"));
+        assert!(properties.contains_key("verify"));
+        assert!(properties.contains_key("notes"));
+        assert!(properties.contains_key("decisions"));
+        assert!(properties.contains_key("paths"));
+        assert!(properties.contains_key("deps"));
+        assert!(properties.contains_key("labels"));
+        assert!(properties.contains_key("targets"));
+        assert!(properties.contains_key("scope"));
+        assert!(properties.contains_key("path"));
+        assert!(properties.contains_key("parent_reason"));
+        let actions = properties["action"]["enum"].as_array().unwrap();
+        assert!(actions.iter().any(|value| value == "reparent"));
+
+        assert!(!properties.contains_key("mana_scope"));
+        assert!(!properties.contains_key("mana_dir"));
+        assert!(!properties.contains_key("paths_csv"));
+        assert!(!properties.contains_key("fact_title"));
+        assert!(!properties.contains_key("add_label"));
+        assert!(!properties.contains_key("remove_label"));
+
+        let kind_enum = properties["kind"]["enum"].as_array().unwrap();
+        assert!(kind_enum.iter().any(|value| value == "task"));
+        assert!(!kind_enum.iter().any(|value| value == "job"));
+    }
+
+    #[test]
+    fn mana_validation_teaches_required_fields() {
+        let output = validate_mana_action("notes_append", &json!({ "id": "304" }))
+            .expect("notes_append without notes should fail validation");
+
+        assert!(output.is_error);
+        assert_eq!(output.details["action"], json!("notes_append"));
+        assert_eq!(output.details["missing"], json!(["notes"]));
+        assert_eq!(output.details["canonical_fields"], json!(["id", "notes"]));
+        assert!(output
+            .text_content()
+            .unwrap_or_default()
+            .contains("requires id and notes"));
+    }
+
+    #[test]
+    fn mana_validation_rejects_path_when_paths_is_intended() {
+        let output = validate_mana_action(
+            "create",
+            &json!({ "title": "Doc task", "path": "src/lib.rs" }),
+        )
+        .expect("create with path attachment should teach paths");
+
+        assert!(output.is_error);
+        assert_eq!(output.details["invalid"], json!(["path"]));
+        assert!(output
+            .text_content()
+            .unwrap_or_default()
+            .contains("Use path for project/.mana location"));
+    }
+
+    #[test]
+    fn mana_validation_allows_valid_create_and_decision_add() {
+        assert!(validate_mana_action("create", &json!({ "title": "Build thing" })).is_none());
+        assert!(validate_mana_action(
+            "decision_add",
+            &json!({ "id": "304", "decisions": ["Use canonical names"] }),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn mana_validation_requires_parent_for_reparent() {
+        let output = validate_mana_action("reparent", &json!({ "id": "313.2" }))
+            .expect("reparent without parent should fail validation");
+
+        assert!(output.is_error);
+        assert_eq!(output.details["missing"], json!(["parent"]));
+        assert_eq!(
+            output.details["canonical_fields"],
+            json!(["id", "parent", "reason"])
+        );
+    }
+
+    #[tokio::test]
+    async fn reparent_moves_child_between_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
+        let tool = ManaTool::default();
+
+        let old_parent = tool
+            .execute(
+                "old_parent",
+                json!({ "action": "create", "title": "Old Parent" }),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let old_parent_id = old_parent.details["unit"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let new_parent = tool
+            .execute(
+                "new_parent",
+                json!({ "action": "create", "title": "New Parent" }),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let new_parent_id = new_parent.details["unit"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let child = tool
+            .execute(
+                "child",
+                json!({ "action": "create", "title": "Child", "parent": old_parent_id, "parent_reason": "Initial grouping" }),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let child_id = child.details["unit"]["id"].as_str().unwrap().to_string();
+
+        let moved = tool
+            .execute(
+                "move_child",
+                json!({
+                    "action": "reparent",
+                    "id": child_id,
+                    "parent": new_parent_id,
+                    "reason": "Belongs under the new reliability epic"
+                }),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!moved.is_error);
+        assert_eq!(moved.details["action"], json!("reparent"));
+        assert_eq!(moved.details["old_parent"], json!(old_parent_id));
+        assert_eq!(moved.details["new_parent"], json!(new_parent_id));
+        assert!(moved
+            .text_content()
+            .unwrap_or_default()
+            .contains("reparented"));
+    }
+
     #[tokio::test]
     async fn update_supports_acceptance_labels_and_decisions() {
         let dir = tempfile::tempdir().unwrap();
@@ -2681,7 +4275,7 @@ mod tests {
                     "action": "update",
                     "id": "1",
                     "acceptance": "must pass auth flow",
-                    "add_label": "backend",
+                    "labels": ["backend"],
                     "decisions": ["Choose retry limit"],
                     "resolve_decisions": []
                 }),
@@ -2691,7 +4285,10 @@ mod tests {
             .unwrap();
         let unit = &result.details["unit"];
         assert_eq!(unit["acceptance"], "must pass auth flow");
-        assert_eq!(unit["labels"][0], "backend");
+        assert_eq!(
+            unit["labels"].as_array().cloned().unwrap_or_default(),
+            vec![json!("backend")]
+        );
         assert_eq!(unit["decisions"][0], "Choose retry limit");
     }
 
@@ -2742,6 +4339,8 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         let tool = ManaTool::default();
         let reopened = tool
@@ -2777,6 +4376,8 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         let verify = tool
             .execute(
@@ -2811,8 +4412,10 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
-        let fact = tool.execute("call_fact", json!({ "action": "fact_create", "fact_title": "Auth fact", "verify": "test -d .mana", "description": "fact body", "ttl_days": 7 }), ctx3).await.unwrap();
+        let fact = tool.execute("call_fact", json!({ "action": "fact_create", "title": "Auth fact", "verify": "test -d .mana", "description": "fact body", "ttl_days": 7 }), ctx3).await.unwrap();
         assert_eq!(fact.details["unit"]["unit_type"], "fact");
     }
 
@@ -2915,6 +4518,8 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -2961,6 +4566,8 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -3020,6 +4627,8 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -3072,6 +4681,8 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
         let tool = ManaTool::default();
         let result = tool
@@ -3256,26 +4867,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_run_returns_promptly() {
+    async fn run_returns_promptly() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
         let tool = ManaTool::default();
         let result = tool
-            .execute(
-                "call_bg",
-                json!({ "action": "run", "background": true, "dry_run": true }),
-                ctx,
-            )
+            .execute("call_run", json!({ "action": "run", "dry_run": true }), ctx)
             .await
             .unwrap();
         let text = result.text_content().unwrap_or("");
-        assert!(text.contains("Started native mana orchestration in background"));
-        assert_eq!(result.details["background"], true);
+        assert!(text.contains("Started native mana orchestration"));
         assert!(result.details["run_id"].as_str().is_some());
     }
 
     #[tokio::test]
-    async fn background_run_enqueues_follow_up_on_completion_without_ui() {
+    async fn run_enqueues_follow_up_on_completion_without_ui() {
         let dir = tempfile::tempdir().unwrap();
         let mana_dir = dir.path().join(".mana");
         std::fs::create_dir_all(&mana_dir).unwrap();
@@ -3305,13 +4911,15 @@ mod tests {
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         };
 
         let tool = ManaTool::default();
         let _ = tool
             .execute(
                 "call_bg_follow_up",
-                json!({ "action": "run", "background": true, "dry_run": true }),
+                json!({ "action": "run", "dry_run": true }),
                 ctx,
             )
             .await
@@ -3338,7 +4946,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_run_with_ui_does_not_enqueue_follow_up_on_completion() {
+    async fn run_with_ui_does_not_enqueue_follow_up_on_completion() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _keep, _widgets) = ctx_with_ui(dir.path(), crate::config::AgentMode::Full);
         let tool = ManaTool::default();
@@ -3351,7 +4959,7 @@ mod tests {
         let _ = tool
             .execute(
                 "call_bg_follow_up_ui",
-                json!({ "action": "run", "background": true, "dry_run": true }),
+                json!({ "action": "run", "dry_run": true }),
                 ctx,
             )
             .await
@@ -3368,14 +4976,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_run_supports_explicit_targets() {
+    async fn run_supports_explicit_targets() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
         let tool = ManaTool::default();
         let result = tool
             .execute(
                 "call_bg_targets",
-                json!({ "action": "run", "background": true, "dry_run": true, "targets": ["1", "2"] }),
+                json!({ "action": "run", "dry_run": true, "targets": ["1", "2"] }),
                 ctx,
             )
             .await
@@ -3392,11 +5000,7 @@ mod tests {
         let tool = ManaTool::default();
 
         let run_result = tool
-            .execute(
-                "call_run",
-                json!({ "action": "run", "background": false, "dry_run": true }),
-                ctx,
-            )
+            .execute("call_run", json!({ "action": "run", "dry_run": true }), ctx)
             .await
             .unwrap();
         let run_id = run_result.details["run_id"]
@@ -3420,11 +5024,14 @@ mod tests {
             "state_text was: {state_text}"
         );
         assert!(
-            state_text.contains("Worker runtime:"),
+            state_text.contains("Worker runtime:")
+                || state_text.contains("Next: Inspect logs/agents"),
             "state_text was: {state_text}"
         );
         assert!(
-            state_text.contains("Units:") || state_text.contains("Latest: Dry run:"),
+            state_text.contains("Units:")
+                || state_text.contains("Latest: Dry run:")
+                || state_text.contains("0 total"),
             "state_text was: {state_text}"
         );
         assert!(
@@ -3444,11 +5051,12 @@ mod tests {
             .unwrap();
         let eval_text = evaluation.text_content().unwrap_or("");
         assert!(
-            eval_text.contains("Native mana orchestration run ") && eval_text.contains("finished"),
+            eval_text.contains("Native mana orchestration run ")
+                && (eval_text.contains("finished") || eval_text.contains("still running")),
             "eval_text was: {eval_text}"
         );
         assert!(
-            eval_text.contains("Worker runtime:"),
+            eval_text.contains("Worker runtime:") || eval_text.contains("Runtime:"),
             "eval_text was: {eval_text}"
         );
     }
@@ -3458,7 +5066,6 @@ mod tests {
         let mut store = ManaRunStore::default();
         let active_id = store.start_run(
             "all ready units".to_string(),
-            true,
             &mana::commands::run::NativeRunParams {
                 target: mana::commands::run::RunTarget::AllReady,
                 jobs: 2,
@@ -3473,7 +5080,6 @@ mod tests {
         );
         let finished_id = store.start_run(
             "unit 1".to_string(),
-            false,
             &mana::commands::run::NativeRunParams {
                 target: mana::commands::run::RunTarget::Unit("1".to_string()),
                 jobs: 1,
@@ -3511,7 +5117,6 @@ mod tests {
         let mut state = NativeRunState::new(
             "run-7".to_string(),
             "unit 7".to_string(),
-            false,
             &mana::commands::run::NativeRunParams {
                 target: mana::commands::run::RunTarget::Unit("7".to_string()),
                 jobs: 1,
@@ -3532,5 +5137,397 @@ mod tests {
         let text = output.text_content().unwrap_or("");
         assert!(text.contains("2 failed unit"));
         assert!(text.contains("Latest: ✗ 7 failed verify"));
+        assert!(text.contains("Next: Inspect failed units"));
+        assert_eq!(
+            output.details["recovery"]["retry_requires_unit_update"],
+            json!(true)
+        );
+        assert!(output.details["recovery"]["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action
+                .as_str()
+                .unwrap_or_default()
+                .contains("do not rerun unchanged")));
+    }
+
+    #[test]
+    fn run_state_output_includes_recovery_details() {
+        let mut state = NativeRunState::new(
+            "run-8".to_string(),
+            "unit 8".to_string(),
+            &mana::commands::run::NativeRunParams {
+                target: mana::commands::run::RunTarget::Unit("8".to_string()),
+                jobs: 1,
+                dry_run: false,
+                loop_mode: false,
+                keep_going: false,
+                timeout: 30,
+                idle_timeout: 5,
+                json_stream: true,
+                review: false,
+            },
+        );
+        state.status = "failed".to_string();
+        state.summary.total_failed = 1;
+        state.units.push(RunUnitStatus {
+            id: "8".to_string(),
+            title: "Failed unit".to_string(),
+            status: "failed".to_string(),
+            round: Some(1),
+            agent: Some("imp-worker".to_string()),
+            model: None,
+            duration_secs: Some(3),
+            tool_count: Some(2),
+            turns: Some(1),
+            failure_summary: Some("verify failed".to_string()),
+            error: Some("exit 1".to_string()),
+        });
+
+        let output = run_state_output(&state);
+        let text = output.text_content().unwrap_or_default();
+
+        assert!(text.contains("Next: Inspect failed units"));
+        assert_eq!(
+            output.details["recovery"]["failed_units"][0]["id"],
+            json!("8")
+        );
+        assert_eq!(
+            output.details["recovery"]["retry_requires_unit_update"],
+            json!(true)
+        );
+    }
+    #[test]
+    fn validate_native_run_target_rejects_multi_explicit_targets() {
+        let target = RunTarget::Explicit(vec!["1".to_string(), "2".to_string()]);
+
+        let error = validate_native_run_target(&target).expect_err("must not broaden scope");
+
+        assert!(error.contains("multiple explicit targets"));
+        assert!(error.contains("one target at a time"));
+    }
+
+    #[test]
+    fn target_ids_from_run_target_extracts_explicit_units() {
+        assert_eq!(
+            target_ids_from_run_target(&RunTarget::Unit("273.3".to_string())),
+            vec!["273.3".to_string()]
+        );
+        assert_eq!(
+            target_ids_from_run_target(&RunTarget::Explicit(vec![
+                "1".to_string(),
+                "2".to_string()
+            ])),
+            vec!["1".to_string(), "2".to_string()]
+        );
+        assert!(target_ids_from_run_target(&RunTarget::AllReady).is_empty());
+    }
+
+    #[test]
+    fn retry_guardrail_blocks_failed_unit_without_new_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let mana_dir = dir.path().join(".mana");
+        std::fs::create_dir(&mana_dir).unwrap();
+        mana_core::config::Config {
+            project: "retry-test".to_string(),
+            next_id: 1,
+            auto_close_parent: true,
+            run: None,
+            plan: None,
+            max_loops: 10,
+            max_concurrent: 4,
+            poll_interval: 30,
+            extends: vec![],
+            rules_file: None,
+            file_locking: false,
+            worktree: false,
+            on_close: None,
+            on_fail: None,
+            verify_timeout: None,
+            review: None,
+            user: None,
+            user_email: None,
+            auto_commit: false,
+            commit_template: None,
+            research: None,
+            run_model: None,
+            plan_model: None,
+            review_model: None,
+            research_model: None,
+            batch_verify: false,
+            memory_reserve_mb: 0,
+            notify: None,
+        }
+        .save(&mana_dir)
+        .unwrap();
+
+        let created = mana_core::api::create_unit(
+            &mana_dir,
+            mana_core::ops::create::CreateParams {
+                title: "Retry target".to_string(),
+                verify: Some("false".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let id = created.unit.id;
+        let now = chrono::Utc::now();
+        let mut failed_unit = mana_core::ops::show::get(&mana_dir, &id).unwrap().unit;
+        failed_unit
+            .attempt_log
+            .push(mana_core::unit::AttemptRecord {
+                num: 1,
+                outcome: mana_core::unit::AttemptOutcome::Failed,
+                notes: Some("verify failed".to_string()),
+                agent: Some("imp-test".to_string()),
+                started_at: Some(now),
+                finished_at: Some(now),
+                autonomy_observation: None,
+            });
+        failed_unit.updated_at = now - chrono::Duration::milliseconds(1);
+        let unit_path = mana_core::discovery::find_unit_file(&mana_dir, &id).unwrap();
+        failed_unit.to_file(&unit_path).unwrap();
+
+        let guardrail = retry_guardrail_for_targets(&mana_dir, std::slice::from_ref(&id))
+            .unwrap()
+            .expect("failed unchanged unit should require update");
+
+        assert_eq!(guardrail["retry_requires_unit_update"], json!(true));
+        assert_eq!(guardrail["blocked_units"][0]["id"], json!(id));
+        assert!(guardrail["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action.as_str().unwrap_or_default().contains("Append notes")));
+    }
+
+    #[test]
+    fn retry_guardrail_allows_failed_unit_after_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let mana_dir = dir.path().join(".mana");
+        std::fs::create_dir(&mana_dir).unwrap();
+        mana_core::config::Config {
+            project: "retry-test".to_string(),
+            next_id: 1,
+            auto_close_parent: true,
+            run: None,
+            plan: None,
+            max_loops: 10,
+            max_concurrent: 4,
+            poll_interval: 30,
+            extends: vec![],
+            rules_file: None,
+            file_locking: false,
+            worktree: false,
+            on_close: None,
+            on_fail: None,
+            verify_timeout: None,
+            review: None,
+            user: None,
+            user_email: None,
+            auto_commit: false,
+            commit_template: None,
+            research: None,
+            run_model: None,
+            plan_model: None,
+            review_model: None,
+            research_model: None,
+            batch_verify: false,
+            memory_reserve_mb: 0,
+            notify: None,
+        }
+        .save(&mana_dir)
+        .unwrap();
+
+        let created = mana_core::api::create_unit(
+            &mana_dir,
+            mana_core::ops::create::CreateParams {
+                title: "Retry target".to_string(),
+                verify: Some("false".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let id = created.unit.id;
+        let now = chrono::Utc::now();
+        let mut failed_unit = mana_core::ops::show::get(&mana_dir, &id).unwrap().unit;
+        failed_unit
+            .attempt_log
+            .push(mana_core::unit::AttemptRecord {
+                num: 1,
+                outcome: mana_core::unit::AttemptOutcome::Failed,
+                notes: Some("verify failed".to_string()),
+                agent: Some("imp-test".to_string()),
+                started_at: Some(now),
+                finished_at: Some(now),
+                autonomy_observation: None,
+            });
+        failed_unit.updated_at = now;
+        let unit_path = mana_core::discovery::find_unit_file(&mana_dir, &id).unwrap();
+        failed_unit.to_file(&unit_path).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        mana_core::api::update_unit(
+            &mana_dir,
+            &id,
+            mana_core::ops::update::UpdateParams {
+                notes: Some("Changed retry plan after failure".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let guardrail = retry_guardrail_for_targets(&mana_dir, &[id]).unwrap();
+
+        assert!(guardrail.is_none());
+    }
+    fn native_run_params_for_test() -> mana::commands::run::NativeRunParams {
+        mana::commands::run::NativeRunParams {
+            target: mana::commands::run::RunTarget::AllReady,
+            jobs: 1,
+            dry_run: false,
+            loop_mode: false,
+            keep_going: false,
+            timeout: 30,
+            idle_timeout: 5,
+            json_stream: true,
+            review: false,
+        }
+    }
+
+    fn ready_unit_for_model_test(model: Option<&str>) -> mana_run_core::ReadyUnit {
+        mana_run_core::ReadyUnit {
+            id: "1".to_string(),
+            title: "Model propagation".to_string(),
+            priority: 2,
+            critical_path_weight: 0,
+            paths: Vec::new(),
+            produces: Vec::new(),
+            requires: Vec::new(),
+            dependencies: Vec::new(),
+            parent: None,
+            model: model.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn native_worker_options_prefer_unit_model_and_config_thinking() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
+        let mut config = crate::config::Config::default();
+        config.model = Some("config-model".to_string());
+        config.thinking = Some(imp_llm::ThinkingLevel::High);
+        ctx.config = Arc::new(config);
+        let run_args = mana::commands::run::NativeRunParams {
+            timeout: 42,
+            ..native_run_params_for_test()
+        };
+
+        let options = worker_options_for_native_unit(
+            &ready_unit_for_model_test(Some("unit-model")),
+            &run_args,
+            dir.path().to_path_buf(),
+            dir.path().join(".mana"),
+            &ctx,
+        );
+
+        assert_eq!(options.model.as_deref(), Some("unit-model"));
+        assert_eq!(options.thinking, Some(imp_llm::ThinkingLevel::High));
+        assert_eq!(options.max_turns, Some(42));
+        assert_eq!(
+            options.mana_dir_override.as_deref(),
+            Some(dir.path().join(".mana").as_path())
+        );
+    }
+
+    #[test]
+    fn native_worker_options_fall_back_to_config_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
+        let mut config = crate::config::Config::default();
+        config.model = Some("config-model".to_string());
+        ctx.config = Arc::new(config);
+
+        let options = worker_options_for_native_unit(
+            &ready_unit_for_model_test(None),
+            &native_run_params_for_test(),
+            dir.path().to_path_buf(),
+            dir.path().join(".mana"),
+            &ctx,
+        );
+
+        assert_eq!(options.model.as_deref(), Some("config-model"));
+    }
+
+    #[test]
+    fn native_run_runtime_info_reports_config_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
+        let mut config = crate::config::Config::default();
+        config.model = Some("config-model".to_string());
+        ctx.config = Arc::new(config);
+
+        let runtime = runtime_info_for_run(&native_run_params_for_test(), &ctx);
+
+        assert_eq!(runtime.direct_agent.as_deref(), Some("imp"));
+        assert_eq!(runtime.model.as_deref(), Some("config-model"));
+    }
+
+    #[test]
+    fn mana_run_state_persists_material_events() {
+        let mut store = ManaRunStore::default();
+        let run_id = store.start_run("all ready units".to_string(), &native_run_params_for_test());
+        let before = store.snapshot(Some(&run_id)).unwrap().last_event_at_ms;
+
+        store.update_with_event(
+            &run_id,
+            &mana::stream::StreamEvent::UnitTool {
+                id: "1".to_string(),
+                tool_name: "read".to_string(),
+                tool_count: 1,
+                file_path: Some("src/lib.rs".to_string()),
+            },
+        );
+
+        let state = store.snapshot(Some(&run_id)).unwrap();
+        assert_eq!(state.event_count, 1);
+        assert!(state.last_event_at_ms >= before);
+        assert!(state.log_lines.iter().any(|line| line.contains("#1 read")));
+    }
+
+    #[test]
+    fn mana_run_state_marks_stale_running_runs_interrupted() {
+        let mut store = ManaRunStore::default();
+        let run_id = store.start_run("all ready units".to_string(), &native_run_params_for_test());
+        {
+            let run = store
+                .runs
+                .iter_mut()
+                .find(|run| run.run_id == run_id)
+                .unwrap();
+            run.status = "running".to_string();
+            run.last_event_at_ms = unix_time_ms().saturating_sub(INTERRUPTED_RUN_STALE_MS + 1_000);
+        }
+
+        store.classify_stale_unfinished_runs();
+
+        let state = store.snapshot(Some(&run_id)).unwrap();
+        assert_eq!(state.status, "interrupted");
+        assert!(state.error.as_deref().unwrap_or_default().contains("stale"));
+        let output = run_state_output(&state);
+        let text = output.text_content().unwrap_or_default();
+        assert!(text.contains("Interrupted:"));
+        assert_eq!(
+            output.details["recovery"]["stale_workers"][0]["run_id"],
+            run_id
+        );
+        assert!(output.details["recovery"]["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action
+                .as_str()
+                .unwrap_or_default()
+                .contains("interrupted/stale")));
     }
 }

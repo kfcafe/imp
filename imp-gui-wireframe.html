@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>imp GUI wireframe</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b0d10; --panel:#11151b; --panel2:#151b23; --line:#27313d; --muted:#8b98a8; --text:#e8edf3; --accent:#8b5cf6; --good:#22c55e; --warn:#f59e0b; --bad:#ef4444; --blue:#38bdf8; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:13px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }
+  .app { height:100vh; display:grid; grid-template-columns:260px 1fr 360px; grid-template-rows:44px 1fr 210px; gap:1px; background:var(--line); }
+  header { grid-column:1/4; background:#090b0f; display:flex; align-items:center; justify-content:space-between; padding:0 14px; }
+  .brand { display:flex; gap:10px; align-items:center; font-weight:700; letter-spacing:.2px; }
+  .logo { width:22px; height:22px; border-radius:7px; background:linear-gradient(135deg,var(--accent),var(--blue)); box-shadow:0 0 20px #8b5cf655; }
+  .top-actions { display:flex; gap:8px; align-items:center; color:var(--muted); }
+  .btn { border:1px solid var(--line); background:var(--panel2); color:var(--text); border-radius:8px; padding:5px 9px; }
+  aside, main, .inspector, .bottom { background:var(--panel); min-width:0; }
+  .sidebar { padding:12px; overflow:auto; }
+  h2 { font-size:11px; text-transform:uppercase; color:var(--muted); letter-spacing:.12em; margin:18px 0 8px; }
+  h2:first-child { margin-top:0; }
+  .item { padding:9px; border:1px solid transparent; border-radius:10px; display:grid; gap:4px; margin-bottom:6px; background:#0e1218; }
+  .item.active { border-color:#8b5cf680; background:#181224; }
+  .row { display:flex; justify-content:space-between; gap:10px; align-items:center; }
+  .muted { color:var(--muted); }
+  .pill { font-size:11px; border:1px solid var(--line); border-radius:999px; padding:2px 7px; color:var(--muted); white-space:nowrap; }
+  .pill.good { color:var(--good); border-color:#22c55e55; }
+  .pill.warn { color:var(--warn); border-color:#f59e0b55; }
+  .pill.blue { color:var(--blue); border-color:#38bdf855; }
+  main { display:flex; flex-direction:column; overflow:hidden; }
+  .work-head { padding:14px 16px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:14px; }
+  .title { font-size:18px; font-weight:700; }
+  .tabs { display:flex; gap:6px; margin-top:8px; }
+  .tab { padding:5px 9px; border-radius:8px; color:var(--muted); }
+  .tab.active { background:var(--panel2); color:var(--text); }
+  .timeline { padding:16px; overflow:auto; display:grid; gap:12px; }
+  .card { border:1px solid var(--line); background:#0d1117; border-radius:14px; overflow:hidden; }
+  .card-head { padding:10px 12px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
+  .card-body { padding:12px; }
+  .steps { display:grid; gap:9px; }
+  .step { display:grid; grid-template-columns:18px 1fr auto; gap:9px; align-items:start; }
+  .dot { width:10px; height:10px; margin-top:4px; border-radius:50%; background:var(--muted); }
+  .dot.good { background:var(--good); box-shadow:0 0 14px #22c55e66; }
+  .dot.run { background:var(--blue); box-shadow:0 0 14px #38bdf866; }
+  pre { margin:0; padding:12px; background:#07090d; border-radius:10px; overflow:auto; color:#cbd5e1; font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .inspector { padding:14px; overflow:auto; }
+  .kv { display:grid; grid-template-columns:105px 1fr; gap:8px 12px; margin:10px 0; }
+  .box { border:1px solid var(--line); background:#0d1117; border-radius:12px; padding:11px; margin-bottom:10px; }
+  .bottom { grid-column:2/4; display:grid; grid-template-columns:1fr 380px; overflow:hidden; }
+  .diff, .terminal { padding:12px; overflow:auto; border-right:1px solid var(--line); }
+  .terminal { border-right:0; }
+  .diffline { font-family:ui-monospace, Menlo, monospace; white-space:pre; }
+  .add { color:#86efac; } .del { color:#fca5a5; } .ctx { color:#94a3b8; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand"><div class="logo"></div><div>imp workbench</div><span class="pill blue">project: imp</span></div>
+    <div class="top-actions"><span>Run #1842</span><span class="pill good">verifying</span><button class="btn">Approve tools</button><button class="btn">New task</button></div>
+  </header>
+
+  <aside class="sidebar">
+    <h2>Next work</h2>
+    <div class="item active"><div class="row"><strong>83 Cursor bounds hardening</strong><span class="pill warn">active</span></div><div class="muted">Verify panic-prone text-box state</div></div>
+    <div class="item"><div class="row"><strong>272.1 YouTube transcript</strong><span class="pill">claimed</span></div><div class="muted">Pure HTTP extraction</div></div>
+    <div class="item"><div class="row"><strong>46.1 Runtime safety gaps</strong><span class="pill">planning</span></div><div class="muted">Backlog reconciliation</div></div>
+    <h2>Memory</h2>
+    <div class="item"><strong>Decisions</strong><div class="muted">3 open · 18 resolved</div></div>
+    <div class="item"><strong>Facts</strong><div class="muted">verified project claims</div></div>
+    <div class="item"><strong>Rules</strong><div class="muted">AGENTS.md + local conventions</div></div>
+    <h2>Agents</h2>
+    <div class="item"><div class="row"><strong>imp</strong><span class="pill good">online</span></div><div class="muted">editing + verify</div></div>
+    <div class="item"><div class="row"><strong>reviewer</strong><span class="pill">idle</span></div><div class="muted">available for focused review</div></div>
+  </aside>
+
+  <main>
+    <div class="work-head">
+      <div><div class="title">Harden TUI text-box cursor and bounds handling</div><div class="tabs"><span class="tab active">Narrative</span><span class="tab">Plan</span><span class="tab">Tools</span><span class="tab">Review</span></div></div>
+      <div class="row"><span class="pill">scope locked</span><span class="pill good">tests passing</span></div>
+    </div>
+    <div class="timeline">
+      <div class="card"><div class="card-head"><strong>Scope lock</strong><span class="pill blue">approved</span></div><div class="card-body">I will modify text-box cursor bounds and nearby tests only. I will not refactor app state, rendering architecture, or CLI code.</div></div>
+      <div class="card"><div class="card-head"><strong>Execution timeline</strong><span class="muted">live</span></div><div class="card-body steps">
+        <div class="step"><div class="dot good"></div><div><strong>Inspected local rules and text-box implementation</strong><div class="muted">Found cursor state can drift after line edits and resize.</div></div><span class="pill good">evidence</span></div>
+        <div class="step"><div class="dot good"></div><div><strong>Patched bounds normalization</strong><div class="muted">Centralized cursor clamping after mutation paths.</div></div><span class="pill">diff</span></div>
+        <div class="step"><div class="dot run"></div><div><strong>Running focused verify</strong><div class="muted">cargo test -p imp-tui text_box</div></div><span class="pill blue">running</span></div>
+      </div></div>
+      <div class="card"><div class="card-head"><strong>Agent message draft</strong><span class="pill">pending final</span></div><div class="card-body">DONE — cursor state is normalized after edits and resize; focused text-box tests pass. Concern: broader terminal integration not exercised by this narrow check.</div></div>
+    </div>
+  </main>
+
+  <section class="inspector">
+    <h2>Selected task</h2>
+    <div class="box"><strong>83 · Cursor bounds hardening</strong><div class="kv"><span class="muted">Status</span><span>active</span><span class="muted">Assignee</span><span>imp</span><span class="muted">Risk</span><span>medium: panic path</span><span class="muted">Verify</span><span><code>cargo test -p imp-tui text_box</code></span></div></div>
+    <h2>Acceptance</h2>
+    <div class="box">Cursor and selection state cannot panic after insert, delete, line wrap, paste, or terminal resize.</div>
+    <h2>Files</h2>
+    <div class="box"><div>crates/imp-tui/src/text_box.rs</div><div class="muted">modified · 42 lines</div></div>
+    <div class="box"><div>crates/imp-tui/src/text_box/tests.rs</div><div class="muted">modified · 3 regression tests</div></div>
+    <h2>Promote</h2>
+    <button class="btn">Create follow-up task</button> <button class="btn">Record decision</button>
+  </section>
+
+  <section class="bottom">
+    <div class="diff"><h2>Diff preview</h2><pre><span class="ctx">fn apply_edit(&mut self, edit: Edit) {</span>
+<span class="del">-    self.cursor = next_cursor;</span>
+<span class="add">+    self.cursor = self.normalize_cursor(next_cursor);</span>
+<span class="ctx">}</span>
+
+<span class="add">+fn normalize_cursor(&self, cursor: Cursor) -> Cursor {</span>
+<span class="add">+    cursor.clamp_to_buffer(&self.buffer)</span>
+<span class="add">+}</span></pre></div>
+    <div class="terminal"><h2>Verify output</h2><pre>$ cargo test -p imp-tui text_box
+running 12 tests
+test text_box::cursor_clamps_after_resize ... ok
+test text_box::delete_at_line_end ... ok
+
+result: ok. 12 passed; 0 failed</pre></div>
+  </section>
+</div>
+</body>
+</html>

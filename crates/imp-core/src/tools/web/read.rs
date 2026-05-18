@@ -6,17 +6,18 @@
 use reqwest::Client;
 use url::Url;
 
-use super::types::{ContentFormat, PageContent};
+use super::types::{ContentFormat, ExtractionQuality, PageContent};
 
 /// User-Agent string that identifies as a legitimate browser to avoid blocks.
 pub(crate) const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 pub(crate) const ACCEPT_HEADER: &str =
     "text/markdown,text/plain;q=0.9,text/html;q=0.8,application/xhtml+xml;q=0.7,*/*;q=0.5";
+const MAX_RESPONSE_BYTES: u64 = 5 * 1024 * 1024;
 
 /// Fetch a URL and extract its readable content.
 pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent, ReadError> {
-    let parsed_url = Url::parse(url).map_err(|e| ReadError::InvalidUrl(e.to_string()))?;
+    let parsed_url = validate_url(url)?;
 
     if super::youtube::is_youtube_url(&parsed_url) {
         return super::youtube::fetch_and_extract(client, url)
@@ -70,12 +71,22 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
     }
 
     let final_url = response.url().to_string();
+    validate_url(&final_url)?;
     let was_redirected = final_url != requested_url;
-    let html = response
-        .text()
+    if let Some(content_length) = response.content_length() {
+        if content_length > MAX_RESPONSE_BYTES {
+            return Err(ReadError::ResponseTooLarge(content_length));
+        }
+    }
+    let bytes = response
+        .bytes()
         .await
         .map_err(|e| ReadError::Fetch(e.to_string()))?;
-    let raw_body_bytes = html.len();
+    if bytes.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(ReadError::ResponseTooLarge(bytes.len() as u64));
+    }
+    let raw_body_bytes = bytes.len();
+    let html = String::from_utf8_lossy(&bytes).into_owned();
 
     if html.len() < 100 {
         return Err(ReadError::InsufficientContent);
@@ -110,8 +121,11 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
                 was_redirected: meta.was_redirected,
                 raw_body_bytes: meta.raw_body_bytes,
                 diagnostics: Vec::new(),
+                quality: ExtractionQuality::Good,
+                quality_reasons: Vec::new(),
             };
             page.diagnostics = diagnose(&page, "");
+            apply_quality(&mut page);
             Ok(page)
         }
         ContentFormat::Html => {
@@ -123,6 +137,7 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
             page.was_redirected = meta.was_redirected;
             page.raw_body_bytes = meta.raw_body_bytes;
             page.diagnostics = diagnose(&page, &html);
+            apply_quality(&mut page);
             Ok(page)
         }
     }
@@ -175,7 +190,113 @@ fn extract_readable(html: &str, url: &str) -> Result<PageContent, ReadError> {
         was_redirected: false,
         raw_body_bytes: 0,
         diagnostics: Vec::new(),
+        quality: ExtractionQuality::Good,
+        quality_reasons: Vec::new(),
     })
+}
+
+fn validate_url(url: &str) -> Result<Url, ReadError> {
+    let parsed = Url::parse(url).map_err(|e| ReadError::InvalidUrl(e.to_string()))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => {
+            return Err(ReadError::UnsafeUrl(format!(
+                "unsupported URL scheme: {scheme}"
+            )));
+        }
+    }
+
+    let Some(host) = parsed.host_str() else {
+        return Err(ReadError::UnsafeUrl("missing URL host".to_string()));
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if matches!(host.as_str(), "localhost" | "metadata.google.internal") {
+        return Err(ReadError::UnsafeUrl(format!("blocked host: {host}")));
+    }
+    if host.ends_with(".localhost") || host.ends_with(".local") {
+        return Err(ReadError::UnsafeUrl(format!("blocked local host: {host}")));
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_blocked_ip(ip) {
+            return Err(ReadError::UnsafeUrl(format!(
+                "blocked private address: {ip}"
+            )));
+        }
+    } else if let Some(ip) = parsed.host().and_then(|host| match host {
+        url::Host::Ipv4(ip) => Some(std::net::IpAddr::V4(ip)),
+        url::Host::Ipv6(ip) => Some(std::net::IpAddr::V6(ip)),
+        url::Host::Domain(_) => None,
+    }) {
+        if is_blocked_ip(ip) {
+            return Err(ReadError::UnsafeUrl(format!(
+                "blocked private address: {ip}"
+            )));
+        }
+    }
+
+    Ok(parsed)
+}
+
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || is_documentation_ipv4(ip)
+                || ip.is_unspecified()
+                || ip.octets()[0] == 0
+                || ip.octets()[0] >= 224
+                || ip == std::net::Ipv4Addr::new(169, 254, 169, 254)
+        }
+        std::net::IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || is_documentation_ipv6(ip)
+        }
+    }
+}
+
+fn is_documentation_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    octets[0] == 192 && octets[1] == 0 && octets[2] == 2
+        || octets[0] == 198 && octets[1] == 51 && octets[2] == 100
+        || octets[0] == 203 && octets[1] == 0 && octets[2] == 113
+}
+
+fn is_documentation_ipv6(ip: std::net::Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xfff0) == 0x2001 && ip.segments()[1] == 0x0db8
+}
+
+fn apply_quality(page: &mut PageContent) {
+    let mut reasons = Vec::new();
+    if page.content_length < 300 {
+        reasons.push("short_content".to_string());
+    }
+    if !page.diagnostics.is_empty() {
+        reasons.push("diagnostics".to_string());
+    }
+    if page.raw_body_bytes > 100 * 1024
+        && (page.content_length as f64) < (page.raw_body_bytes as f64 * 0.1)
+    {
+        reasons.push("low_extraction_ratio".to_string());
+    }
+
+    page.quality = if reasons
+        .iter()
+        .any(|reason| reason == "low_extraction_ratio")
+        || reasons.len() >= 2
+    {
+        ExtractionQuality::Poor
+    } else if reasons.is_empty() {
+        ExtractionQuality::Good
+    } else {
+        ExtractionQuality::Partial
+    };
+    page.quality_reasons = reasons;
 }
 
 pub fn diagnose(page: &PageContent, raw_html: &str) -> Vec<String> {
@@ -271,12 +392,14 @@ fn detect_content_format(content_type: &str) -> ContentFormat {
 #[derive(Debug)]
 pub enum ReadError {
     InvalidUrl(String),
+    UnsafeUrl(String),
     Fetch(String),
     HttpStatus(u16, String),
     NotHtml(String),
     Parse(String),
     NoContent,
     InsufficientContent,
+    ResponseTooLarge(u64),
     Youtube(String),
 }
 
@@ -284,12 +407,18 @@ impl std::fmt::Display for ReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidUrl(msg) => write!(f, "Invalid URL: {msg}"),
+            Self::UnsafeUrl(msg) => write!(f, "Unsafe URL: {msg}"),
             Self::Fetch(msg) => write!(f, "Fetch failed: {msg}"),
             Self::HttpStatus(code, reason) => write!(f, "HTTP {code} {reason}"),
             Self::NotHtml(ct) => write!(f, "Not an HTML page (content-type: {ct})"),
             Self::Parse(msg) => write!(f, "Parse error: {msg}"),
             Self::NoContent => write!(f, "Could not extract readable content from page"),
             Self::InsufficientContent => write!(f, "Page returned insufficient content"),
+            Self::ResponseTooLarge(bytes) => write!(
+                f,
+                "Response too large: {bytes} bytes exceeds {} byte limit",
+                MAX_RESPONSE_BYTES
+            ),
             Self::Youtube(msg) => write!(f, "YouTube extraction failed: {msg}"),
         }
     }
@@ -305,6 +434,58 @@ mod tests {
             ACCEPT_HEADER,
             "text/markdown,text/plain;q=0.9,text/html;q=0.8,application/xhtml+xml;q=0.7,*/*;q=0.5"
         );
+    }
+
+    #[test]
+    fn validate_url_rejects_unsafe_targets() {
+        for url in [
+            "file:///etc/passwd",
+            "http://localhost:3000",
+            "https://service.local/path",
+            "http://127.0.0.1",
+            "http://10.0.0.1",
+            "http://169.254.169.254/latest/meta-data",
+            "http://[::1]/",
+        ] {
+            let result = validate_url(url);
+            assert!(
+                matches!(result, Err(ReadError::UnsafeUrl(_))),
+                "expected unsafe URL error for {url}, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_url_allows_public_http_urls() {
+        assert!(validate_url("https://example.com/path").is_ok());
+        assert!(validate_url("http://93.184.216.34/").is_ok());
+    }
+
+    #[test]
+    fn quality_marks_low_extraction_ratio_as_poor() {
+        let mut page = PageContent {
+            title: Some("Big Page".to_string()),
+            text: "short".to_string(),
+            url: "https://example.com/big".to_string(),
+            content_length: 5,
+            requested_url: "https://example.com/big".to_string(),
+            status_code: 200,
+            content_type: Some("text/html".to_string()),
+            format_received: ContentFormat::Html,
+            was_redirected: false,
+            raw_body_bytes: 150_000,
+            diagnostics: vec!["warning".to_string()],
+            quality: ExtractionQuality::Good,
+            quality_reasons: Vec::new(),
+        };
+
+        apply_quality(&mut page);
+
+        assert_eq!(page.quality.name(), "poor");
+        assert!(page
+            .quality_reasons
+            .iter()
+            .any(|reason| reason == "low_extraction_ratio"));
     }
 
     #[test]
@@ -453,6 +634,8 @@ mod tests {
             was_redirected: false,
             raw_body_bytes: 2_000,
             diagnostics: Vec::new(),
+            quality: ExtractionQuality::Good,
+            quality_reasons: Vec::new(),
         };
 
         let warnings = diagnose(
@@ -477,6 +660,8 @@ mod tests {
             was_redirected: false,
             raw_body_bytes: 1_500,
             diagnostics: Vec::new(),
+            quality: ExtractionQuality::Good,
+            quality_reasons: Vec::new(),
         };
 
         let warnings = diagnose(&page, "<html><body>404</body></html>");
@@ -498,6 +683,8 @@ mod tests {
             was_redirected: false,
             raw_body_bytes: 8_000,
             diagnostics: Vec::new(),
+            quality: ExtractionQuality::Good,
+            quality_reasons: Vec::new(),
         };
 
         let warnings = diagnose(
@@ -522,6 +709,8 @@ mod tests {
             was_redirected: false,
             raw_body_bytes: 150_000,
             diagnostics: Vec::new(),
+            quality: ExtractionQuality::Good,
+            quality_reasons: Vec::new(),
         };
 
         let warnings = diagnose(&page, "<html></html>");

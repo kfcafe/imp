@@ -27,6 +27,7 @@ toml.workspace = true
 similar.workspace = true
 walkdir.workspace = true
 glob = "0.3"
+pathdiff = "0.2"
 regex = "1"
 ignore.workspace = true
 project-detect.workspace = true
@@ -39,6 +40,7 @@ tree-sitter-rust.workspace = true
 tree-sitter-typescript.workspace = true
 tree-sitter-python.workspace = true
 tree-sitter-go.workspace = true
+tree-sitter-kotlin-ng.workspace = true
 jsonschema = "0.45"
 rusqlite = { version = "0.39", features = ["bundled"] }
 

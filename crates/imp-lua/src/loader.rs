@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::sandbox::{LuaError, LuaRuntime};
@@ -21,6 +22,7 @@ pub fn discover_extensions(
         dirs.push(project.join(".imp").join("lua"));
     }
 
+    let mut seen_names = BTreeSet::new();
     for dir in &dirs {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -32,7 +34,9 @@ pub fn discover_extensions(
                         .file_stem()
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    extensions.push(LuaExtension { name, path });
+                    if seen_names.insert(name.clone()) {
+                        extensions.push(LuaExtension { name, path });
+                    }
                     continue;
                 }
 
@@ -44,7 +48,9 @@ pub fn discover_extensions(
                             .file_name()
                             .map(|s| s.to_string_lossy().to_string())
                             .unwrap_or_default();
-                        extensions.push(LuaExtension { name, path: init });
+                        if seen_names.insert(name.clone()) {
+                            extensions.push(LuaExtension { name, path: init });
+                        }
                     }
                 }
             }
@@ -72,10 +78,37 @@ pub fn load_extensions(
 pub fn reload(
     user_config_dir: &Path,
     project_dir: Option<&Path>,
+    policy: &imp_core::config::LuaCapabilityPolicy,
 ) -> Result<(LuaRuntime, Vec<LuaExtension>), LuaError> {
     let extensions = discover_extensions(user_config_dir, project_dir);
     let runtime = LuaRuntime::new()?;
     crate::bridge::setup_host_api(&runtime)?;
+    runtime.apply_capability_policy(policy);
     load_extensions(&runtime, &extensions);
     Ok((runtime, extensions))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_extensions_deduplicates_global_and_project_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let user_config = temp.path().join("user");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(user_config.join("lua")).unwrap();
+        std::fs::create_dir_all(project.join(".imp").join("lua")).unwrap();
+        std::fs::write(user_config.join("lua").join("imp-update.lua"), "").unwrap();
+        std::fs::write(project.join(".imp").join("lua").join("imp-update.lua"), "").unwrap();
+
+        let extensions = discover_extensions(&user_config, Some(&project));
+
+        assert_eq!(extensions.len(), 1);
+        assert_eq!(extensions[0].name, "imp-update");
+        assert_eq!(
+            extensions[0].path,
+            user_config.join("lua").join("imp-update.lua")
+        );
+    }
 }

@@ -40,7 +40,6 @@ pub enum Action {
     Reload,
     Quit,
     // Overlays
-    OpenFileFinder,
     OpenCommandPalette,
     // Overlay navigation
     OverlayUp,

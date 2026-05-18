@@ -302,7 +302,9 @@ mod tests {
             turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::mana_review::TurnManaReviewAccumulator::default(),
             )),
+            run_policy: Default::default(),
             config: std::sync::Arc::new(crate::config::Config::default()),
+            supporting_provenance: Vec::new(),
         }
     }
 

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -13,9 +15,100 @@ pub struct SlashCommand {
     pub description: String,
 }
 
-/// Built-in slash commands.
+/// Merge built-in and extension-provided slash commands for discovery menus.
+pub fn merge_extension_commands(
+    mut commands: Vec<SlashCommand>,
+    extension_commands: impl IntoIterator<Item = (String, String)>,
+) -> Vec<SlashCommand> {
+    let mut by_name: BTreeMap<String, SlashCommand> = commands
+        .drain(..)
+        .map(|command| (command.name.clone(), command))
+        .collect();
+
+    for (name, description) in extension_commands {
+        by_name.entry(name.clone()).or_insert_with(|| SlashCommand {
+            name,
+            description: if description.trim().is_empty() {
+                "Extension command".into()
+            } else {
+                description
+            },
+        });
+    }
+
+    by_name.into_values().collect()
+}
+
+/// Merge skill commands into the slash menu without overriding real commands.
+pub fn merge_skill_commands(
+    mut commands: Vec<SlashCommand>,
+    skills: impl IntoIterator<Item = (String, String)>,
+) -> Vec<SlashCommand> {
+    let mut by_name: BTreeMap<String, SlashCommand> = commands
+        .drain(..)
+        .map(|command| (command.name.clone(), command))
+        .collect();
+
+    for (name, description) in skills {
+        by_name.entry(name.clone()).or_insert_with(|| SlashCommand {
+            name,
+            description: if description.trim().is_empty() {
+                "Skill".into()
+            } else {
+                format!("Skill: {description}")
+            },
+        });
+    }
+
+    by_name.into_values().collect()
+}
+
 pub fn builtin_commands() -> Vec<SlashCommand> {
     vec![
+        SlashCommand {
+            name: "improve".into(),
+            description: "Switch workflow mode to Improve in a sandbox branch/worktree".into(),
+        },
+        SlashCommand {
+            name: "improve-safe".into(),
+            description: "Switch workflow mode to research-only Improve".into(),
+        },
+        SlashCommand {
+            name: "improve-merge".into(),
+            description: "Merge active Improve branch after reviewing changelog".into(),
+        },
+        SlashCommand {
+            name: "improve-help".into(),
+            description: "Explain Improve autoresearch guardrails".into(),
+        },
+        SlashCommand {
+            name: "status".into(),
+            description: "Show active imp work status".into(),
+        },
+        SlashCommand {
+            name: "autonomy".into(),
+            description: "Set autonomy mode (/autonomy safe|local-auto|allow-all-local)".into(),
+        },
+        SlashCommand {
+            name: "clean".into(),
+            description: "Clean active sandbox/artifacts safely".into(),
+        },
+        SlashCommand {
+            name: "loop".into(),
+            description: "Loop a prompt (/loop <message>)".into(),
+        },
+        SlashCommand {
+            name: "run".into(),
+            description: "Set active mana run (/run <id>, /run clear)".into(),
+        },
+        SlashCommand {
+            name: "stop".into(),
+            description: "Stop active imp work".into(),
+        },
+        SlashCommand {
+            name: "scope".into(),
+            description: "Set active mana scope (/scope <id>, /scope clear)".into(),
+        },
         SlashCommand {
             name: "model".into(),
             description: "Select model".into(),
@@ -23,6 +116,10 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
         SlashCommand {
             name: "settings".into(),
             description: "Open settings".into(),
+        },
+        SlashCommand {
+            name: "mana".into(),
+            description: "Open mana work graph navigator".into(),
         },
         SlashCommand {
             name: "tree".into(),

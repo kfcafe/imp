@@ -4,10 +4,11 @@ use async_trait::async_trait;
 use imp_core::storage;
 use imp_core::tools::lua::{parameter_schema_from_lua, tool_output_from_lua_result};
 use imp_core::tools::{Tool, ToolContext, ToolOutput, ToolRegistry};
+use imp_core::ui::{ComponentSpec, SelectOption};
 use imp_core::Error as CoreError;
 use imp_llm::auth::AuthStore;
 use mlua::{Function, Lua, MultiValue, Table, Value};
-use serde_json::json;
+use serde_json::{json, Value as JsonValue};
 use std::sync::{Arc, Mutex};
 
 use crate::sandbox::{
@@ -61,21 +62,7 @@ impl Tool for LuaTool {
             "cwd": ctx.cwd.display().to_string(),
             "cancelled": ctx.is_cancelled(),
         });
-        let call_ctx = LuaCallContext {
-            cwd: ctx.cwd,
-            cancelled: ctx.cancelled,
-            update_tx: ctx.update_tx,
-            command_tx: ctx.command_tx,
-            ui: ctx.ui,
-            file_cache: ctx.file_cache,
-            checkpoint_state: ctx.checkpoint_state,
-            file_tracker: ctx.file_tracker,
-            anchor_store: ctx.anchor_store,
-            lua_tool_loader: ctx.lua_tool_loader,
-            mode: ctx.mode,
-            read_max_lines: ctx.read_max_lines,
-            config: ctx.config,
-        };
+        let call_ctx = LuaCallContext::from(ctx);
 
         tokio::task::spawn_blocking(move || {
             let runtime_guard = runtime
@@ -164,6 +151,169 @@ fn extract_header_pairs(headers: Option<Table>) -> mlua::Result<Vec<(String, Str
     Ok(pairs)
 }
 
+fn ui_unavailable_result(lua: &Lua) -> mlua::Result<Value> {
+    ui_error_result(lua, "unavailable")
+}
+
+fn ui_cancelled_result(lua: &Lua) -> mlua::Result<Value> {
+    ui_error_result(lua, "cancelled")
+}
+
+fn ui_invalid_result(lua: &Lua, message: impl AsRef<str>) -> mlua::Result<Value> {
+    let result = lua.create_table()?;
+    result.set("ok", false)?;
+    result.set("reason", "invalid")?;
+    result.set("message", message.as_ref())?;
+    Ok(Value::Table(result))
+}
+
+fn ui_error_result(lua: &Lua, reason: &str) -> mlua::Result<Value> {
+    let result = lua.create_table()?;
+    result.set("ok", false)?;
+    result.set("reason", reason)?;
+    Ok(Value::Table(result))
+}
+
+fn ui_ok_result(lua: &Lua, value: JsonValue) -> mlua::Result<Value> {
+    let result = lua.create_table()?;
+    result.set("ok", true)?;
+    result.set("value", json_to_lua_value(lua, &value)?)?;
+    Ok(Value::Table(result))
+}
+
+fn option_from_json(value: &JsonValue) -> Option<SelectOption> {
+    match value {
+        JsonValue::String(label) => Some(SelectOption {
+            label: label.clone(),
+            description: None,
+        }),
+        JsonValue::Object(object) => Some(SelectOption {
+            label: object.get("label")?.as_str()?.to_string(),
+            description: object
+                .get("description")
+                .and_then(JsonValue::as_str)
+                .map(str::to_string),
+        }),
+        _ => None,
+    }
+}
+
+fn options_from_spec(spec: &JsonValue) -> Result<Vec<SelectOption>, String> {
+    let values = spec
+        .get("options")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| "ui request requires an options array".to_string())?;
+    values
+        .iter()
+        .map(|value| option_from_json(value).ok_or_else(|| "invalid ui option".to_string()))
+        .collect()
+}
+
+fn component_from_spec(spec: &JsonValue) -> Result<ComponentSpec, String> {
+    let component = spec.get("component").unwrap_or(spec);
+    serde_json::from_value(component.clone()).map_err(|error| error.to_string())
+}
+
+fn execute_ui_request(
+    lua: &Lua,
+    spec: JsonValue,
+    call_ctx: &Arc<Mutex<Option<LuaCallContext>>>,
+) -> mlua::Result<Value> {
+    let ctx = {
+        let ctx_guard = call_ctx
+            .lock()
+            .map_err(|_| mlua::Error::external("call context lock poisoned"))?;
+        match ctx_guard.as_ref() {
+            Some(ctx) => ctx.to_tool_context(),
+            None => return ui_unavailable_result(lua),
+        }
+    };
+
+    if !ctx.ui.has_ui() {
+        return ui_unavailable_result(lua);
+    }
+
+    let kind = spec
+        .get("kind")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("custom");
+    let title = spec.get("title").and_then(JsonValue::as_str).unwrap_or("");
+    let message = spec
+        .get("message")
+        .or_else(|| spec.get("context"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or("");
+
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|_| mlua::Error::external("imp.ui requires a tokio runtime"))?;
+
+    match kind {
+        "confirm" => match handle.block_on(ctx.ui.confirm(title, message)) {
+            Some(value) => ui_ok_result(lua, JsonValue::Bool(value)),
+            None => ui_cancelled_result(lua),
+        },
+        "select" => {
+            let options = match options_from_spec(&spec) {
+                Ok(options) => options,
+                Err(message) => return ui_invalid_result(lua, message),
+            };
+            match handle.block_on(ctx.ui.select_with_context(title, message, &options)) {
+                Some(index) => ui_ok_result(
+                    lua,
+                    json!({
+                        "index": index + 1,
+                        "label": options.get(index).map(|option| option.label.clone()),
+                    }),
+                ),
+                None => ui_cancelled_result(lua),
+            }
+        }
+        "multi_select" | "multi-select" => {
+            let options = match options_from_spec(&spec) {
+                Ok(options) => options,
+                Err(message) => return ui_invalid_result(lua, message),
+            };
+            match handle.block_on(ctx.ui.multi_select_with_context(title, message, &options)) {
+                Some(indices) => {
+                    let selected: Vec<JsonValue> = indices
+                        .into_iter()
+                        .map(|index| {
+                            json!({
+                                "index": index + 1,
+                                "label": options.get(index).map(|option| option.label.clone()),
+                            })
+                        })
+                        .collect();
+                    ui_ok_result(lua, JsonValue::Array(selected))
+                }
+                None => ui_cancelled_result(lua),
+            }
+        }
+        "input" => {
+            let placeholder = spec
+                .get("placeholder")
+                .and_then(JsonValue::as_str)
+                .or_else(|| spec.get("default").and_then(JsonValue::as_str))
+                .unwrap_or("");
+            match handle.block_on(ctx.ui.input_with_context(title, message, placeholder)) {
+                Some(value) => ui_ok_result(lua, JsonValue::String(value)),
+                None => ui_cancelled_result(lua),
+            }
+        }
+        "custom" => {
+            let component = match component_from_spec(&spec) {
+                Ok(component) => component,
+                Err(message) => return ui_invalid_result(lua, message),
+            };
+            match handle.block_on(ctx.ui.custom(component)) {
+                Some(value) => ui_ok_result(lua, value),
+                None => ui_cancelled_result(lua),
+            }
+        }
+        other => ui_invalid_result(lua, format!("unknown ui request kind '{other}'")),
+    }
+}
+
 /// Set up the `imp` global table with host API functions.
 ///
 /// Exposes to Lua:
@@ -173,6 +323,8 @@ fn extract_header_pairs(headers: Option<Table>) -> mlua::Result<Vec<(String, Str
 /// - imp.register_command(name, def)  — register a slash command
 /// - imp.events.on() / imp.events.emit() — inter-extension event bus
 /// - imp.tool(name, params)           — call a native imp tool
+/// - imp.ui.request(spec)             — ask the active UI for confirm/select/input/custom
+/// - imp.ui.confirm(title, message)   — ergonomic yes/no helper
 /// - imp.secret(provider, field?)     — read a saved imp secret field
 /// - imp.secret_fields(provider)      — read all saved fields for a provider
 /// - imp.env(name)                    — read an env var (scoped by allowed list)
@@ -236,35 +388,44 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
                     "imp.exec() is disabled for this runtime",
                 ));
             }
-            let mut command = Command::new("sh");
-            command.arg("-c");
-
-            // Build the full command string
-            let full_cmd = if let Some(args_table) = args {
-                let mut parts = vec![cmd];
+            let output = if let Some(args_table) = args {
+                let mut command = Command::new(&cmd);
                 for pair in args_table.sequence_values::<String>() {
-                    parts.push(pair?);
+                    command.arg(pair?);
                 }
-                parts.join(" ")
-            } else {
-                cmd
-            };
-            command.stdin(Stdio::null()).arg(&full_cmd);
 
-            // Apply opts
-            if let Some(opts_table) = &opts {
-                if let Ok(Some(cwd)) = opts_table.get::<Option<String>>("cwd") {
-                    command.current_dir(cwd);
-                }
-                if let Ok(Some(env_table)) = opts_table.get::<Option<Table>>("env") {
-                    for pair in env_table.pairs::<String, String>() {
-                        let (name, value) = pair?;
-                        command.env(name, value);
+                if let Some(opts_table) = &opts {
+                    if let Ok(Some(cwd)) = opts_table.get::<Option<String>>("cwd") {
+                        command.current_dir(cwd);
+                    }
+                    if let Ok(Some(env_table)) = opts_table.get::<Option<Table>>("env") {
+                        for pair in env_table.pairs::<String, String>() {
+                            let (name, value) = pair?;
+                            command.env(name, value);
+                        }
                     }
                 }
-            }
 
-            let output = command.output().map_err(mlua::Error::external)?;
+                command.stdin(Stdio::null()).output()
+            } else {
+                let mut command = Command::new("sh");
+                command.arg("-c").arg(&cmd);
+
+                if let Some(opts_table) = &opts {
+                    if let Ok(Some(cwd)) = opts_table.get::<Option<String>>("cwd") {
+                        command.current_dir(cwd);
+                    }
+                    if let Ok(Some(env_table)) = opts_table.get::<Option<Table>>("env") {
+                        for pair in env_table.pairs::<String, String>() {
+                            let (name, value) = pair?;
+                            command.env(name, value);
+                        }
+                    }
+                }
+
+                command.stdin(Stdio::null()).output()
+            }
+            .map_err(mlua::Error::external)?;
 
             let result = lua_inner.create_table()?;
             result.set(
@@ -405,6 +566,41 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
         },
     )?;
     imp.set("tool", imp_tool_fn)?;
+
+    // ── imp.ui — programmatic host interaction ───────────────────
+    let ui = lua.create_table()?;
+    let ui_call_ctx = runtime.call_context();
+    let ui_request_fn = lua.create_function(move |lua_inner, spec: Value| {
+        execute_ui_request(lua_inner, lua_value_to_json(spec), &ui_call_ctx)
+    })?;
+    ui.set("request", ui_request_fn)?;
+
+    let confirm_call_ctx = runtime.call_context();
+    let ui_confirm_fn = lua.create_function(
+        move |lua_inner, (title, message): (String, Option<String>)| -> mlua::Result<Value> {
+            let result = execute_ui_request(
+                lua_inner,
+                json!({
+                    "kind": "confirm",
+                    "title": title,
+                    "message": message.unwrap_or_default(),
+                }),
+                &confirm_call_ctx,
+            )?;
+            let json = lua_value_to_json(result);
+            if json.get("ok").and_then(JsonValue::as_bool) == Some(true) {
+                Ok(match json.get("value").and_then(JsonValue::as_bool) {
+                    Some(value) => Value::Boolean(value),
+                    None => Value::Nil,
+                })
+            } else {
+                Ok(Value::Nil)
+            }
+        },
+    )?;
+    ui.set("confirm", ui_confirm_fn)?;
+
+    imp.set("ui", ui)?;
 
     // ── imp.update(text) — stream progress to the TUI ─────────────
     let update_call_ctx = runtime.call_context();

@@ -21,14 +21,6 @@ enum GitActionClass {
     Mutating,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedWorktreeEntry {
-    path: String,
-    branch: Option<String>,
-    is_bare: bool,
-    is_detached: bool,
-}
-
 #[async_trait]
 impl Tool for GitTool {
     fn name(&self) -> &str {
@@ -40,7 +32,7 @@ impl Tool for GitTool {
     }
 
     fn description(&self) -> &str {
-        "Local git operations for status, diff, log, commit, restore, and worktrees."
+        "Local git status, diff, log, stage, commit, restore."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -54,83 +46,66 @@ impl Tool for GitTool {
                         "diff",
                         "log",
                         "merge_base",
-                        "worktree_info",
                         "stage",
                         "commit",
-                        "restore",
-                        "worktree_add",
-                        "worktree_remove"
+                        "restore"
                     ],
-                    "description": "Git operation to perform"
+                    "description": "Git action"
                 },
                 "path": {
                     "type": "string",
-                    "description": "Optional repo or worktree path to run from; defaults to the session cwd"
+                    "description": "Repo/worktree path"
                 },
                 "files": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Optional file paths for diff/log/stage/restore"
+                    "description": "File paths"
                 },
-                "all": {
+                "all_changes": {
                     "type": "boolean",
-                    "description": "For stage: stage all changes with git add -A"
+                    "description": "Stage all changes"
                 },
                 "cached": {
                     "type": "boolean",
-                    "description": "For diff: compare staged changes instead of working tree"
+                    "description": "Diff staged changes"
                 },
                 "base": {
                     "type": "string",
-                    "description": "For diff: base ref; when set without head, compares base..HEAD"
+                    "description": "Diff base ref"
                 },
                 "head": {
                     "type": "string",
-                    "description": "For diff: head ref when comparing two refs"
+                    "description": "Diff head ref"
                 },
                 "ref1": {
                     "type": "string",
-                    "description": "For merge_base: first ref"
+                    "description": "First ref"
                 },
                 "ref2": {
                     "type": "string",
-                    "description": "For merge_base: second ref"
+                    "description": "Second ref"
                 },
                 "limit": {
-                    "type": "number",
-                    "description": "For log: maximum number of entries to show (default 10)"
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Log limit"
                 },
                 "message": {
                     "type": "string",
-                    "description": "For commit: commit message"
+                    "description": "Commit message"
                 },
-                "allowEmpty": {
+                "allow_empty": {
                     "type": "boolean",
-                    "description": "For commit: allow an empty commit"
+                    "description": "Allow empty commit"
+                },
+                "preserve_index": {
+                    "type": "boolean",
+                    "description": "For file-targeted commits, preserve the existing index by committing via a temporary index (default true)"
                 },
                 "source": {
                     "type": "string",
-                    "description": "For restore: optional source ref (defaults to index/HEAD behavior)"
-                },
-                "worktreePath": {
-                    "type": "string",
-                    "description": "For worktree_add/remove: path to add or remove"
-                },
-                "branch": {
-                    "type": "string",
-                    "description": "For worktree_add: branch name to create; for worktree_remove with deleteBranch=true, explicit branch to delete"
-                },
-                "startPoint": {
-                    "type": "string",
-                    "description": "For worktree_add: optional starting ref (defaults to HEAD)"
-                },
-                "force": {
-                    "type": "boolean",
-                    "description": "For worktree_remove: force removal; for deleteBranch=true, force branch deletion"
-                },
-                "deleteBranch": {
-                    "type": "boolean",
-                    "description": "For worktree_remove: also delete the associated branch after removal"
+                    "description": "Restore source ref"
                 }
             },
             "required": ["action"]
@@ -182,12 +157,18 @@ impl Tool for GitTool {
             "diff" => diff_action(&cwd, &repo_root, &params).await,
             "log" => log_action(&cwd, &repo_root, &params).await,
             "merge_base" => merge_base_action(&cwd, &repo_root, &params).await,
-            "worktree_info" => worktree_info_action(&cwd, &repo_root).await,
+            "worktree_info" => Ok(ToolOutput::error(
+                "git worktree actions moved to the worktree tool; use action=list",
+            )),
             "stage" => stage_action(&cwd, &repo_root, &params).await,
             "commit" => commit_action(&cwd, &repo_root, &params).await,
             "restore" => restore_action(&cwd, &repo_root, &params, &ctx).await,
-            "worktree_add" => worktree_add_action(&cwd, &repo_root, &params).await,
-            "worktree_remove" => worktree_remove_action(&cwd, &repo_root, &params).await,
+            "worktree_add" => Ok(ToolOutput::error(
+                "git worktree actions moved to the worktree tool; use action=add",
+            )),
+            "worktree_remove" => Ok(ToolOutput::error(
+                "git worktree actions moved to the worktree tool; use action=remove",
+            )),
             _ => Ok(ToolOutput::error(format!(
                 "Unsupported git action `{action}`"
             ))),
@@ -328,6 +309,7 @@ async fn status_action(cwd: &Path, repo_root: &Path) -> Result<ToolOutput> {
     Ok(ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text }],
         details: json!({
+            "action": "status",
             "repo_root": repo_root.display().to_string(),
             "branch": branch_summary,
             "head": head,
@@ -352,7 +334,17 @@ fn non_empty_param<'a>(params: &'a serde_json::Value, field_name: &str) -> Optio
     params
         .get(field_name)?
         .as_str()
-        .filter(|s| !s.trim().is_empty())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn validate_ref(value: &str, field_name: &str) -> std::result::Result<(), crate::error::Error> {
+    if value.starts_with('-') || value.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(crate::error::Error::Tool(format!(
+            "{field_name} must be a safe git ref"
+        )));
+    }
+    Ok(())
 }
 
 async fn diff_action(
@@ -367,6 +359,10 @@ async fn diff_action(
 
     let mut args = vec!["diff".to_string()];
     if let Some(base) = base {
+        validate_ref(base, "base")?;
+        if let Some(head) = head {
+            validate_ref(head, "head")?;
+        }
         let range = match head {
             Some(head) => format!("{base}..{head}"),
             None => format!("{base}..HEAD"),
@@ -399,6 +395,7 @@ async fn diff_action(
     Ok(ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text }],
         details: json!({
+            "action": "diff",
             "repo_root": repo_root.display().to_string(),
             "cached": cached,
             "base": base,
@@ -421,7 +418,7 @@ async fn log_action(
     let limit = params["limit"]
         .as_u64()
         .unwrap_or(DEFAULT_LOG_LIMIT as u64)
-        .max(1);
+        .clamp(1, 100);
 
     let mut args = vec![
         "log".to_string(),
@@ -450,6 +447,7 @@ async fn log_action(
     Ok(ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text }],
         details: json!({
+            "action": "log",
             "repo_root": repo_root.display().to_string(),
             "limit": limit,
             "files": files,
@@ -463,12 +461,14 @@ async fn merge_base_action(
     repo_root: &Path,
     params: &serde_json::Value,
 ) -> Result<ToolOutput> {
-    let Some(ref1) = params["ref1"].as_str() else {
+    let Some(ref1) = non_empty_param(params, "ref1") else {
         return Ok(ToolOutput::error("Missing required parameter: ref1"));
     };
-    let Some(ref2) = params["ref2"].as_str() else {
+    validate_ref(ref1, "ref1")?;
+    let Some(ref2) = non_empty_param(params, "ref2") else {
         return Ok(ToolOutput::error("Missing required parameter: ref2"));
     };
+    validate_ref(ref2, "ref2")?;
 
     let output = run_git_owned(
         cwd,
@@ -486,79 +486,11 @@ async fn merge_base_action(
             text: merge_base.clone(),
         }],
         details: json!({
+            "action": "merge_base",
             "repo_root": repo_root.display().to_string(),
             "ref1": ref1,
             "ref2": ref2,
             "merge_base": merge_base,
-        }),
-        is_error: false,
-    })
-}
-
-async fn worktree_info_action(cwd: &Path, repo_root: &Path) -> Result<ToolOutput> {
-    let output = run_git(cwd, ["worktree", "list", "--porcelain"]).await?;
-    if !output.status.success() {
-        return Ok(git_failure("git worktree list failed", &output));
-    }
-
-    let entries = parse_worktree_list(&stdout_lossy(&output));
-    let current_secondary = mana_core::worktree::detect_worktree(cwd).ok().flatten();
-    let mut text = String::new();
-    text.push_str(&format!("repo: {}\n", repo_root.display()));
-    match &current_secondary {
-        Some(info) => {
-            text.push_str(&format!(
-                "current worktree: secondary ({}) at {}\n",
-                info.branch,
-                info.worktree_path.display()
-            ));
-            text.push_str(&format!("main worktree: {}\n", info.main_path.display()));
-        }
-        None => {
-            text.push_str("current worktree: main\n");
-        }
-    }
-    if entries.is_empty() {
-        text.push_str("registered worktrees: none\n");
-    } else {
-        text.push_str("registered worktrees:\n");
-        for entry in &entries {
-            let branch = entry.branch.as_deref().unwrap_or("(detached)");
-            let mut flags = Vec::new();
-            if entry.is_bare {
-                flags.push("bare");
-            }
-            if entry.is_detached {
-                flags.push("detached");
-            }
-            if flags.is_empty() {
-                text.push_str(&format!("- {} [{}]\n", entry.path, branch));
-            } else {
-                text.push_str(&format!(
-                    "- {} [{}] ({})\n",
-                    entry.path,
-                    branch,
-                    flags.join(", ")
-                ));
-            }
-        }
-    }
-
-    Ok(ToolOutput {
-        content: vec![imp_llm::ContentBlock::Text { text }],
-        details: json!({
-            "repo_root": repo_root.display().to_string(),
-            "current_secondary_worktree": current_secondary.as_ref().map(|info| json!({
-                "main_path": info.main_path.display().to_string(),
-                "worktree_path": info.worktree_path.display().to_string(),
-                "branch": info.branch,
-            })),
-            "worktrees": entries.iter().map(|entry| json!({
-                "path": entry.path,
-                "branch": entry.branch,
-                "is_bare": entry.is_bare,
-                "is_detached": entry.is_detached,
-            })).collect::<Vec<_>>(),
         }),
         is_error: false,
     })
@@ -570,7 +502,11 @@ async fn stage_action(
     params: &serde_json::Value,
 ) -> Result<ToolOutput> {
     let files = parse_string_array(params, "files")?;
-    let all = params["all"].as_bool().unwrap_or(false);
+    let all = params
+        .get("all_changes")
+        .or_else(|| params.get("all"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
 
     let args = if all {
         vec!["add".to_string(), "-A".to_string()]
@@ -601,9 +537,15 @@ async fn stage_action(
             text: summary.clone(),
         }],
         details: json!({
+            "action": "stage",
             "repo_root": repo_root.display().to_string(),
-            "all": all,
+            "all_changes": all,
             "files": files,
+            "recovery": {
+                "undo": if all { "git reset" } else { "git reset -- <files>" },
+                "files": files,
+                "all_changes": all,
+            },
             "summary": summary,
         }),
         is_error: false,
@@ -622,10 +564,29 @@ async fn commit_action(
         return Ok(ToolOutput::error("Commit message cannot be empty"));
     }
 
-    let allow_empty = params["allowEmpty"].as_bool().unwrap_or(false);
+    let allow_empty = params
+        .get("allow_empty")
+        .or_else(|| params.get("allowEmpty"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let files = parse_string_array(params, "files")?;
+    let preserve_index = params
+        .get("preserve_index")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+
+    if !files.is_empty() && preserve_index {
+        return targeted_commit_action(cwd, repo_root, message, allow_empty, &files).await;
+    }
+
     let mut args = vec!["commit".to_string(), "-m".to_string(), message.to_string()];
     if allow_empty {
         args.push("--allow-empty".to_string());
+    }
+    if !files.is_empty() {
+        args.push("--only".to_string());
+        args.push("--".to_string());
+        args.extend(files.iter().cloned());
     }
 
     let output = run_git_owned(cwd, args).await?;
@@ -636,6 +597,7 @@ async fn commit_action(
     let head = head_sha_short(cwd)
         .await
         .unwrap_or_else(|| "unknown".to_string());
+    let parent = head_parent_sha_short(cwd).await;
     let stdout = stdout_trimmed(&output);
     let text = if stdout.is_empty() {
         format!("Committed {head}: {message}")
@@ -646,14 +608,180 @@ async fn commit_action(
     Ok(ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text: text.clone() }],
         details: json!({
+            "action": "commit",
             "repo_root": repo_root.display().to_string(),
             "message": message,
             "allow_empty": allow_empty,
             "head": head,
+            "parent": parent,
+            "recovery": {
+                "commit": head,
+                "parent": parent,
+            },
             "summary": text,
         }),
         is_error: false,
     })
+}
+
+async fn targeted_commit_action(
+    cwd: &Path,
+    repo_root: &Path,
+    message: &str,
+    allow_empty: bool,
+    files: &[String],
+) -> Result<ToolOutput> {
+    let diff_output = run_git_owned(
+        cwd,
+        ["diff", "--quiet", "HEAD", "--"]
+            .into_iter()
+            .map(str::to_string)
+            .chain(files.iter().cloned())
+            .collect(),
+    )
+    .await?;
+    if diff_output.status.success() && !allow_empty {
+        return Ok(ToolOutput::error(format!(
+            "No changes to commit for targeted path(s): {}",
+            files.join(", ")
+        )));
+    }
+
+    let index_path = std::env::temp_dir().join(format!(
+        "imp-git-targeted-index-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let index = index_path.to_string_lossy().to_string();
+
+    let read_tree = run_git_with_env(cwd, ["read-tree", "HEAD"], Some((&index, repo_root))).await?;
+    if !read_tree.status.success() {
+        cleanup_temp_index(&index_path);
+        return Ok(git_failure("git read-tree failed", &read_tree));
+    }
+
+    let mut add_args = vec!["add".to_string(), "--".to_string()];
+    add_args.extend(files.iter().cloned());
+    let add = run_git_owned_with_env(cwd, add_args, Some((&index, repo_root))).await?;
+    if !add.status.success() {
+        cleanup_temp_index(&index_path);
+        return Ok(git_failure("git add failed for targeted commit", &add));
+    }
+
+    let write_tree = run_git_with_env(cwd, ["write-tree"], Some((&index, repo_root))).await?;
+    if !write_tree.status.success() {
+        cleanup_temp_index(&index_path);
+        return Ok(git_failure("git write-tree failed", &write_tree));
+    }
+    let tree = stdout_trimmed(&write_tree);
+
+    if !allow_empty {
+        let head_tree = run_git(cwd, ["rev-parse", "HEAD^{tree}"]).await?;
+        if !head_tree.status.success() {
+            cleanup_temp_index(&index_path);
+            return Ok(git_failure("git rev-parse HEAD tree failed", &head_tree));
+        }
+        if stdout_trimmed(&head_tree) == tree {
+            cleanup_temp_index(&index_path);
+            return Ok(ToolOutput::error(format!(
+                "No changes to commit for targeted path(s): {}",
+                files.join(", ")
+            )));
+        }
+    }
+
+    let commit_tree = run_git_owned(
+        cwd,
+        vec![
+            "commit-tree".to_string(),
+            tree,
+            "-p".to_string(),
+            "HEAD".to_string(),
+            "-m".to_string(),
+            message.to_string(),
+        ],
+    )
+    .await?;
+    if !commit_tree.status.success() {
+        cleanup_temp_index(&index_path);
+        return Ok(git_failure("git commit-tree failed", &commit_tree));
+    }
+    let new_head = stdout_trimmed(&commit_tree);
+
+    let update_ref = run_git_owned(
+        cwd,
+        vec![
+            "update-ref".to_string(),
+            "-m".to_string(),
+            format!("commit: {message}"),
+            "HEAD".to_string(),
+            new_head.clone(),
+        ],
+    )
+    .await?;
+    cleanup_temp_index(&index_path);
+    if !update_ref.status.success() {
+        return Ok(git_failure("git update-ref failed", &update_ref));
+    }
+
+    let mut reset_args = vec![
+        "reset".to_string(),
+        "-q".to_string(),
+        "HEAD".to_string(),
+        "--".to_string(),
+    ];
+    reset_args.extend(files.iter().cloned());
+    let reset_index = run_git_owned(cwd, reset_args).await?;
+    if !reset_index.status.success() {
+        return Ok(git_failure(
+            "git reset failed after targeted commit",
+            &reset_index,
+        ));
+    }
+
+    let head = head_sha_short(cwd)
+        .await
+        .unwrap_or_else(|| "unknown".to_string());
+    let parent = head_parent_sha_short(cwd).await;
+    let summary = format!(
+        "Committed {head}: {message}\nIncluded targeted path(s): {}\nPreserved existing index and unrelated worktree changes.",
+        files.join(", ")
+    );
+
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text {
+            text: summary.clone(),
+        }],
+        details: json!({
+            "action": "commit",
+            "repo_root": repo_root.display().to_string(),
+            "message": message,
+            "allow_empty": allow_empty,
+            "files": files,
+            "preserve_index": true,
+            "head": head,
+            "parent": parent,
+            "recovery": {
+                "commit": head,
+                "parent": parent,
+            },
+            "summary": summary,
+        }),
+        is_error: false,
+    })
+}
+
+fn cleanup_temp_index(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let lock = path.with_extension("lock");
+    let _ = std::fs::remove_file(lock);
+}
+
+fn unique_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
 }
 
 async fn restore_action(
@@ -674,10 +802,9 @@ async fn restore_action(
     )?;
 
     let mut args = vec!["restore".to_string()];
-    if let Some(source) = params["source"].as_str() {
-        if !source.trim().is_empty() {
-            args.push(format!("--source={source}"));
-        }
+    if let Some(source) = non_empty_param(params, "source") {
+        validate_ref(source, "source")?;
+        args.push(format!("--source={source}"));
     }
     args.push("--".to_string());
     args.extend(files.iter().cloned());
@@ -693,165 +820,15 @@ async fn restore_action(
             text: summary.clone(),
         }],
         details: json!({
+            "action": "restore",
             "repo_root": repo_root.display().to_string(),
             "files": files,
             "checkpoint_id": checkpoint.as_ref().map(|c| c.id.clone()),
             "checkpoint_label": checkpoint.as_ref().and_then(|c| c.label.clone()),
-            "summary": summary,
-        }),
-        is_error: false,
-    })
-}
-
-async fn worktree_add_action(
-    cwd: &Path,
-    repo_root: &Path,
-    params: &serde_json::Value,
-) -> Result<ToolOutput> {
-    let Some(raw_worktree_path) = params["worktreePath"].as_str() else {
-        return Ok(ToolOutput::error(
-            "Missing required parameter: worktreePath",
-        ));
-    };
-    let Some(branch) = params["branch"].as_str() else {
-        return Ok(ToolOutput::error("Missing required parameter: branch"));
-    };
-    if branch.trim().is_empty() {
-        return Ok(ToolOutput::error("branch cannot be empty"));
-    }
-
-    let worktree_path = resolve_path(cwd, raw_worktree_path);
-    let start_point = params["startPoint"].as_str().unwrap_or("HEAD");
-
-    let output = run_git_owned(
-        cwd,
-        vec![
-            "worktree".to_string(),
-            "add".to_string(),
-            "-b".to_string(),
-            branch.to_string(),
-            worktree_path.display().to_string(),
-            start_point.to_string(),
-        ],
-    )
-    .await?;
-
-    if !output.status.success() {
-        return Ok(git_failure("git worktree add failed", &output));
-    }
-
-    let summary = format!(
-        "Created worktree {} on branch {}",
-        worktree_path.display(),
-        branch
-    );
-
-    Ok(ToolOutput {
-        content: vec![imp_llm::ContentBlock::Text {
-            text: summary.clone(),
-        }],
-        details: json!({
-            "repo_root": repo_root.display().to_string(),
-            "worktree_path": worktree_path.display().to_string(),
-            "branch": branch,
-            "start_point": start_point,
-            "summary": summary,
-        }),
-        is_error: false,
-    })
-}
-
-async fn worktree_remove_action(
-    cwd: &Path,
-    repo_root: &Path,
-    params: &serde_json::Value,
-) -> Result<ToolOutput> {
-    let Some(raw_worktree_path) = params["worktreePath"].as_str() else {
-        return Ok(ToolOutput::error(
-            "Missing required parameter: worktreePath",
-        ));
-    };
-    let worktree_path = resolve_path(cwd, raw_worktree_path);
-    let force = params["force"].as_bool().unwrap_or(false);
-    let delete_branch = params["deleteBranch"].as_bool().unwrap_or(false);
-
-    if same_path(&worktree_path, repo_root) {
-        return Ok(ToolOutput::error(
-            "Refusing to remove the main worktree/root checkout",
-        ));
-    }
-    if same_path(&worktree_path, cwd) {
-        return Ok(ToolOutput::error(
-            "Refusing to remove the current working directory worktree",
-        ));
-    }
-
-    let entries_output = run_git(cwd, ["worktree", "list", "--porcelain"]).await?;
-    if !entries_output.status.success() {
-        return Ok(git_failure("git worktree list failed", &entries_output));
-    }
-    let entries = parse_worktree_list(&stdout_lossy(&entries_output));
-    let matched_branch = params["branch"]
-        .as_str()
-        .map(|s| s.to_string())
-        .or_else(|| {
-            entries
-                .iter()
-                .find(|entry| same_path(Path::new(&entry.path), &worktree_path))
-                .and_then(|entry| entry.branch.clone())
-        });
-
-    let mut args = vec!["worktree".to_string(), "remove".to_string()];
-    if force {
-        args.push("--force".to_string());
-    }
-    args.push(worktree_path.display().to_string());
-
-    let output = run_git_owned(cwd, args).await?;
-    if !output.status.success() {
-        return Ok(git_failure("git worktree remove failed", &output));
-    }
-
-    let mut branch_deleted = false;
-    if delete_branch {
-        if let Some(branch) = matched_branch.as_deref() {
-            let branch_output = run_git_owned(
-                cwd,
-                vec![
-                    "branch".to_string(),
-                    if force { "-D" } else { "-d" }.to_string(),
-                    branch.to_string(),
-                ],
-            )
-            .await?;
-            if !branch_output.status.success() {
-                return Ok(git_failure("git branch delete failed", &branch_output));
-            }
-            branch_deleted = true;
-        }
-    }
-
-    let summary = if branch_deleted {
-        format!(
-            "Removed worktree {} and deleted branch {}",
-            worktree_path.display(),
-            matched_branch.as_deref().unwrap_or("(unknown)")
-        )
-    } else {
-        format!("Removed worktree {}", worktree_path.display())
-    };
-
-    Ok(ToolOutput {
-        content: vec![imp_llm::ContentBlock::Text {
-            text: summary.clone(),
-        }],
-        details: json!({
-            "repo_root": repo_root.display().to_string(),
-            "worktree_path": worktree_path.display().to_string(),
-            "force": force,
-            "delete_branch": delete_branch,
-            "branch": matched_branch,
-            "branch_deleted": branch_deleted,
+            "recovery": {
+                "checkpoint_id": checkpoint.as_ref().map(|c| c.id.clone()),
+                "checkpoint_label": checkpoint.as_ref().and_then(|c| c.label.clone()),
+            },
             "summary": summary,
         }),
         is_error: false,
@@ -873,14 +850,32 @@ fn parse_string_array(
 
     let mut result = Vec::with_capacity(items.len());
     for item in items {
-        let Some(s) = item.as_str() else {
+        let Some(s) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
             return Err(crate::error::Error::Tool(format!(
-                "{field_name} must contain only strings"
+                "{field_name} must contain only non-empty strings"
             )));
         };
+        if s.chars().any(|c| c == '\0' || c.is_control()) {
+            return Err(crate::error::Error::Tool(format!(
+                "{field_name} must contain safe path strings"
+            )));
+        }
         result.push(s.to_string());
     }
     Ok(result)
+}
+
+async fn head_parent_sha_short(cwd: &Path) -> Option<String> {
+    let output = run_git(cwd, ["rev-parse", "--short", "HEAD^"]).await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let parent = stdout_trimmed(&output);
+    if parent.is_empty() {
+        None
+    } else {
+        Some(parent)
+    }
 }
 
 async fn head_sha_short(cwd: &Path) -> Option<String> {
@@ -913,6 +908,38 @@ where
 
 async fn run_git_owned(cwd: &Path, args: Vec<String>) -> std::io::Result<std::process::Output> {
     run_git(cwd, args).await
+}
+
+async fn run_git_with_env<I, S>(
+    cwd: &Path,
+    args: I,
+    temp_index: Option<(&str, &Path)>,
+) -> std::io::Result<std::process::Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some((index, work_tree)) = temp_index {
+        command
+            .env("GIT_INDEX_FILE", index)
+            .env("GIT_WORK_TREE", work_tree);
+    }
+    command.output().await
+}
+
+async fn run_git_owned_with_env(
+    cwd: &Path,
+    args: Vec<String>,
+    temp_index: Option<(&str, &Path)>,
+) -> std::io::Result<std::process::Output> {
+    run_git_with_env(cwd, args, temp_index).await
 }
 
 fn stdout_lossy(output: &std::process::Output) -> String {
@@ -949,7 +976,16 @@ fn git_failure(prefix: &str, output: &std::process::Output) -> ToolOutput {
         (true, false) => format!("{prefix}: {stderr}"),
         (false, false) => format!("{prefix}: {stdout}\n{stderr}"),
     };
-    ToolOutput::error(combined)
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text: combined }],
+        details: json!({
+            "success": false,
+            "exit_code": output.status.code(),
+            "stdout": stdout,
+            "stderr": stderr,
+        }),
+        is_error: true,
+    }
 }
 
 fn display_or_unknown(s: &str) -> &str {
@@ -981,71 +1017,6 @@ fn truncate_for_display(text: &str) -> (String, String, Option<PathBuf>) {
     (content, note, truncated.temp_file)
 }
 
-fn parse_worktree_list(output: &str) -> Vec<ParsedWorktreeEntry> {
-    let mut entries = Vec::new();
-    let mut current_path: Option<String> = None;
-    let mut current_branch: Option<String> = None;
-    let mut is_bare = false;
-    let mut is_detached = false;
-
-    let push_current = |entries: &mut Vec<ParsedWorktreeEntry>,
-                        current_path: &mut Option<String>,
-                        current_branch: &mut Option<String>,
-                        is_bare: &mut bool,
-                        is_detached: &mut bool| {
-        if let Some(path) = current_path.take() {
-            entries.push(ParsedWorktreeEntry {
-                path,
-                branch: current_branch.take(),
-                is_bare: *is_bare,
-                is_detached: *is_detached,
-            });
-        }
-        *is_bare = false;
-        *is_detached = false;
-    };
-
-    for line in output.lines() {
-        if let Some(path) = line.strip_prefix("worktree ") {
-            push_current(
-                &mut entries,
-                &mut current_path,
-                &mut current_branch,
-                &mut is_bare,
-                &mut is_detached,
-            );
-            current_path = Some(path.to_string());
-        } else if let Some(branch_ref) = line.strip_prefix("branch ") {
-            current_branch = Some(
-                branch_ref
-                    .strip_prefix("refs/heads/")
-                    .unwrap_or(branch_ref)
-                    .to_string(),
-            );
-        } else if line == "bare" {
-            is_bare = true;
-        } else if line == "detached" {
-            is_detached = true;
-        }
-    }
-
-    push_current(
-        &mut entries,
-        &mut current_path,
-        &mut current_branch,
-        &mut is_bare,
-        &mut is_detached,
-    );
-    entries
-}
-
-fn same_path(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1073,7 +1044,27 @@ mod tests {
             read_max_lines: 500,
             turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
             config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
         }
+    }
+
+    fn run_git_output(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|e| panic!("git {:?} failed to execute: {e}", args));
+        assert!(
+            output.status.success(),
+            "git {:?} in {} failed (exit {:?}):\nstdout: {}\nstderr: {}",
+            args,
+            dir.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
@@ -1106,6 +1097,24 @@ mod tests {
 
     fn extract_text(result: &ToolOutput) -> String {
         result.text_content().unwrap_or_default().to_string()
+    }
+
+    #[test]
+    fn schema_hides_worktree_actions_and_uses_snake_case_fields() {
+        let schema = GitTool.parameters();
+        let properties = schema["properties"].as_object().unwrap();
+        let actions = properties["action"]["enum"].as_array().unwrap();
+
+        assert!(!actions.iter().any(|value| value == "worktree_info"));
+        assert!(!actions.iter().any(|value| value == "worktree_add"));
+        assert!(!actions.iter().any(|value| value == "worktree_remove"));
+        assert!(properties.contains_key("all_changes"));
+        assert!(!properties.contains_key("all"));
+        assert!(properties.contains_key("allow_empty"));
+        assert!(!properties.contains_key("allowEmpty"));
+        assert!(!properties.contains_key("worktreePath"));
+        assert_eq!(properties["limit"]["type"], json!("integer"));
+        assert_eq!(properties["limit"]["maximum"], json!(100));
     }
 
     #[tokio::test]
@@ -1187,6 +1196,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn git_stage_accepts_all_changes() {
+        let dir = setup_repo();
+        fs::write(dir.path().join("new.txt"), "new\n").unwrap();
+        let tool = GitTool;
+
+        let result = tool
+            .execute(
+                "c-stage-all",
+                json!({"action": "stage", "all_changes": true}),
+                test_ctx(dir.path(), AgentMode::Worker),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(result.details["all_changes"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn git_commit_accepts_allow_empty() {
+        let dir = setup_repo();
+        let tool = GitTool;
+
+        let result = tool
+            .execute(
+                "c-empty-commit",
+                json!({"action": "commit", "message": "empty commit", "allow_empty": true}),
+                test_ctx(dir.path(), AgentMode::Worker),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(result.details["allow_empty"], json!(true));
+        assert!(extract_text(&result).contains("empty commit"));
+    }
+
+    #[tokio::test]
+    async fn targeted_commit_preserves_existing_index_and_unrelated_worktree() {
+        let dir = setup_repo();
+        fs::write(dir.path().join("target.txt"), "target base\n").unwrap();
+        fs::write(dir.path().join("staged.txt"), "staged base\n").unwrap();
+        fs::write(dir.path().join("dirty.txt"), "dirty base\n").unwrap();
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "add fixtures"]);
+
+        fs::write(dir.path().join("target.txt"), "target changed\n").unwrap();
+        fs::write(dir.path().join("staged.txt"), "staged changed\n").unwrap();
+        fs::write(dir.path().join("dirty.txt"), "dirty changed\n").unwrap();
+        run_git(dir.path(), &["add", "staged.txt"]);
+
+        let tool = GitTool;
+        let result = tool
+            .execute(
+                "c-targeted-commit",
+                json!({
+                    "action": "commit",
+                    "message": "update target only",
+                    "files": ["target.txt"]
+                }),
+                test_ctx(dir.path(), AgentMode::Worker),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error, "{}", extract_text(&result));
+        assert_eq!(result.details["preserve_index"], json!(true));
+        assert!(extract_text(&result).contains("Included targeted path"));
+
+        let committed_files = run_git_output(
+            dir.path(),
+            &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+        );
+        assert_eq!(committed_files, "target.txt");
+
+        let status = run_git_output(dir.path(), &["status", "--porcelain=v1"]);
+        assert!(
+            status.lines().any(|line| line == "M  staged.txt"),
+            "{status}"
+        );
+        assert!(
+            !status.lines().any(|line| line.ends_with("target.txt")),
+            "{status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn targeted_commit_rejects_noop_paths() {
+        let dir = setup_repo();
+        let tool = GitTool;
+
+        let result = tool
+            .execute(
+                "c-targeted-noop",
+                json!({
+                    "action": "commit",
+                    "message": "noop target",
+                    "files": ["note.txt"]
+                }),
+                test_ctx(dir.path(), AgentMode::Worker),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(extract_text(&result).contains("No changes to commit"));
+        assert_eq!(
+            run_git_output(dir.path(), &["rev-list", "--count", "HEAD"]),
+            "1"
+        );
+    }
+
+    #[tokio::test]
     async fn git_restore_reverts_file_and_creates_checkpoint() {
         let dir = setup_repo();
         fs::write(dir.path().join("note.txt"), "changed\n").unwrap();
@@ -1213,28 +1335,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn git_worktree_add_and_remove_work() {
+    async fn git_worktree_actions_point_to_worktree_tool() {
         let dir = setup_repo();
         let tool = GitTool;
-        let worktree_path = dir.path().join("../repo-worktree");
-        let worktree_path_str = worktree_path.display().to_string();
 
-        let add = tool
-            .execute(
-                "c-add",
-                json!({
-                    "action": "worktree_add",
-                    "worktreePath": worktree_path_str,
-                    "branch": "feature/test",
-                }),
-                test_ctx(dir.path(), AgentMode::Worker),
-            )
-            .await
-            .unwrap();
-        assert!(!add.is_error);
-        assert!(worktree_path.exists());
-
-        let info = tool
+        let result = tool
             .execute(
                 "c-info",
                 json!({"action": "worktree_info"}),
@@ -1242,23 +1347,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!info.is_error);
-        assert!(info.details["worktrees"].as_array().unwrap().len() >= 2);
 
-        let remove = tool
-            .execute(
-                "c-remove",
-                json!({
-                    "action": "worktree_remove",
-                    "worktreePath": worktree_path.display().to_string(),
-                    "deleteBranch": true,
-                }),
-                test_ctx(dir.path(), AgentMode::Worker),
-            )
-            .await
-            .unwrap();
-        assert!(!remove.is_error);
-        assert!(!worktree_path.exists());
+        assert!(result.is_error);
+        assert!(extract_text(&result).contains("worktree tool"));
     }
 
     #[tokio::test]
@@ -1296,17 +1387,5 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(extract_text(&result).contains("repo:"));
-    }
-
-    #[test]
-    fn parse_worktree_list_handles_multiple_entries() {
-        let entries = parse_worktree_list(
-            "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /repo-wt\nHEAD def\nbranch refs/heads/feature\ndetached\n",
-        );
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].path, "/repo");
-        assert_eq!(entries[0].branch.as_deref(), Some("main"));
-        assert_eq!(entries[1].branch.as_deref(), Some("feature"));
-        assert!(entries[1].is_detached);
     }
 }

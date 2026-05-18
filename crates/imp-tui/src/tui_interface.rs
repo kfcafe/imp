@@ -22,6 +22,12 @@ pub enum UiRequest {
         options: Vec<SelectOption>,
         reply: tokio::sync::oneshot::Sender<Option<usize>>,
     },
+    MultiSelect {
+        title: String,
+        context: String,
+        options: Vec<SelectOption>,
+        reply: tokio::sync::oneshot::Sender<Option<Vec<usize>>>,
+    },
     Input {
         title: String,
         context: String,
@@ -96,6 +102,25 @@ impl UserInterface for TuiInterface {
         let _ = self
             .tx
             .send(UiRequest::Select {
+                title: title.to_string(),
+                context: context.to_string(),
+                options: options.to_vec(),
+                reply: reply_tx,
+            })
+            .await;
+        reply_rx.await.ok().flatten()
+    }
+
+    async fn multi_select_with_context(
+        &self,
+        title: &str,
+        context: &str,
+        options: &[SelectOption],
+    ) -> Option<Vec<usize>> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let _ = self
+            .tx
+            .send(UiRequest::MultiSelect {
                 title: title.to_string(),
                 context: context.to_string(),
                 options: options.to_vec(),

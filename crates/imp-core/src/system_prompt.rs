@@ -36,8 +36,11 @@ pub struct Dependency {
 pub struct TaskContext {
     pub title: String,
     pub description: String,
+    pub design: Option<String>,
     pub acceptance: Option<String>,
     pub verify: Option<String>,
+    pub verify_timeout_secs: Option<u64>,
+    pub fail_first: bool,
     pub notes: Option<String>,
     pub attempts: Vec<Attempt>,
     pub dependencies: Vec<Dependency>,
@@ -108,8 +111,11 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
         p.soul,
     ));
 
-    // Layer 1.25: Execution policy
-    parts.push(execution_policy_layer());
+    // Layer 1.25: Execution policy (currently folded into identity operating rules)
+    let execution_policy = execution_policy_layer();
+    if !execution_policy.is_empty() {
+        parts.push(execution_policy);
+    }
 
     // Layer 1.5: Environment context
     parts.push(environment_layer(p.cwd));
@@ -211,30 +217,30 @@ fn identity_layer(
         }
     }
 
-    s.push_str("\nTool usage guide:\n");
-    s.push_str("- Use `shell` for search, file discovery, directory listing, builds, tests, scripts, package managers, and other shell-native tasks. Prefer `scan` for structural code understanding before broad text search when symbol relationships or code blocks matter.\n");
+    s.push_str("\nTool routing:\n");
+    s.push_str("- Use `bash` for shell-native search, file discovery, builds, tests, scripts, and package managers; prefer `scan` when code structure or symbols matter.\n");
     if defs.iter().any(|def| def.name == "git") {
-        s.push_str("- Use `git` for local repo/worktree operations; use `shell` for uncovered git commands.\n");
+        s.push_str("- Use `git` for local repo/worktree operations; use `bash` for uncovered git commands.\n");
     }
     if defs.iter().any(|def| def.name == "mana") {
-        s.push_str("- Prefer the native `mana` tool over `shell` for mana operations when an equivalent action exists; use `shell` only for mana-adjacent shell work with no native mana action.\n");
+        s.push_str("- Prefer native `mana` actions over shell for mana work.\n");
     }
-    s.push_str("- Use `read` to inspect a specific file with stable line-oriented output.\n");
-    s.push_str("- Use `scan` for structural code understanding and for extracting code at file:line, file:start-end, or file#symbol. Prefer it over `shell`+search when you need symbols, call sites, or coherent code blocks.\n");
-    s.push_str("- Use `edit` and `write` for file changes.\n");
-    s.push_str("- Use specialized tools like `mana`, `ask`, `web`, `extend`, and `recall` when the task calls for them. Use `recall` when you need to search past conversations.\n");
+    s.push_str("- Use `read` before explaining or editing specific files; use `edit`/`write` for file changes.\n");
 
-    s.push_str("\nMana doctrine:\n");
-    s.push_str("- Mana is imp's substrate for explicit work. Represent work in mana whenever structure, verification, retries, dependencies, or handoff would help. Any mana unit must be detailed enough for another agent to execute cold without guesswork, even if you end up doing the work yourself.\n");
-    s.push_str("- Treat each unit description as an execution prompt.\n");
-    s.push_str("- Include current state, concrete steps, file paths with intent, edge cases, and a targeted verify command.\n");
-    s.push_str("- Update units with new context after failures; do not retry unchanged.\n");
-    s.push_str("- Mana is the durable project context — session memory is ephemeral, personal memory is global preferences; project plans, architecture decisions, verified facts, and implementation structure belong in mana, not in session history or memory.md.\n");
-    s.push_str("- During planning and design conversations, proactively externalize durable structure as it appears. When the conversation settles on a goal, decomposition, architecture direction, dependency, blocker, or follow-up that should survive the turn, create or update mana during the conversation.\n");
-    s.push_str("- Map durable planning artifacts deliberately: use an epic, child job, note, or decision based on the shape of the information, and keep facts reserved for verifiable claims.\n");
-    s.push_str("- Do not ask permission merely to capture plan artifacts in mana. Do ask before making consequential scope, architecture, destructive, or execution commitments on the user's behalf.\n");
-    s.push_str("- If durable planning state changed this turn, make the between-turn mana update before the substantive reply. Summarize the delta only when it adds value beyond what the mana tool or UI already made visible.\n");
-    s.push_str("- A future wiki layer at `.mana/wiki/` will hold synthesized project knowledge; for now, use mana facts for verifiable claims and mana units/notes for everything else that should survive the session.\n");
+    s.push_str("\nOperating rules:\n");
+    s.push_str("- Re-check the user's intent each turn; distinguish discussion, planning, implementation, review, and orchestration.\n");
+    s.push_str("- Ground repository claims in files or tool output inspected in this session; inspect named files, symbols, commands, and errors before acting on them.\n");
+    s.push_str("- For analysis-only requests, stay read-only. For implementation, make small reversible changes and verify with the narrowest useful check.\n");
+    s.push_str("- Treat failed commands, compiler errors, and missing evidence as blockers to resolve or report; never claim unverified success.\n");
+    s.push_str("- Ask one focused question when uncertainty changes scope, risk, architecture, destructive action, or user-visible behavior; otherwise proceed on low-risk local assumptions.\n");
+    s.push_str("- Keep replies concise and evidence-oriented: what changed or was found, how it was verified, and what remains.\n");
+    s.push_str("- Use mana when durable work structure, verification, dependencies, retries, decisions, handoff, or recovery matter; make units detailed enough for another agent to execute cold.\n");
+    s.push_str("- During planning/design, externalize real durable structure only when it changes project/work state the user is actively developing: concrete goals, decompositions, decisions, dependencies, follow-ups, blockers, or handoff context.\n");
+    s.push_str("- Do not create mana artifacts from explanation-only answers, hypotheticals, commentary about external content, brainstorming with no adopted next step, or conversational asides. When unsure whether discussion became durable work, ask or just answer in chat.\n");
+    s.push_str("- For real durable structure, use epics/tasks/notes/decisions deliberately, reserve facts for verifiable claims, and avoid noisy mana writes for small one-pass work.\n");
+    s.push_str("- Update mana after failures or material planning changes before relying on chat memory.\n");
+    s.push_str("- When working from a mana unit, treat its scope, dependencies, acceptance criteria, and verify command as the execution contract; do not broaden into unrelated cleanup.\n");
+    s.push_str("- Stop only on verified completion, a real blocker, or a user-facing decision point; mana writes are checkpoints, not proof of completion.\n");
 
     // Append role instructions after identity layer
     if let Some(role) = role {
@@ -263,30 +269,7 @@ fn identity_layer(
 }
 
 fn execution_policy_layer() -> String {
-    let mut s = String::from("Execution discipline:\n");
-    s.push_str("- Re-evaluate the user's intent on every new message before acting. Distinguish analysis, implementation, planning, review, and orchestration.\n");
-    s.push_str("- Never claim repository facts that you have not inspected in this session. Ground important claims in opened files, tool output, or explicit user-provided evidence.\n");
-    s.push_str("- If the user references a specific file, symbol, command, or error, inspect it before explaining or proposing changes.\n");
-    s.push_str("- For analysis-only requests, stay read-only unless the user asks for changes.\n");
-    s.push_str("- For implementation, prefer small, reversible changes and verify them with the smallest relevant checks before declaring success.\n");
-    s.push_str("- Do not treat failed commands, failed checks, or missing evidence as success. If blocked, report the exact blocker and the next useful action.\n");
-    s.push_str("- Before changing code, make sure you understand the relevant local context: inspect the files you will modify, nearby patterns, and any task-specific constraints already present in the repo.\n");
-    s.push_str("- Match the completion mode to the request. For diagnosis, provide findings, root cause, and concrete next-step options without making changes. For implementation, make the change, verify it, and summarize the evidence.\n");
-    s.push_str("- Treat task verify commands, failing tests, compiler errors, and tool errors as first-class evidence. Either resolve them or explain precisely why they remain blocked.\n");
-    s.push_str("- Prefer the smallest check that proves the work: targeted tests, focused builds, existence checks, or narrow validation commands before broad project-wide verification.\n");
-    s.push_str("- When uncertainty is consequential, ask one concise question instead of guessing. When uncertainty is local and low-risk, proceed and state the assumption briefly.\n");
-    s.push_str("- If prior attempts failed, do not retry the same plan unchanged. Use the new evidence to adapt the approach first.\n");
-    s.push_str("- Keep user-facing updates concise and evidence-oriented: what you inspected, what you changed, what you verified, and what remains.\n");
-    s.push_str("- When working from a mana unit, treat the unit as an execution contract: use its scope, verify gate, dependencies, and embedded context before broadening the search.\n");
-    s.push_str("- Prefer mana-native inspection and progress recording over ad hoc shell workflows when mana already models the work state.\n");
-    s.push_str("- For worker-style execution, keep planning lightweight and execution direct; use `mana update` to record discoveries and blockers instead of carrying them only in transient chat.\n");
-    s.push_str("- If a mana unit is underspecified, identify the exact missing context and either inspect the relevant artifacts or report the gap precisely rather than inventing missing requirements.\n");
-    s.push_str("- Treat chat as discussion and mana as the persistent external work and idea graph. When a conversation produces durable structure — plans, architecture, decomposition, migrations, blockers, dependencies, or follow-up work — represent that structure in mana during the conversation, not after it.\n");
-    s.push_str("- When durable planning state changes, update mana before the substantive reply when that durable state should become the source of truth for the next turn. Avoid restating mana-visible deltas verbosely when the tool output or UI already shows them.\n");
-    s.push_str("- Do not use mana only when work is large; use it whenever externalizing the plan is likely to improve execution quality, correctness, scope clarity, reviewability, or future continuation.\n");
-    s.push_str("- Prefer native mana actions over shell or direct file mutation for durable planning/work structure. Use append-style mana updates to keep the graph current during conversation.\n");
-    s.push_str("- If work spans more than one project or clearly belongs at the ecosystem layer, target root mana explicitly rather than relying on the nearest project scope.\n");
-    s
+    String::new()
 }
 
 fn working_style_lines(sliders: &crate::personality::PersonalitySliders) -> Vec<&'static str> {
@@ -423,60 +406,41 @@ fn agents_md_layer(agents: &[AgentsMd]) -> String {
     s
 }
 
-fn skills_layer(skills: &[Skill], mode: &AgentMode) -> String {
-    let mut s = String::from("Available skills (use read to load when relevant):\n");
-    if let Some(trigger) = mana_skill_trigger(skills, mode) {
-        s.push_str(&format!("- Trigger: {trigger}\n"));
-    }
+fn skills_layer(skills: &[Skill], _mode: &AgentMode) -> String {
+    let mut s = String::from(
+        "Available skills (load with `read ~/.imp/skills/<name>/SKILL.md` when relevant):\n",
+    );
     for skill in skills {
-        s.push_str(&format!(
-            "- {}: {} [{}]\n",
-            skill.name,
-            skill.description,
-            skill.path.display()
-        ));
+        let description = compact_skill_description(&skill.description);
+        if description.is_empty() {
+            s.push_str(&format!("- {}\n", skill.name));
+        } else {
+            s.push_str(&format!("- {}: {}\n", skill.name, description));
+        }
     }
     s
 }
 
-fn mana_skill_trigger(skills: &[Skill], mode: &AgentMode) -> Option<&'static str> {
-    let has_mana = skills.iter().any(|skill| skill.name == "mana");
-    let has_mana_basics = skills.iter().any(|skill| skill.name == "mana-basics");
+fn compact_skill_description(description: &str) -> String {
+    let normalized = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    let first_sentence = normalized
+        .split_once(". ")
+        .map(|(first, _)| format!("{}.", first))
+        .unwrap_or(normalized);
+    truncate_chars(&first_sentence, 120)
+}
 
-    match mode {
-        AgentMode::Full | AgentMode::Orchestrator | AgentMode::Planner => {
-            if has_mana {
-                Some("Load `mana` before writing or restructuring mana units for non-trivial work.")
-            } else {
-                None
-            }
-        }
-        AgentMode::Worker => {
-            if has_mana_basics {
-                Some(
-                    "Load `mana-basics` before using worker-safe mana actions beyond a quick status check.",
-                )
-            } else if has_mana {
-                Some(
-                    "Load `mana` before using worker-safe mana actions beyond a quick status check.",
-                )
-            } else {
-                None
-            }
-        }
-        AgentMode::Auditor => {
-            if has_mana_basics {
-                Some(
-                    "Load `mana-basics` before inspecting mana state across multiple units or runs.",
-                )
-            } else if has_mana {
-                Some("Load `mana` before inspecting mana state across multiple units or runs.")
-            } else {
-                None
-            }
-        }
-        AgentMode::Reviewer => None,
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
     }
+
+    let mut truncated = text
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
 fn facts_layer(facts: &[Fact]) -> String {
@@ -498,6 +462,13 @@ fn task_layer(task: &TaskContext) -> String {
     let mut s = String::from("## Task\n");
     s.push_str(&format!("Title: {}\n", task.title));
     s.push_str(&format!("Description: {}\n", task.description));
+    if let Some(ref design) = task.design {
+        if !design.trim().is_empty() {
+            s.push_str("Design:\n");
+            s.push_str(design);
+            s.push('\n');
+        }
+    }
     if let Some(ref notes) = task.notes {
         if !notes.trim().is_empty() {
             s.push_str("Notes:\n");
@@ -512,6 +483,12 @@ fn task_layer(task: &TaskContext) -> String {
     }
     if let Some(ref verify) = task.verify {
         s.push_str(&format!("Verify: {}\n", verify));
+        if let Some(timeout_secs) = task.verify_timeout_secs {
+            s.push_str(&format!("Verify timeout: {}s\n", timeout_secs));
+        }
+        if task.fail_first {
+            s.push_str("Fail-first: verify was expected to fail before implementation; preserve that contract.\n");
+        }
         s.push_str("Treat the verify command as the primary completion check for this task.\n");
     }
 
@@ -682,7 +659,6 @@ mod tests {
             tool_set: ToolSet::All,
             readonly: true,
             instructions: Some("Review code carefully. Do not modify files.".into()),
-            max_turns: Some(10),
         }
     }
 
@@ -695,7 +671,6 @@ mod tests {
             tool_set: ToolSet::All,
             readonly: false,
             instructions: None,
-            max_turns: None,
         }
     }
 
@@ -750,15 +725,15 @@ mod tests {
     // -- Layer 1: Identity --
 
     #[test]
-    fn system_prompt_includes_execution_policy_layer() {
+    fn system_prompt_includes_operating_rules() {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
-        assert!(result.text.contains("Execution discipline:"));
-        assert!(result
-            .text
-            .contains("Never claim repository facts that you have not inspected in this session."));
+        assert!(result.text.contains("Operating rules:"));
         assert!(result.text.contains(
-            "For analysis-only requests, stay read-only unless the user asks for changes."
+            "Ground repository claims in files or tool output inspected in this session"
+        ));
+        assert!(result.text.contains(
+            "For analysis-only requests, stay read-only. For implementation, make small reversible changes"
         ));
     }
 
@@ -767,26 +742,31 @@ mod tests {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(result.text.contains(
-            "During planning and design conversations, proactively externalize durable structure as it appears."
+            "During planning/design, externalize real durable structure only when it changes project/work state the user is actively developing"
         ));
-        assert!(result.text.contains("epic, child job, note, or decision"));
         assert!(result
             .text
-            .contains("Do not ask permission merely to capture plan artifacts in mana."));
+            .contains("Do not create mana artifacts from explanation-only answers"));
+        assert!(result.text.contains("epics/tasks/notes/decisions"));
+        assert!(result.text.contains("reserve facts for verifiable claims"));
         assert!(result.text.contains(
-            "If durable planning state changed this turn, make the between-turn mana update before the substantive reply"
+            "Update mana after failures or material planning changes before relying on chat memory"
         ));
-        assert!(result.text.contains(
-            "Summarize the delta only when it adds value beyond what the mana tool or UI already made visible."
-        ));
+        assert!(result
+            .text
+            .contains("mana writes are checkpoints, not proof of completion"));
         assert_eq!(
             result
                 .text
-                .matches("between-turn mana update before the substantive reply")
+                .matches("mana writes are checkpoints, not proof of completion")
                 .count(),
             1,
-            "between-turn mana update guidance should appear once"
+            "mana checkpoint guidance should appear once"
         );
+        assert!(!result.text.contains("Mana doctrine:"));
+        assert!(!result
+            .text
+            .contains("between-turn mana update before the substantive reply"));
         assert!(!result
             .text
             .contains("include a concise mana delta summary in the response"));
@@ -815,24 +795,24 @@ mod tests {
         }));
 
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
-        assert!(result.text.contains(
-            "Prefer the native `mana` tool over `bash` for mana operations when an equivalent action exists"
-        ));
+        assert!(result
+            .text
+            .contains("Prefer native `mana` actions over shell for mana work."));
     }
 
     #[test]
     fn system_prompt_mana_guidance_omitted_without_mana_tool() {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
-        assert!(!result.text.contains(
-            "Prefer the native `mana` tool over `bash` for mana operations when an equivalent action exists"
-        ));
+        assert!(!result
+            .text
+            .contains("Prefer native `mana` actions over shell for mana work."));
     }
 
     #[test]
     fn system_prompt_no_mana_guidance_or_delegation_in_prompt() {
-        // Mana guidance and delegation blocks have been moved to the mana skill.
-        // Verify they no longer appear regardless of tool availability.
+        // Extended mana guidance lives in native `mana guide`/`mana template` affordances.
+        // Verify large legacy prompt blocks no longer appear regardless of tool availability.
         let mut reg = make_registry();
         reg.register(Arc::new(FakeTool {
             name: "bash",
@@ -977,12 +957,12 @@ mod tests {
     // -- Layer 3: Skills --
 
     #[test]
-    fn system_prompt_skills_listed_with_paths() {
+    fn system_prompt_skills_listed_compactly_without_paths() {
         let reg = make_registry();
         let skills = vec![
             make_skill(
                 "rust",
-                "Conventions for Rust code",
+                "Conventions for Rust code. Extra detail that should not be included.",
                 "/home/.imp/skills/rust/SKILL.md",
             ),
             make_skill(
@@ -992,19 +972,19 @@ mod tests {
             ),
         ];
         let result = test_assemble(&reg, &[], &skills, &[], None, None, None);
-        assert!(result
+        assert!(result.text.contains(
+            "Available skills (load with `read ~/.imp/skills/<name>/SKILL.md` when relevant):"
+        ));
+        assert!(result.text.contains("- rust: Conventions for Rust code."));
+        assert!(result.text.contains("- testing: Write and review tests"));
+        assert!(!result.text.contains("/home/.imp/skills/rust/SKILL.md"));
+        assert!(!result
             .text
-            .contains("Available skills (use read to load when relevant):"));
-        assert!(result
-            .text
-            .contains("- rust: Conventions for Rust code [/home/.imp/skills/rust/SKILL.md]"));
-        assert!(result
-            .text
-            .contains("- testing: Write and review tests [/home/.imp/skills/testing/SKILL.md]"));
+            .contains("Extra detail that should not be included"));
     }
 
     #[test]
-    fn system_prompt_includes_mode_aware_mana_skill_trigger() {
+    fn system_prompt_does_not_add_mode_aware_mana_skill_trigger() {
         let reg = make_registry();
         let skills = vec![make_skill(
             "mana",
@@ -1029,14 +1009,12 @@ mod tests {
             guardrail_profile: None,
         });
 
-        assert!(result.text.contains("- Trigger:"));
-        assert!(result.text.contains(
-            "Load `mana` before writing or restructuring mana units for non-trivial work."
-        ));
+        assert!(!result.text.contains("- Trigger:"));
+        assert!(!result.text.contains("Load `mana`"));
     }
 
     #[test]
-    fn system_prompt_orchestrator_uses_same_mana_trigger() {
+    fn system_prompt_orchestrator_does_not_add_mana_skill_trigger() {
         let reg = make_registry();
         let skills = vec![make_skill(
             "mana",
@@ -1061,13 +1039,12 @@ mod tests {
             guardrail_profile: None,
         });
 
-        assert!(result.text.contains(
-            "Load `mana` before writing or restructuring mana units for non-trivial work."
-        ));
+        assert!(!result.text.contains("- Trigger:"));
+        assert!(!result.text.contains("Load `mana`"));
     }
 
     #[test]
-    fn system_prompt_worker_prefers_mana_basics_trigger() {
+    fn system_prompt_worker_does_not_add_mana_basics_trigger() {
         let reg = make_registry();
         let skills = vec![
             make_skill(
@@ -1099,9 +1076,8 @@ mod tests {
             guardrail_profile: None,
         });
 
-        assert!(result.text.contains(
-            "Load `mana-basics` before using worker-safe mana actions beyond a quick status check."
-        ));
+        assert!(!result.text.contains("- Trigger:"));
+        assert!(!result.text.contains("Load `mana-basics`"));
     }
 
     #[test]
@@ -1296,8 +1272,11 @@ mod tests {
         let task = TaskContext {
             title: "Fix the failing auth test".into(),
             description: "The JWT validation test panics on expired tokens".into(),
+            design: None,
             acceptance: None,
             verify: Some("cargo test auth::jwt_test".into()),
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: None,
             attempts: vec![],
             dependencies: vec![],
@@ -1323,8 +1302,11 @@ mod tests {
         let task = TaskContext {
             title: "Fix bug".into(),
             description: "Something is broken".into(),
+            design: None,
             acceptance: None,
             verify: None,
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: None,
             attempts: vec![
                 Attempt {
@@ -1362,8 +1344,11 @@ mod tests {
         let task = TaskContext {
             title: "Implement feature".into(),
             description: "New feature".into(),
+            design: None,
             acceptance: None,
             verify: None,
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: None,
             attempts: vec![],
             dependencies: vec![Dependency {
@@ -1391,8 +1376,14 @@ mod tests {
         let task = TaskContext {
             title: "Fix auth".into(),
             description: "Tighten token validation".into(),
+            design: Some(
+                "Keep validation logic in the existing auth module; avoid a broader auth rewrite."
+                    .into(),
+            ),
             acceptance: None,
             verify: Some("cargo test auth".into()),
+            verify_timeout_secs: Some(30),
+            fail_first: true,
             notes: Some("Prefer touching only auth paths unless necessary".into()),
             attempts: vec![],
             dependencies: vec![],
@@ -1403,6 +1394,14 @@ mod tests {
             ],
         };
         let result = test_assemble(&reg, &[], &[], &[], None, Some(&task), None);
+        assert!(result.text.contains("Design:"));
+        assert!(result
+            .text
+            .contains("Keep validation logic in the existing auth module"));
+        assert!(result.text.contains("Verify timeout: 30s"));
+        assert!(result
+            .text
+            .contains("Fail-first: verify was expected to fail before implementation"));
         assert!(result.text.contains("Notes:"));
         assert!(result
             .text
@@ -1429,8 +1428,11 @@ mod tests {
         let task = TaskContext {
             title: "Do something".into(),
             description: "Details here".into(),
+            design: None,
             acceptance: None,
             verify: None,
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: None,
             attempts: vec![],
             dependencies: vec![],
@@ -1551,8 +1553,11 @@ mod tests {
         let task = TaskContext {
             title: "Add caching".into(),
             description: "Add Redis caching layer".into(),
+            design: None,
             acceptance: None,
             verify: Some("cargo test cache".into()),
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: None,
             attempts: vec![Attempt {
                 number: 1,
@@ -1573,7 +1578,7 @@ mod tests {
 
         // All layers present in order
         let identity_pos = result.text.find("You are imp").unwrap();
-        let policy_pos = result.text.find("Execution discipline").unwrap();
+        let policy_pos = result.text.find("Operating rules").unwrap();
         let context_pos = result.text.find("# Project Context").unwrap();
         let skills_pos = result.text.find("Available skills").unwrap();
         let facts_pos = result.text.find("Project facts").unwrap();
@@ -1683,8 +1688,11 @@ mod tests {
         let task = TaskContext {
             title: "Fix bug".into(),
             description: "Broken".into(),
+            design: None,
             acceptance: None,
             verify: None,
+            verify_timeout_secs: None,
+            fail_first: false,
             notes: None,
             attempts: vec![],
             dependencies: vec![],

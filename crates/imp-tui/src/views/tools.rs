@@ -7,7 +7,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use serde_json::Value;
 
-use crate::animation::spinner_frame;
 use crate::theme::Theme;
 
 fn abbreviate_home_path(path: &str) -> String {
@@ -103,19 +102,10 @@ impl DisplayToolCall {
         focused: bool,
         animation_level: AnimationLevel,
     ) -> Line<'static> {
+        let _ = tick;
+        let _ = animation_level;
         let is_running = self.output.is_none() && !self.is_error;
-        let icon = if self.is_error {
-            "✗".to_string()
-        } else if is_running {
-            match animation_level {
-                AnimationLevel::None => "•".to_string(),
-                AnimationLevel::Spinner | AnimationLevel::Minimal => {
-                    spinner_frame(tick).to_string()
-                }
-            }
-        } else {
-            "✓".to_string()
-        };
+        let icon = if self.is_error { "✗" } else { "✓" };
         let icon_style = if self.is_error {
             theme.error_style()
         } else if is_running {
@@ -136,16 +126,16 @@ impl DisplayToolCall {
             Span::raw(" ")
         };
 
-        let mut spans = vec![
-            focus_span,
-            Span::styled(format!(" {icon} "), icon_style),
-            Span::styled(
-                self.name.clone(),
-                Style::default()
-                    .fg(theme.tool_name)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ];
+        let mut spans = vec![focus_span];
+        if !is_running {
+            spans.push(Span::styled(format!(" {icon} "), icon_style));
+        }
+        spans.push(Span::styled(
+            self.name.clone(),
+            Style::default()
+                .fg(theme.tool_name)
+                .add_modifier(Modifier::BOLD),
+        ));
 
         if !self.args_summary.is_empty() {
             spans.push(Span::raw(" "));
@@ -207,11 +197,12 @@ impl DisplayToolCall {
                 let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
                 match action {
                     "extract" => args
-                        .get("files")
+                        .get("targets")
+                        .or_else(|| args.get("files"))
                         .and_then(|v| v.as_array())
                         .map(|items| abbreviate_path_list(items))
                         .unwrap_or_else(|| "extract".to_string()),
-                    "scan" => args
+                    "directory" | "scan" => args
                         .get("directory")
                         .and_then(|v| v.as_str())
                         .map(abbreviate_home_path)
@@ -426,7 +417,7 @@ fn summarize_json_object(args: &Value) -> String {
     let mut fields = Vec::new();
     for (key, value) in obj {
         if let Some(short) = value_to_short_string(value) {
-            fields.push(format!("{key}={short}"));
+            fields.push(format!("{key} {short}"));
         }
     }
 
@@ -440,7 +431,7 @@ fn summarize_json_object(args: &Value) -> String {
 fn push_field(fields: &mut Vec<String>, key: &str, value: Option<String>) {
     if let Some(value) = value {
         if !value.is_empty() {
-            fields.push(format!("{key}={value}"));
+            fields.push(format!("{key} {value}"));
         }
     }
 }
@@ -651,10 +642,10 @@ mod tests {
         );
 
         assert!(summary.starts_with("create  "));
-        assert!(summary.contains("title=Fix hotkeys"));
-        assert!(summary.contains("priority=1"));
-        assert!(summary.contains("verify=cargo check -p imp-tui"));
-        assert!(summary.contains("deps=1.2,1.3"));
+        assert!(summary.contains("title Fix hotkeys"));
+        assert!(summary.contains("priority 1"));
+        assert!(summary.contains("verify cargo check -p imp-tui"));
+        assert!(summary.contains("deps 1.2,1.3"));
     }
 
     #[test]
