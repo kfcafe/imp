@@ -214,7 +214,6 @@ impl Agent {
         let mut queued_pre_turn_follow_ups: std::collections::VecDeque<String> =
             std::collections::VecDeque::new();
         trace_run("init_loop_state", phase_started);
-        let phase_started = std::time::Instant::now();
 
         if let Some(nudge) = mana_skill_follow_up_hint(
             &prompt,

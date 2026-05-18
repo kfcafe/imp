@@ -51,10 +51,6 @@ pub fn global_sessions_dir() -> PathBuf {
     global_root().join("sessions")
 }
 
-pub fn global_runs_dir() -> PathBuf {
-    global_root().join("runs")
-}
-
 pub fn global_run_index_path() -> PathBuf {
     global_runs_dir().join("index.jsonl")
 }

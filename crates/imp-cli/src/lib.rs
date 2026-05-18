@@ -2960,7 +2960,11 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
             "model": model,
             "timestamp": timestamp,
         }),
-        AgentEvent::AgentEnd { usage, cost, status } => json!({
+        AgentEvent::AgentEnd {
+            usage,
+            cost,
+            status,
+        } => json!({
             "type": "agent_end",
             "usage": usage,
             "cost": cost,

@@ -1190,7 +1190,10 @@ pub fn build_click_map_from_rendered_lines(
 
     for line_index in window.start..window.end {
         let plain = line_to_plain_text(&lines[line_index]);
-        let Some(rest) = plain.strip_prefix("▸ ").or_else(|| plain.strip_prefix("▾ ")) else {
+        let Some(rest) = plain
+            .strip_prefix("▸ ")
+            .or_else(|| plain.strip_prefix("▾ "))
+        else {
             continue;
         };
         let Some(id) = rest.strip_prefix('#') else {
