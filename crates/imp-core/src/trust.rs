@@ -150,7 +150,7 @@ impl<T: Default> Default for TrustedContext<T> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrustLabel {
     UserInstruction,
@@ -161,6 +161,7 @@ pub enum TrustLabel {
     GeneratedSummary,
     VerifierOutput,
     ManaLedger,
+    #[default]
     Unknown,
 }
 
@@ -187,13 +188,7 @@ impl TrustLabel {
     }
 }
 
-impl Default for TrustLabel {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "source")]
 pub enum ProvenanceSource {
     UserInstruction,
@@ -221,6 +216,7 @@ pub enum ProvenanceSource {
     Extension {
         id: String,
     },
+    #[default]
     Unknown,
 }
 
@@ -256,12 +252,6 @@ impl ProvenanceSource {
             Self::Extension { .. } => vec![RiskLabel::ToolOutput],
             Self::Unknown => vec![RiskLabel::LowTrust],
         }
-    }
-}
-
-impl Default for ProvenanceSource {
-    fn default() -> Self {
-        Self::Unknown
     }
 }
 

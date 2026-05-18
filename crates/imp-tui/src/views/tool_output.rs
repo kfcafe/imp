@@ -44,7 +44,7 @@ fn styled_read_output(
     theme: &Theme,
     with_line_numbers: bool,
 ) -> Vec<Line<'static>> {
-    let Some(output) = tc.output.as_deref().or_else(|| {
+    let Some(output) = tc.output.as_deref().or({
         if tc.streaming_output.is_empty() {
             None
         } else {
@@ -177,7 +177,7 @@ fn styled_write_output(
 }
 
 fn styled_diff_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
-    let Some(output) = tc.output.as_deref().or_else(|| {
+    let Some(output) = tc.output.as_deref().or({
         if tc.streaming_output.is_empty() {
             None
         } else {
@@ -236,7 +236,7 @@ fn styled_plain_output_with(
     theme: &Theme,
     style_for_line: fn(&str, &Theme, bool) -> Style,
 ) -> Vec<Line<'static>> {
-    let Some(output) = tc.output.as_deref().or_else(|| {
+    let Some(output) = tc.output.as_deref().or({
         if tc.streaming_output.is_empty() {
             None
         } else {

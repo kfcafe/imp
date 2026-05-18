@@ -94,11 +94,7 @@ impl AskState {
         self.input_cursor = clamp_cursor_to_boundary(&self.input, cursor);
         self.editor_cursor = self.input_cursor;
         self.normalize_option_cursor();
-        if self.input.is_empty() && !self.options.is_empty() {
-            self.input_active = false;
-        } else {
-            self.input_active = true;
-        }
+        self.input_active = !self.input.is_empty() || self.options.is_empty();
     }
 
     pub fn height(&self, width: u16) -> u16 {

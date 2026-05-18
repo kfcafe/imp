@@ -16,10 +16,10 @@ async fn main() -> Result<()> {
 
     while let Some(event) = session.recv_event().await {
         match event {
-            AgentEvent::MessageDelta { delta } => {
-                if let imp_core::imp_llm::StreamEvent::TextDelta { text } = delta {
-                    print!("{text}");
-                }
+            AgentEvent::MessageDelta {
+                delta: imp_core::imp_llm::StreamEvent::TextDelta { text },
+            } => {
+                print!("{text}");
             }
             AgentEvent::ToolExecutionStart { tool_name, .. } => {
                 eprintln!("\n[tool:{tool_name}]");

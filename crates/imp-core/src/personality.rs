@@ -811,10 +811,10 @@ mod tests {
     fn soul_default_file_write_only_happens_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("soul.md");
-        assert_eq!(write_default_soul_if_missing(&path).unwrap(), true);
+        assert!(write_default_soul_if_missing(&path).unwrap());
         let first = std::fs::read_to_string(&path).unwrap();
         assert!(first.contains("# Soul"));
-        assert_eq!(write_default_soul_if_missing(&path).unwrap(), false);
+        assert!(!write_default_soul_if_missing(&path).unwrap());
         let second = std::fs::read_to_string(&path).unwrap();
         assert_eq!(first, second);
     }

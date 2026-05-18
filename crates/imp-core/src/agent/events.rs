@@ -56,6 +56,42 @@ pub struct TimingEvent {
     pub success: Option<bool>,
 }
 
+impl TimingEvent {
+    pub fn new(
+        turn: u32,
+        stage: TimingStage,
+        turn_started_at: std::time::Instant,
+        llm_request_started_at: Option<std::time::Instant>,
+    ) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            turn,
+            stage,
+            since_turn_start_ms: now.duration_since(turn_started_at).as_millis() as u64,
+            since_llm_request_start_ms: llm_request_started_at
+                .map(|started_at| now.duration_since(started_at).as_millis() as u64),
+            duration_ms: None,
+            label: None,
+            success: None,
+        }
+    }
+
+    pub fn with_duration_ms(mut self, duration_ms: u64) -> Self {
+        self.duration_ms = Some(duration_ms);
+        self
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    pub fn with_success(mut self, success: bool) -> Self {
+        self.success = Some(success);
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryCheckpointKind {

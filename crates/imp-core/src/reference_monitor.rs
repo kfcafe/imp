@@ -700,7 +700,7 @@ impl Default for TrustScopeContext {
 }
 
 /// Coarse kind of action a tool can perform.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolActionKind {
     Read,
@@ -714,13 +714,8 @@ pub enum ToolActionKind {
     AskUser,
     Secret,
     Extension,
+    #[default]
     Unknown,
-}
-
-impl Default for ToolActionKind {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 /// Minimal tool manifest subset needed by the reference monitor.
@@ -745,7 +740,6 @@ pub struct ToolMetadata {
 
 impl ToolMetadata {
     pub fn new(name: impl Into<String>, action_kind: ToolActionKind) -> Self {
-        let action_kind = action_kind;
         Self {
             name: name.into(),
             action_kind,
@@ -911,17 +905,32 @@ impl Default for ToolMetadata {
 }
 
 /// Resource touched by a tool action.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResourceScope {
+    #[default]
     None,
-    File { path: PathBuf },
-    Directory { path: PathBuf },
-    Command { program: String },
-    Network { host: Option<String> },
-    Mana { action: Option<String> },
-    Secret { name: Option<String> },
-    Extension { id: String },
+    File {
+        path: PathBuf,
+    },
+    Directory {
+        path: PathBuf,
+    },
+    Command {
+        program: String,
+    },
+    Network {
+        host: Option<String>,
+    },
+    Mana {
+        action: Option<String>,
+    },
+    Secret {
+        name: Option<String>,
+    },
+    Extension {
+        id: String,
+    },
 }
 
 impl ResourceScope {
@@ -932,12 +941,6 @@ impl ResourceScope {
             }
             _ => None,
         }
-    }
-}
-
-impl Default for ResourceScope {
-    fn default() -> Self {
-        Self::None
     }
 }
 
@@ -1438,7 +1441,7 @@ mod reference_monitor_types_tests {
         assert_eq!(context.workflow_type, WorkflowType::CodeChange);
         assert_eq!(context.risk_level, RiskLevel::High);
         assert_eq!(context.workspace_scope, contract.workspace_scope);
-        assert_eq!(context.trust_scope.allow_external_context, false);
+        assert!(!context.trust_scope.allow_external_context);
         assert!(context
             .trust_labels
             .contains(&"external-context-blocked".to_string()));
@@ -1459,7 +1462,7 @@ mod reference_monitor_types_tests {
             ToolPolicyContext::new("read", ToolActionKind::Read).with_workflow_contract(&contract);
         let record = PolicyTraceRecord::from_context(&context, ToolPolicyDecision::allow());
         assert_eq!(record.autonomy_mode, AutonomyMode::LocalAuto);
-        assert_eq!(record.trust_scope.low_trust_requires_review, false);
+        assert!(!record.trust_scope.low_trust_requires_review);
         assert!(record
             .trust_labels
             .contains(&"low-trust-review-not-required".to_string()));

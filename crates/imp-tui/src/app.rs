@@ -115,6 +115,7 @@ pub enum Pane {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum UiMode {
     Normal,
     ModelSelector(ModelSelectorState),
@@ -291,6 +292,7 @@ impl std::fmt::Debug for AgentStartResult {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum RuntimeSignal {
     AgentEvent(AgentEvent),
     AgentTaskCompleted,
@@ -896,6 +898,8 @@ impl TuiTrace {
     }
 }
 
+type LuaCommandTask = tokio::task::JoinHandle<(String, Result<Option<String>, String>)>;
+
 pub struct App {
     // Core
     pub running: bool,
@@ -910,7 +914,7 @@ pub struct App {
     agent_task: Option<tokio::task::JoinHandle<Result<(), ImpCoreError>>>,
     agent_start_task: Option<tokio::task::JoinHandle<()>>,
     compaction_task: Option<tokio::task::JoinHandle<Result<String, String>>>,
-    lua_command_task: Option<tokio::task::JoinHandle<(String, Result<Option<String>, String>)>>,
+    lua_command_task: Option<LuaCommandTask>,
     pub is_streaming: bool,
     pub message_queue: Vec<QueuedMessage>,
     pending_agent_prompt: Option<String>,
@@ -1148,7 +1152,7 @@ fn create_improve_sandbox(cwd: &Path, scope: &ManaUnitRef) -> Result<ImproveSand
     let branch = format!("imp/improve/{slug}");
     let mut worktree = repo_root
         .parent()
-        .unwrap_or_else(|| repo_root.as_path())
+        .unwrap_or(repo_root.as_path())
         .join(format!("{repo_name}-improve-{slug}"));
 
     let existing_worktrees = run_git(&repo_root, &["worktree", "list", "--porcelain"])?;
@@ -1175,7 +1179,7 @@ fn create_improve_sandbox(cwd: &Path, scope: &ManaUnitRef) -> Result<ImproveSand
         for index in 2..100 {
             let candidate = repo_root
                 .parent()
-                .unwrap_or_else(|| repo_root.as_path())
+                .unwrap_or(repo_root.as_path())
                 .join(format!("{repo_name}-improve-{slug}-{index}"));
             if !candidate.exists() {
                 worktree = candidate;
@@ -1784,6 +1788,7 @@ fn run_clean_command(cwd: &Path, sandbox: &ImproveSandbox, force: bool) -> Clean
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_status_text(
     snapshot: &StatusSnapshot,
     workflow_mode: WorkflowMode,
@@ -1897,10 +1902,10 @@ fn open_path_in_editor(path: &Path) -> std::io::Result<()> {
 
     #[cfg(target_os = "macos")]
     {
-        return std::process::Command::new("open")
+        std::process::Command::new("open")
             .arg(path)
             .spawn()
-            .map(|_| ());
+            .map(|_| ())
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -3279,7 +3284,7 @@ impl App {
             StartupAction {
                 trigger: "Ctrl+L".to_string(),
                 label: "model".to_string(),
-                description: format!("{}", self.model_name),
+                description: self.model_name.to_string(),
             },
         ];
 
@@ -5812,22 +5817,21 @@ impl App {
                 // Resolve prefix: exact match first, then unique prefix match.
                 // Keep the original text for /skill:<name> so arguments survive.
                 let commands = self.slash_commands();
-                let cmd = if canonical_typed == "improve safe" {
-                    canonical_typed.to_string()
-                } else if canonical_typed.starts_with("skill:") {
-                    canonical_typed.to_string()
-                } else {
-                    commands
-                        .iter()
-                        .find(|c| c.name == canonical_typed)
-                        .or_else(|| {
-                            commands
-                                .iter()
-                                .find(|c| c.name.starts_with(canonical_typed))
-                        })
-                        .map(|c| c.name.clone())
-                        .unwrap_or_else(|| canonical_typed.to_string())
-                };
+                let cmd =
+                    if canonical_typed == "improve safe" || canonical_typed.starts_with("skill:") {
+                        canonical_typed.to_string()
+                    } else {
+                        commands
+                            .iter()
+                            .find(|c| c.name == canonical_typed)
+                            .or_else(|| {
+                                commands
+                                    .iter()
+                                    .find(|c| c.name.starts_with(canonical_typed))
+                            })
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|| canonical_typed.to_string())
+                    };
                 self.execute_command(&cmd);
                 self.editor.push_history();
                 self.editor.clear();
@@ -6080,7 +6084,7 @@ impl App {
                 );
             }
             "improve" => match args {
-                arg if matches!(arg, "merge" | "adopt" | "approve") => {
+                "merge" | "adopt" | "approve" => {
                     self.improve_merge_command(args)
                 }
                 arg => self.set_improve_mode(arg.eq_ignore_ascii_case("safe")),

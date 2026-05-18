@@ -744,8 +744,10 @@ mod tests {
         let mana_dir = temp.path().join(".mana");
         std::fs::create_dir(&mana_dir).unwrap();
 
-        let mut mana_config = mana_core::config::Config::default();
-        mana_config.project = "test".to_string();
+        let mana_config = mana_core::config::Config {
+            project: "test".to_string(),
+            ..Default::default()
+        };
         mana_config.save(&mana_dir).unwrap();
 
         let mut working = mana_core::unit::Unit::new("1", "Implement auth flow");
@@ -789,8 +791,10 @@ mod tests {
         let mana_dir = temp.path().join(".mana");
         std::fs::create_dir(&mana_dir).unwrap();
 
-        let mut mana_config = mana_core::config::Config::default();
-        mana_config.project = "test".to_string();
+        let mana_config = mana_core::config::Config {
+            project: "test".to_string(),
+            ..Default::default()
+        };
         mana_config.save(&mana_dir).unwrap();
 
         let mut working = mana_core::unit::Unit::new("1", "Implement auth flow");

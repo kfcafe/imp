@@ -3590,8 +3590,10 @@ mod tests {
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    type TestWidgets = Arc<std::sync::Mutex<Vec<(String, Option<WidgetContent>)>>>;
+
     struct TestUi {
-        widgets: Arc<std::sync::Mutex<Vec<(String, Option<WidgetContent>)>>>,
+        widgets: TestWidgets,
     }
 
     #[async_trait]
@@ -3753,11 +3755,7 @@ mod tests {
     fn ctx_with_ui(
         dir: &std::path::Path,
         mode: crate::config::AgentMode,
-    ) -> (
-        ToolContext,
-        tempfile::TempDir,
-        Arc<std::sync::Mutex<Vec<(String, Option<WidgetContent>)>>>,
-    ) {
+    ) -> (ToolContext, tempfile::TempDir, TestWidgets) {
         let mana_dir = dir.join(".mana");
         std::fs::create_dir_all(&mana_dir).unwrap();
         std::fs::write(mana_dir.join("config.yaml"), "project: test\nnext_id: 2\n").unwrap();
@@ -5430,9 +5428,11 @@ mod tests {
     fn native_worker_options_prefer_unit_model_and_config_thinking() {
         let dir = tempfile::tempdir().unwrap();
         let (mut ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
-        let mut config = crate::config::Config::default();
-        config.model = Some("config-model".to_string());
-        config.thinking = Some(imp_llm::ThinkingLevel::High);
+        let config = crate::config::Config {
+            model: Some("config-model".to_string()),
+            thinking: Some(imp_llm::ThinkingLevel::High),
+            ..Default::default()
+        };
         ctx.config = Arc::new(config);
         let run_args = mana::commands::run::NativeRunParams {
             timeout: 42,
@@ -5460,8 +5460,10 @@ mod tests {
     fn native_worker_options_fall_back_to_config_model() {
         let dir = tempfile::tempdir().unwrap();
         let (mut ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
-        let mut config = crate::config::Config::default();
-        config.model = Some("config-model".to_string());
+        let config = crate::config::Config {
+            model: Some("config-model".to_string()),
+            ..Default::default()
+        };
         ctx.config = Arc::new(config);
 
         let options = worker_options_for_native_unit(
@@ -5479,8 +5481,10 @@ mod tests {
     fn native_run_runtime_info_reports_config_model() {
         let dir = tempfile::tempdir().unwrap();
         let (mut ctx, _keep) = ctx_with_mode(dir.path(), crate::config::AgentMode::Full);
-        let mut config = crate::config::Config::default();
-        config.model = Some("config-model".to_string());
+        let config = crate::config::Config {
+            model: Some("config-model".to_string()),
+            ..Default::default()
+        };
         ctx.config = Arc::new(config);
 
         let runtime = runtime_info_for_run(&native_run_params_for_test(), &ctx);

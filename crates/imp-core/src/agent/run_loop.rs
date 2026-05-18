@@ -10,7 +10,7 @@ use imp_llm::{
 use crate::agent::loop_state::enforce_verification_closeout;
 use crate::agent::{
     Agent, AgentCommand, AgentEvent, LoopDecision, RecoveryCheckpointKind, RunFinalStatus,
-    StopReason as AgentStopReason, TimingStage, TurnPhase, TurnState,
+    StopReason as AgentStopReason, TimingEvent, TimingStage, TurnPhase, TurnState,
 };
 use crate::error::Result;
 use crate::evidence::{
@@ -321,13 +321,9 @@ impl Agent {
                 effort: None,
             };
             self.emit_timing_with_details(
-                turn,
-                TimingStage::ContextAssemblyEnd,
-                turn_started_at,
-                None,
-                Some(context_assembly_started_at.elapsed().as_millis() as u64),
-                None,
-                Some(true),
+                TimingEvent::new(turn, TimingStage::ContextAssemblyEnd, turn_started_at, None)
+                    .with_duration_ms(context_assembly_started_at.elapsed().as_millis() as u64)
+                    .with_success(true),
             )
             .await;
 
@@ -676,13 +672,14 @@ impl Agent {
                 let assessment_started_at = Instant::now();
                 let assessment = self.assess_post_turn(&msg, &[], false, &mana_review);
                 self.emit_timing_with_details(
-                    turn,
-                    TimingStage::PostTurnAssessmentEnd,
-                    turn_started_at,
-                    None,
-                    Some(assessment_started_at.elapsed().as_millis() as u64),
-                    None,
-                    Some(true),
+                    TimingEvent::new(
+                        turn,
+                        TimingStage::PostTurnAssessmentEnd,
+                        turn_started_at,
+                        None,
+                    )
+                    .with_duration_ms(assessment_started_at.elapsed().as_millis() as u64)
+                    .with_success(true),
                 )
                 .await;
                 self.emit(AgentEvent::TurnAssessment {
@@ -769,13 +766,14 @@ impl Agent {
             let assessment_started_at = Instant::now();
             let assessment = self.assess_post_turn(&msg, &results, true, &mana_review);
             self.emit_timing_with_details(
-                turn,
-                TimingStage::PostTurnAssessmentEnd,
-                turn_started_at,
-                None,
-                Some(assessment_started_at.elapsed().as_millis() as u64),
-                None,
-                Some(true),
+                TimingEvent::new(
+                    turn,
+                    TimingStage::PostTurnAssessmentEnd,
+                    turn_started_at,
+                    None,
+                )
+                .with_duration_ms(assessment_started_at.elapsed().as_millis() as u64)
+                .with_success(true),
             )
             .await;
             self.emit(AgentEvent::TurnAssessment {

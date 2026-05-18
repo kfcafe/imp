@@ -268,7 +268,7 @@ fn is_documentation_ipv4(ip: std::net::Ipv4Addr) -> bool {
 }
 
 fn is_documentation_ipv6(ip: std::net::Ipv6Addr) -> bool {
-    (ip.segments()[0] & 0xfff0) == 0x2001 && ip.segments()[1] == 0x0db8
+    ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8
 }
 
 fn apply_quality(page: &mut PageContent) {

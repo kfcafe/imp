@@ -860,6 +860,7 @@ mod tests {
     use crate::UsageReportArgs;
     use imp_core::usage::{UsageCostBreakdown, UsageTokens};
 
+    #[allow(clippy::too_many_arguments)]
     fn canonical_record(
         request_id: &str,
         recorded_at: u64,
