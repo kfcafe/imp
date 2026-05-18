@@ -9,6 +9,7 @@ homepage.workspace = true
 readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
+exclude = ["auth.json"]
 
 [[bin]]
 name = "imp"
