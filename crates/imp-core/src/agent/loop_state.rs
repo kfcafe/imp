@@ -92,7 +92,10 @@ pub enum ContinueReason {
     ExecutionDebt,
     ToolResultsNeedInterpretation,
     QueuedUserFollowUp,
-    RecoveryContinuation,
+    OrchestrationProgress,
+    WorkflowCloseout,
+    WorkflowBootstrap,
+    WorkflowDecomposition,
 }
 
 impl ContinueReason {
@@ -103,7 +106,10 @@ impl ContinueReason {
             Self::ExecutionDebt => "execution_debt",
             Self::ToolResultsNeedInterpretation => "tool_results_need_interpretation",
             Self::QueuedUserFollowUp => "queued_user_follow_up",
-            Self::RecoveryContinuation => "recovery_continuation",
+            Self::OrchestrationProgress => "orchestration_progress",
+            Self::WorkflowCloseout => "workflow_closeout",
+            Self::WorkflowBootstrap => "workflow_bootstrap",
+            Self::WorkflowDecomposition => "workflow_decomposition",
         }
     }
 }
@@ -119,6 +125,7 @@ pub enum StopReason {
     ExecutionBlocked,
     DecompositionCompleted,
     WorkCompleted,
+    CloseoutIncomplete,
 }
 
 impl StopReason {
@@ -131,6 +138,7 @@ impl StopReason {
             Self::ExecutionBlocked => "execution_blocked",
             Self::DecompositionCompleted => "decomposition_completed",
             Self::WorkCompleted => "work_completed",
+            Self::CloseoutIncomplete => "closeout_incomplete",
         }
     }
 }
@@ -179,7 +187,7 @@ impl RunFinalStatus {
                     message: reason.as_str().to_string(),
                 }
             }
-            StopReason::NoProgress => Self::DoneWithConcerns {
+            StopReason::NoProgress | StopReason::CloseoutIncomplete => Self::DoneWithConcerns {
                 reason,
                 concerns: vec!["stopped because no justified continuation was available".into()],
             },

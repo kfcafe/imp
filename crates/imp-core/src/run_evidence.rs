@@ -192,7 +192,11 @@ impl RunEvent {
             }
             AgentEvent::MessageStart { .. }
             | AgentEvent::MessageDelta { .. }
-            | AgentEvent::MessageEnd { .. } => {}
+            | AgentEvent::MessageEnd { .. }
+            | AgentEvent::WorkflowControllerSnapshot { .. }
+            | AgentEvent::WorktreeCreated { .. }
+            | AgentEvent::WorktreeDiffCaptured { .. }
+            | AgentEvent::WorktreeCloseout { .. } => {}
         }
 
         run_event
@@ -356,6 +360,10 @@ fn agent_event_kind(event: &AgentEvent) -> &'static str {
         AgentEvent::VerificationStarted { .. } => "verification.started",
         AgentEvent::VerificationCompleted { .. } => "verification.completed",
         AgentEvent::EvidenceWritten { .. } => "evidence.written",
+        AgentEvent::WorkflowControllerSnapshot { .. } => "workflow.controller_snapshot",
+        AgentEvent::WorktreeCreated { .. } => "worktree.created",
+        AgentEvent::WorktreeDiffCaptured { .. } => "worktree.diff_captured",
+        AgentEvent::WorktreeCloseout { .. } => "worktree.closeout",
         AgentEvent::Error { .. } => "error",
     }
 }

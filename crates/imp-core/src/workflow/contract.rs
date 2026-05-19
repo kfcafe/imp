@@ -70,6 +70,7 @@ pub struct WorkflowContract {
     pub closeout_criteria: CloseoutCriteria,
     pub mana_unit_ref: Option<String>,
     pub parent_workflow_ref: Option<String>,
+    pub role: Option<String>,
 }
 
 impl WorkflowContract {
@@ -129,6 +130,7 @@ impl Default for WorkflowContract {
             closeout_criteria: CloseoutCriteria::default(),
             mana_unit_ref: None,
             parent_workflow_ref: None,
+            role: None,
         }
     }
 }

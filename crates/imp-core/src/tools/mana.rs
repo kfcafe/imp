@@ -1309,6 +1309,7 @@ fn worker_options_for_native_unit(
         model: unit.model.clone().or_else(|| ctx.config.model.clone()),
         provider: None,
         api_key: None,
+        role: None,
         thinking: ctx.config.thinking,
         max_turns: Some(run_args.timeout),
         autonomy_mode: None,

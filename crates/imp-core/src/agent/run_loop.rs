@@ -13,13 +13,18 @@ use crate::agent::{
     StopReason as AgentStopReason, TimingEvent, TimingStage, TurnPhase, TurnState,
 };
 use crate::error::Result;
+use crate::eval_candidate::{redact_eval_candidate, EvalArtifactRef};
+use crate::eval_candidate_closeout::{eval_candidate_for_closeout, EvalCandidateCloseoutContext};
 use crate::evidence::{
     EvidenceActions, EvidenceArtifact, EvidencePacket, EvidencePolicy, EvidenceTrustSummary,
     EvidenceVerificationGate,
 };
 use crate::hooks::HookEvent;
 use crate::ui::NotifyLevel;
-use crate::workflow::{AutonomyMode, VerificationGateRunner};
+use crate::workflow::{
+    capture_worktree_diff_artifacts, write_worktree_metadata, AutonomyMode, VerificationGateRunner,
+    WorktreeRunMetadata,
+};
 use crate::{
     storage,
     trace::TraceWriter,
@@ -91,10 +96,41 @@ impl Agent {
         }
     }
 
+    async fn capture_worktree_run_artifacts(
+        &self,
+        artifacts: &storage::RunArtifacts,
+    ) -> Option<WorktreeRunMetadata> {
+        let mut metadata = self.worktree_run_metadata.clone()?;
+        self.write_trace_event(&AgentEvent::WorktreeCreated {
+            metadata: metadata.clone(),
+        });
+        let worktree_artifact_dir = artifacts.root().join("worktree");
+        match capture_worktree_diff_artifacts(&mut metadata, &worktree_artifact_dir).await {
+            Ok(_) => {
+                let _ = write_worktree_metadata(
+                    &worktree_artifact_dir.join("worktree-metadata.json"),
+                    &metadata,
+                )
+                .await;
+                self.write_trace_event(&AgentEvent::WorktreeDiffCaptured {
+                    metadata: metadata.clone(),
+                });
+                Some(metadata)
+            }
+            Err(err) => {
+                self.write_trace_event(&AgentEvent::Warning {
+                    message: format!("failed to capture worktree diff artifacts: {err}"),
+                });
+                None
+            }
+        }
+    }
+
     async fn write_run_evidence(
         &self,
         run_id: &str,
         artifacts: &storage::RunArtifacts,
+        worktree_metadata: Option<&WorktreeRunMetadata>,
         prompt: &str,
         status: &RunFinalStatus,
     ) {
@@ -119,6 +155,13 @@ impl Agent {
             .iter()
             .map(evidence_verification_gate)
             .collect();
+        if let Some(metadata) = worktree_metadata {
+            packet.summary.push(format!(
+                "Worktree-auto changes ran in {} on branch {}; inspect worktree artifacts for status and patch.",
+                metadata.worktree_path.display(),
+                metadata.branch
+            ));
+        }
         packet.artifacts = vec![
             EvidenceArtifact {
                 kind: "trace".into(),
@@ -131,6 +174,39 @@ impl Agent {
                 summary: Some("Workflow contract snapshot".into()),
             },
         ];
+        if let Some(metadata) = worktree_metadata {
+            let worktree_dir = artifacts.root().join("worktree");
+            packet.artifacts.extend([
+                EvidenceArtifact {
+                    kind: "worktree-status".into(),
+                    path: metadata.status_path.clone(),
+                    summary: Some(format!(
+                        "Worktree status for {} ({})",
+                        metadata.worktree_path.display(),
+                        if metadata.clean { "clean" } else { "dirty" }
+                    )),
+                },
+                EvidenceArtifact {
+                    kind: "worktree-diff-stat".into(),
+                    path: metadata.stat_path.clone(),
+                    summary: Some("Worktree diff summary".into()),
+                },
+                EvidenceArtifact {
+                    kind: "worktree-diff".into(),
+                    path: metadata.patch_path.clone(),
+                    summary: Some("Binary-safe worktree patch".into()),
+                },
+                EvidenceArtifact {
+                    kind: "worktree-metadata".into(),
+                    path: worktree_dir.join("worktree-metadata.json"),
+                    summary: Some(format!(
+                        "Worktree {} on branch {}",
+                        metadata.worktree_path.display(),
+                        metadata.branch
+                    )),
+                },
+            ]);
+        }
         let evidence_path = artifacts.evidence_path();
         if packet.write_markdown(&evidence_path).is_ok() {
             self.write_trace_event(&AgentEvent::EvidenceWritten {
@@ -145,7 +221,65 @@ impl Agent {
         }
     }
 
-    /// Run the agent loop with an initial prompt.
+    async fn write_closeout_eval_candidate(
+        &self,
+        run_id: &str,
+        artifacts: &storage::RunArtifacts,
+        prompt: &str,
+        status: &RunFinalStatus,
+    ) {
+        let candidate_id = format!("{run_id}-closeout");
+        let context = EvalCandidateCloseoutContext {
+            candidate_id: candidate_id.clone(),
+            run_id: Some(run_id.to_string()),
+            workflow_id: self
+                .workflow_contract
+                .id
+                .clone()
+                .or_else(|| self.workflow_contract.mana_unit_ref.clone()),
+            session_id: None,
+            prompt: Some(prompt.to_string()),
+            expected_summary: Some(
+                "Agent run should satisfy its workflow contract and required verification gates"
+                    .into(),
+            ),
+            verifiers: Vec::new(),
+            artifact_refs: vec![
+                EvalArtifactRef {
+                    kind: "trace".into(),
+                    path: artifacts.trace_path(),
+                    summary: Some("Structured runtime event trace".into()),
+                    sha256: None,
+                },
+                EvalArtifactRef {
+                    kind: "evidence".into(),
+                    path: artifacts.evidence_path(),
+                    summary: Some("Run evidence packet".into()),
+                    sha256: None,
+                },
+                EvalArtifactRef {
+                    kind: "workflow-contract".into(),
+                    path: artifacts.workflow_contract_path(),
+                    summary: Some("Workflow contract snapshot".into()),
+                    sha256: None,
+                },
+            ],
+        };
+        let Some(candidate) =
+            eval_candidate_for_closeout(status, &self.verification_gates, context)
+        else {
+            return;
+        };
+        let path = artifacts.eval_candidate_path(&candidate_id);
+        if let Some(parent) = path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&redact_eval_candidate(candidate)) {
+            let _ = std::fs::write(path, json);
+        }
+    }
     pub async fn run(&mut self, prompt: String) -> Result<()> {
         let trace_path = std::env::var_os("IMP_TUI_TRACE").map(std::path::PathBuf::from);
         let trace_run = |phase: &str, started: std::time::Instant| {
@@ -227,7 +361,18 @@ impl Agent {
         }
 
         loop {
+            self.bootstrap_workflow_if_required(&prompt).await;
             let mut turn_state = TurnState::new(turn);
+            self.workflow_controller.tick_turn();
+            if let Some(artifacts) = &run_artifacts {
+                let _ = self
+                    .workflow_controller
+                    .save_to_path(&artifacts.workflow_controller_path());
+            }
+            self.emit(AgentEvent::WorkflowControllerSnapshot {
+                snapshot: self.workflow_controller.snapshot(),
+            })
+            .await;
             turn_state.enter(TurnPhase::ReceiveCommands);
 
             if let Some(reconciliation) = self.reconcile_recovery_before_turn(turn).await {
@@ -688,7 +833,13 @@ impl Agent {
                 })
                 .await;
                 turn_state.enter(TurnPhase::DecideNext);
-                let decision = self.loop_decision_after_turn(&assessment);
+                let mut decision = self.loop_decision_after_turn(&assessment);
+                if matches!(decision, LoopDecision::Finish { .. }) {
+                    if let Some(controller_decision) = self.workflow_controller_continue_decision()
+                    {
+                        decision = controller_decision;
+                    }
+                }
                 match decision {
                     LoopDecision::Continue { prompt, reason } => {
                         self.mark_continue_reason(reason);
@@ -747,6 +898,7 @@ impl Agent {
             }
 
             record_mana_mutation_results(&self.turn_mana_review, &results);
+            self.record_workflow_obligations_from_tool_results(&results);
             let mana_review = self.finish_turn_mana_review(turn);
             self.emit(AgentEvent::TurnEnd {
                 index: turn,
@@ -782,7 +934,12 @@ impl Agent {
             })
             .await;
             turn_state.enter(TurnPhase::DecideNext);
-            let decision = self.loop_decision_after_turn(&assessment);
+            let mut decision = self.loop_decision_after_turn(&assessment);
+            if matches!(decision, LoopDecision::Finish { .. }) {
+                if let Some(controller_decision) = self.workflow_controller_continue_decision() {
+                    decision = controller_decision;
+                }
+            }
             let should_stop_after_tool_turn = matches!(
                 decision,
                 LoopDecision::Finish {
@@ -828,9 +985,32 @@ impl Agent {
             }
             status = enforce_verification_closeout(status, &self.verification_gates);
         }
+        if !cancelled {
+            status = self.workflow_controller.enforce_closeout_status(status);
+        }
+        let worktree_metadata = if let Some(artifacts) = &run_artifacts {
+            self.capture_worktree_run_artifacts(artifacts).await
+        } else {
+            None
+        };
         if let Some(artifacts) = &run_artifacts {
-            self.write_run_evidence(&run_id, artifacts, &prompt, &status)
+            self.write_run_evidence(
+                &run_id,
+                artifacts,
+                worktree_metadata.as_ref(),
+                &prompt,
+                &status,
+            )
+            .await;
+            self.write_closeout_eval_candidate(&run_id, artifacts, &prompt, &status)
                 .await;
+            let _ = self
+                .workflow_controller
+                .save_to_path(&artifacts.workflow_controller_path());
+            self.emit(AgentEvent::WorkflowControllerSnapshot {
+                snapshot: self.workflow_controller.snapshot(),
+            })
+            .await;
         }
         let cost = total_usage.cost(&self.model.meta.pricing);
         self.emit(AgentEvent::AgentEnd {

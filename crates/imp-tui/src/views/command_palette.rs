@@ -82,6 +82,10 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
             description: "Explain Improve autoresearch guardrails".into(),
         },
         SlashCommand {
+            name: "eval".into(),
+            description: "Save latest run as an eval candidate (/eval <expected> [--note ...] [--verifier ...])".into(),
+        },
+        SlashCommand {
             name: "status".into(),
             description: "Show active imp work status".into(),
         },

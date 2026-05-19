@@ -20,7 +20,7 @@ mode.
 | `suggest` | planning/advice only | Read and inspect; propose changes/commands instead of executing mutable actions. |
 | `safe` | current default | Preserve current imp behavior: normal reads/searches, explicit tool policy checks, no new broad grants. |
 | `local-auto` | unattended local implementation | May edit workspace and run normal local checks; approval for high-risk shell/network/secrets/outside-scope actions. |
-| `worktree-auto` | unattended isolated implementation | Requires an isolated worktree/run cwd. Until 394.9 creates worktrees automatically, this mode returns `SandboxOnly` / `autonomy_worktree_required` unless an existing `WorkspaceScope::Worktree` context is supplied. Use `local-auto` for current-workspace unattended execution. |
+| `worktree-auto` | unattended isolated implementation | Creates or uses an isolated git worktree/run cwd; captures status/diff/metadata artifacts; exposes keep/apply/discard closeout. Fails closed with `autonomy_worktree_required` if isolation cannot be established. |
 | `allow-all-local` | easy auditable local allow-all | Allow local workspace writes and shell commands with audit/evidence; still hard-deny outside-workspace writes, secrets exfiltration, network mutation, and destructive system actions unless separately granted. |
 | `allow-all` | easy auditable broad allow-all | Allow most tools/actions with trace/evidence, including network when tools support it; hard rails still apply. |
 | `ci` | noninteractive reproducible automation | No user prompts; allow declared commands/gates only; fail closed on missing approvals or ambiguous policy. |
@@ -156,9 +156,9 @@ The TUI should display autonomy mode compactly, not as a modal-heavy workflow:
 - run closeout/evidence should include selected mode
 - approval prompts should state mode, tool, resource scope, and reason code
 - switching to allow-all variants should be explicit and visually distinct
-- if `worktree-auto` is selected before 394.9 worktree creation support lands,
-  the TUI/CLI should show `autonomy_worktree_required` and suggest `local-auto`
-  for current-workspace execution or an explicit existing worktree context
+- if `worktree-auto` cannot create or use an isolated worktree, the TUI/CLI should
+  show `autonomy_worktree_required` and suggest cleaning the checkout, using
+  `local-auto`, or passing explicit worktree metadata/context
 
 Default TUI startup remains `safe` unless config/CLI explicitly sets another
 mode.
@@ -199,7 +199,8 @@ more auditable than interactive safe mode, not less.
 4. Add CLI/config/TUI selection plumbing.
 5. Record autonomy mode in evidence/trace where not already present.
 6. Add hard-rail dangerous grant design separately in 394.6.7.
-7. Let 394.9 implement real `worktree-auto` isolation.
+7. Keep `worktree-auto` isolation, artifact capture, and lifecycle closeout wired
+   to trace/evidence and user-facing docs as the workflow runtime evolves.
 
 ## User-facing examples
 
@@ -252,10 +253,12 @@ verification context.
 imp --autonomy worktree-auto "implement the refactor in an isolated worktree"
 ```
 
-Until 394.9 creates/manages worktrees automatically, `worktree-auto` fails closed
-with `autonomy_worktree_required` unless an existing `WorkspaceScope::Worktree`
-context is supplied by the runtime. Use `local-auto` if you intentionally want the
-current workspace to be modified now.
+`worktree-auto` creates or uses an isolated git worktree for the run, then keeps
+all file writes and shell commands scoped to that worktree. Runtime closeout
+captures status, diff-stat, binary patch, and metadata artifacts under the run
+artifact directory, and the TUI/trace/evidence surfaces the worktree path, branch,
+and closeout choices. Use `local-auto` if you intentionally want the current
+workspace to be modified instead.
 
 Maintainer note: never silently downgrade `worktree-auto` to current-workspace
 execution. That would violate user intent and make reviews unsafe.

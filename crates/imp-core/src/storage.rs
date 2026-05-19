@@ -130,6 +130,10 @@ impl RunArtifacts {
         &self.root
     }
 
+    pub fn workflow_controller_path(&self) -> PathBuf {
+        self.root.join("workflow-controller.json")
+    }
+
     pub fn workflow_contract_path(&self) -> PathBuf {
         self.root.join("workflow-contract.json")
     }
@@ -152,6 +156,13 @@ impl RunArtifacts {
 
     pub fn policy_log_path(&self) -> PathBuf {
         self.root.join("policy.jsonl")
+    }
+
+    pub fn eval_candidate_path(&self, candidate_id: &str) -> PathBuf {
+        self.root
+            .join("eval-candidates")
+            .join(candidate_id)
+            .join("candidate.json")
     }
 }
 
@@ -176,6 +187,27 @@ pub fn run_artifacts_under(base: PathBuf, run_id: &str) -> io::Result<RunArtifac
     let root = base.join(safe_run_id);
     ensure_child_path(&base, &root)?;
     RunArtifacts::create(root)
+}
+
+pub fn existing_project_run_artifacts(
+    project_dir: &Path,
+    run_id: &str,
+) -> io::Result<RunArtifacts> {
+    existing_run_artifacts_under(project_runs_dir(project_dir), run_id)
+}
+
+pub fn existing_run_artifacts_under(base: PathBuf, run_id: &str) -> io::Result<RunArtifacts> {
+    let safe_run_id = sanitize_run_id(run_id)?;
+    let root = base.join(safe_run_id);
+    ensure_child_path(&base, &root)?;
+    if root.is_dir() {
+        Ok(RunArtifacts::new(root))
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "run artifact directory does not exist",
+        ))
+    }
 }
 
 fn sanitize_run_id(run_id: &str) -> io::Result<&str> {
@@ -513,9 +545,24 @@ mod tests {
             artifacts.root().join("policy.jsonl")
         );
         assert_eq!(
+            artifacts.workflow_controller_path(),
+            artifacts.root().join("workflow-controller.json")
+        );
+        assert_eq!(
             artifacts.workflow_contract_path(),
             artifacts.root().join("workflow-contract.json")
         );
+    }
+
+    #[test]
+    fn existing_run_artifacts_reopens_without_creating_missing_directory() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path().join("runs");
+        assert!(existing_run_artifacts_under(base.clone(), "run_1").is_err());
+
+        let created = run_artifacts_under(base.clone(), "run_1").unwrap();
+        let reopened = existing_run_artifacts_under(base, "run_1").unwrap();
+        assert_eq!(reopened.root(), created.root());
     }
 
     #[test]

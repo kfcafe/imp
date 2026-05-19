@@ -9,6 +9,10 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use imp_core::eval_candidate::{
+    redact_eval_candidate, EvalActualBehavior, EvalCandidate, EvalExpectedBehavior,
+    EvalFailureMode, EvalPrivacy, EvalRedactionStatus, EvalVerifier,
+};
 use imp_core::format_error_for_display;
 use imp_core::ui::WidgetContent;
 use imp_core::{mana_run_summary, stop_mana_run, ManaRunSummary, ManaUnitRef, TurnManaReview};
@@ -27,6 +31,9 @@ use imp_core::compaction::{
 };
 use imp_core::config::Config;
 use imp_core::personality::default_soul_markdown;
+use imp_core::runtime::{
+    RuntimeChildWorkflowSummary, RuntimeStateAccumulator, RuntimeStateSnapshot,
+};
 use imp_core::session::{SessionEntry, SessionInfo, SessionManager};
 use imp_core::tools::ToolRegistry;
 use imp_core::trust::{Provenance, RiskLabel, TrustLabel};
@@ -264,6 +271,7 @@ struct AgentStartRequest {
     session: SessionManager,
     model_name: String,
     model_registry: ModelRegistry,
+    role_name: Option<String>,
     thinking_level: ThinkingLevel,
     config: Config,
     workflow_mode: WorkflowMode,
@@ -273,6 +281,8 @@ struct AgentStartRequest {
     autonomy_mode: AutonomyMode,
     runtime_signal_tx: tokio::sync::mpsc::Sender<RuntimeSignal>,
     ui_tx: tokio::sync::mpsc::Sender<crate::tui_interface::UiRequest>,
+    preloaded_lua_tools: Option<ToolRegistry>,
+    prompt_context: Option<imp_core::mana_prompt_context::SessionPromptContext>,
     tui_trace: Option<TuiTrace>,
 }
 
@@ -924,6 +934,7 @@ pub struct App {
     // Config
     pub config: Config,
     pub model_name: String,
+    pub role_name: Option<String>,
     pub thinking_level: ThinkingLevel,
     pub context_window: u32,
 
@@ -946,6 +957,7 @@ pub struct App {
     pub last_esc: Option<Instant>,
     pub tick: u64,
     completed_turns_in_run: u32,
+    last_agent_error: Option<String>,
     suppress_completion_notification: bool,
     pub ui_rx: Option<tokio::sync::mpsc::Receiver<crate::tui_interface::UiRequest>>,
     lua_command_ui: Option<Arc<dyn imp_core::ui::UserInterface>>,
@@ -990,6 +1002,9 @@ pub struct App {
     // Extension state
     pub status_items: HashMap<String, String>,
     verification_status_items: BTreeMap<String, String>,
+    runtime_state: RuntimeStateAccumulator,
+    runtime_event_sequence: u64,
+    pub runtime_snapshot: RuntimeStateSnapshot,
     pub widgets: HashMap<String, WidgetContent>,
 
     /// Lua extension runtime (for command dispatch and hot-reload).
@@ -1082,7 +1097,11 @@ fn agent_event_kind(event: &AgentEvent) -> &'static str {
         AgentEvent::AgentEnd { .. } => "agent_end",
         AgentEvent::Warning { .. } => "warning",
         AgentEvent::RecoveryCheckpoint { .. } => "recovery_checkpoint",
+        AgentEvent::WorktreeCreated { .. } => "worktree_created",
+        AgentEvent::WorktreeDiffCaptured { .. } => "worktree_diff_captured",
+        AgentEvent::WorktreeCloseout { .. } => "worktree_closeout",
         AgentEvent::EvidenceWritten { .. } => "evidence_written",
+        AgentEvent::WorkflowControllerSnapshot { .. } => "workflow_controller_snapshot",
         AgentEvent::VerificationStarted { .. } => "verification_started",
         AgentEvent::VerificationCompleted { .. } => "verification_completed",
         AgentEvent::PolicyChecked { .. } => "policy_checked",
@@ -1250,6 +1269,31 @@ fn trust_policy_warning(record: &imp_core::reference_monitor::PolicyTraceRecord)
 
     Some(format!(
         "Trust warning: {} ({})",
+        reason.message, reason.code
+    ))
+}
+
+fn extension_policy_warning(
+    record: &imp_core::reference_monitor::PolicyTraceRecord,
+) -> Option<String> {
+    let reason = match &record.decision {
+        imp_core::reference_monitor::ToolPolicyDecision::Allow { reasons } => {
+            reasons.iter().find(|reason| {
+                reason.source == imp_core::reference_monitor::PolicySource::ToolManifest
+            })
+        }
+        imp_core::reference_monitor::ToolPolicyDecision::Deny { reason }
+        | imp_core::reference_monitor::ToolPolicyDecision::AskUser { reason }
+        | imp_core::reference_monitor::ToolPolicyDecision::DryRunOnly { reason }
+        | imp_core::reference_monitor::ToolPolicyDecision::SandboxOnly { reason }
+        | imp_core::reference_monitor::ToolPolicyDecision::RequireVerification { reason } => {
+            (reason.source == imp_core::reference_monitor::PolicySource::ToolManifest)
+                .then_some(reason)
+        }
+    }?;
+
+    Some(format!(
+        "Extension policy: {} ({})",
         reason.message, reason.code
     ))
 }
@@ -1439,6 +1483,30 @@ fn start_agent_from_request(
         .resolve_meta(&request.model_name, None)
         .ok_or_else(|| format!("Unknown model: {}", request.model_name))?;
     let mut provider_name = meta.provider.clone();
+    let role_registry = request
+        .config
+        .role_registry()
+        .map_err(|err| format!("Role registry error: {err}"))?;
+    let selected_role = request
+        .role_name
+        .as_deref()
+        .map(|role_name| {
+            role_registry
+                .resolve(role_name)
+                .ok_or_else(|| format!("Unknown role: {role_name}"))
+        })
+        .transpose()?;
+    let cli_model_selected = request.config.model.as_deref() != Some(request.model_name.as_str());
+    if !cli_model_selected {
+        if let Some(role_name) = request.role_name.as_deref() {
+            if let Some(model) =
+                role_registry.resolve_model_for_role(role_name, &request.model_registry)
+            {
+                meta = model.clone();
+                provider_name = meta.provider.clone();
+            }
+        }
+    }
     if should_use_chatgpt_provider(&auth_store, &request.model_registry, &meta) {
         provider_name = "openai-codex".to_string();
         meta = request
@@ -1479,27 +1547,24 @@ fn start_agent_from_request(
     config.thinking = Some(request.thinking_level);
     let requested_max_tokens = request.config.max_tokens;
     let builder_cwd_for_lua = agent_cwd.clone();
-    let start = Instant::now();
-    let policy = request.config.lua.resolve_policy(request.config.mode);
-    let mut preloaded_lua_tools = ToolRegistry::new();
-    let user_config_dir = imp_core::config::Config::user_config_dir();
-    imp_lua::init_lua_extensions(
-        &user_config_dir,
-        Some(&builder_cwd_for_lua),
-        &mut preloaded_lua_tools,
-        &policy,
-    );
-    if let Some(trace) = request.tui_trace.as_ref() {
-        trace.log(&format!(
-            "agent_start_phase phase=lua_extensions duration_ms={}",
-            start.elapsed().as_millis()
-        ));
+    let mut builder =
+        AgentBuilder::new(config, agent_cwd, model, api_key).autonomy_mode(request.autonomy_mode);
+    if let Some(role) = selected_role {
+        builder = builder.role(role);
     }
-
+    if let Some(prompt_context) = request.prompt_context.clone() {
+        builder = builder.preloaded_prompt_context(prompt_context);
+    }
+    if let Some(preloaded_lua_tools) = request.preloaded_lua_tools {
+        builder = builder.preloaded_lua_tools(preloaded_lua_tools);
+    } else {
+        let lua_cwd = builder_cwd_for_lua.clone();
+        let user_config_dir = imp_core::config::Config::user_config_dir();
+        builder = builder.lua_tool_loader(move |policy, tools| {
+            imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools, policy);
+        });
+    }
     let start = Instant::now();
-    let builder = AgentBuilder::new(config, agent_cwd, model, api_key)
-        .autonomy_mode(request.autonomy_mode)
-        .preloaded_lua_tools(preloaded_lua_tools);
     let (mut agent, handle) = builder
         .build()
         .map_err(|e: imp_core::error::Error| e.to_string())?;
@@ -1805,6 +1870,7 @@ fn render_status_text(
     improve_auto_turn_budget: u32,
     improve_safe_mode: bool,
     sandbox: Option<&ImproveSandbox>,
+    runtime_snapshot: RuntimeStateSnapshot,
     loop_state: Option<&LoopState>,
 ) -> String {
     let mut lines = Vec::new();
@@ -1875,7 +1941,32 @@ fn render_status_text(
             single_line_preview(&state.message)
         ));
     }
+    if !runtime_snapshot.child_workflows.is_empty() {
+        lines.push("children:".to_string());
+        for child in &runtime_snapshot.child_workflows {
+            lines.push(format_child_workflow_status_line(child));
+            if let Some(summary) = &child.summary {
+                lines.push(format!("    summary: {}", single_line_preview(summary)));
+            }
+            if !child.concerns.is_empty() {
+                lines.push(format!("    concerns: {}", child.concerns.join("; ")));
+            }
+            if let Some(evidence) = child.evidence_refs.first() {
+                lines.push(format!("    evidence: {}", evidence.path.display()));
+            }
+        }
+    }
     lines.join("\n")
+}
+
+fn format_child_workflow_status_line(child: &RuntimeChildWorkflowSummary) -> String {
+    let title = child.title.as_deref().unwrap_or("");
+    let status = format!("{:?}", child.status);
+    if title.is_empty() {
+        format!("  {}  {}  {}", child.role, child.id, status)
+    } else {
+        format!("  {}  {}  {}  {}", child.role, child.id, status, title)
+    }
 }
 
 fn selected_read_file_path_from_tool(tc: Option<&DisplayToolCall>, cwd: &Path) -> Option<PathBuf> {
@@ -2130,6 +2221,7 @@ impl App {
             session,
             config,
             model_name,
+            role_name: None,
             thinking_level,
             context_window,
             mode: UiMode::Normal,
@@ -2147,6 +2239,7 @@ impl App {
             last_esc: None,
             tick: 0,
             completed_turns_in_run: 0,
+            last_agent_error: None,
             suppress_completion_notification: false,
             ui_rx: None,
             lua_command_ui: None,
@@ -2185,6 +2278,9 @@ impl App {
             startup_surface_metadata,
             status_items: HashMap::new(),
             verification_status_items: BTreeMap::new(),
+            runtime_state: RuntimeStateAccumulator::new("tui"),
+            runtime_event_sequence: 0,
+            runtime_snapshot: RuntimeStateSnapshot::default(),
             widgets: HashMap::new(),
             lua_runtime: None,
             selected_startup_skill: None,
@@ -2729,7 +2825,12 @@ impl App {
         if let Some(last) = self.latest_streaming_message_mut() {
             last.is_streaming = false;
         }
-        self.push_error_msg(&format_error_for_display(&error));
+
+        let display_error = format_error_for_display(&error);
+        if self.last_agent_error.as_deref() != Some(display_error.as_str()) {
+            self.push_error_msg(&display_error);
+            self.last_agent_error = Some(display_error);
+        }
     }
 
     fn maybe_notify_agent_completion(&mut self) {
@@ -5114,7 +5215,7 @@ impl App {
                 self.autonomy_status_label()
             )),
             AutonomyMode::WorktreeAuto => self.push_system_msg(
-                "Autonomy mode: worktree-auto — requires an existing worktree until 394.9 worktree creation lands.",
+                "Autonomy mode: worktree-auto — isolated worktree runs show worktree path, diff artifact, and closeout choices in status/evidence.",
             ),
             _ => self.push_system_msg(&format!("Autonomy mode: {mode}")),
         }
@@ -5314,6 +5415,7 @@ impl App {
         let improve_auto_turn_budget = self.config.ui.improve_auto_turn_budget;
         let improve_safe_mode = self.improve_safe_mode;
         let loop_state = self.loop_state.clone();
+        let runtime_snapshot = self.runtime_snapshot.clone();
         let signal_tx = self.runtime_signal_tx.clone();
         self.push_system_msg("Loading status…");
         self.status_command_task = Some(tokio::spawn(async move {
@@ -5330,6 +5432,7 @@ impl App {
                         improve_auto_turn_budget,
                         improve_safe_mode,
                         sandbox.as_ref(),
+                        runtime_snapshot,
                         loop_state.as_ref(),
                     ),
                 }
@@ -5494,6 +5597,7 @@ impl App {
             session: self.session.clone(),
             model_name: self.model_name.clone(),
             model_registry: self.model_registry.clone(),
+            role_name: self.role_name.clone(),
             thinking_level: self.thinking_level,
             config: self.config.clone(),
             workflow_mode: self.workflow_mode,
@@ -5503,6 +5607,8 @@ impl App {
             autonomy_mode: self.autonomy_mode,
             runtime_signal_tx: self.runtime_signal_tx.clone(),
             ui_tx,
+            preloaded_lua_tools: self.preloaded_lua_tools(),
+            prompt_context: Some(imp_core::mana_prompt_context::SessionPromptContext::default()),
             tui_trace: self.tui_trace.clone(),
         }
     }
@@ -5719,6 +5825,7 @@ impl App {
         self.is_streaming = true;
         self.streaming_anchor_user_index = Some(user_message_index);
         self.completed_turns_in_run = 0;
+        self.last_agent_error = None;
         self.suppress_completion_notification = false;
         self.auto_scroll = true;
         self.scroll_offset = 0;
@@ -6020,6 +6127,100 @@ impl App {
         self.queue_improve_mode_continuation_if_ready();
     }
 
+    fn eval_candidate_command(&mut self, args: &str) {
+        let Some(evidence_path) = self.status_items.get("evidence").map(PathBuf::from) else {
+            self.push_warning_msg("No run evidence is available yet; run something before /eval.");
+            return;
+        };
+        let Some(run_root) = evidence_path.parent().map(Path::to_path_buf) else {
+            self.push_warning_msg("Could not infer run artifact directory from evidence path.");
+            return;
+        };
+        let expected = command_option_value(args, "note")
+            .map(|_| args.split("--note").next().unwrap_or(args).trim())
+            .unwrap_or(args)
+            .split("--verifier")
+            .next()
+            .unwrap_or(args)
+            .trim();
+        if expected.is_empty() {
+            self.push_system_msg(
+                "Usage: /eval <expected behavior> [--note correction] [--verifier command]",
+            );
+            return;
+        }
+        let note = command_option_value(args, "note");
+        let verifier = command_option_value(args, "verifier");
+        let run_id = run_root
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "run".into());
+        let candidate_id = format!("{run_id}-manual");
+        let mut candidate =
+            EvalCandidate::new(candidate_id.clone(), EvalFailureMode::UserCorrection);
+        candidate.source.run_id = Some(run_id.clone());
+        candidate.expected_behavior = EvalExpectedBehavior {
+            summary: expected.to_string(),
+            assertions: verifier
+                .as_ref()
+                .map(|command| vec![format!("{command} passes")])
+                .unwrap_or_default(),
+        };
+        candidate.actual_behavior = note.map(|summary| EvalActualBehavior {
+            summary,
+            error_excerpt: None,
+        });
+        if let Some(command) = verifier {
+            candidate.verifiers.push(EvalVerifier {
+                name: "manual verifier".into(),
+                command: Some(command),
+                required: true,
+                ..EvalVerifier::default()
+            });
+        }
+        candidate.artifact_refs = vec![
+            imp_core::eval_candidate::EvalArtifactRef {
+                kind: "evidence".into(),
+                path: evidence_path,
+                summary: Some("Run evidence packet".into()),
+                sha256: None,
+            },
+            imp_core::eval_candidate::EvalArtifactRef {
+                kind: "trace".into(),
+                path: run_root.join("trace.jsonl"),
+                summary: Some("Structured runtime event trace".into()),
+                sha256: None,
+            },
+        ];
+        candidate.privacy = EvalPrivacy {
+            redaction_status: EvalRedactionStatus::Unreviewed,
+            redaction_rules: Vec::new(),
+            contains_sensitive_data: false,
+        };
+        let candidate = redact_eval_candidate(candidate);
+        let path = run_root
+            .join("eval-candidates")
+            .join(&candidate_id)
+            .join("candidate.json");
+        if let Some(parent) = path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                self.push_error_msg(&format!("Could not create eval candidate directory: {err}"));
+                return;
+            }
+        }
+        match serde_json::to_string_pretty(&candidate)
+            .map_err(std::io::Error::other)
+            .and_then(|json| std::fs::write(&path, json))
+        {
+            Ok(()) => {
+                self.status_items
+                    .insert("eval-candidate".into(), path.display().to_string());
+                self.push_system_msg(&format!("Saved eval candidate: {}", path.display()));
+            }
+            Err(err) => self.push_error_msg(&format!("Could not save eval candidate: {err}")),
+        }
+    }
+
     fn execute_command(&mut self, cmd: &str) {
         let mut parts = cmd.splitn(2, char::is_whitespace);
         let command = parts.next().unwrap_or("");
@@ -6091,6 +6292,7 @@ impl App {
                 "Improve uses a new branch checked out in a separate worktree before making code changes. It never commits or merges without explicit approval. Use /improve safe for research-only evaluation and mana follow-ups.",
             ),
             "status" => self.show_status_command(),
+            "eval" => self.eval_candidate_command(args),
             "autonomy" => self.autonomy_command(args),
             "clean" => self.clean_command(args),
             "loop" => self.start_loop_command(args),
@@ -8390,7 +8592,32 @@ impl App {
 
     // ── Agent event handling ────────────────────────────────────
 
+    fn apply_runtime_snapshot_projection(&mut self) {
+        self.runtime_snapshot = self.runtime_state.snapshot();
+
+        for (key, value) in &self.runtime_snapshot.status_items {
+            self.status_items.insert(key.clone(), value.clone());
+        }
+
+        self.verification_status_items.clear();
+        for gate in &self.runtime_snapshot.verification_gates {
+            let status = format!("{:?}", gate.status).to_lowercase();
+            self.verification_status_items.insert(
+                gate.id.clone(),
+                verification_status_text(gate, Some(&status), None),
+            );
+        }
+    }
+
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
+        self.runtime_event_sequence += 1;
+        let runtime_event = event.to_runtime_event("tui", self.runtime_event_sequence);
+        self.runtime_state.apply(&runtime_event);
+        self.apply_runtime_snapshot_projection();
+        self.handle_agent_event_legacy(event)
+    }
+
+    fn handle_agent_event_legacy(&mut self, event: AgentEvent) {
         if !self.first_agent_event_seen {
             self.first_agent_event_seen = true;
             if let Some(started_at) = self.agent_turn_started_at {
@@ -8604,6 +8831,38 @@ impl App {
                 self.push_warning_msg(&message);
             }
             AgentEvent::RecoveryCheckpoint { .. } => {}
+            AgentEvent::WorktreeCreated { metadata } => {
+                self.status_items.insert(
+                    "worktree".to_string(),
+                    format!("{} @ {}", metadata.branch, metadata.worktree_path.display()),
+                );
+                self.push_system_msg(&format!(
+                    "Worktree-auto active: editing {} on branch {} (original checkout: {}).",
+                    metadata.worktree_path.display(),
+                    metadata.branch,
+                    metadata.main_worktree.display()
+                ));
+                self.invalidate_chat_render_cache();
+            }
+            AgentEvent::WorktreeDiffCaptured { metadata } => {
+                self.status_items.insert(
+                    "worktree-diff".to_string(),
+                    metadata.patch_path.display().to_string(),
+                );
+                self.push_system_msg(&format!(
+                    "Worktree diff captured: {}. Closeout choices: keep worktree, apply patch, or discard worktree.",
+                    metadata.patch_path.display()
+                ));
+                self.invalidate_chat_render_cache();
+            }
+            AgentEvent::WorktreeCloseout { result } => {
+                self.status_items.insert(
+                    "worktree-closeout".to_string(),
+                    format!("{:?}: {}", result.action, result.message),
+                );
+                self.push_system_msg(&format!("Worktree closeout: {}", result.message));
+                self.invalidate_chat_render_cache();
+            }
             AgentEvent::EvidenceWritten { path } => {
                 self.status_items
                     .insert("evidence".to_string(), path.display().to_string());
@@ -8636,6 +8895,9 @@ impl App {
             }
             AgentEvent::PolicyChecked { record } => {
                 if let Some(message) = trust_policy_warning(&record) {
+                    self.push_warning_msg(&message);
+                }
+                if let Some(message) = extension_policy_warning(&record) {
                     self.push_warning_msg(&message);
                 }
             }
@@ -8698,6 +8960,10 @@ impl App {
 
                 // Parse the error for a cleaner display
                 let display_error = format_error_for_display(&error);
+                if self.last_agent_error.as_deref() == Some(display_error.as_str()) {
+                    return;
+                }
+                self.last_agent_error = Some(display_error.clone());
 
                 self.messages.push(DisplayMessage {
                     role: MessageRole::Error,
@@ -8763,6 +9029,17 @@ fn command_arg(rest: &str) -> Option<&str> {
     } else {
         rest.strip_prefix(char::is_whitespace).map(str::trim)
     }
+}
+
+fn command_option_value(args: &str, option: &str) -> Option<String> {
+    let needle = format!("--{option}");
+    let (_, tail) = args.split_once(&needle)?;
+    let value = tail.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let next_option = value.find(" --").unwrap_or(value.len());
+    Some(value[..next_option].trim().to_string()).filter(|value| !value.is_empty())
 }
 
 fn expand_prompt_path(path: &str, cwd: &Path) -> PathBuf {
@@ -9123,6 +9400,72 @@ mod session_lifecycle {
         assert_eq!(app.session.leaf_id(), Some("entry-1"));
     }
 
+    #[test]
+    fn eval_candidate_command_saves_manual_candidate_from_latest_evidence() {
+        let tmp = TempDir::new().unwrap();
+        let mut app = make_persistent_app(&tmp);
+        let run_root = app.cwd.join(".imp/runs/run_tui");
+        std::fs::create_dir_all(&run_root).unwrap();
+        std::fs::write(run_root.join("trace.jsonl"), "{}\n").unwrap();
+        std::fs::write(run_root.join("evidence.md"), "# Evidence\n").unwrap();
+        app.status_items.insert(
+            "evidence".into(),
+            run_root.join("evidence.md").display().to_string(),
+        );
+
+        app.execute_command(
+            "eval Expected corrected behavior --note Human correction --verifier cargo test tui",
+        );
+
+        let path = run_root
+            .join("eval-candidates")
+            .join("run_tui-manual")
+            .join("candidate.json");
+        let json = std::fs::read_to_string(&path).unwrap();
+        let candidate: EvalCandidate = serde_json::from_str(&json).unwrap();
+        assert_eq!(candidate.failure_mode, EvalFailureMode::UserCorrection);
+        assert_eq!(candidate.source.run_id.as_deref(), Some("run_tui"));
+        assert_eq!(
+            candidate.expected_behavior.summary,
+            "Expected corrected behavior"
+        );
+        assert_eq!(
+            candidate.expected_behavior.assertions,
+            vec!["cargo test tui passes"]
+        );
+        assert_eq!(
+            candidate
+                .actual_behavior
+                .as_ref()
+                .map(|actual| actual.summary.as_str()),
+            Some("Human correction")
+        );
+        assert_eq!(
+            candidate.verifiers[0].command.as_deref(),
+            Some("cargo test tui")
+        );
+        let saved_path = app.status_items.get("eval-candidate").cloned();
+        assert_eq!(
+            saved_path.as_deref(),
+            Some(path.display().to_string().as_str())
+        );
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Saved eval candidate")));
+    }
+
+    #[test]
+    fn eval_candidate_command_requires_evidence() {
+        let mut app = make_app();
+        app.execute_command("eval Expected behavior");
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.role == MessageRole::Warning
+                && message.content.contains("No run evidence")));
+    }
+
     #[tokio::test]
     async fn send_message_defers_agent_start_until_after_echo_redraw() {
         let tmp = TempDir::new().unwrap();
@@ -9161,10 +9504,7 @@ mod session_lifecycle {
         }
 
         assert!(app.pending_agent_prompt.is_none());
-        assert!(app
-            .messages
-            .iter()
-            .any(|message| message.role == MessageRole::Error));
+        assert!(app.agent_start_task.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11181,6 +11521,89 @@ mod session_lifecycle {
     }
 
     #[test]
+    fn worktree_events_update_status_and_surface_closeout_choices() {
+        let mut app = make_app();
+        let metadata = imp_core::workflow::WorktreeRunMetadata {
+            main_worktree: "/repo".into(),
+            worktree_path: "/tmp/imp-worktree".into(),
+            branch: "imp/run/worktree-auto".into(),
+            patch_path: "/repo/.imp/runs/run-1/worktree/diff.patch".into(),
+            ..imp_core::workflow::WorktreeRunMetadata::default()
+        };
+
+        app.handle_agent_event(AgentEvent::WorktreeCreated {
+            metadata: metadata.clone(),
+        });
+        assert_eq!(
+            app.status_items.get("worktree").map(String::as_str),
+            Some("imp/run/worktree-auto @ /tmp/imp-worktree")
+        );
+        assert_eq!(
+            app.runtime_snapshot
+                .workspace
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.metadata.branch.as_str()),
+            Some("imp/run/worktree-auto")
+        );
+        assert!(app.messages.iter().any(|message| {
+            message.content.contains("Worktree-auto active")
+                && message.content.contains("original checkout: /repo")
+        }));
+
+        app.handle_agent_event(AgentEvent::WorktreeDiffCaptured { metadata });
+        assert_eq!(
+            app.status_items.get("worktree-diff").map(String::as_str),
+            Some("/repo/.imp/runs/run-1/worktree/diff.patch")
+        );
+        assert_eq!(
+            app.runtime_snapshot
+                .status_items
+                .get("worktree-diff")
+                .map(String::as_str),
+            Some("/repo/.imp/runs/run-1/worktree/diff.patch")
+        );
+        assert!(app.messages.iter().any(|message| {
+            message.content.contains("Closeout choices")
+                && message.content.contains("apply patch")
+                && message.content.contains("discard worktree")
+        }));
+
+        app.handle_agent_event(AgentEvent::WorktreeCloseout {
+            result: imp_core::workflow::WorktreeCloseoutResult {
+                action: imp_core::workflow::WorktreeCloseoutAction::Keep,
+                message: "kept worktree".into(),
+                ..imp_core::workflow::WorktreeCloseoutResult::default()
+            },
+        });
+        assert!(app
+            .status_items
+            .get("worktree-closeout")
+            .is_some_and(|value| value.contains("kept worktree")));
+    }
+
+    #[test]
+    fn extension_policy_event_surfaces_manifest_warning() {
+        let mut app = make_app();
+        let mut context = imp_core::reference_monitor::ToolPolicyContext::new(
+            "example_network",
+            imp_core::reference_monitor::ToolActionKind::Extension,
+        );
+        context.metadata.extension = true;
+        context.metadata.network = true;
+        context.autonomy_mode = imp_core::workflow::AutonomyMode::Safe;
+        let record = imp_core::reference_monitor::ReferenceMonitor
+            .evaluate(&context, &imp_core::policy::RunPolicy::new());
+
+        app.handle_agent_event(AgentEvent::PolicyChecked { record });
+
+        assert!(app.messages.iter().any(|message| {
+            message.content.contains("Extension policy:")
+                && message.content.contains("extension_network_denied")
+        }));
+    }
+
+    #[test]
     fn trust_policy_event_surfaces_concise_warning() {
         let mut app = make_app();
         let context = imp_core::reference_monitor::ToolPolicyContext::new(
@@ -11423,6 +11846,55 @@ mod session_lifecycle {
     }
 
     #[test]
+    fn status_text_includes_child_workflows() {
+        let app = make_app();
+        let snapshot = StatusSnapshot {
+            cwd: app.cwd.clone(),
+            git_lines: None,
+            sandbox_status: None,
+            stale_improve_metadata_message: None,
+        };
+        let mut runtime_snapshot = RuntimeStateSnapshot::default();
+        runtime_snapshot
+            .child_workflows
+            .push(RuntimeChildWorkflowSummary {
+                id: "child-verifier-1".into(),
+                parent_id: Some("parent".into()),
+                role: "verifier".into(),
+                title: Some("Verify parser".into()),
+                status: imp_core::workflow::ChildWorkflowStatus::DoneWithConcerns,
+                summary: Some("verification completed with failures".into()),
+                concerns: vec!["parser_empty_input failed".into()],
+                evidence_refs: vec![imp_core::runtime::RuntimeArtifactRef {
+                    kind: "test-output".into(),
+                    path: ".imp/runs/parent/children/child-verifier-1/evidence.md".into(),
+                    summary: Some("test output".into()),
+                }],
+                last_progress_ms: Some(1),
+            });
+
+        let status = render_status_text(
+            &snapshot,
+            app.workflow_mode,
+            app.agent_status_label(),
+            app.active_mana_scope.as_ref(),
+            app.active_mana_run.as_ref(),
+            app.improve_auto_turns,
+            app.config.ui.improve_auto_turn_budget,
+            app.improve_safe_mode,
+            app.improve_sandbox.as_ref(),
+            runtime_snapshot,
+            app.loop_state.as_ref(),
+        );
+
+        assert!(status.contains("children:"));
+        assert!(status.contains("verifier  child-verifier-1  DoneWithConcerns  Verify parser"));
+        assert!(status.contains("summary: verification completed with failures"));
+        assert!(status.contains("concerns: parser_empty_input failed"));
+        assert!(status.contains("evidence: .imp/runs/parent/children/child-verifier-1/evidence.md"));
+    }
+
+    #[test]
     fn status_text_includes_active_loop() {
         let mut app = make_app();
         app.loop_state = Some(LoopState {
@@ -11447,6 +11919,7 @@ mod session_lifecycle {
             app.config.ui.improve_auto_turn_budget,
             app.improve_safe_mode,
             app.improve_sandbox.as_ref(),
+            RuntimeStateSnapshot::default(),
             app.loop_state.as_ref(),
         );
 

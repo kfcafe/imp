@@ -9,6 +9,8 @@ pub mod context_prefill;
 pub mod contracts;
 pub mod error;
 pub mod error_display;
+pub mod eval_candidate;
+pub mod eval_candidate_closeout;
 pub mod evidence;
 pub mod guardrails;
 pub mod hooks;

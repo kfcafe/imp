@@ -12,12 +12,12 @@ use crate::error::Result;
 use crate::mana_prompt_context;
 use crate::policy::RunPolicy;
 use crate::resources;
-use crate::roles::Role;
+use crate::roles::{Role, RoleToolPolicy};
 use crate::system_prompt::{self, Fact, TaskContext};
 use crate::tools::{LuaToolLoader, ToolRegistry};
 use crate::workflow::{
     AutonomyMode, ImplicitWorkflowContractInput, VerificationGate, VerificationRequirement,
-    WorkflowContract,
+    WorkflowContract, WorktreeRunMetadata, WorktreeRunPlan,
 };
 
 fn load_scoped_memory_block(
@@ -89,6 +89,8 @@ pub struct AgentBuilder {
     /// Optional workflow contract override. If absent, build creates an implicit contract.
     pub verification_gates: Vec<VerificationGate>,
     workflow_contract: Option<WorkflowContract>,
+    worktree_run_plan: Option<WorktreeRunPlan>,
+    worktree_run_metadata: Option<WorktreeRunMetadata>,
 }
 
 impl AgentBuilder {
@@ -110,6 +112,8 @@ impl AgentBuilder {
             run_policy: RunPolicy::default(),
             verification_gates: Vec::new(),
             workflow_contract: None,
+            worktree_run_plan: None,
+            worktree_run_metadata: None,
         }
     }
 
@@ -219,6 +223,22 @@ impl AgentBuilder {
         self
     }
 
+    /// Attach worktree-auto execution metadata and switch the build cwd/scope to the worktree.
+    pub fn worktree_run(mut self, plan: WorktreeRunPlan, metadata: WorktreeRunMetadata) -> Self {
+        self.cwd = metadata.worktree_path.clone();
+        let mut contract = self.workflow_contract.unwrap_or_else(|| {
+            WorkflowContract::implicit_from(
+                ImplicitWorkflowContractInput::prompt("").cwd(&self.cwd),
+            )
+        });
+        contract.workspace_scope = plan.workspace_scope();
+        contract.autonomy_mode = AutonomyMode::WorktreeAuto;
+        self.workflow_contract = Some(contract);
+        self.worktree_run_plan = Some(plan);
+        self.worktree_run_metadata = Some(metadata);
+        self
+    }
+
     /// Set the autonomy mode on the implicit workflow contract.
     pub fn autonomy_mode(mut self, mode: AutonomyMode) -> Self {
         let mut contract = self.workflow_contract.unwrap_or_else(|| {
@@ -231,10 +251,61 @@ impl AgentBuilder {
         self
     }
 
+    fn apply_role_to_workflow_contract(&mut self) {
+        let Some(role) = self.role.as_ref() else {
+            return;
+        };
+        let contract = self.workflow_contract.get_or_insert_with(|| {
+            WorkflowContract::implicit_from(
+                ImplicitWorkflowContractInput::prompt("").cwd(&self.cwd),
+            )
+        });
+        if contract.title.is_none() {
+            contract.title = Some(format!("{} role workflow", role.name));
+        }
+        for command in &role.verification.suggested_commands {
+            contract
+                .required_verification
+                .push(VerificationRequirement::command(command.clone()));
+        }
+        for evidence in &role.required_evidence {
+            let label = if evidence.description.is_empty() {
+                evidence.kind.clone()
+            } else {
+                format!("{}: {}", evidence.kind, evidence.description)
+            };
+            if evidence.required {
+                contract
+                    .closeout_criteria
+                    .criteria
+                    .push(format!("required evidence: {label}"));
+            } else {
+                contract
+                    .closeout_criteria
+                    .criteria
+                    .push(format!("optional evidence: {label}"));
+            }
+        }
+        match &role.tool_policy {
+            RoleToolPolicy::All => {}
+            RoleToolPolicy::Only(tools) => {
+                for tool in tools {
+                    contract.tool_permissions.allowed_tools.insert(tool.clone());
+                }
+            }
+            RoleToolPolicy::AllExcept(tools) => {
+                for tool in tools {
+                    contract.tool_permissions.denied_tools.insert(tool.clone());
+                }
+            }
+        }
+    }
+
     /// Build the agent, wiring config → thresholds, hooks, resources, and tools.
     ///
     /// Returns `(Agent, AgentHandle)` ready for use.
-    pub fn build(self) -> Result<(Agent, AgentHandle)> {
+    pub fn build(mut self) -> Result<(Agent, AgentHandle)> {
+        self.apply_role_to_workflow_contract();
         let build_started = Instant::now();
         let trace_path = std::env::var_os("IMP_TUI_TRACE").map(PathBuf::from);
         let trace_phase = |phase: &str, started: Instant| {
@@ -261,7 +332,7 @@ impl AgentBuilder {
         }
         agent.context_config = self.config.context.clone();
         if let Some(ref role) = self.role {
-            if let Some(thinking) = role.thinking_level {
+            if let Some(thinking) = role.model_routing.thinking.or(role.thinking_level) {
                 agent.thinking_level = thinking;
             }
             agent.role = Some(role.clone());
@@ -279,6 +350,10 @@ impl AgentBuilder {
         agent.config = Arc::new(self.config.clone());
         agent.run_policy = self.run_policy;
         agent.verification_gates = self.verification_gates;
+        if let Some(contract) = self.workflow_contract.clone() {
+            agent.workflow_contract = contract;
+        }
+        agent.worktree_run_metadata = self.worktree_run_metadata;
         agent.lua_tool_loader = self.lua_tool_loader.clone();
 
         let phase_started = Instant::now();
@@ -301,6 +376,9 @@ impl AgentBuilder {
         if agent.mode != crate::config::AgentMode::Full {
             let mode = agent.mode;
             agent.tools.retain(|name| mode.allows_tool(name));
+        }
+        if let Some(role) = &agent.role {
+            apply_role_tool_policy(&mut agent.tools, role);
         }
         trace_phase("mode_filter", phase_started);
 
@@ -400,6 +478,18 @@ impl AgentBuilder {
             }
         }
         Ok((agent, handle))
+    }
+}
+
+fn apply_role_tool_policy(tools: &mut ToolRegistry, role: &Role) {
+    match &role.tool_policy {
+        RoleToolPolicy::All => {}
+        RoleToolPolicy::Only(allowed) => {
+            tools.retain(|name| allowed.iter().any(|tool| tool == name))
+        }
+        RoleToolPolicy::AllExcept(denied) => {
+            tools.retain(|name| !denied.iter().any(|tool| tool == name))
+        }
     }
 }
 
@@ -844,6 +934,92 @@ mod tests {
 
         assert!(agent.system_prompt.contains("Project facts:"));
         assert!(!agent.system_prompt.contains("Project memory status:"));
+    }
+
+    #[test]
+    fn builder_applies_coder_role_tools_prompt_and_workflow_contract() {
+        let registry = Config::default().role_registry().unwrap();
+        let role = registry.resolve("coder").unwrap();
+        let (agent, _handle) = AgentBuilder::new(
+            Config::default(),
+            PathBuf::from("/tmp"),
+            test_model(),
+            "key".into(),
+        )
+        .role(role)
+        .build()
+        .unwrap();
+
+        assert!(agent.tools.get("edit").is_some());
+        assert!(agent.tools.get("write").is_some());
+        assert!(agent
+            .system_prompt
+            .contains("Make the smallest coherent code change"));
+        assert!(agent
+            .workflow_contract
+            .closeout_criteria
+            .criteria
+            .iter()
+            .any(|criterion| criterion.contains("diff-summary")));
+        assert!(agent
+            .workflow_contract
+            .tool_permissions
+            .allowed_tools
+            .contains("edit"));
+        assert!(agent.workflow_contract.required_verification.is_empty());
+    }
+
+    #[test]
+    fn builder_applies_verifier_role_readonly_tools_and_contract_hints() {
+        let registry = Config::default().role_registry().unwrap();
+        let mut role = registry.resolve("verifier").unwrap();
+        role.verification.suggested_commands = vec!["cargo test -p imp-core role_registry".into()];
+        let (agent, _handle) = AgentBuilder::new(
+            Config::default(),
+            PathBuf::from("/tmp"),
+            test_model(),
+            "key".into(),
+        )
+        .role(role)
+        .build()
+        .unwrap();
+
+        assert!(agent.role.as_ref().unwrap().readonly);
+        assert!(agent.tools.get("read").is_some());
+        assert!(agent.tools.get("bash").is_some());
+        assert!(agent.tools.get("edit").is_none());
+        assert!(agent.tools.get("write").is_none());
+        assert!(agent
+            .system_prompt
+            .contains("Run only declared or clearly relevant verification commands"));
+        assert_eq!(agent.workflow_contract.required_verification.len(), 1);
+        assert!(agent
+            .workflow_contract
+            .closeout_criteria
+            .criteria
+            .iter()
+            .any(|criterion| criterion.contains("test-output")));
+    }
+
+    #[test]
+    fn builder_preserves_default_behavior_without_role() {
+        let (agent, _handle) = AgentBuilder::new(
+            Config::default(),
+            PathBuf::from("/tmp"),
+            test_model(),
+            "key".into(),
+        )
+        .build()
+        .unwrap();
+
+        assert!(agent.role.is_none());
+        assert!(agent.tools.get("edit").is_some());
+        assert!(agent.tools.get("write").is_some());
+        assert!(agent
+            .workflow_contract
+            .closeout_criteria
+            .criteria
+            .is_empty());
     }
 
     #[test]

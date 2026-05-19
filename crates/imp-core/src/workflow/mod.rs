@@ -4,10 +4,18 @@
 //! existing imp runs without changing agent behavior. Later workflow runtime
 //! features (policy, verification, evidence, child runs) build on these types.
 
+mod bootstrap;
+mod child_workflow;
 mod contract;
+mod controller;
 mod verification;
 mod verification_runner;
+mod worktree_run;
 
+pub use bootstrap::*;
+pub use child_workflow::*;
 pub use contract::*;
+pub use controller::*;
 pub use verification::*;
 pub use verification_runner::*;
+pub use worktree_run::*;

@@ -34,6 +34,16 @@ impl ReferenceMonitor {
             };
         }
 
+        if context.metadata.extension && context.metadata.secrets {
+            return ToolPolicyDecision::Deny {
+                reason: PolicyReason::new(
+                    PolicySource::ToolManifest,
+                    "extension_secret_denied",
+                    "TypeScript extension tools cannot receive secrets until explicit secret grants are implemented.",
+                ),
+            };
+        }
+
         match run_policy.check_tool(&context.tool_name) {
             RunToolDecision::Allowed => {}
             RunToolDecision::Denied(message) => {
@@ -68,6 +78,33 @@ impl ReferenceMonitor {
                     }
                 }
             }
+        }
+
+        if context.metadata.extension && context.metadata.network {
+            return match context.autonomy_mode {
+                AutonomyMode::AllowAll => ToolPolicyDecision::Allow {
+                    reasons: vec![PolicyReason::new(
+                        PolicySource::WorkflowAutonomy,
+                        "extension_network_allowed_allow_all",
+                        "TypeScript extension network capability allowed by allow-all autonomy.",
+                    )],
+                },
+                AutonomyMode::Suggest => self.ask_user_decision(
+                    "extension_network_requires_approval",
+                    "TypeScript extension network capability requires approval.",
+                ),
+                AutonomyMode::Safe
+                | AutonomyMode::LocalAuto
+                | AutonomyMode::WorktreeAuto
+                | AutonomyMode::AllowAllLocal
+                | AutonomyMode::Ci => ToolPolicyDecision::Deny {
+                    reason: PolicyReason::new(
+                        PolicySource::ToolManifest,
+                        "extension_network_denied",
+                        "TypeScript extension network capability is denied in this autonomy mode.",
+                    ),
+                },
+            };
         }
 
         let trust_decision = self.check_trust_escalation(context);
@@ -1241,6 +1278,54 @@ mod reference_monitor_types_tests {
                 action: Some("close".into())
             }
         );
+    }
+
+    #[test]
+    fn extension_secret_capability_is_denied_before_autonomy() {
+        let monitor = ReferenceMonitor;
+        let mut context = ToolPolicyContext::new("secret_ext", ToolActionKind::Extension);
+        context.metadata.extension = true;
+        context.metadata.secrets = true;
+        context.autonomy_mode = AutonomyMode::AllowAll;
+
+        let decision = monitor.check_tool_action(&context, &RunPolicy::default());
+        assert!(matches!(
+            decision,
+            ToolPolicyDecision::Deny { reason } if reason.code == "extension_secret_denied"
+        ));
+    }
+
+    #[test]
+    fn extension_network_capability_requires_policy_grant() {
+        let monitor = ReferenceMonitor;
+        let mut context = ToolPolicyContext::new("net_ext", ToolActionKind::Extension);
+        context.metadata.extension = true;
+        context.metadata.network = true;
+        context.autonomy_mode = AutonomyMode::Safe;
+
+        let decision = monitor.check_tool_action(&context, &RunPolicy::default());
+        assert!(matches!(
+            decision,
+            ToolPolicyDecision::Deny { reason } if reason.code == "extension_network_denied"
+        ));
+
+        context.autonomy_mode = AutonomyMode::AllowAll;
+        let decision = monitor.check_tool_action(&context, &RunPolicy::default());
+        assert!(matches!(decision, ToolPolicyDecision::Allow { .. }));
+    }
+
+    #[test]
+    fn safe_mode_allows_extension_readonly_capability() {
+        let monitor = ReferenceMonitor;
+        let mut context = ToolPolicyContext::new("readonly_ext", ToolActionKind::Read);
+        context.metadata.extension = true;
+        context.metadata.readonly = true;
+        context.metadata.external_side_effect = false;
+        context.metadata.workspace_write = false;
+        context.autonomy_mode = AutonomyMode::Safe;
+
+        let decision = monitor.check_tool_action(&context, &RunPolicy::default());
+        assert!(matches!(decision, ToolPolicyDecision::Allow { .. }));
     }
 
     #[test]

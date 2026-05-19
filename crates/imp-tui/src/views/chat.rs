@@ -471,8 +471,8 @@ fn render_visible_lines(lines: &[Line<'_>], area: Rect, buf: &mut Buffer, scroll
     let visible = &lines[window.start..window.end];
 
     for (i, line) in visible.iter().enumerate() {
-        let y = area.y + i as u16;
-        if y >= area.y + area.height {
+        let y = area.y.saturating_add(i as u16);
+        if y >= area.y.saturating_add(area.height) {
             break;
         }
         buf.set_line(area.x, y, line, area.width);
@@ -500,8 +500,9 @@ fn visible_line_window(
     scroll_offset: usize,
 ) -> VisibleLineWindow {
     let scroll_offset = clamp_scroll_offset_to_view(total_lines, visible_height, scroll_offset);
-    let start = total_lines.saturating_sub(visible_height + scroll_offset);
-    let end = total_lines.min(start + visible_height);
+    let requested = visible_height.saturating_add(scroll_offset);
+    let start = total_lines.saturating_sub(requested);
+    let end = total_lines.min(start.saturating_add(visible_height));
 
     VisibleLineWindow {
         scroll_offset,
@@ -572,7 +573,8 @@ pub fn scroll_offset_for_message_at_top(
     .len();
 
     let visible_height = chat_area.height as usize;
-    let offset = total_lines.saturating_sub(visible_height + anchor_line);
+    let requested = visible_height.saturating_add(anchor_line);
+    let offset = total_lines.saturating_sub(requested);
     clamp_scroll_offset_to_view(total_lines, visible_height, offset)
 }
 

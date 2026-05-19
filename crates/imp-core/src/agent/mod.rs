@@ -127,8 +127,14 @@ pub struct Agent {
     pub config: Arc<Config>,
     /// Per-run tool/write policy layered on top of AgentMode.
     pub run_policy: RunPolicy,
+    /// Runtime-owned controller for mana-backed workflow obligations.
+    pub workflow_controller: crate::workflow::WorkflowRunController,
+
     /// Verification gates declared for this run.
     pub verification_gates: Vec<crate::workflow::VerificationGate>,
+
+    /// Worktree-auto metadata when this run executes in an isolated worktree.
+    pub worktree_run_metadata: Option<crate::workflow::WorktreeRunMetadata>,
 
     /// Lightweight workflow contract for this agent run. Initially informational; future runtime layers use it for policy, verification, and evidence.
     pub workflow_contract: WorkflowContract,
@@ -227,7 +233,9 @@ impl Agent {
             workflow_contract: WorkflowContract::implicit_from(
                 crate::workflow::ImplicitWorkflowContractInput::prompt("").cwd(&cwd),
             ),
+            workflow_controller: crate::workflow::WorkflowRunController::new(),
             verification_gates: Vec::new(),
+            worktree_run_metadata: None,
             trace_writer: Arc::new(Mutex::new(None)),
             run_id: Arc::new(Mutex::new(None)),
             lua_tool_loader: None,
@@ -260,12 +268,20 @@ impl Agent {
         let work_completed = tool_results_indicate_work_completed(tool_results, self.mode);
         let execution_debt = tool_results_indicate_execution_debt(tool_results, self.mode);
         let execution_evidence = tool_results_indicate_execution_evidence(tool_results, self.mode);
+        let orchestration_run_id = mana_orchestration_run_id(tool_results);
+        let orchestration_started = orchestration_run_id.is_some()
+            || tool_results_indicate_orchestration_started(tool_results, self.mode);
         let planning_only_progress = execution_debt && !execution_evidence;
         let mana_stop_reason = mana_review_stop_reason(mana_review, self.mode);
         let planner_text_stop_reason = planner_stop_reason(message, self.mode);
         let execution_text_stop_reason = execution_stop_reason(message, self.mode);
 
-        let continue_recommendation = if should_queue_mana_externalization_follow_up(
+        let continue_recommendation = if orchestration_started {
+            Some(ContinueRecommendation {
+                prompt: orchestration_follow_up_text(orchestration_run_id.as_deref()),
+                reason: ContinueReason::OrchestrationProgress,
+            })
+        } else if should_queue_mana_externalization_follow_up(
             message,
             self.mode,
             self.has_mana_skill,
@@ -309,6 +325,7 @@ impl Agent {
                 execution_debt,
                 execution_evidence,
                 planning_only_progress,
+                orchestration_started,
             },
             mana: ManaEvidence {
                 stop_reason: mana_stop_reason,
@@ -318,6 +335,141 @@ impl Agent {
                 execution_stop_reason: execution_text_stop_reason,
             },
             continue_recommendation,
+        }
+    }
+
+    async fn bootstrap_workflow_if_required(&mut self, prompt: &str) {
+        if !matches!(
+            self.workflow_controller.bootstrap,
+            crate::workflow::WorkflowBootstrapState::Unspecified
+        ) {
+            return;
+        }
+
+        let decision = crate::workflow::classify_workflow_intent(
+            prompt,
+            matches!(self.mode, AgentMode::Orchestrator | AgentMode::Planner),
+        );
+        crate::workflow::apply_intent_to_controller(&mut self.workflow_controller, &decision);
+        if !self.workflow_controller.bootstrap_required() {
+            return;
+        }
+
+        let shape = crate::workflow::classify_graph_shape(prompt);
+        crate::workflow::apply_graph_shape_to_controller(&mut self.workflow_controller, &shape);
+
+        let Ok(mana_dir) = mana_core::discovery::find_mana_dir(&self.cwd) else {
+            self.workflow_controller.skip_bootstrap(format!(
+                "mana bootstrap unavailable: no .mana found for {}",
+                self.cwd.display()
+            ));
+            return;
+        };
+
+        let request = crate::workflow::WorkflowBootstrapRequest::from_prompt(prompt, &self.cwd);
+        match crate::workflow::create_native_mana_root(&mana_dir, request) {
+            Ok(root) => {
+                self.workflow_controller.bind_mana_root(root.mana_root_id);
+                self.workflow_controller.record_mana_graph_changed();
+            }
+            Err(err) => {
+                self.workflow_controller.closeout.blocker = Some(format!(
+                    "workflow bootstrap failed to create mana root: {err}"
+                ));
+            }
+        }
+    }
+
+    pub fn resume_workflow_controller_from_project_run(
+        &mut self,
+        run_id: &str,
+    ) -> std::io::Result<()> {
+        let artifacts = crate::storage::existing_project_run_artifacts(&self.cwd, run_id)?;
+        self.workflow_controller = crate::workflow::WorkflowRunController::load_from_path(
+            &artifacts.workflow_controller_path(),
+        )?;
+        Ok(())
+    }
+
+    fn record_workflow_obligations_from_tool_results(
+        &mut self,
+        tool_results: &[imp_llm::ToolResultMessage],
+    ) {
+        for result in tool_results {
+            if result.is_error {
+                continue;
+            }
+
+            match result.tool_name.as_str() {
+                "mana" => self.record_workflow_mana_obligation(result),
+                "write" | "edit" | "multi_edit" => {
+                    self.workflow_controller.record_direct_work_changed();
+                }
+                "bash" | "shell" if bash_result_is_successful_check(result) => {
+                    self.workflow_controller.record_closeout_ready();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn record_workflow_mana_obligation(&mut self, result: &imp_llm::ToolResultMessage) {
+        let Some(action) = mana_result_action(result) else {
+            return;
+        };
+
+        match mana_loop::classify_mana_action(action) {
+            mana_loop::ManaActionClass::Orchestration => {
+                if matches!(action, "run_state" | "evaluate") {
+                    if let Some((run_id, status)) = mana_run_status_from_result(result) {
+                        self.workflow_controller
+                            .update_child_run_status(&run_id, status);
+                    }
+                } else {
+                    self.workflow_controller.record_mana_orchestration_started(
+                        mana_orchestration_run_id(std::slice::from_ref(result)),
+                    );
+                }
+            }
+            mana_loop::ManaActionClass::ProgressCheckpoint
+            | mana_loop::ManaActionClass::GraphMutation
+            | mana_loop::ManaActionClass::DecisionFact => {
+                if matches!(action, "create") {
+                    if let Some(unit_id) = mana_unit_id_from_result(result) {
+                        if mana_result_parent_id(result).as_deref()
+                            == self.workflow_controller.mana_root_id.as_deref()
+                        {
+                            self.workflow_controller.record_child_unit(unit_id);
+                        } else {
+                            self.workflow_controller.bind_mana_root(unit_id);
+                        }
+                    }
+                }
+                self.workflow_controller.record_mana_graph_changed();
+            }
+            mana_loop::ManaActionClass::Lifecycle => {
+                if matches!(action, "verify" | "close") {
+                    if let Some(unit_id) = mana_unit_id_from_result(result) {
+                        self.workflow_controller.complete_unit(&unit_id);
+                    }
+                    self.workflow_controller.record_closeout_ready();
+                } else {
+                    self.workflow_controller.record_mana_graph_changed();
+                }
+            }
+            mana_loop::ManaActionClass::ReadHelp
+            | mana_loop::ManaActionClass::Inspect
+            | mana_loop::ManaActionClass::Destructive
+            | mana_loop::ManaActionClass::Unknown => {}
+        }
+    }
+
+    fn workflow_controller_continue_decision(&self) -> Option<LoopDecision> {
+        match self.workflow_controller.decide_next() {
+            crate::workflow::WorkflowControllerDecision::Continue { prompt, reason } => {
+                Some(LoopDecision::Continue { prompt, reason })
+            }
+            crate::workflow::WorkflowControllerDecision::Stop { .. } => None,
         }
     }
 
@@ -334,7 +486,10 @@ impl Agent {
             }
             ContinueReason::ToolResultsNeedInterpretation
             | ContinueReason::QueuedUserFollowUp
-            | ContinueReason::RecoveryContinuation => {}
+            | ContinueReason::OrchestrationProgress
+            | ContinueReason::WorkflowCloseout
+            | ContinueReason::WorkflowBootstrap
+            | ContinueReason::WorkflowDecomposition => {}
         }
     }
 
@@ -652,6 +807,16 @@ fn confidence_continue_follow_up_text() -> &'static str {
     "Confidence is high and the mana delta is already visible. Continue to the next small, well-bounded step now using native mana-backed workflow, unless a consequential decision or blocker appears. Do not re-summarize the same visible mana change in chat unless new context needs to be called out."
 }
 
+fn orchestration_follow_up_text(run_id: Option<&str>) -> String {
+    if let Some(run_id) = run_id {
+        return format!(
+            "Orchestration has started as {run_id}, but the requested outcome is not complete yet. Inspect mana(action=\"run_state\", run_id=\"{run_id}\") and mana(action=\"logs\", run_id=\"{run_id}\"), continue coordinating ready work, retry or escalate failed units, and only stop when the workflow is verified complete, blocked by a concrete decision, or no runnable work remains."
+        );
+    }
+
+    crate::workflow::workflow_supervision_prompt()
+}
+
 fn execution_debt_follow_up_text() -> &'static str {
     "You have recorded or planned work, but the requested outcome is not satisfied yet. Continue working until the user's requested outcome is satisfied, or until concrete evidence shows it cannot be completed. Do not stop merely because you recorded a plan, updated mana, or completed one intermediate step."
 }
@@ -883,6 +1048,106 @@ fn tool_results_indicate_execution_debt(
                             | mana_loop::ManaActionClass::GraphMutation
                             | mana_loop::ManaActionClass::DecisionFact
                     )
+                })
+    })
+}
+
+fn mana_orchestration_run_id(tool_results: &[imp_llm::ToolResultMessage]) -> Option<String> {
+    tool_results.iter().find_map(|result| {
+        if result.is_error || result.tool_name != "mana" {
+            return None;
+        }
+        let action = result.details.get("action").and_then(|v| v.as_str())?;
+        if mana_loop::classify_mana_action(action) != mana_loop::ManaActionClass::Orchestration {
+            return None;
+        }
+        result
+            .details
+            .get("run_id")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string)
+    })
+}
+
+fn mana_unit_id_from_result(result: &imp_llm::ToolResultMessage) -> Option<String> {
+    result
+        .details
+        .get("id")
+        .or_else(|| result.details.get("unit_id"))
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
+}
+
+fn mana_result_parent_id(result: &imp_llm::ToolResultMessage) -> Option<String> {
+    result
+        .details
+        .get("parent")
+        .or_else(|| result.details.get("parent_id"))
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
+}
+
+fn mana_run_status_from_result(
+    result: &imp_llm::ToolResultMessage,
+) -> Option<(String, crate::workflow::WorkflowChildRunStatus)> {
+    if result.is_error || result.tool_name != "mana" {
+        return None;
+    }
+    let run_id = result
+        .details
+        .get("run_id")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    let status = result.details.get("status").and_then(|v| v.as_str())?;
+    let total_failed = result
+        .details
+        .get("summary")
+        .and_then(|summary| summary.get("total_failed"))
+        .and_then(|v| v.as_u64());
+    Some((
+        run_id,
+        crate::workflow::WorkflowChildRunStatus::from_mana_run_status(status, total_failed),
+    ))
+}
+
+fn bash_result_is_successful_check(result: &imp_llm::ToolResultMessage) -> bool {
+    if result.is_error {
+        return false;
+    }
+    let Some(command) = result.details.get("command").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let exit_code_ok = result.details.get("exit_code").and_then(|v| v.as_i64()) == Some(0);
+    if !exit_code_ok {
+        return false;
+    }
+    let command = command.to_ascii_lowercase();
+    command.contains("check")
+        || command.contains("test")
+        || command.contains("verify")
+        || command.contains("pytest")
+        || command.contains("cargo test")
+        || command.contains("cargo check")
+}
+
+fn tool_results_indicate_orchestration_started(
+    tool_results: &[imp_llm::ToolResultMessage],
+    mode: AgentMode,
+) -> bool {
+    if !matches!(mode, AgentMode::Full | AgentMode::Orchestrator) {
+        return false;
+    }
+
+    tool_results.iter().any(|result| {
+        !result.is_error
+            && result.tool_name == "mana"
+            && result
+                .details
+                .get("action")
+                .and_then(|v| v.as_str())
+                .is_some_and(|action| {
+                    mana_loop::classify_mana_action(action)
+                        == mana_loop::ManaActionClass::Orchestration
                 })
     })
 }
@@ -1487,6 +1752,46 @@ mod tests {
         }
     }
 
+    struct ExtensionNetworkTool;
+
+    #[async_trait]
+    impl crate::tools::Tool for ExtensionNetworkTool {
+        fn name(&self) -> &str {
+            "extension_net"
+        }
+        fn label(&self) -> &str {
+            "Extension network"
+        }
+        fn description(&self) -> &str {
+            "Pretends to perform extension network access"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+        fn is_readonly(&self) -> bool {
+            false
+        }
+        fn policy_metadata(&self) -> crate::reference_monitor::ToolMetadata {
+            let mut metadata = crate::reference_monitor::ToolMetadata::new(
+                self.name(),
+                crate::reference_monitor::ToolActionKind::Extension,
+            );
+            metadata.extension = true;
+            metadata.extension_id = Some("test.extension".into());
+            metadata.network = true;
+            metadata.requires_approval = true;
+            metadata
+        }
+        async fn execute(
+            &self,
+            _call_id: &str,
+            _params: serde_json::Value,
+            _ctx: crate::tools::ToolContext,
+        ) -> crate::error::Result<crate::tools::ToolOutput> {
+            Ok(crate::tools::ToolOutput::text("network extension executed"))
+        }
+    }
+
     /// A mutable tool for testing write partitioning.
     #[allow(dead_code)]
     struct WriteTool;
@@ -1787,6 +2092,7 @@ mod tests {
                 execution_debt: false,
                 execution_evidence: false,
                 planning_only_progress: false,
+                orchestration_started: false,
             },
             mana: ManaEvidence { stop_reason: None },
             text_fallback: TextFallbackEvidence {
@@ -2002,6 +2308,37 @@ mod tests {
             AgentEvent::ToolExecutionEnd { result, .. } => Some(result),
             _ => None,
         })
+    }
+
+    #[tokio::test]
+    async fn extension_network_policy_denial_attaches_policy_details_to_result() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response("call_ext", "extension_net", serde_json::json!({}), 100, 30),
+            text_response("done", 100, 10),
+        ]));
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Full;
+        agent.tools.register(Arc::new(ExtensionNetworkTool));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Run extension".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let policy = first_policy_record(&events).expect("policy checked");
+        assert_eq!(policy.tool_name, "extension_net");
+        assert!(matches!(
+            policy.decision,
+            crate::reference_monitor::ToolPolicyDecision::Deny { .. }
+        ));
+        let result = first_tool_result(&events).expect("tool result");
+        assert!(result.is_error);
+        assert_eq!(result.details["policy"]["tool_name"], "extension_net");
+        assert_eq!(
+            result.details["policy"]["decision"]["reason"]["code"],
+            "extension_network_denied"
+        );
     }
 
     #[tokio::test]
@@ -2242,6 +2579,7 @@ mod tests {
                 execution_debt: false,
                 execution_evidence: false,
                 planning_only_progress: false,
+                orchestration_started: false,
             },
             mana: ManaEvidence {
                 stop_reason: Some(StopReason::DecompositionCompleted),
@@ -2274,6 +2612,7 @@ mod tests {
                 execution_debt: false,
                 execution_evidence: false,
                 planning_only_progress: false,
+                orchestration_started: false,
             },
             mana: ManaEvidence { stop_reason: None },
             text_fallback: TextFallbackEvidence {
@@ -2305,6 +2644,7 @@ mod tests {
                 execution_debt: true,
                 execution_evidence: false,
                 planning_only_progress: false,
+                orchestration_started: false,
             },
             mana: ManaEvidence { stop_reason: None },
             text_fallback: TextFallbackEvidence {
@@ -2350,6 +2690,139 @@ mod tests {
         assert!(should_queue_execution_debt_follow_up(
             true, false, false, true
         ));
+    }
+
+    #[test]
+    fn agent_can_resume_workflow_controller_from_project_run_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifacts = crate::storage::project_run_artifacts(temp.path(), "run_resume").unwrap();
+        let mut controller = crate::workflow::WorkflowRunController::new();
+        controller.record_mana_graph_changed();
+        controller
+            .save_to_path(&artifacts.workflow_controller_path())
+            .unwrap();
+
+        let (mut agent, _handle) = Agent::new(
+            test_model(Arc::new(MockProvider::new(vec![]))),
+            temp.path().to_path_buf(),
+        );
+        agent
+            .resume_workflow_controller_from_project_run("run_resume")
+            .unwrap();
+
+        assert!(agent.workflow_controller.graph_closeout_required);
+    }
+
+    #[test]
+    fn mana_run_status_result_extracts_terminal_status() {
+        let result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_mana".to_string(),
+            tool_name: "mana".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "run done".to_string(),
+            }],
+            is_error: false,
+            details: serde_json::json!({
+                "action": "run_state",
+                "run_id": "run-42",
+                "status": "done",
+                "summary": { "total_failed": 0 }
+            }),
+            timestamp: 0,
+        };
+
+        assert_eq!(
+            mana_run_status_from_result(&result),
+            Some((
+                "run-42".into(),
+                crate::workflow::WorkflowChildRunStatus::Done
+            ))
+        );
+    }
+
+    #[test]
+    fn successful_check_command_is_direct_closeout_evidence() {
+        let result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_bash".to_string(),
+            tool_name: "bash".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "ok".to_string(),
+            }],
+            is_error: false,
+            details: serde_json::json!({
+                "command": "cargo test -p imp-core workflow::controller --lib",
+                "exit_code": 0
+            }),
+            timestamp: 0,
+        };
+
+        assert!(bash_result_is_successful_check(&result));
+    }
+
+    #[test]
+    fn mana_run_result_extracts_run_id_for_supervision() {
+        let result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_mana".to_string(),
+            tool_name: "mana".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "Started native mana orchestration".to_string(),
+            }],
+            is_error: false,
+            details: serde_json::json!({ "action": "run", "run_id": "run-42" }),
+            timestamp: 0,
+        };
+
+        assert_eq!(
+            mana_orchestration_run_id(std::slice::from_ref(&result)).as_deref(),
+            Some("run-42")
+        );
+        assert!(tool_results_indicate_orchestration_started(
+            std::slice::from_ref(&result),
+            AgentMode::Full
+        ));
+    }
+
+    #[test]
+    fn mana_run_assessment_prefers_supervision_over_work_completed() {
+        let agent = Agent::new(
+            test_model(Arc::new(MockProvider::new(vec![]))),
+            PathBuf::from("/tmp"),
+        )
+        .0;
+        let result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_mana".to_string(),
+            tool_name: "mana".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "Started native mana orchestration".to_string(),
+            }],
+            is_error: false,
+            details: serde_json::json!({ "action": "run", "run_id": "run-42" }),
+            timestamp: 0,
+        };
+        let message = AssistantMessage {
+            content: vec![ContentBlock::Text {
+                text: "Started run.".to_string(),
+            }],
+            usage: None,
+            stop_reason: LlmStopReason::ToolUse,
+            timestamp: 0,
+        };
+
+        let assessment = agent.assess_post_turn(
+            &message,
+            std::slice::from_ref(&result),
+            true,
+            &TurnManaReview::no_change(0),
+        );
+
+        assert!(assessment.runtime.orchestration_started);
+        assert_eq!(
+            assessment.into_next_action(),
+            NextAction::Continue {
+                prompt: orchestration_follow_up_text(Some("run-42")),
+                reason: ContinueReason::OrchestrationProgress,
+            }
+        );
     }
 
     #[test]

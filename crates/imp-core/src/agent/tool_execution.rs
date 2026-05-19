@@ -101,6 +101,27 @@ fn attach_provenance_to_result(
     result
 }
 
+fn attach_policy_trace_to_result(
+    mut result: imp_llm::ToolResultMessage,
+    policy_record: &crate::reference_monitor::PolicyTraceRecord,
+) -> imp_llm::ToolResultMessage {
+    let mut details = match result.details {
+        serde_json::Value::Object(map) => map,
+        serde_json::Value::Null => serde_json::Map::new(),
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("raw".into(), other);
+            map
+        }
+    };
+    details.insert(
+        "policy".into(),
+        serde_json::to_value(policy_record).unwrap_or(serde_json::Value::Null),
+    );
+    result.details = serde_json::Value::Object(details);
+    result
+}
+
 impl Agent {
     pub(super) fn plan_tools(&self, calls: Vec<(String, String, serde_json::Value)>) -> ToolPlan {
         let calls = calls
@@ -341,10 +362,11 @@ impl Agent {
         })
         .await;
         if let Some(reason) = policy_block {
-            let result = crate::tools::ToolOutput::error(legacy_policy_error_message(
+            let mut result = crate::tools::ToolOutput::error(legacy_policy_error_message(
                 tool_name, self.mode, &reason,
             ))
             .into_tool_result(call_id, tool_name);
+            result = attach_policy_trace_to_result(result, &policy_record);
             self.emit(AgentEvent::ToolExecutionEnd {
                 tool_call_id: call_id.to_string(),
                 result: result.clone(),
@@ -587,6 +609,7 @@ impl Agent {
 
         let provenance = tool_result_provenance(tool_name, &args);
         result = attach_provenance_to_result(result, &provenance);
+        result = attach_policy_trace_to_result(result, &policy_record);
         self.emit(AgentEvent::ToolExecutionEnd {
             tool_call_id: call_id.to_string(),
             result: result.clone(),
