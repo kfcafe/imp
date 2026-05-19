@@ -249,6 +249,48 @@ fn identity_layer(
             s.push_str(instructions);
             s.push('\n');
         }
+        for instruction in &role.instruction_set {
+            if role.instructions.as_ref() == Some(instruction) {
+                continue;
+            }
+            s.push('\n');
+            s.push_str(instruction);
+            s.push('\n');
+        }
+        if let Some(schema) = &role.output_schema {
+            s.push_str("\nRole output schema metadata:\n");
+            if !schema.name.is_empty() {
+                s.push_str("- schema: `");
+                s.push_str(&schema.name);
+                s.push_str("`\n");
+            }
+            if !schema.description.is_empty() {
+                s.push_str("- description: ");
+                s.push_str(&schema.description);
+                s.push('\n');
+            }
+            if let Some(reference) = &schema.json_schema_ref {
+                s.push_str("- json_schema_ref: ");
+                s.push_str(reference);
+                s.push('\n');
+            }
+            if !schema.required_sections.is_empty() {
+                s.push_str("- required sections: ");
+                s.push_str(&schema.required_sections.join(", "));
+                s.push('\n');
+            }
+            if let Some(contract) = &schema.output_contract {
+                s.push_str("- output contract: ");
+                s.push_str(contract);
+                s.push('\n');
+            }
+            if let Some(example) = &schema.example {
+                s.push_str("- example:\n");
+                s.push_str(example);
+                s.push('\n');
+            }
+            s.push_str("These schema hints guide the response shape; they are metadata, not enforced validation.\n");
+        }
     }
 
     // Append mode instructions if present
@@ -651,27 +693,18 @@ mod tests {
     }
 
     fn make_readonly_role() -> Role {
-        use crate::roles::ToolSet;
-        Role {
-            name: "reviewer".into(),
-            model: None,
-            thinking_level: None,
-            tool_set: ToolSet::All,
-            readonly: true,
-            instructions: Some("Review code carefully. Do not modify files.".into()),
-        }
+        Role::from_def(
+            "reviewer",
+            &crate::roles::RoleDef {
+                readonly: true,
+                instructions: Some("Review code carefully. Do not modify files.".into()),
+                ..crate::roles::RoleDef::default()
+            },
+        )
     }
 
     fn make_worker_role() -> Role {
-        use crate::roles::ToolSet;
-        Role {
-            name: "worker".into(),
-            model: None,
-            thinking_level: None,
-            tool_set: ToolSet::All,
-            readonly: false,
-            instructions: None,
-        }
+        Role::from_def("worker", &crate::roles::RoleDef::default())
     }
 
     fn make_personality() -> PersonalityProfile {
@@ -1467,6 +1500,28 @@ mod tests {
         assert!(result
             .text
             .contains("Review code carefully. Do not modify files."));
+    }
+
+    #[test]
+    fn system_prompt_role_output_schema_metadata_appended_as_guidance() {
+        let reg = make_registry();
+        let mut role = make_worker_role();
+        role.output_schema = Some(crate::roles::RoleOutputSchema {
+            name: "verification-result".into(),
+            description: "Structured verifier result".into(),
+            required_sections: vec!["status".into(), "commands".into()],
+            output_contract: Some("Return status and commands.".into()),
+            example: Some("status: passed\ncommands: ...".into()),
+            ..crate::roles::RoleOutputSchema::default()
+        });
+        let result = test_assemble(&reg, &[], &[], &[], None, None, Some(&role));
+        assert!(result.text.contains("Role output schema metadata:"));
+        assert!(result.text.contains("- schema: `verification-result`"));
+        assert!(result
+            .text
+            .contains("- required sections: status, commands"));
+        assert!(result.text.contains("Return status and commands."));
+        assert!(result.text.contains("metadata, not enforced validation"));
     }
 
     #[test]

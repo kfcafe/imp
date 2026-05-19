@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::guardrails::GuardrailConfig;
 use crate::hooks::HookDef;
 use crate::personality::PersonalityConfig;
-use crate::roles::RoleDef;
+use crate::roles::{RoleDef, RoleRegistry, RoleRegistryError};
 use crate::storage;
 use crate::tools::web::types::WebConfig;
 
@@ -990,6 +990,11 @@ impl Config {
         storage::global_sessions_dir()
     }
 
+    /// Resolve built-in roles plus config overrides and validate them.
+    pub fn role_registry(&self) -> std::result::Result<RoleRegistry, RoleRegistryError> {
+        RoleRegistry::from_overrides(self.roles.clone())
+    }
+
     /// Save config to a TOML file. Creates parent directories if needed.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
@@ -1247,9 +1252,8 @@ role = "assistant"
             RoleDef {
                 model: Some("haiku".into()),
                 thinking: None,
-                tools: None,
                 readonly: false,
-                instructions: None,
+                ..RoleDef::default()
             },
         );
 
@@ -1261,9 +1265,8 @@ role = "assistant"
                     RoleDef {
                         model: Some("sonnet".into()),
                         thinking: Some(ThinkingLevel::High),
-                        tools: None,
                         readonly: true,
-                        instructions: None,
+                        ..RoleDef::default()
                     },
                 );
                 m
