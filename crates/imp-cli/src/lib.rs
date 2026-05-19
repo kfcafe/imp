@@ -90,6 +90,10 @@ use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
 use imp_core::config::{AnimationLevel, Config, ToolOutputDisplay};
+use imp_core::eval_candidate::{
+    redact_eval_candidate, EvalActualBehavior, EvalCandidate, EvalExpectedBehavior,
+    EvalFailureMode, EvalPrivacy, EvalRedactionStatus, EvalVerifier, EVAL_CANDIDATES_DIR,
+};
 use imp_core::format_error_for_display;
 use imp_core::tools::web::types::SearchProvider;
 use imp_core::workflow::{AutonomyMode, VerificationGate};
@@ -240,6 +244,9 @@ struct Cli {
     /// Model to use (alias or full ID)
     #[arg(short, long)]
     model: Option<String>,
+    /// Role to apply (planner, coder, verifier, reviewer, researcher, integrator)
+    #[arg(long)]
+    role: Option<String>,
 
     /// Thinking level: off, minimal, low, medium, high, xhigh
     #[arg(long)]
@@ -840,6 +847,144 @@ fn run_evidence_command(command: Option<&EvidenceCommand>) -> imp_core::Result<(
     Ok(())
 }
 
+fn run_eval_command(command: &EvalCommand) -> io::Result<()> {
+    match command {
+        EvalCommand::Save {
+            run,
+            reason,
+            expected,
+            note,
+            verifier,
+            id,
+        } => save_eval_candidate(
+            run,
+            reason,
+            expected,
+            note.as_deref(),
+            verifier.as_deref(),
+            id.as_deref(),
+        ),
+        EvalCommand::List | EvalCommand::Ls => list_eval_candidates(),
+        EvalCommand::Show { id } => show_eval_candidate(id),
+    }
+}
+
+fn eval_candidates_root(cwd: &Path) -> PathBuf {
+    cwd.join(EVAL_CANDIDATES_DIR)
+}
+
+fn parse_eval_failure_mode(value: &str) -> EvalFailureMode {
+    match value {
+        "blocked" => EvalFailureMode::Blocked,
+        "done-with-concerns" => EvalFailureMode::DoneWithConcerns,
+        "verification-failed" => EvalFailureMode::VerificationFailed,
+        "verification-blocked" => EvalFailureMode::VerificationBlocked,
+        "verification-skipped-required" => EvalFailureMode::VerificationSkippedRequired,
+        "policy-denied" => EvalFailureMode::PolicyDenied,
+        "tool-loop" => EvalFailureMode::ToolLoop,
+        "tool-error" => EvalFailureMode::ToolError,
+        "user-correction" => EvalFailureMode::UserCorrection,
+        "negative-feedback" => EvalFailureMode::NegativeFeedback,
+        "worktree-apply-conflict" => EvalFailureMode::WorktreeApplyConflict,
+        "manual" => EvalFailureMode::Manual,
+        _ => EvalFailureMode::Unknown,
+    }
+}
+
+fn save_eval_candidate(
+    run_id: &str,
+    reason: &str,
+    expected: &str,
+    note: Option<&str>,
+    verifier: Option<&str>,
+    id: Option<&str>,
+) -> io::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let run_root = imp_core::storage::project_runs_dir(&cwd).join(run_id);
+    let trace_path = run_root.join("trace.jsonl");
+    let evidence_path = run_root.join("evidence.md");
+    if !trace_path.exists() || !evidence_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("run artifacts not found for {run_id}: expected trace.jsonl and evidence.md"),
+        ));
+    }
+
+    let candidate_id = id
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{run_id}-{reason}"));
+    let mut candidate = EvalCandidate::new(candidate_id, parse_eval_failure_mode(reason));
+    candidate.source.run_id = Some(run_id.to_string());
+    candidate.expected_behavior = EvalExpectedBehavior {
+        summary: expected.to_string(),
+        assertions: verifier
+            .map(|command| vec![format!("{command} passes")])
+            .unwrap_or_default(),
+    };
+    candidate.actual_behavior = note.map(|note| EvalActualBehavior {
+        summary: note.to_string(),
+        error_excerpt: None,
+    });
+    if let Some(command) = verifier {
+        candidate.verifiers.push(EvalVerifier {
+            name: "manual verifier".into(),
+            command: Some(command.to_string()),
+            required: true,
+            ..EvalVerifier::default()
+        });
+    }
+    candidate.artifact_refs = vec![
+        imp_core::eval_candidate::EvalArtifactRef {
+            kind: "trace".into(),
+            path: trace_path,
+            summary: Some("Structured runtime event trace".into()),
+            sha256: None,
+        },
+        imp_core::eval_candidate::EvalArtifactRef {
+            kind: "evidence".into(),
+            path: evidence_path,
+            summary: Some("Run evidence packet".into()),
+            sha256: None,
+        },
+    ];
+    candidate.privacy = EvalPrivacy {
+        redaction_status: EvalRedactionStatus::Unreviewed,
+        redaction_rules: Vec::new(),
+        contains_sensitive_data: false,
+    };
+
+    let path = redact_eval_candidate(candidate).write_to_dir(&cwd)?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+fn list_eval_candidates() -> io::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let root = eval_candidates_root(&cwd);
+    if !root.exists() {
+        return Ok(());
+    }
+    let mut ids = Vec::new();
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() && entry.path().join("candidate.json").exists() {
+            ids.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    ids.sort();
+    for id in ids {
+        println!("{id}");
+    }
+    Ok(())
+}
+
+fn show_eval_candidate(id: &str) -> io::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let json = std::fs::read_to_string(EvalCandidate::candidate_path(&cwd, id))?;
+    println!("{json}");
+    Ok(())
+}
+
 pub async fn run() {
     let cli = Cli::parse();
 
@@ -964,6 +1109,13 @@ pub async fn run() {
             }
             Commands::Evidence { command } => {
                 if let Err(e) = run_evidence_command(command.as_ref()) {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
+            Commands::Eval { command } => {
+                if let Err(e) = run_eval_command(command) {
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
@@ -2071,6 +2223,7 @@ async fn run_headless_mode(
         model: cli.model.clone().or_else(|| assignment.model.clone()),
         provider: cli.provider.clone(),
         api_key: cli.api_key.clone(),
+        role: cli.role.clone(),
         thinking: cli
             .thinking
             .as_ref()
@@ -2109,6 +2262,7 @@ async fn run_headless_mode(
     emit_startup_timing(&mut startup_timer, StartupStage::RunLoopStarted);
 
     let output_mode = determine_headless_output_mode(&cli.mode, io::stdout().is_terminal());
+    let mut runtime_state = RuntimeStateAccumulator::new("headless");
     let mut printed_trailing_newline = false;
 
     while let Some(event) = prepared.session.recv_event().await {
@@ -2325,11 +2479,14 @@ fn print_headless_human_event(
     Ok(())
 }
 
+fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>> {
+    print_json_event_with_runtime(event, None)
+}
 fn print_json_event_with_runtime(
     event: &AgentEvent,
     runtime: Option<&mut RuntimeStateAccumulator>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let value = json_event_value(event)?;
+    let value = legacy_json_event_value(event)?;
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{}", serde_json::to_string(&value)?)?;
     if let Some(runtime) = runtime {
@@ -2365,16 +2522,7 @@ fn print_json_event_with_runtime(
     Ok(())
 }
 
-fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>> {
-    let value = json_event_value(event)?;
-    let line = serde_json::to_string(&value)?;
-    let mut stdout = io::stdout().lock();
-    writeln!(stdout, "{line}")?;
-    stdout.flush()?;
-    Ok(())
-}
-
-fn json_event_value(event: &AgentEvent) -> Result<Value, Box<dyn std::error::Error>> {
+fn legacy_json_event_value(event: &AgentEvent) -> Result<Value, Box<dyn std::error::Error>> {
     let value = match event {
         AgentEvent::AgentStart { model, timestamp } => {
             json!({ "type": "agent_start", "model": model, "timestamp": timestamp })
@@ -2435,6 +2583,18 @@ fn json_event_value(event: &AgentEvent) -> Result<Value, Box<dyn std::error::Err
             "checkpoint": checkpoint,
         }),
         AgentEvent::Warning { message } => json!({ "type": "warning", "message": message }),
+        AgentEvent::WorktreeCreated { metadata } => json!({
+            "type": "worktree_created",
+            "metadata": metadata,
+        }),
+        AgentEvent::WorktreeDiffCaptured { metadata } => json!({
+            "type": "worktree_diff_captured",
+            "metadata": metadata,
+        }),
+        AgentEvent::WorktreeCloseout { result } => json!({
+            "type": "worktree_closeout",
+            "result": result,
+        }),
         AgentEvent::EvidenceWritten { path } => json!({
             "type": "evidence_written",
             "path": path.display().to_string(),
@@ -2460,14 +2620,10 @@ fn json_event_value(event: &AgentEvent) -> Result<Value, Box<dyn std::error::Err
             "record": record,
         }),
         AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
-        AgentEvent::ToolOutputDelta { .. } => return Ok(()), // handled in TUI only
+        AgentEvent::ToolOutputDelta { .. } => json!({ "type": "tool_output_delta" }),
     };
 
-    let line = serde_json::to_string(&value)?;
-    let mut stdout = io::stdout().lock();
-    writeln!(stdout, "{line}")?;
-    stdout.flush()?;
-    Ok(())
+    Ok(value)
 }
 
 fn stream_event_to_json(event: &StreamEvent) -> serde_json::Value {
@@ -3042,12 +3198,50 @@ async fn deliver_ui_response(value: Value, pending_ui: &UiResponseMap) -> Result
 }
 
 async fn forward_rpc_events(mut handle: AgentHandle, stdout_tx: mpsc::Sender<Value>) {
+    let mut runtime_state = RuntimeStateAccumulator::new("rpc");
+    let mut sequence = 0_u64;
     while let Some(event) = handle.event_rx.recv().await {
-        let _ = stdout_tx.send(rpc_agent_event_to_json(&event)).await;
+        sequence += 1;
+        let runtime_event = event.to_runtime_event("rpc", sequence);
+        runtime_state.apply(&runtime_event);
+        let _ = stdout_tx
+            .send(rpc_agent_event_to_json_with_runtime(
+                &event,
+                &runtime_event,
+                &runtime_state.snapshot(),
+            ))
+            .await;
     }
 }
 
+#[cfg(test)]
 fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
+    let runtime_event = event.to_runtime_event("rpc", 0);
+    let mut runtime_state = RuntimeStateAccumulator::new("rpc");
+    runtime_state.apply(&runtime_event);
+    rpc_agent_event_to_json_with_runtime(event, &runtime_event, &runtime_state.snapshot())
+}
+
+fn rpc_agent_event_to_json_with_runtime(
+    event: &AgentEvent,
+    runtime_event: &imp_core::runtime::RuntimeEvent,
+    runtime_state: &imp_core::runtime::RuntimeStateSnapshot,
+) -> Value {
+    let mut value = rpc_agent_event_legacy_json(event);
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "runtime_event".into(),
+            serde_json::to_value(runtime_event).unwrap_or(Value::Null),
+        );
+        object.insert(
+            "runtime_state".into(),
+            serde_json::to_value(runtime_state).unwrap_or(Value::Null),
+        );
+    }
+    value
+}
+
+fn rpc_agent_event_legacy_json(event: &AgentEvent) -> Value {
     match event {
         AgentEvent::AgentStart { model, timestamp } => json!({
             "type": "agent_start",
@@ -3124,6 +3318,18 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
         AgentEvent::Warning { message } => {
             json!({ "type": "warning", "message": message })
         }
+        AgentEvent::WorktreeCreated { metadata } => json!({
+            "type": "worktree_created",
+            "metadata": metadata,
+        }),
+        AgentEvent::WorktreeDiffCaptured { metadata } => json!({
+            "type": "worktree_diff_captured",
+            "metadata": metadata,
+        }),
+        AgentEvent::WorktreeCloseout { result } => json!({
+            "type": "worktree_closeout",
+            "result": result,
+        }),
         AgentEvent::EvidenceWritten { path } => json!({
             "type": "evidence_written",
             "path": path.display().to_string(),
@@ -3312,6 +3518,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         model: cli.model.clone(),
         provider: cli.provider.clone(),
         api_key: cli.api_key.clone(),
+        role: cli.role.clone(),
         thinking: cli
             .thinking
             .as_ref()
@@ -4300,6 +4507,7 @@ async fn build_chat_session(
         model: cli.model.clone(),
         provider: cli.provider.clone(),
         api_key: cli.api_key.clone(),
+        role: cli.role.clone(),
         thinking: cli
             .thinking
             .as_ref()
@@ -4993,6 +5201,7 @@ mod tests {
             print: None,
             provider: None,
             model: None,
+            role: None,
             thinking: None,
             api_key: None,
             cont: false,
@@ -5007,9 +5216,10 @@ mod tests {
             no_tools: false,
             system_prompt: None,
             mode: "interactive".to_string(),
+            output: "text".to_string(),
+            runtime_json: false,
             autonomy: None,
             verify: Vec::new(),
-            output: "text".to_string(),
             max_turns: None,
             max_tokens: None,
             verbose: false,
@@ -5241,6 +5451,7 @@ mod tests {
             model: None,
             provider: None,
             api_key: None,
+            role: None,
             system_prompt: None,
             thinking: Some(ThinkingLevel::Off),
             max_turns: Some(2),
@@ -5304,6 +5515,7 @@ mod tests {
             model: None,
             provider: None,
             api_key: None,
+            role: None,
             system_prompt: None,
             thinking: Some(ThinkingLevel::Off),
             max_turns: Some(1),
