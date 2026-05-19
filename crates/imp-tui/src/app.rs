@@ -5587,6 +5587,13 @@ impl App {
         }
     }
 
+    fn preloaded_lua_tools(&self) -> Option<ToolRegistry> {
+        let policy = self.config.lua.resolve_policy(self.config.mode);
+        let mut tools = ToolRegistry::new();
+        let user_config_dir = imp_core::config::Config::user_config_dir();
+        imp_lua::init_lua_extensions(&user_config_dir, Some(&self.cwd), &mut tools, &policy);
+        Some(tools)
+    }
     fn agent_start_request(&mut self) -> AgentStartRequest {
         let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(16);
         let tui_ui = crate::tui_interface::TuiInterface::new(ui_tx.clone());
