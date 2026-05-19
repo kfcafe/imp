@@ -9,6 +9,7 @@ use crate::guardrails::GuardrailConfig;
 use crate::hooks::HookDef;
 use crate::personality::PersonalityConfig;
 use crate::roles::{RoleDef, RoleRegistry, RoleRegistryError};
+use crate::workflow_profiles::{WorkflowProfileDef, WorkflowProfileError, WorkflowRegistry};
 use crate::storage;
 use crate::tools::web::types::WebConfig;
 
@@ -455,6 +456,9 @@ pub struct Config {
     #[serde(default)]
     pub roles: HashMap<String, RoleDef>,
 
+    /// User-overridable workflow profiles backing slash commands.
+    #[serde(default)]
+    pub workflows: HashMap<String, WorkflowProfileDef>,
     /// Hook definitions.
     #[serde(default)]
     pub hooks: Vec<HookDef>,
@@ -977,6 +981,7 @@ impl Config {
             self.personality.merge(other.personality);
         }
         self.roles.extend(other.roles);
+        self.workflows.extend(other.workflows);
         self.hooks.extend(other.hooks);
     }
 
@@ -995,6 +1000,10 @@ impl Config {
         RoleRegistry::from_overrides(self.roles.clone())
     }
 
+    /// Resolve built-in workflow profiles plus config overrides and validate them.
+    pub fn workflow_registry(&self) -> std::result::Result<WorkflowRegistry, WorkflowProfileError> {
+        WorkflowRegistry::from_overrides(self.workflows.clone())
+    }
     /// Save config to a TOML file. Creates parent directories if needed.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
@@ -1049,6 +1058,7 @@ mod tests {
         assert_eq!(config.web, WebConfig::default());
         assert_eq!(config.personality, PersonalityConfig::default());
         assert!(config.roles.is_empty());
+        assert!(config.workflows.is_empty());
         assert!(config.hooks.is_empty());
         assert!((config.context.observation_mask_threshold - 0.6).abs() < f64::EPSILON);
         assert_eq!(config.context.mask_window, 10);
@@ -1242,6 +1252,32 @@ role = "assistant"
         assert_eq!(user.model.as_deref(), Some("sonnet"));
         assert_eq!(user.max_tokens, Some(1024));
         assert_eq!(user.max_turns, Some(20));
+    }
+
+    #[test]
+    fn config_merge_workflows_extend() {
+        let mut base = Config::default();
+        base.workflows.insert(
+            "plan".into(),
+            WorkflowProfileDef {
+                confirm_body: Some("Save plan".into()),
+                ..WorkflowProfileDef::default()
+            },
+        );
+        let mut other = Config::default();
+        other.workflows.insert(
+            "security-review".into(),
+            WorkflowProfileDef {
+                instructions: Some("Security: {{prompt}}".into()),
+                aliases: Some(vec!["sec".into()]),
+                ..WorkflowProfileDef::default()
+            },
+        );
+        base.merge(other);
+        assert_eq!(base.workflows.len(), 2);
+        let registry = base.workflow_registry().unwrap();
+        assert_eq!(registry.get("plan").unwrap().confirm_body, "Save plan");
+        assert_eq!(registry.get("sec").unwrap().name, "security-review");
     }
 
     #[test]
@@ -1496,6 +1532,13 @@ readonly = false
 [roles.reader]
 readonly = true
 
+[workflows.security-review]
+description = "Security review"
+aliases = ["sec"]
+triggers = ["audit auth"]
+readonly = true
+instructions = "Security: {{prompt}}"
+
 [[hooks]]
 event = "after_file_write"
 action = "log"
@@ -1510,6 +1553,9 @@ blocking = false
         assert!(config.roles.contains_key("reader"));
         assert_eq!(config.roles["coder"].model.as_deref(), Some("opus"));
         assert!(config.roles["reader"].readonly);
+        assert_eq!(config.workflows.len(), 1);
+        let workflows = config.workflow_registry().unwrap();
+        assert_eq!(workflows.get("sec").unwrap().name, "security-review");
         assert_eq!(config.hooks.len(), 1);
         assert_eq!(config.hooks[0].event, "after_file_write");
     }

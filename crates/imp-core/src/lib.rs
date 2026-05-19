@@ -42,6 +42,7 @@ pub mod trust;
 pub mod ui;
 pub mod usage;
 pub mod workflow;
+pub mod workflow_profiles;
 
 pub use agent::{RecoveryCheckpoint, RecoveryCheckpointKind, TimingEvent, TimingStage};
 pub use error::{Error, Result};
