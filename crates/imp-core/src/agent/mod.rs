@@ -405,6 +405,9 @@ impl Agent {
                 "write" | "edit" | "multi_edit" => {
                     self.workflow_controller.record_direct_work_changed();
                 }
+                "read" if self.workflow_controller.direct_closeout_required => {
+                    self.workflow_controller.record_closeout_ready();
+                }
                 "bash" | "shell" if bash_result_is_successful_check(result) => {
                     self.workflow_controller.record_closeout_ready();
                 }
@@ -1208,6 +1211,9 @@ fn tool_results_indicate_work_completed(
 
         if matches!(result.tool_name.as_str(), "write" | "edit" | "multi_edit") {
             saw_edit_like_success = true;
+        }
+        if result.tool_name == "read" && saw_edit_like_success {
+            return true;
         }
 
         let action = result.details.get("action").and_then(|v| v.as_str());
