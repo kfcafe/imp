@@ -9511,7 +9511,11 @@ mod session_lifecycle {
         }
 
         assert!(app.pending_agent_prompt.is_none());
-        assert!(app.agent_start_task.is_some());
+        assert!(app.agent_start_task.is_none());
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.role == MessageRole::Error));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
