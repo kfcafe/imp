@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "id": "example.typescript",
+  "name": "Example TypeScript Extension",
+  "version": "0.1.0",
+  "runtime": {
+    "kind": "typescript-subprocess",
+    "command": "node",
+    "args": ["src/tool.mjs"],
+    "protocol": "one-shot-json",
+    "timeoutMs": 5000,
+    "outputLimitBytes": 65536
+  },
+  "tools": [
+    {
+      "name": "example_echo",
+      "label": "Example echo",
+      "description": "Echo text and return metadata from the example TypeScript extension.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" },
+          "fail": { "type": "boolean" }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "sideEffect": "read-only",
+      "resourceScope": { "kind": "none" },
+      "network": "none",
+      "secrets": [],
+      "env": [],
+      "timeoutMs": 5000,
+      "outputLimitBytes": 65536,
+      "policyTags": ["extension", "example", "read-only"],
+      "verifierTags": ["example"]
+    },
+    {
+      "name": "example_write_demo",
+      "label": "Example write demo",
+      "description": "Demonstrate a policy-gated workspace-write TypeScript extension tool.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "text": { "type": "string" }
+        },
+        "required": ["path", "text"],
+        "additionalProperties": false
+      },
+      "sideEffect": "workspace-write",
+      "resourceScope": {
+        "kind": "workspace",
+        "read": [],
+        "write": ["tmp/example-extension/**"]
+      },
+      "network": "none",
+      "secrets": [],
+      "env": [],
+      "timeoutMs": 5000,
+      "outputLimitBytes": 65536,
+      "policyTags": ["extension", "example", "workspace-write"],
+      "verifierTags": ["example"]
+    }
+  ]
+}

@@ -1,4 +1,8 @@
 use eframe::egui;
+use imp_core::runtime::{
+    RuntimeArtifactRef, RuntimeEvent, RuntimeEventKind, RuntimePhase, RuntimeStateAccumulator,
+    RuntimeStateSnapshot, RuntimeToolStatus,
+};
 
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(139, 92, 246);
 const PANEL: egui::Color32 = egui::Color32::from_rgb(17, 21, 27);
@@ -8,18 +12,85 @@ const GOOD: egui::Color32 = egui::Color32::from_rgb(34, 197, 94);
 const WARN: egui::Color32 = egui::Color32::from_rgb(245, 158, 11);
 const BLUE: egui::Color32 = egui::Color32::from_rgb(56, 189, 248);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiRuntimeViewModel {
+    pub run_label: String,
+    pub phase: RuntimePhase,
+    pub phase_label: String,
+    pub model: Option<String>,
+    pub worktree_label: Option<String>,
+    pub evidence_paths: Vec<String>,
+    pub active_tools: Vec<String>,
+    pub completed_tools: Vec<String>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+    pub status_lines: Vec<String>,
+}
+
+impl GuiRuntimeViewModel {
+    pub fn from_snapshot(snapshot: &RuntimeStateSnapshot) -> Self {
+        let run_label = snapshot
+            .workflow
+            .run_id
+            .clone()
+            .unwrap_or_else(|| "run: unsaved".into());
+        let worktree_label = snapshot.workspace.worktree.as_ref().map(|worktree| {
+            format!(
+                "{} @ {}",
+                worktree.metadata.branch,
+                worktree.metadata.worktree_path.display()
+            )
+        });
+        let evidence_paths = snapshot
+            .evidence_refs
+            .iter()
+            .map(|artifact| artifact_display_label(artifact))
+            .collect();
+        let active_tools = snapshot
+            .active_tools
+            .iter()
+            .map(|tool| format!("{} · {}", tool.name, tool.id))
+            .collect();
+        let completed_tools = snapshot
+            .completed_tools
+            .iter()
+            .map(|tool| format!("{} · {}", tool.name, tool_status_label(tool.status)))
+            .collect();
+        let mut status_lines = snapshot
+            .status_items
+            .iter()
+            .map(|(key, value)| format!("{key}: {value}"))
+            .collect::<Vec<_>>();
+        status_lines.sort();
+
+        Self {
+            run_label,
+            phase: snapshot.phase,
+            phase_label: phase_label(snapshot.phase).into(),
+            model: snapshot.workflow.model.clone(),
+            worktree_label,
+            evidence_paths,
+            active_tools,
+            completed_tools,
+            warnings: snapshot.warnings.clone(),
+            errors: snapshot.errors.clone(),
+            status_lines,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct WorkItem {
-    id: &'static str,
-    title: &'static str,
-    status: &'static str,
-    summary: &'static str,
+    id: String,
+    title: String,
+    status: String,
+    summary: String,
 }
 
 #[derive(Debug, Clone)]
 struct TimelineEvent {
-    title: &'static str,
-    detail: &'static str,
+    title: String,
+    detail: String,
     status: EventStatus,
 }
 
@@ -35,6 +106,8 @@ pub struct ImpGuiApp {
     selected_work_index: usize,
     work_items: Vec<WorkItem>,
     timeline: Vec<TimelineEvent>,
+    runtime_accumulator: RuntimeStateAccumulator,
+    runtime_view: GuiRuntimeViewModel,
     terminal_output: String,
     diff_preview: String,
 }
@@ -42,60 +115,65 @@ pub struct ImpGuiApp {
 impl ImpGuiApp {
     pub fn new(creation_context: &eframe::CreationContext<'_>) -> Self {
         configure_style(&creation_context.egui_ctx);
-
+        let runtime_accumulator = demo_runtime_accumulator();
+        let runtime_view = GuiRuntimeViewModel::from_snapshot(&runtime_accumulator.snapshot());
         Self {
             project_name: "imp".to_owned(),
             selected_work_index: 0,
             work_items: vec![
                 WorkItem {
-                    id: "83",
-                    title: "Cursor bounds hardening",
-                    status: "active",
-                    summary: "Verify panic-prone text-box state",
+                    id: "83".into(),
+                    title: "Cursor bounds hardening".into(),
+                    status: "active".into(),
+                    summary: "Verify panic-prone text-box state".into(),
                 },
                 WorkItem {
-                    id: "272.1",
-                    title: "YouTube transcript",
-                    status: "claimed",
-                    summary: "Pure HTTP extraction",
+                    id: "272.1".into(),
+                    title: "YouTube transcript".into(),
+                    status: "claimed".into(),
+                    summary: "Pure HTTP extraction".into(),
                 },
                 WorkItem {
-                    id: "46.1",
-                    title: "Runtime safety gaps",
-                    status: "planning",
-                    summary: "Backlog reconciliation",
+                    id: "46.1".into(),
+                    title: "Runtime safety gaps".into(),
+                    status: "planning".into(),
+                    summary: "Backlog reconciliation".into(),
                 },
             ],
             timeline: vec![
                 TimelineEvent {
-                    title: "Scope lock",
-                    detail: "Modify the selected unit only; keep runtime integration explicit and reviewable.",
+                    title: "Runtime snapshot".into(),
+                    detail: "GUI derives reusable run state from imp_core::runtime::RuntimeStateSnapshot.".into(),
                     status: EventStatus::Done,
                 },
                 TimelineEvent {
-                    title: "Inspect project context",
-                    detail: "Load AGENTS.md, mana unit details, relevant code, and verification command before editing.",
+                    title: "Event reducer".into(),
+                    detail: "RuntimeEvent streams reduce through RuntimeStateAccumulator before rendering.".into(),
                     status: EventStatus::Done,
                 },
                 TimelineEvent {
-                    title: "Run focused verify",
-                    detail: "Execute the narrowest useful command and stream output into the workbench.",
+                    title: "Frontend state".into(),
+                    detail: "GUI keeps layout/selection local; core owns semantic run facts.".into(),
                     status: EventStatus::Running,
                 },
                 TimelineEvent {
-                    title: "Summarize outcome",
-                    detail: "Return DONE, DONE_WITH_CONCERNS, BLOCKED, or NEEDS_CONTEXT with evidence.",
+                    title: "Live agent bridge".into(),
+                    detail: "Future work: subscribe to real runtime events instead of demo fixture data.".into(),
                     status: EventStatus::Pending,
                 },
             ],
-            terminal_output: "$ cargo check -p imp-gui\nchecking imp-gui...\n".to_owned(),
-            diff_preview: "fn apply_edit(&mut self, edit: Edit) {\n-    self.cursor = next_cursor;\n+    self.cursor = self.normalize_cursor(next_cursor);\n}\n".to_owned(),
+            runtime_accumulator,
+            runtime_view,
+            terminal_output: "$ cargo test -p imp-gui\nchecking runtime snapshot adapter...\n".to_owned(),
+            diff_preview: "RuntimeStateSnapshot -> GuiRuntimeViewModel\n  phase\n  tools\n  worktree\n  evidence\n".to_owned(),
         }
     }
 }
 
 impl eframe::App for ImpGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.runtime_view =
+            GuiRuntimeViewModel::from_snapshot(&self.runtime_accumulator.snapshot());
         self.render_top_bar(ctx);
         self.render_left_sidebar(ctx);
         self.render_right_inspector(ctx);
@@ -114,11 +192,15 @@ impl ImpGuiApp {
                     ui.colored_label(ACCENT, "●");
                     ui.strong("imp workbench");
                     pill(ui, &format!("project: {}", self.project_name), BLUE);
+                    pill(
+                        ui,
+                        &self.runtime_view.phase_label,
+                        phase_color(self.runtime_view.phase),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let _ = ui.button("New task");
                         let _ = ui.button("Approve tools");
-                        pill(ui, "verifying", GOOD);
-                        ui.label(egui::RichText::new("Run #1842").color(MUTED));
+                        ui.label(egui::RichText::new(&self.runtime_view.run_label).color(MUTED));
                     });
                 });
             });
@@ -136,15 +218,13 @@ impl ImpGuiApp {
                         self.selected_work_index = index;
                     }
                 }
-
-                section_heading(ui, "Memory");
-                nav_card(ui, "Decisions", "3 open · 18 resolved");
-                nav_card(ui, "Facts", "verified project claims");
-                nav_card(ui, "Rules", "AGENTS.md + local conventions");
-
-                section_heading(ui, "Agents");
-                nav_card(ui, "imp", "online · editing + verify");
-                nav_card(ui, "reviewer", "idle · available for focused review");
+                section_heading(ui, "Runtime state");
+                for line in self.runtime_view.status_lines.iter().take(5) {
+                    nav_card(ui, "status", line);
+                }
+                if let Some(model) = &self.runtime_view.model {
+                    nav_card(ui, "Model", model);
+                }
             });
     }
 
@@ -157,26 +237,40 @@ impl ImpGuiApp {
                 section_heading(ui, "Selected task");
                 card(ui, |ui| {
                     ui.strong(format!("{} · {}", selected.id, selected.title));
-                    key_value(ui, "Status", selected.status);
+                    key_value(ui, "Status", &selected.status);
                     key_value(ui, "Assignee", "imp");
                     key_value(ui, "Risk", "medium: runtime path");
-                    key_value(ui, "Verify", "cargo check -p imp-gui");
+                    key_value(ui, "Verify", "cargo test -p imp-gui");
                 });
-
-                section_heading(ui, "Acceptance");
+                section_heading(ui, "Runtime snapshot");
                 card(ui, |ui| {
-                    ui.label("The GUI shell compiles, opens independently, and preserves existing CLI/TUI behavior.");
+                    key_value(ui, "Phase", &self.runtime_view.phase_label);
+                    key_value(
+                        ui,
+                        "Active tools",
+                        &self.runtime_view.active_tools.len().to_string(),
+                    );
+                    key_value(
+                        ui,
+                        "Completed",
+                        &self.runtime_view.completed_tools.len().to_string(),
+                    );
+                    if let Some(worktree) = &self.runtime_view.worktree_label {
+                        key_value(ui, "Worktree", worktree);
+                    }
                 });
-
-                section_heading(ui, "Files");
-                nav_card(ui, "crates/imp-gui", "new egui app crate");
-                nav_card(ui, "Cargo.toml", "workspace registration");
-
-                section_heading(ui, "Promote");
-                ui.horizontal_wrapped(|ui| {
-                    let _ = ui.button("Create follow-up task");
-                    let _ = ui.button("Record decision");
-                });
+                section_heading(ui, "Evidence");
+                if self.runtime_view.evidence_paths.is_empty() {
+                    nav_card(
+                        ui,
+                        "No evidence yet",
+                        "Runtime snapshots will surface artifact refs here",
+                    );
+                } else {
+                    for path in &self.runtime_view.evidence_paths {
+                        nav_card(ui, "Artifact", path);
+                    }
+                }
             });
     }
 
@@ -187,7 +281,7 @@ impl ImpGuiApp {
             .show(ctx, |ui| {
                 ui.columns(2, |columns| {
                     columns[0].vertical(|ui| {
-                        section_heading(ui, "Diff preview");
+                        section_heading(ui, "Runtime adapter");
                         code_block(ui, &mut self.diff_preview);
                     });
                     columns[1].vertical(|ui| {
@@ -204,29 +298,121 @@ impl ImpGuiApp {
             .frame(panel_frame(PANEL))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.heading(selected.title);
+                    ui.heading(&selected.title);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        pill(ui, "tests passing", GOOD);
+                        pill(ui, "snapshot-backed", GOOD);
                         pill(ui, "scope locked", MUTED);
                     });
                 });
                 ui.horizontal(|ui| {
-                    for tab in ["Narrative", "Plan", "Tools", "Review"] {
-                        let _ = ui.selectable_label(tab == "Narrative", tab);
+                    for tab in ["Narrative", "Runtime", "Tools", "Review"] {
+                        let _ = ui.selectable_label(tab == "Runtime", tab);
                     }
                 });
                 ui.separator();
-
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for event in &self.timeline {
                         timeline_card(ui, event);
                     }
                     card(ui, |ui| {
-                        ui.strong("Agent message draft");
-                        ui.label("DONE — GUI shell is compiling. Next: wire the app to real mana units and agent events.");
+                        ui.strong("Runtime summary");
+                        ui.label(format!(
+                            "{} · {} active tools · {} completed tools",
+                            self.runtime_view.phase_label,
+                            self.runtime_view.active_tools.len(),
+                            self.runtime_view.completed_tools.len()
+                        ));
+                        for warning in &self.runtime_view.warnings {
+                            ui.colored_label(WARN, warning);
+                        }
+                        for error in &self.runtime_view.errors {
+                            ui.colored_label(egui::Color32::RED, error);
+                        }
                     });
                 });
             });
+    }
+}
+
+fn demo_runtime_accumulator() -> RuntimeStateAccumulator {
+    let mut accumulator = RuntimeStateAccumulator::new("demo-runtime");
+    accumulator.apply(&RuntimeEvent {
+        run_id: "demo-runtime".into(),
+        sequence: 1,
+        kind: RuntimeEventKind::AgentStarted {
+            model: "openrouter/demo".into(),
+        },
+        ..RuntimeEvent::default()
+    });
+    accumulator.apply(&RuntimeEvent {
+        run_id: "demo-runtime".into(),
+        sequence: 2,
+        kind: RuntimeEventKind::ToolStarted {
+            tool_call: imp_core::runtime::RuntimeToolCall {
+                id: "tool-1".into(),
+                name: "bash".into(),
+                status: RuntimeToolStatus::Running,
+                args_preview: Some("cargo test -p imp-gui".into()),
+                ..imp_core::runtime::RuntimeToolCall::default()
+            },
+        },
+        ..RuntimeEvent::default()
+    });
+    accumulator.apply(&RuntimeEvent {
+        run_id: "demo-runtime".into(),
+        sequence: 3,
+        kind: RuntimeEventKind::EvidenceUpdated {
+            artifact: RuntimeArtifactRef {
+                kind: "runtime-doc".into(),
+                path: "docs/runtime-event-state-api.md".into(),
+                summary: Some("Runtime API docs".into()),
+            },
+        },
+        ..RuntimeEvent::default()
+    });
+    accumulator
+}
+
+fn artifact_display_label(artifact: &RuntimeArtifactRef) -> String {
+    match &artifact.summary {
+        Some(summary) => format!("{} · {}", artifact.path.display(), summary),
+        None => artifact.path.display().to_string(),
+    }
+}
+
+fn phase_label(phase: RuntimePhase) -> &'static str {
+    match phase {
+        RuntimePhase::Idle => "idle",
+        RuntimePhase::Starting => "starting",
+        RuntimePhase::Running => "running",
+        RuntimePhase::WaitingForTool => "waiting for tool",
+        RuntimePhase::WaitingForApproval => "waiting for approval",
+        RuntimePhase::Verifying => "verifying",
+        RuntimePhase::Completed => "completed",
+        RuntimePhase::Failed => "failed",
+        RuntimePhase::Blocked => "blocked",
+    }
+}
+
+fn phase_color(phase: RuntimePhase) -> egui::Color32 {
+    match phase {
+        RuntimePhase::Completed => GOOD,
+        RuntimePhase::Failed | RuntimePhase::Blocked => WARN,
+        RuntimePhase::Running
+        | RuntimePhase::WaitingForTool
+        | RuntimePhase::WaitingForApproval
+        | RuntimePhase::Verifying => BLUE,
+        RuntimePhase::Idle | RuntimePhase::Starting => MUTED,
+    }
+}
+
+fn tool_status_label(status: RuntimeToolStatus) -> &'static str {
+    match status {
+        RuntimeToolStatus::Pending => "pending",
+        RuntimeToolStatus::Running => "running",
+        RuntimeToolStatus::Succeeded => "succeeded",
+        RuntimeToolStatus::Failed => "failed",
+        RuntimeToolStatus::Cancelled => "cancelled",
     }
 }
 
@@ -291,10 +477,10 @@ fn work_item_button(ui: &mut egui::Ui, item: &WorkItem, selected: bool) -> egui:
             ui.horizontal(|ui| {
                 ui.strong(format!("{} {}", item.id, item.title));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(item.status).small().color(WARN));
+                    ui.label(egui::RichText::new(&item.status).small().color(WARN));
                 });
             });
-            ui.label(egui::RichText::new(item.summary).color(MUTED));
+            ui.label(egui::RichText::new(&item.summary).color(MUTED));
         })
         .response
         .interact(egui::Sense::click())
@@ -337,8 +523,8 @@ fn timeline_card(ui: &mut egui::Ui, event: &TimelineEvent) {
             };
             ui.colored_label(color, symbol);
             ui.vertical(|ui| {
-                ui.strong(event.title);
-                ui.label(egui::RichText::new(event.detail).color(MUTED));
+                ui.strong(&event.title);
+                ui.label(egui::RichText::new(&event.detail).color(MUTED));
             });
         });
     });
@@ -357,4 +543,66 @@ fn code_block(ui: &mut egui::Ui, text: &mut String) {
                     .desired_rows(8),
             );
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use imp_core::runtime::{RuntimeToolCall, RuntimeWorktreeState};
+    use imp_core::workflow::WorktreeRunMetadata;
+
+    #[test]
+    fn gui_view_model_projects_runtime_snapshot_without_tui_types() {
+        let mut snapshot = RuntimeStateSnapshot::default();
+        snapshot.workflow.run_id = Some("run-1".into());
+        snapshot.workflow.model = Some("openrouter/test".into());
+        snapshot.phase = RuntimePhase::WaitingForTool;
+        snapshot.active_tools.push(RuntimeToolCall {
+            id: "tool-1".into(),
+            name: "bash".into(),
+            status: RuntimeToolStatus::Running,
+            ..RuntimeToolCall::default()
+        });
+        snapshot.workspace.worktree = Some(RuntimeWorktreeState {
+            metadata: WorktreeRunMetadata {
+                worktree_path: "/tmp/imp-worktree".into(),
+                branch: "imp/run/test".into(),
+                ..WorktreeRunMetadata::default()
+            },
+            ..RuntimeWorktreeState::default()
+        });
+        snapshot.evidence_refs.push(RuntimeArtifactRef {
+            kind: "worktree-diff".into(),
+            path: ".imp/runs/run-1/worktree/diff.patch".into(),
+            summary: Some("patch".into()),
+        });
+        snapshot
+            .status_items
+            .insert("phase".into(), "waiting".into());
+
+        let view = GuiRuntimeViewModel::from_snapshot(&snapshot);
+        assert_eq!(view.run_label, "run-1");
+        assert_eq!(view.phase, RuntimePhase::WaitingForTool);
+        assert_eq!(view.model.as_deref(), Some("openrouter/test"));
+        assert_eq!(view.active_tools, vec!["bash · tool-1".to_string()]);
+        assert_eq!(
+            view.worktree_label.as_deref(),
+            Some("imp/run/test @ /tmp/imp-worktree")
+        );
+        assert_eq!(view.evidence_paths.len(), 1);
+        assert!(view
+            .status_lines
+            .iter()
+            .any(|line| line == "phase: waiting"));
+    }
+
+    #[test]
+    fn gui_demo_runtime_uses_core_accumulator() {
+        let snapshot = demo_runtime_accumulator().snapshot();
+        let view = GuiRuntimeViewModel::from_snapshot(&snapshot);
+        assert_eq!(view.run_label, "demo-runtime");
+        assert_eq!(view.phase, RuntimePhase::WaitingForTool);
+        assert_eq!(view.active_tools, vec!["bash · tool-1".to_string()]);
+        assert_eq!(view.evidence_paths.len(), 1);
+    }
 }

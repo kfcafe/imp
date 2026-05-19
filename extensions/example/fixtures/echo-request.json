@@ -1,0 +1,12 @@
+{
+  "id": "call-1",
+  "type": "tool_call",
+  "tool": "example_echo",
+  "input": { "text": "hello from example" },
+  "context": {
+    "cwd": ".",
+    "extensionId": "example.typescript",
+    "runId": "example",
+    "timeoutMs": 5000
+  }
+}
