@@ -346,11 +346,10 @@ impl Agent {
             return;
         }
 
-        let decision = crate::workflow::classify_workflow_intent(
-            prompt,
-            matches!(self.mode, AgentMode::Orchestrator | AgentMode::Planner),
-        );
-        crate::workflow::apply_intent_to_controller(&mut self.workflow_controller, &decision);
+        if matches!(self.mode, AgentMode::Orchestrator) {
+            let decision = crate::workflow::classify_workflow_intent(prompt, true);
+            crate::workflow::apply_intent_to_controller(&mut self.workflow_controller, &decision);
+        }
         if !self.workflow_controller.bootstrap_required() {
             return;
         }
@@ -404,6 +403,7 @@ impl Agent {
                 "mana" => self.record_workflow_mana_obligation(result),
                 "write" | "edit" | "multi_edit" => {
                     self.workflow_controller.record_direct_work_changed();
+                    self.workflow_controller.record_closeout_ready();
                 }
                 "read" if self.workflow_controller.direct_closeout_required => {
                     self.workflow_controller.record_closeout_ready();
@@ -2210,6 +2210,7 @@ mod tests {
         ]));
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.workflow_controller.record_closeout_ready();
         agent.tools.register(Arc::new(WriteTool));
 
         let events_task = tokio::spawn(collect_events(handle));
@@ -4922,6 +4923,7 @@ mod integration {
     fn create_agent_with_tools(provider: Arc<dyn Provider>, cwd: PathBuf) -> (Agent, AgentHandle) {
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, cwd);
+        agent.workflow_controller.record_closeout_ready();
         agent.tools.register(Arc::new(WriteTool));
         agent.tools.register(Arc::new(ReadTool));
         agent.tools.register(Arc::new(EditTool));

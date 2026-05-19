@@ -962,12 +962,22 @@ impl Agent {
 
             if let Some(follow_up) = queued_follow_ups.pop_front() {
                 self.messages.push(Message::user(&follow_up));
+                turn_state.record_continue(super::ContinueReason::QueuedUserFollowUp);
+                turn += 1;
+                continue;
             }
-
             if should_stop_after_tool_turn {
                 break;
             }
-
+            let should_interpret_tool_results = matches!(
+                final_status,
+                Some(RunFinalStatus::Done {
+                    reason: AgentStopReason::NoAutomaticFollowUp,
+                })
+            );
+            if !should_interpret_tool_results && final_status.is_some() {
+                break;
+            }
             turn_state.record_continue(super::ContinueReason::ToolResultsNeedInterpretation);
             turn += 1;
         }
