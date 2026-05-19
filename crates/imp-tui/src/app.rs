@@ -273,8 +273,6 @@ struct AgentStartRequest {
     autonomy_mode: AutonomyMode,
     runtime_signal_tx: tokio::sync::mpsc::Sender<RuntimeSignal>,
     ui_tx: tokio::sync::mpsc::Sender<crate::tui_interface::UiRequest>,
-    preloaded_lua_tools: Option<ToolRegistry>,
-    prompt_context: imp_core::mana_prompt_context::SessionPromptContext,
     tui_trace: Option<TuiTrace>,
 }
 
@@ -1477,31 +1475,39 @@ fn start_agent_from_request(
     };
 
     let workflow_context = workflow_context_prompt_for_request(&request);
-    let phase_started = Instant::now();
     let mut config = request.config.clone();
     config.thinking = Some(request.thinking_level);
     let requested_max_tokens = request.config.max_tokens;
     let builder_cwd_for_lua = agent_cwd.clone();
-    let mut builder = AgentBuilder::new(config, agent_cwd, model, api_key)
-        .autonomy_mode(request.autonomy_mode)
-        .preloaded_prompt_context(request.prompt_context.clone());
-    if let Some(preloaded_lua_tools) = request.preloaded_lua_tools {
-        builder = builder.preloaded_lua_tools(preloaded_lua_tools);
-    } else {
-        let lua_cwd = builder_cwd_for_lua.clone();
-        let user_config_dir = imp_core::config::Config::user_config_dir();
-        builder = builder.lua_tool_loader(move |policy, tools| {
-            imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools, policy);
-        });
+    let start = Instant::now();
+    let policy = request.config.lua.resolve_policy(request.config.mode);
+    let mut preloaded_lua_tools = ToolRegistry::new();
+    let user_config_dir = imp_core::config::Config::user_config_dir();
+    imp_lua::init_lua_extensions(
+        &user_config_dir,
+        Some(&builder_cwd_for_lua),
+        &mut preloaded_lua_tools,
+        &policy,
+    );
+    if let Some(trace) = request.tui_trace.as_ref() {
+        trace.log(&format!(
+            "agent_start_phase phase=lua_extensions duration_ms={}",
+            start.elapsed().as_millis()
+        ));
     }
+
+    let start = Instant::now();
+    let builder = AgentBuilder::new(config, agent_cwd, model, api_key)
+        .autonomy_mode(request.autonomy_mode)
+        .preloaded_lua_tools(preloaded_lua_tools);
     let (mut agent, handle) = builder
         .build()
         .map_err(|e: imp_core::error::Error| e.to_string())?;
     trace_tui_to(
         trace,
         format!(
-            "agent_start_phase phase=builder_lua duration_ms={}",
-            phase_started.elapsed().as_millis()
+            "agent_start_phase phase=builder_build duration_ms={}",
+            start.elapsed().as_millis()
         ),
     );
 
@@ -5478,14 +5484,6 @@ impl App {
         }
     }
 
-    fn preloaded_lua_tools(&self) -> Option<ToolRegistry> {
-        let policy = self.config.lua.resolve_policy(self.config.mode);
-        let mut tools = ToolRegistry::new();
-        let user_config_dir = imp_core::config::Config::user_config_dir();
-        imp_lua::init_lua_extensions(&user_config_dir, Some(&self.cwd), &mut tools, &policy);
-        Some(tools)
-    }
-
     fn agent_start_request(&mut self) -> AgentStartRequest {
         let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(16);
         let tui_ui = crate::tui_interface::TuiInterface::new(ui_tx.clone());
@@ -5505,8 +5503,6 @@ impl App {
             autonomy_mode: self.autonomy_mode,
             runtime_signal_tx: self.runtime_signal_tx.clone(),
             ui_tx,
-            preloaded_lua_tools: self.preloaded_lua_tools(),
-            prompt_context: imp_core::mana_prompt_context::load_session_prompt_context(&self.cwd),
             tui_trace: self.tui_trace.clone(),
         }
     }
@@ -8865,6 +8861,15 @@ mod session_lifecycle {
         assert_eq!(app.messages[last_user].content, "keep going");
         assert_eq!(app.messages[last_assistant].role, MessageRole::Assistant);
         assert!(app.messages[last_assistant].is_streaming);
+    }
+
+    #[test]
+    fn agent_start_request_keeps_expensive_startup_work_deferred() {
+        let mut app = make_app();
+        let request = app.agent_start_request();
+
+        assert_eq!(request.model_name, app.model_name);
+        assert_eq!(request.config.model, app.config.model);
     }
 
     #[test]

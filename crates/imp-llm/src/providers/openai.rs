@@ -262,7 +262,9 @@ fn build_request(model: &Model, context: Context, options: RequestOptions) -> Ap
 }
 
 fn build_tool_defs(tools: &[ToolDefinition]) -> Vec<ApiToolDef> {
-    tools
+    let mut sorted: Vec<&ToolDefinition> = tools.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    sorted
         .iter()
         .map(|t| ApiToolDef {
             tool_type: "function".into(),
@@ -920,7 +922,57 @@ mod tests {
     use crate::message::{ToolResultMessage, UserMessage};
     use crate::model::{Capabilities, ModelPricing};
 
-    // -- Message serialization tests --
+    #[test]
+    fn openai_tool_defs_are_sorted_for_prompt_cache_stability() {
+        let write = ToolDefinition {
+            name: "write".into(),
+            description: "Write".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+        };
+        let bash = ToolDefinition {
+            name: "bash".into(),
+            description: "Bash".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+        };
+        let read = ToolDefinition {
+            name: "read".into(),
+            description: "Read".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+        };
+
+        let names = build_tool_defs(&[write.clone(), bash.clone(), read.clone()])
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["bash", "read", "write"]);
+
+        let first_request = ApiRequest {
+            model: "gpt-test".into(),
+            input: vec![serde_json::json!({ "role": "user", "content": "hello" })],
+            stream: true,
+            instructions: Some("system".into()),
+            tools: build_tool_defs(&[write.clone(), bash.clone(), read.clone()]),
+            temperature: None,
+            max_output_tokens: None,
+            reasoning: None,
+        };
+        let second_request = ApiRequest {
+            model: "gpt-test".into(),
+            input: vec![serde_json::json!({ "role": "user", "content": "hello" })],
+            stream: true,
+            instructions: Some("system".into()),
+            tools: build_tool_defs(&[read, write, bash]),
+            temperature: None,
+            max_output_tokens: None,
+            reasoning: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(first_request).unwrap(),
+            serde_json::to_value(second_request).unwrap()
+        );
+    }
+
 
     #[test]
     fn openai_serialize_text_user_message() {

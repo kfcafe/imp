@@ -492,20 +492,22 @@ impl AuthStore {
     /// Resolve a ChatGPT/OpenAI OAuth token, preferring `openai-codex` when present.
     pub async fn resolve_chatgpt_oauth(&mut self) -> Result<ApiKey> {
         for provider in ["openai-codex", "openai"] {
-            if self.get_oauth(provider).is_none() {
+            let Some(StoredCredential::OAuth(oauth)) = self.stored.get(provider) else {
                 continue;
+            };
+            if oauth.is_expired() {
+                return self
+                    .resolve_or_refresh(provider, |refresh_token| {
+                        let refresh_token = refresh_token.to_string();
+                        async move {
+                            crate::oauth::chatgpt::ChatGptOAuth::new()
+                                .refresh_token(&refresh_token)
+                                .await
+                        }
+                    })
+                    .await;
             }
-
-            return self
-                .resolve_or_refresh(provider, |refresh_token| {
-                    let refresh_token = refresh_token.to_string();
-                    async move {
-                        crate::oauth::chatgpt::ChatGptOAuth::new()
-                            .refresh_token(&refresh_token)
-                            .await
-                    }
-                })
-                .await;
+            return Ok(oauth.access_token.clone());
         }
 
         Err(crate::error::Error::Auth(
