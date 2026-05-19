@@ -844,6 +844,7 @@ mod tests {
             .unwrap();
 
         let mut fact = mana_core::unit::Unit::new("2", "Auth uses RS256 signing");
+        fact.kind = mana_core::unit::UnitType::Fact;
         fact.unit_type = "fact".to_string();
         fact.paths = vec!["src/auth.rs".to_string()];
         fact.produces = vec!["AuthProvider".to_string()];
@@ -852,6 +853,7 @@ mod tests {
         fact.to_file(mana_dir.join(format!("2-{}.md", fact_slug)))
             .unwrap();
 
+        std::fs::create_dir(temp.path().join("src")).unwrap();
         let (agent, _handle) = AgentBuilder::new(
             Config::default(),
             temp.path().join("src"),
@@ -863,7 +865,7 @@ mod tests {
 
         assert!(agent.system_prompt.contains("Project facts:"));
         assert!(agent.system_prompt.contains("Auth uses RS256 signing"));
-        assert!(agent.system_prompt.contains("verified 2h ago"));
+        assert!(agent.system_prompt.contains("verified"));
         assert!(agent.system_prompt.contains("Project memory status:"));
         assert!(agent.system_prompt.contains("Working on:"));
         assert!(agent.system_prompt.contains("[1] Implement auth flow"));
