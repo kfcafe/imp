@@ -104,6 +104,7 @@ use imp_core::personality::{
     tunable_state_for_label, SoulTunableState,
 };
 use imp_core::resources::{discover_project_soul, suggested_project_soul_path};
+use imp_core::runtime::RuntimeStateAccumulator;
 use imp_core::session::{SessionEntry, SessionManager};
 use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
 use imp_core::usage::{UsageCostBreakdown, UsageRecordSource, UsageTokens};
@@ -300,6 +301,9 @@ struct Cli {
     /// Final output format for --print: text or json
     #[arg(long, default_value = "text")]
     output: String,
+    /// Emit shared runtime_event/runtime_state payloads alongside legacy JSON events
+    #[arg(long)]
+    runtime_json: bool,
 
     /// Autonomy mode: suggest, safe, local-auto, worktree-auto, allow-all-local, allow-all, ci
     #[arg(long, value_name = "MODE")]
@@ -405,6 +409,11 @@ enum Commands {
         #[command(subcommand)]
         command: Option<EvidenceCommand>,
     },
+    /// Save, list, or show eval candidate artifacts
+    Eval {
+        #[command(subcommand)]
+        command: EvalCommand,
+    },
     /// Import skills and config from other agents (pi, Claude Code, Codex)
     Import {
         /// Only detect — don't copy anything
@@ -439,6 +448,36 @@ enum EvidenceCommand {
     List,
     /// Print the latest evidence HTML path
     Latest,
+}
+#[derive(Subcommand, Debug)]
+enum EvalCommand {
+    /// Save a run or correction as an eval candidate artifact
+    Save {
+        /// Source run id under .imp/runs
+        #[arg(long)]
+        run: String,
+        /// Primary failure reason
+        #[arg(long, default_value = "manual")]
+        reason: String,
+        /// Expected behavior summary
+        #[arg(long)]
+        expected: String,
+        /// Optional human note/correction summary
+        #[arg(long)]
+        note: Option<String>,
+        /// Optional verifier command that would catch this issue
+        #[arg(long)]
+        verifier: Option<String>,
+        /// Explicit candidate id
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// List project-local eval candidates
+    List,
+    /// Alias for list
+    Ls,
+    /// Show one eval candidate JSON document
+    Show { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2074,7 +2113,13 @@ async fn run_headless_mode(
 
     while let Some(event) = prepared.session.recv_event().await {
         match output_mode {
-            HeadlessOutputMode::Json => print_json_event(&event)?,
+            HeadlessOutputMode::Json => {
+                if cli.runtime_json {
+                    print_json_event_with_runtime(&event, Some(&mut runtime_state))?
+                } else {
+                    print_json_event(&event)?
+                }
+            }
             HeadlessOutputMode::Human => print_headless_human_event(
                 &event,
                 !cli.no_tools,
@@ -2280,7 +2325,56 @@ fn print_headless_human_event(
     Ok(())
 }
 
+fn print_json_event_with_runtime(
+    event: &AgentEvent,
+    runtime: Option<&mut RuntimeStateAccumulator>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let value = json_event_value(event)?;
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{}", serde_json::to_string(&value)?)?;
+    if let Some(runtime) = runtime {
+        let sequence = runtime.snapshot().status_items.len() as u64
+            + runtime.snapshot().active_tools.len() as u64
+            + runtime.snapshot().completed_tools.len() as u64
+            + 1;
+        let run_id = runtime
+            .snapshot()
+            .workflow
+            .run_id
+            .clone()
+            .unwrap_or_else(|| "headless".into());
+        let runtime_event = event.to_runtime_event(run_id, sequence);
+        runtime.apply(&runtime_event);
+        writeln!(
+            stdout,
+            "{}",
+            serde_json::to_string(&json!({
+                "type": "runtime_event",
+                "event": runtime_event,
+            }))?
+        )?;
+        writeln!(
+            stdout,
+            "{}",
+            serde_json::to_string(&json!({
+                "type": "runtime_state",
+                "snapshot": runtime.snapshot(),
+            }))?
+        )?;
+    }
+    Ok(())
+}
+
 fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>> {
+    let value = json_event_value(event)?;
+    let line = serde_json::to_string(&value)?;
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{line}")?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn json_event_value(event: &AgentEvent) -> Result<Value, Box<dyn std::error::Error>> {
     let value = match event {
         AgentEvent::AgentStart { model, timestamp } => {
             json!({ "type": "agent_start", "model": model, "timestamp": timestamp })
@@ -2344,6 +2438,10 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
         AgentEvent::EvidenceWritten { path } => json!({
             "type": "evidence_written",
             "path": path.display().to_string(),
+        }),
+        AgentEvent::WorkflowControllerSnapshot { snapshot } => json!({
+            "type": "workflow_controller_snapshot",
+            "snapshot": snapshot,
         }),
         AgentEvent::VerificationStarted { gate } => json!({
             "type": "verification_started",
@@ -3029,6 +3127,10 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
         AgentEvent::EvidenceWritten { path } => json!({
             "type": "evidence_written",
             "path": path.display().to_string(),
+        }),
+        AgentEvent::WorkflowControllerSnapshot { snapshot } => json!({
+            "type": "workflow_controller_snapshot",
+            "snapshot": snapshot,
         }),
         AgentEvent::VerificationStarted { gate } => json!({
             "type": "verification_started",
