@@ -1192,9 +1192,10 @@ pub fn build_click_map_from_rendered_lines(
 
     for (line_index, line) in lines.iter().enumerate().take(window.end).skip(window.start) {
         let plain = line_to_plain_text(line);
-        let Some(rest) = plain
+        let header = plain.trim_start();
+        let Some(rest) = header
             .strip_prefix("▸ ")
-            .or_else(|| plain.strip_prefix("▾ "))
+            .or_else(|| header.strip_prefix("▾ "))
         else {
             continue;
         };
@@ -1384,7 +1385,7 @@ mod tests {
     fn build_click_map_from_rendered_lines_finds_visible_tool_headers() {
         let lines = vec![
             Line::from("hello"),
-            Line::from("▸ #tool-1 read src/main.rs"),
+            Line::from("  ▸ #tool-1 read src/main.rs"),
             Line::from("world"),
         ];
         let map = build_click_map_from_rendered_lines(&lines, Rect::new(0, 10, 80, 3), 0);

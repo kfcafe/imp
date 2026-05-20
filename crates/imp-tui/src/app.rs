@@ -4498,6 +4498,12 @@ impl App {
         self.focus_tool_with_pin(index, true);
     }
 
+    /// Focus a tool call from an inline chat hit and show its details immediately.
+    fn focus_tool_in_inspector(&mut self, index: usize) {
+        self.focus_tool_with_pin(index, true);
+        self.active_pane = Pane::SidebarDetail;
+    }
+
     fn focus_latest_tool_with_pin(&mut self, pinned: bool) -> bool {
         let total = self.total_tool_calls();
         if total == 0 {
@@ -5064,7 +5070,7 @@ impl App {
                     if let Some(tool_id) = self.tool_id_at_chat_row(row, chat_area) {
                         self.clear_selection();
                         if let Some(index) = self.find_tool_call_index(&tool_id) {
-                            self.focus_tool(index);
+                            self.focus_tool_in_inspector(index);
                         }
                         return;
                     }
@@ -11473,6 +11479,50 @@ mod session_lifecycle {
 
         assert_eq!(app.tool_focus, Some(0));
         assert_eq!(app.active_pane, Pane::SidebarList);
+    }
+
+    #[test]
+    fn mouse_click_on_chat_tool_header_opens_inspector_detail() {
+        let mut app = make_app();
+        app.config.ui.sidebar_style = imp_core::config::SidebarStyle::Split;
+        app.chat_surface = Some(TextSurface::new(
+            SelectablePane::Chat,
+            Rect::new(0, 0, 80, 5),
+            vec!["  ▸ #tc-42 bash $ ls".into()],
+            0,
+        ));
+        app.chat_tool_click_map = vec![(0, "tc-42".into())];
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "checking...".into(),
+            thinking: None,
+            tool_calls: vec![crate::views::tools::DisplayToolCall {
+                id: "tc-42".into(),
+                name: "bash".into(),
+                args_summary: "$ ls".into(),
+                output: Some("file1\nfile2".into()),
+                details: serde_json::Value::Null,
+                is_error: false,
+                expanded: false,
+                streaming_lines: Vec::new(),
+                streaming_output: String::new(),
+            }],
+            assistant_blocks: Vec::new(),
+            is_streaming: false,
+            timestamp: 0,
+        });
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 4,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        });
+
+        assert!(app.sidebar.open);
+        assert_eq!(app.tool_focus, Some(0));
+        assert_eq!(app.active_pane, Pane::SidebarDetail);
+        assert!(app.selection.is_none());
     }
 
     #[test]
