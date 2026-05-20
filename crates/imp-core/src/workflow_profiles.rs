@@ -55,9 +55,16 @@ pub struct WorkflowSuggestion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowProfileError {
     InvalidName(String),
-    InvalidAlias { profile: String, alias: String },
+    InvalidAlias {
+        profile: String,
+        alias: String,
+    },
     UnknownWorkflow(String),
-    AliasConflict { alias: String, first: String, second: String },
+    AliasConflict {
+        alias: String,
+        first: String,
+        second: String,
+    },
     MissingInstructions(String),
 }
 
@@ -69,7 +76,11 @@ impl std::fmt::Display for WorkflowProfileError {
                 write!(f, "invalid alias `{alias}` for workflow `{profile}`")
             }
             Self::UnknownWorkflow(name) => write!(f, "unknown workflow `{name}`"),
-            Self::AliasConflict { alias, first, second } => write!(
+            Self::AliasConflict {
+                alias,
+                first,
+                second,
+            } => write!(
                 f,
                 "workflow alias `{alias}` is used by both `{first}` and `{second}`"
             ),
@@ -138,9 +149,11 @@ impl WorkflowRegistry {
     }
 
     pub fn get(&self, name_or_alias: &str) -> Option<&WorkflowProfile> {
-        self.profiles
-            .get(name_or_alias)
-            .or_else(|| self.aliases.get(name_or_alias).and_then(|name| self.profiles.get(name)))
+        self.profiles.get(name_or_alias).or_else(|| {
+            self.aliases
+                .get(name_or_alias)
+                .and_then(|name| self.profiles.get(name))
+        })
     }
 
     pub fn resolve(&self, name_or_alias: &str) -> Result<&WorkflowProfile, WorkflowProfileError> {
@@ -195,7 +208,11 @@ impl WorkflowProfile {
         if self.instructions.contains("{{prompt}}") {
             self.instructions.replace("{{prompt}}", prompt)
         } else {
-            format!("{}\n\nUser request:\n{}", self.instructions.trim_end(), prompt)
+            format!(
+                "{}\n\nUser request:\n{}",
+                self.instructions.trim_end(),
+                prompt
+            )
         }
     }
 }
@@ -404,8 +421,8 @@ mod tests {
 
     #[test]
     fn registry_includes_builtin_workflows() {
-        let registry = WorkflowRegistry::from_overrides(Vec::<(String, WorkflowProfileDef)>::new())
-            .unwrap();
+        let registry =
+            WorkflowRegistry::from_overrides(Vec::<(String, WorkflowProfileDef)>::new()).unwrap();
         for name in ["plan", "review", "verify", "implement", "research", "debug"] {
             assert!(registry.get(name).is_some(), "missing {name}");
         }
@@ -444,14 +461,16 @@ mod tests {
         )])
         .unwrap();
         assert_eq!(registry.get("sec").unwrap().name, "security-review");
-        let suggestion = registry.infer("can you audit auth in this change?").unwrap();
+        let suggestion = registry
+            .infer("can you audit auth in this change?")
+            .unwrap();
         assert_eq!(suggestion.profile.name, "security-review");
     }
 
     #[test]
     fn infer_ignores_never_suggest_profiles() {
-        let registry = WorkflowRegistry::from_overrides(Vec::<(String, WorkflowProfileDef)>::new())
-            .unwrap();
+        let registry =
+            WorkflowRegistry::from_overrides(Vec::<(String, WorkflowProfileDef)>::new()).unwrap();
         let suggestion = registry.infer("please implement this change");
         assert_ne!(suggestion.map(|s| s.profile.name), Some("implement".into()));
     }

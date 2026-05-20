@@ -40,6 +40,7 @@ use imp_core::trust::{Provenance, RiskLabel, TrustLabel};
 use imp_core::workflow::{
     AutonomyMode, VerificationCloseoutEffect, VerificationGate, VerificationGateStatus,
 };
+use imp_core::workflow_profiles::{WorkflowProfile, WorkflowSuggest};
 use imp_core::Error as ImpCoreError;
 use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelMeta, ModelRegistry, ProviderRegistry};
@@ -155,6 +156,10 @@ pub enum AskReply {
     Select(tokio::sync::oneshot::Sender<Option<usize>>),
     MultiSelect(tokio::sync::oneshot::Sender<Option<Vec<usize>>>),
     Input(tokio::sync::oneshot::Sender<Option<String>>),
+    WorkflowSuggestion {
+        profile: WorkflowProfile,
+        prompt: String,
+    },
 }
 
 #[derive(Debug)]
@@ -5798,11 +5803,19 @@ impl App {
     }
 
     fn enqueue_visible_agent_turn(&mut self, text: String) {
+        self.enqueue_visible_agent_turn_with_prompt(text.clone(), text);
+    }
+
+    fn enqueue_visible_agent_turn_with_prompt(
+        &mut self,
+        visible_text: String,
+        agent_prompt: String,
+    ) {
         let user_message_index = self.messages.len();
         let timestamp = imp_llm::now();
         self.messages.push(DisplayMessage {
             role: MessageRole::User,
-            content: text.clone(),
+            content: visible_text.clone(),
             thinking: None,
             tool_calls: Vec::new(),
             assistant_blocks: Vec::new(),
@@ -5824,9 +5837,9 @@ impl App {
         let agent_session = self.session.snapshot_with_pending_user_message(
             entry_id.clone(),
             timestamp,
-            text.clone(),
+            visible_text.clone(),
         );
-        self.start_user_message_persist(persist_session, entry_id, text.clone(), timestamp);
+        self.start_user_message_persist(persist_session, entry_id, visible_text.clone(), timestamp);
         self.session = agent_session;
 
         self.is_streaming = true;
@@ -5839,7 +5852,7 @@ impl App {
         self.tool_focus = None;
         self.tool_focus_pinned = false;
         self.sidebar_auto_follow = true;
-        self.pending_agent_prompt = Some(text);
+        self.pending_agent_prompt = Some(agent_prompt);
         self.pending_agent_cwd = None;
     }
 
@@ -5919,6 +5932,11 @@ impl App {
         if !text.contains('\n') {
             if let Some(cmd_text) = text.strip_prefix('/') {
                 let typed = cmd_text.trim();
+                if self.try_workflow_command(typed) {
+                    self.editor.push_history();
+                    self.editor.clear();
+                    return;
+                }
                 let canonical_typed = if typed.eq_ignore_ascii_case("improve safe") {
                     "improve safe"
                 } else {
@@ -5956,6 +5974,13 @@ impl App {
             return;
         }
 
+        if let Some(suggestion) = self.workflow_suggestion_for_prompt(&text) {
+            self.ask_workflow_suggestion(suggestion, text.clone());
+            self.editor.push_history();
+            self.editor.clear();
+            self.needs_redraw = true;
+            return;
+        }
         // Add user message, assistant placeholder, and session entry before deferring agent start.
         self.enqueue_visible_agent_turn(text.clone());
         self.editor.push_history();
@@ -6228,10 +6253,145 @@ impl App {
         }
     }
 
+    fn workflow_registry(&mut self) -> Option<imp_core::workflow_profiles::WorkflowRegistry> {
+        match self.config.workflow_registry() {
+            Ok(registry) => Some(registry),
+            Err(err) => {
+                self.push_warning_msg(&format!("Workflow config error: {err}"));
+                None
+            }
+        }
+    }
+
+    fn try_workflow_command(&mut self, typed: &str) -> bool {
+        let mut parts = typed.splitn(2, char::is_whitespace);
+        let Some(name) = parts.next().filter(|name| !name.is_empty()) else {
+            return false;
+        };
+        if matches!(name, "workflow" | "workflows") {
+            return false;
+        }
+        let Some(registry) = self.workflow_registry() else {
+            return false;
+        };
+        let Some(profile) = registry.get(name).cloned() else {
+            return false;
+        };
+        let prompt = parts.next().unwrap_or_default().trim();
+        if prompt.is_empty() {
+            self.show_workflow_profile(&profile.name);
+            return true;
+        }
+        self.enqueue_workflow_turn(profile, prompt.to_string());
+        true
+    }
+
+    fn enqueue_workflow_turn(&mut self, profile: WorkflowProfile, prompt: String) {
+        let wrapped = profile.wrap_prompt(&prompt);
+        self.push_system_msg(&format!(
+            "Using /{} · {}",
+            profile.name, profile.confirm_body
+        ));
+        self.enqueue_visible_agent_turn_with_prompt(
+            format!("/{} {}", profile.name, prompt),
+            wrapped,
+        );
+    }
+
+    fn workflow_suggestion_for_prompt(&mut self, prompt: &str) -> Option<WorkflowProfile> {
+        let registry = self.workflow_registry()?;
+        let suggestion = registry.infer(prompt)?;
+        match suggestion.profile.suggest {
+            WorkflowSuggest::Never => None,
+            WorkflowSuggest::Auto => Some(suggestion.profile),
+            WorkflowSuggest::Ask => Some(suggestion.profile),
+        }
+    }
+
+    fn ask_workflow_suggestion(&mut self, profile: WorkflowProfile, prompt: String) {
+        let title = if profile.confirm_title.trim().is_empty() {
+            format!("Use /{}?", profile.name)
+        } else {
+            profile.confirm_title.clone()
+        };
+        let mut choices = vec![format!("Use /{}", profile.name), "Normal".to_string()];
+        if !profile.confirm_body.trim().is_empty() {
+            choices[0] = format!("{} · {}", choices[0], profile.confirm_body.trim());
+        }
+        let options = choices
+            .into_iter()
+            .map(|label| crate::views::ask_bar::AskOption {
+                label,
+                description: None,
+                checked: false,
+            })
+            .collect();
+        self.begin_ask(
+            AskState::new(title, String::new(), options, false),
+            AskReply::WorkflowSuggestion { profile, prompt },
+        );
+    }
+
+    fn show_workflow_profiles(&mut self) {
+        let Some(registry) = self.workflow_registry() else {
+            return;
+        };
+        let mut lines = vec!["Workflows".to_string()];
+        for profile in registry.iter() {
+            lines.push(format!("/{} — {}", profile.name, profile.description));
+        }
+        self.push_system_msg(&lines.join("\n"));
+    }
+
+    fn show_workflow_profile(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.push_system_msg("Usage: /workflow <name>");
+            return;
+        }
+        let Some(registry) = self.workflow_registry() else {
+            return;
+        };
+        match registry.resolve(name) {
+            Ok(profile) => {
+                let aliases = if profile.aliases.is_empty() {
+                    "none".to_string()
+                } else {
+                    profile
+                        .aliases
+                        .iter()
+                        .map(|alias| format!("/{alias}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let triggers = if profile.triggers.is_empty() {
+                    "none".to_string()
+                } else {
+                    profile.triggers.join(", ")
+                };
+                self.push_system_msg(&format!(
+                    "/{}\n{}\naliases: {}\nsuggest: {:?}\nreadonly: {}\naction: {}\ntriggers: {}",
+                    profile.name,
+                    profile.description,
+                    aliases,
+                    profile.suggest,
+                    profile.readonly,
+                    profile.confirm_body,
+                    triggers
+                ));
+            }
+            Err(err) => self.push_warning_msg(&err.to_string()),
+        }
+    }
+
     fn execute_command(&mut self, cmd: &str) {
         let mut parts = cmd.splitn(2, char::is_whitespace);
         let command = parts.next().unwrap_or("");
         let args = parts.next().unwrap_or("").trim();
+
+        if self.try_workflow_command(cmd) {
+            return;
+        }
 
         match command {
             "quit" | "q" => {
@@ -6459,6 +6619,13 @@ impl App {
             "welcome" | "setup" => {
                 let all_models = self.model_registry.list().to_vec();
                 self.mode = UiMode::Welcome(WelcomeState::new(&all_models));
+            }
+            "workflow" => {
+                let arg = cmd.strip_prefix("workflow").unwrap_or_default().trim();
+                self.show_workflow_profile(arg);
+            }
+            "workflows" => {
+                self.show_workflow_profiles();
             }
             "copy" => {
                 if self.copy_selection() {
@@ -6709,7 +6876,17 @@ impl App {
             .and_then(|runtime| runtime.lock().ok().map(|guard| guard.command_summaries()))
             .unwrap_or_default();
         let commands = merge_extension_commands(builtin_commands(), extension_commands);
-        merge_skill_commands(commands, self.skill_summaries())
+        let commands = merge_skill_commands(commands, self.skill_summaries());
+        match self.config.workflow_registry() {
+            Ok(registry) => merge_skill_commands(
+                commands,
+                registry
+                    .iter()
+                    .map(|profile| (profile.name.clone(), profile.description.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+            Err(_) => commands,
+        }
     }
 
     fn skill_summaries(&self) -> Vec<(String, String)> {
@@ -7346,6 +7523,51 @@ impl App {
         });
 
         match (&result, reply) {
+            (
+                AskResult::Selected(indices),
+                Some(AskReply::WorkflowSuggestion { profile, prompt }),
+            ) => {
+                let labels: Vec<String> = indices
+                    .iter()
+                    .filter_map(|&i| state.options.get(i).map(|o| o.label.clone()))
+                    .collect();
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::User,
+                    content: labels.join(", "),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+                self.invalidate_chat_render_cache();
+                if indices.first().copied() == Some(0) {
+                    self.enqueue_workflow_turn(profile, prompt);
+                } else {
+                    self.enqueue_visible_agent_turn(prompt);
+                }
+            }
+            (AskResult::Text(text), Some(AskReply::WorkflowSuggestion { profile, prompt })) => {
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::User,
+                    content: text.clone(),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+                self.invalidate_chat_render_cache();
+                if text
+                    .trim()
+                    .eq_ignore_ascii_case(&format!("Use /{}", profile.name))
+                    || text.trim().starts_with(&format!("Use /{} ·", profile.name))
+                {
+                    self.enqueue_workflow_turn(profile, prompt);
+                } else {
+                    self.enqueue_visible_agent_turn(prompt);
+                }
+            }
             (AskResult::Text(text), Some(AskReply::Input(tx))) => {
                 self.messages.push(DisplayMessage {
                     role: MessageRole::User,
@@ -7397,8 +7619,30 @@ impl App {
                     });
                     self.invalidate_chat_render_cache();
                     let _ = tx.send(Some(idx));
+                } else if let Some(other_idx) = state
+                    .options
+                    .iter()
+                    .position(|o| o.label.eq_ignore_ascii_case("Other..."))
+                {
+                    // Select-style UI replies can only send an index back to the
+                    // tool. Preserve the user's typed custom answer visually, then
+                    // select the explicit Other option so the ask_user tool can
+                    // collect and return free text instead of treating the answer
+                    // as skipped.
+                    self.messages.push(DisplayMessage {
+                        role: MessageRole::User,
+                        content: text.clone(),
+                        thinking: None,
+                        tool_calls: Vec::new(),
+                        assistant_blocks: Vec::new(),
+                        is_streaming: false,
+                        timestamp: imp_llm::now(),
+                    });
+                    self.invalidate_chat_render_cache();
+                    let _ = tx.send(Some(other_idx));
                 } else {
-                    // No match — send None. The ask tool will get "User cancelled".
+                    // No match and no explicit Other option — send None. The ask
+                    // tool will report the question as skipped.
                     self.messages.push(DisplayMessage {
                         role: MessageRole::User,
                         content: text.clone(),
@@ -7551,6 +7795,7 @@ impl App {
                 AskReply::Input(tx) => {
                     let _ = tx.send(None);
                 }
+                AskReply::WorkflowSuggestion { .. } => {}
             }
         }
         // Stop the agent — user wants control back
@@ -9364,6 +9609,46 @@ mod session_lifecycle {
     }
 
     #[test]
+    fn ask_select_typed_custom_text_with_other_returns_other_index() {
+        use crate::views::ask_bar::{AskOption, AskState};
+        use tokio::sync::oneshot;
+
+        let mut app = make_app();
+        let (tx, mut rx) = oneshot::channel();
+        app.begin_ask(
+            AskState::with_placeholder(
+                "Choose".to_string(),
+                String::new(),
+                vec![
+                    AskOption {
+                        label: "Red".to_string(),
+                        description: None,
+                        checked: false,
+                    },
+                    AskOption {
+                        label: "Other...".to_string(),
+                        description: None,
+                        checked: false,
+                    },
+                ],
+                false,
+                String::new(),
+            ),
+            AskReply::Select(tx),
+        );
+        app.editor.insert_paste("purple");
+        app.sync_ask_from_editor();
+
+        app.finish_ask();
+
+        assert_eq!(rx.try_recv().unwrap(), Some(1));
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content == "purple"));
+    }
+
+    #[test]
     fn tui_integration_app_new_persistent_session() {
         let tmp = TempDir::new().unwrap();
         let app = make_persistent_app(&tmp);
@@ -10360,6 +10645,104 @@ mod session_lifecycle {
         assert_eq!(app.messages[0].role, MessageRole::System);
         assert!(app.messages[0].content.contains("Memory ("));
         assert!(app.messages[0].content.contains("User profile ("));
+    }
+
+    #[tokio::test]
+    async fn workflow_command_wraps_prompt_for_one_turn() {
+        let mut app = make_app();
+        app.execute_command("plan add billing");
+        assert!(app
+            .pending_agent_prompt
+            .as_ref()
+            .unwrap()
+            .contains("Task workflow: plan"));
+        assert!(app
+            .pending_agent_prompt
+            .as_ref()
+            .unwrap()
+            .contains("add billing"));
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Using /plan")));
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content == "/plan add billing"));
+    }
+
+    #[tokio::test]
+    async fn workflow_alias_resolves_to_profile() {
+        let mut app = make_app();
+        app.execute_command("spec add billing");
+        assert!(app
+            .pending_agent_prompt
+            .as_ref()
+            .unwrap()
+            .contains("Task workflow: plan"));
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content == "/plan add billing"));
+    }
+
+    #[test]
+    fn workflows_command_lists_profiles() {
+        let mut app = make_app();
+        app.execute_command("workflows");
+        let content = &app.messages.last().unwrap().content;
+        assert!(content.contains("/plan"));
+        assert!(content.contains("/review"));
+    }
+
+    #[test]
+    fn workflow_command_shows_profile_details() {
+        let mut app = make_app();
+        app.execute_command("workflow plan");
+        let content = &app.messages.last().unwrap().content;
+        assert!(content.contains("/plan"));
+        assert!(content.contains("aliases:"));
+        assert!(content.contains("action: Save plan"));
+    }
+
+    #[test]
+    fn natural_prompt_suggests_workflow_without_starting_agent() {
+        let mut app = make_app();
+        app.editor.set_content("please plan this feature");
+        app.send_message();
+        assert!(app.pending_agent_prompt.is_none());
+        assert!(matches!(
+            app.ask_reply,
+            Some(AskReply::WorkflowSuggestion { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn accepting_workflow_suggestion_wraps_prompt() {
+        let mut app = make_app();
+        app.editor.set_content("please plan this feature");
+        app.send_message();
+        app.finish_ask();
+        assert!(app
+            .pending_agent_prompt
+            .as_ref()
+            .unwrap()
+            .contains("Task workflow: plan"));
+    }
+
+    #[tokio::test]
+    async fn declining_workflow_suggestion_sends_original_prompt() {
+        let mut app = make_app();
+        app.editor.set_content("please plan this feature");
+        app.send_message();
+        if let Some(state) = app.ask_state.as_mut() {
+            state.cursor = 1;
+        }
+        app.finish_ask();
+        assert_eq!(
+            app.pending_agent_prompt.as_deref(),
+            Some("please plan this feature")
+        );
     }
 
     #[test]

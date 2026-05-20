@@ -9,9 +9,9 @@ use crate::guardrails::GuardrailConfig;
 use crate::hooks::HookDef;
 use crate::personality::PersonalityConfig;
 use crate::roles::{RoleDef, RoleRegistry, RoleRegistryError};
-use crate::workflow_profiles::{WorkflowProfileDef, WorkflowProfileError, WorkflowRegistry};
 use crate::storage;
 use crate::tools::web::types::WebConfig;
+use crate::workflow_profiles::{WorkflowProfileDef, WorkflowProfileError, WorkflowRegistry};
 
 /// Agent mode — controls which tools and mana actions the agent may use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
