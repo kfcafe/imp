@@ -5975,9 +5975,9 @@ impl App {
         }
 
         if let Some(suggestion) = self.workflow_suggestion_for_prompt(&text) {
-            self.ask_workflow_suggestion(suggestion, text.clone());
             self.editor.push_history();
             self.editor.clear();
+            self.ask_workflow_suggestion(suggestion, text.clone());
             self.needs_redraw = true;
             return;
         }
@@ -10743,6 +10743,7 @@ mod session_lifecycle {
             app.pending_agent_prompt.as_deref(),
             Some("please plan this feature")
         );
+        assert!(app.editor.content().is_empty());
     }
 
     #[test]
