@@ -3,6 +3,7 @@
 //! Dispatches to language-specific parsers based on file extension.
 //! Produces rich output: visibility, signatures, fields, variants, trait impls.
 
+pub mod generic;
 pub mod go;
 pub mod kotlin;
 pub mod python;
@@ -25,6 +26,28 @@ const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const MAX_LINE_CHARS: usize = 500;
 
 /// Node kinds that represent enclosing blocks we want to extract around a line or symbol.
+const SUPPORTED_LANGUAGES: &[&str] = &[
+    "shell",
+    "python",
+    "rust",
+    "javascript",
+    "typescript",
+    "go",
+    "elixir",
+    "ruby",
+    "perl",
+    "lua",
+    "luajit",
+    "zig",
+    "odin",
+    "swift",
+    "kotlin",
+    "java",
+    "c",
+    "csharp",
+    "cpp",
+];
+
 const BLOCK_KINDS: &[&str] = &[
     // Rust
     "function_item",
@@ -270,7 +293,7 @@ impl Tool for ScanTool {
             details: json!({
                 "action": action_name,
                 "files_analyzed": files.len(),
-                "supported_languages": ["rust", "typescript", "javascript", "python", "go", "kotlin"],
+                "supported_languages": SUPPORTED_LANGUAGES,
                 "types_count": result.types.len(),
                 "functions_count": result.functions.len(),
             }),
@@ -369,12 +392,36 @@ fn extract_files(files: &[PathBuf], cwd: &Path) -> ScanResult {
             "go" => go::parse(&source, &rel, &mut result),
             "kt" | "kts" => kotlin::parse(&source, &rel, &mut result),
             "js" | "jsx" => typescript::parse(&source, &rel, ext == "jsx", &mut result),
-            // TODO: add more languages as tree-sitter grammars are added
-            _ => {}
+            _ => {
+                if let Some(language) = language_for_extension(ext) {
+                    generic::parse(&source, &rel, language, &mut result);
+                }
+            }
         }
     }
 
     result
+}
+
+fn language_for_extension(ext: &str) -> Option<tree_sitter::Language> {
+    let language = match ext {
+        "sh" | "bash" | "zsh" | "fish" => tree_sitter_bash::LANGUAGE.into(),
+        "ex" | "exs" => tree_sitter_elixir::LANGUAGE.into(),
+        "rb" => tree_sitter_ruby::LANGUAGE.into(),
+        "pl" | "pm" | "t" => tree_sitter_perl::LANGUAGE.into(),
+        "lua" | "luau" => tree_sitter_lua::LANGUAGE.into(),
+        "zig" | "zon" => tree_sitter_zig::LANGUAGE.into(),
+        "odin" => tree_sitter_odin::LANGUAGE.into(),
+        "swift" => tree_sitter_swift::LANGUAGE.into(),
+        "java" => tree_sitter_java::LANGUAGE.into(),
+        "c" | "h" => tree_sitter_c::LANGUAGE.into(),
+        "cs" => tree_sitter_c_sharp::LANGUAGE.into(),
+        "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" => {
+            tree_sitter_cpp::LANGUAGE.into()
+        }
+        _ => return None,
+    };
+    Some(language)
 }
 
 // ── file collection ─────────────────────────────────────────────────
@@ -414,7 +461,47 @@ fn collect_source_files(root: &Path) -> Result<Vec<PathBuf>> {
 fn is_supported(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
-        Some("rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "kt" | "kts")
+        Some(
+            "sh" | "bash"
+                | "zsh"
+                | "fish"
+                | "py"
+                | "pyw"
+                | "rs"
+                | "js"
+                | "jsx"
+                | "mjs"
+                | "cjs"
+                | "ts"
+                | "tsx"
+                | "go"
+                | "ex"
+                | "exs"
+                | "rb"
+                | "pl"
+                | "pm"
+                | "t"
+                | "lua"
+                | "luau"
+                | "zig"
+                | "zon"
+                | "odin"
+                | "swift"
+                | "kt"
+                | "kts"
+                | "java"
+                | "c"
+                | "h"
+                | "cs"
+                | "cc"
+                | "cpp"
+                | "cxx"
+                | "c++"
+                | "hpp"
+                | "hh"
+                | "hxx"
+                | "h++"
+        )
     )
 }
 
@@ -1658,12 +1745,27 @@ fn read_text_file(path: &Path) -> Option<String> {
 fn get_parser(path: &Path) -> Option<tree_sitter::Parser> {
     let ext = path.extension()?.to_str()?;
     let language = match ext {
+        "sh" | "bash" | "zsh" | "fish" => tree_sitter_bash::LANGUAGE.into(),
+        "py" | "pyw" => tree_sitter_python::LANGUAGE.into(),
         "rs" => tree_sitter_rust::LANGUAGE.into(),
-        "ts" | "tsx" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        "js" | "jsx" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        "py" => tree_sitter_python::LANGUAGE.into(),
+        "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
+        "ts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
         "go" => tree_sitter_go::LANGUAGE.into(),
+        "ex" | "exs" => tree_sitter_elixir::LANGUAGE.into(),
+        "rb" => tree_sitter_ruby::LANGUAGE.into(),
+        "pl" | "pm" | "t" => tree_sitter_perl::LANGUAGE.into(),
+        "lua" | "luau" => tree_sitter_lua::LANGUAGE.into(),
+        "zig" | "zon" => tree_sitter_zig::LANGUAGE.into(),
+        "odin" => tree_sitter_odin::LANGUAGE.into(),
+        "swift" => tree_sitter_swift::LANGUAGE.into(),
         "kt" | "kts" => tree_sitter_kotlin_ng::LANGUAGE.into(),
+        "java" => tree_sitter_java::LANGUAGE.into(),
+        "c" | "h" => tree_sitter_c::LANGUAGE.into(),
+        "cs" => tree_sitter_c_sharp::LANGUAGE.into(),
+        "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" => {
+            tree_sitter_cpp::LANGUAGE.into()
+        }
         _ => return None,
     };
     let mut parser = tree_sitter::Parser::new();
@@ -1824,12 +1926,24 @@ fn node_has_name(node: tree_sitter::Node, source: &str, name: &str) -> bool {
 
 fn language_for_path(path: &Path) -> Option<&'static str> {
     match path.extension().and_then(|e| e.to_str())? {
+        "sh" | "bash" | "zsh" | "fish" => Some("shell"),
+        "py" | "pyw" => Some("python"),
         "rs" => Some("rust"),
+        "js" | "jsx" | "mjs" | "cjs" => Some("javascript"),
         "ts" | "tsx" => Some("typescript"),
-        "js" | "jsx" => Some("javascript"),
-        "py" => Some("python"),
         "go" => Some("go"),
+        "ex" | "exs" => Some("elixir"),
+        "rb" => Some("ruby"),
+        "pl" | "pm" | "t" => Some("perl"),
+        "lua" | "luau" => Some("lua"),
+        "zig" | "zon" => Some("zig"),
+        "odin" => Some("odin"),
+        "swift" => Some("swift"),
         "kt" | "kts" => Some("kotlin"),
+        "java" => Some("java"),
+        "c" | "h" => Some("c"),
+        "cs" => Some("csharp"),
+        "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" => Some("cpp"),
         _ => None,
     }
 }
@@ -1849,14 +1963,7 @@ fn format_blocks(blocks: &[CodeBlock]) -> String {
         }
         let details = block_details(block);
 
-        let fence = match block.file.extension().and_then(|e| e.to_str()) {
-            Some("rs") => "rust",
-            Some("ts") | Some("tsx") => "typescript",
-            Some("js") | Some("jsx") => "javascript",
-            Some("py") => "python",
-            Some("go") => "go",
-            _ => "text",
-        };
+        let fence = language_for_path(&block.file).unwrap_or("text");
         sections.push(format!(
             "{header}\nDetails: {details}\n```{fence}\n{}\n```",
             block.code
@@ -1869,6 +1976,144 @@ fn format_blocks(blocks: &[CodeBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parser_is_available_for_requested_languages() {
+        let cases = [
+            ("script.sh", "echo hello"),
+            ("main.py", "def hello():\n    pass\n"),
+            ("lib.rs", "fn hello() {}"),
+            ("app.js", "function hello() {}"),
+            ("app.ts", "function hello(): void {}"),
+            ("main.go", "package main\nfunc hello() {}\n"),
+            ("mod.ex", "defmodule Hello do\n  def hi, do: :ok\nend\n"),
+            ("app.rb", "def hello\nend\n"),
+            ("app.pl", "sub hello { return 1; }"),
+            ("app.lua", "function hello() end"),
+            ("main.zig", "pub fn hello() void {}"),
+            ("main.odin", "hello :: proc() {}"),
+            ("App.swift", "func hello() {}"),
+            ("Main.kt", "fun hello() {}"),
+            ("Main.java", "class Main { void hello() {} }"),
+            ("main.c", "void hello() {}"),
+            ("Program.cs", "class Program { void Hello() {} }"),
+            ("main.cpp", "void hello() {}"),
+        ];
+
+        for (file_name, source) in cases {
+            let path = Path::new(file_name);
+            let mut parser =
+                get_parser(path).unwrap_or_else(|| panic!("missing parser for {file_name}"));
+            let tree = parser
+                .parse(source, None)
+                .unwrap_or_else(|| panic!("failed to parse {file_name}"));
+            assert!(
+                !tree.root_node().has_error(),
+                "parser reported errors for {file_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_extractor_indexes_representative_new_languages() {
+        let cases = [
+            (
+                "src/app.rb",
+                "class Greeter\n  def hello(name)\n  end\nend\n",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/Main.java",
+                "class Greeter { void hello(String name) {} }",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/main.c",
+                "struct Greeter { int id; };\nvoid hello(void) {}",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/App.swift",
+                "struct Greeter { func hello() {} }",
+                "Greeter",
+                "hello",
+            ),
+            ("src/script.sh", "hello() { echo hi; }", "", "hello"),
+            (
+                "src/app.lua",
+                "function hello(name) return name end",
+                "",
+                "hello",
+            ),
+            (
+                "src/main.odin",
+                "Greeter :: struct {}
+hello :: proc() {}",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/app.pl",
+                "package Greeter;
+sub hello { return 1; }",
+                "",
+                "hello",
+            ),
+            (
+                "src/main.cpp",
+                "class Greeter { void hello(); };
+void hello() {}",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/Program.cs",
+                "class Greeter { void Hello() {} }",
+                "Greeter",
+                "Hello",
+            ),
+            (
+                "src/mod.ex",
+                "defmodule Greeter do
+  def hello(name), do: name
+end",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/main.zig",
+                "const Greeter = struct {
+};
+pub fn hello() void {}",
+                "Greeter",
+                "hello",
+            ),
+        ];
+
+        for (file, source, type_name, function_name) in cases {
+            let mut result = ScanResult::default();
+            let ext = Path::new(file).extension().unwrap().to_str().unwrap();
+            let language = language_for_extension(ext)
+                .unwrap_or_else(|| panic!("missing generic language for {file}"));
+            generic::parse(source, file, language, &mut result);
+
+            if !type_name.is_empty() {
+                assert!(
+                    result.types.contains_key(type_name),
+                    "missing type {type_name} for {file}; got {:?}",
+                    result.types.keys().collect::<Vec<_>>()
+                );
+            }
+            assert!(
+                result.functions.contains_key(function_name),
+                "missing function {function_name} for {file}; got {:?}",
+                result.functions.keys().collect::<Vec<_>>()
+            );
+        }
+    }
 
     #[test]
     fn schema_uses_directory_files_extract_and_targets() {
