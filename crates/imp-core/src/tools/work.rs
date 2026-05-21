@@ -1,17 +1,19 @@
 use async_trait::async_trait;
+use imp_work::global_store::StreamRelation;
 use imp_work::{
     build_work_tree, capture_conversation_memory, close_task_with_conventions,
     fail_task_with_conventions, summarize_checks, CheckResult, CloseRequest, ContextRenderer,
     ConversationMemoryInput, ConversationMemoryQuery, Decision, DecisionStatus, Epic,
-    HypothesisResult, MemoryItem, MemoryKind, Prototype, PrototypeEvidence, PrototypeObservation,
-    PrototypeOutcome, PrototypeRecordPolicy, PrototypeStatus, Run, RunOutcome, Task, TaskStatus,
-    WorkId, WorkItem, WorkKind, WorkStore,
+    GlobalWorkStore, HypothesisResult, MemoryItem, MemoryKind, Prototype, PrototypeEvidence,
+    PrototypeObservation, PrototypeOutcome, PrototypeRecordPolicy, PrototypeStatus, Run,
+    RunOutcome, StreamEvent, Task, TaskStatus, WorkId, WorkItem, WorkKind, WorkStore,
 };
 use serde_json::json;
 
 use super::{Tool, ToolContext, ToolOutput};
 use crate::error::{Error, Result};
 use crate::reference_monitor::{ToolActionKind, ToolMetadata};
+use crate::storage;
 
 pub struct WorkTool;
 
@@ -35,8 +37,8 @@ impl Tool for WorkTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create", "list", "context", "refresh_context", "next", "show", "update", "claim", "dep_add", "dep_remove", "validate", "search", "outcome", "prototype_outcome", "runs", "tree", "verify", "close", "fail", "remember"],
-                    "description": "Create, list, show, update, claim, remember/search memory, record/inspect task or prototype outcomes, prepare/refresh context packs, select next ready native imp-work items, or manage native tree/verify/close/fail workflows."
+                    "enum": ["create", "list", "context", "refresh_context", "next", "show", "update", "claim", "dep_add", "dep_remove", "validate", "scope", "search", "outcome", "prototype_outcome", "runs", "tree", "verify", "close", "fail", "remember"],
+                    "description": "Create, list, show, update, claim, report active store scope, remember/search memory, record/inspect task or prototype outcomes, prepare/refresh context packs, select next ready native imp-work items, or manage native tree/verify/close/fail workflows."
                 },
                 "kind": {
                     "type": "string",
@@ -63,6 +65,13 @@ impl Tool for WorkTool {
                 "hypothesis": { "type": "string", "description": "Prototype hypothesis." },
                 "evidence_required": { "type": "array", "items": { "type": "string" } },
                 "sandbox": { "type": "string", "description": "Prototype sandbox path." },
+                "store_source": {
+                    "type": "string",
+                    "enum": ["project_local", "global_project_scoped"],
+                    "description": "Optional read source for supported actions. Defaults to project_local; global_project_scoped is currently supported for task create/list/show/update."
+                },
+                "stream_id": { "type": "string", "description": "Optional project work stream id for global project-scoped task continuity." },
+                "relation": { "type": "string", "enum": ["opened", "continues", "follow_up_to", "supersedes", "related_to", "derived_from", "regression_of", "closed"], "description": "Optional project stream relation for global task create/outcome continuity." },
                 "limit": { "type": "number", "description": "Maximum list items to return. Defaults to 50." },
                 "query": { "type": "string", "description": "Text query for memory retrieval/search or context memory retrieval." },
                 "paths": { "type": "array", "items": { "type": "string" }, "description": "Optional paths for memory items." },
@@ -133,19 +142,20 @@ impl Tool for WorkTool {
         let action = required_str(&params, "action")?;
         let store = WorkStore::open(&ctx.cwd);
         match action {
-            "create" => create_item(&store, &params),
-            "list" => list_items(&store, &params),
+            "create" => create_item(&store, &ctx.cwd, &params),
+            "list" => list_items(&store, &ctx.cwd, &params),
             "context" => create_context_pack(&store, &params),
             "refresh_context" => refresh_context_pack(&store, &params),
             "next" => next_ready_tasks(&store, &params),
-            "show" => show_item(&store, &params),
-            "update" => update_item(&store, &params),
+            "show" => show_item(&store, &ctx.cwd, &params),
+            "update" => update_item(&store, &ctx.cwd, &params),
             "claim" => claim_task(&store, &params),
             "dep_add" => edit_dependency(&store, &params, true),
             "dep_remove" => edit_dependency(&store, &params, false),
             "validate" => validate_store(&store),
+            "scope" => work_scope(&store, &ctx.cwd),
             "search" => search_memory(&store, &params),
-            "outcome" => record_outcome(&store, &params),
+            "outcome" => record_outcome(&store, &ctx.cwd, &params),
             "prototype_outcome" => record_prototype_outcome(&store, &params),
             "runs" => list_runs(&store, &params),
             "tree" => work_tree(&store),
@@ -160,7 +170,15 @@ impl Tool for WorkTool {
     }
 }
 
-fn create_item(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+fn create_item(
+    store: &WorkStore,
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let source = parse_store_source(params)?;
+    if source == storage::WorkStoreSource::GlobalProjectScoped {
+        return create_global_project_scoped_item(cwd, params);
+    }
     let kind = required_str(params, "kind")?;
     let item = match kind {
         "task" => WorkItem::Task(build_task(params)?),
@@ -187,6 +205,7 @@ fn create_item(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutp
         content: vec![imp_llm::ContentBlock::Text { text }],
         details: json!({
             "action": "create",
+            "store_source": source,
             "kind": format_work_kind(item.kind()),
             "id": item.id(),
             "path": path,
@@ -196,7 +215,66 @@ fn create_item(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutp
     })
 }
 
-fn list_items(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+fn create_global_project_scoped_item(
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let kind = required_str(params, "kind")?;
+    if kind != "task" {
+        return Err(Error::Tool(format!(
+            "store_source=global_project_scoped currently supports create kind=task only; got `{kind}`"
+        )));
+    }
+    let task = build_task(params)?;
+    let scope = storage::WorkScope::for_project_dir(cwd);
+    let global = GlobalWorkStore::open(scope.global_store_root.clone());
+    let stream_id = optional_string(params, "stream_id");
+    let path = global
+        .append_task_in_stream(&scope.project_root, &task, stream_id.as_deref())
+        .map_err(|error| Error::Tool(format!("failed to create global project task: {error}")))?;
+    if let Some(stream_id) = stream_id.as_deref() {
+        let relation = parse_stream_relation(params)?.unwrap_or(StreamRelation::Opened);
+        append_stream_event_for_task(
+            &global,
+            &scope.project_root,
+            stream_id,
+            Some(task.id.clone()),
+            relation,
+            format!("Created task {}: {}", task.id, task.title),
+        )?;
+    }
+    let text = format!(
+        "Created global project task {} in {}",
+        task.id,
+        path.display()
+    );
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "action": "create",
+            "store_source": storage::WorkStoreSource::GlobalProjectScoped,
+            "kind": "task",
+            "id": task.id,
+            "path": path,
+            "project_root": scope.project_root,
+            "global_store_root": scope.global_store_root,
+            "stream_id": stream_id,
+            "item": task,
+        }),
+        is_error: false,
+    })
+}
+
+fn list_items(
+    store: &WorkStore,
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let source = parse_store_source(params)?;
+    if source == storage::WorkStoreSource::GlobalProjectScoped {
+        return list_global_project_scoped_tasks(cwd, params);
+    }
+
     let kind_filter = params.get("kind").and_then(|value| value.as_str());
     let limit = params
         .get("limit")
@@ -237,10 +315,126 @@ fn list_items(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutpu
         content: vec![imp_llm::ContentBlock::Text { text }],
         details: json!({
             "action": "list",
+            "store_source": source,
             "items": items,
         }),
         is_error: false,
     })
+}
+
+fn list_global_project_scoped_tasks(
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let kind_filter = params.get("kind").and_then(|value| value.as_str());
+    if !matches!(kind_filter, Some("task") | None) {
+        return Err(Error::Tool(
+            "store_source=global_project_scoped currently supports list kind=task only".to_string(),
+        ));
+    }
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(50) as usize;
+    let scope = storage::WorkScope::for_project_dir(cwd);
+    let global = GlobalWorkStore::open(scope.global_store_root.clone());
+    let mut tasks = global
+        .tasks_for_project(&scope.project_root)
+        .map_err(|error| Error::Tool(format!("failed to list global project tasks: {error}")))?;
+    if let Some(status_filter) = optional_string(params, "status") {
+        let expected = parse_task_status(&status_filter)?;
+        tasks.retain(|task| task.status == expected);
+    }
+    if let Some(parent_filter) = optional_string(params, "parent_work") {
+        tasks.retain(|task| {
+            task.parent
+                .as_ref()
+                .is_some_and(|parent| parent.0 == parent_filter)
+        });
+    }
+    if let Some(path_filter) = optional_string(params, "path") {
+        let path = std::path::PathBuf::from(path_filter);
+        tasks.retain(|task| {
+            task.source_refs
+                .iter()
+                .any(|source| source.reference == path.to_string_lossy())
+        });
+    }
+    tasks.truncate(limit.max(1));
+
+    let mut text = format!("{} global project task(s)", tasks.len());
+    for task in &tasks {
+        text.push_str(&format!(
+            "\n- task {} @{}: {}",
+            task.id,
+            format_task_status_value(task.status),
+            task.title
+        ));
+    }
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "action": "list",
+            "kind": "task",
+            "store_source": storage::WorkStoreSource::GlobalProjectScoped,
+            "project_root": scope.project_root,
+            "global_store_root": scope.global_store_root,
+            "items": tasks,
+        }),
+        is_error: false,
+    })
+}
+
+fn append_stream_event_for_task(
+    global: &GlobalWorkStore,
+    project_root: &std::path::Path,
+    stream_id: &str,
+    work_id: Option<WorkId>,
+    relation: StreamRelation,
+    summary: String,
+) -> Result<()> {
+    global
+        .append_stream_event(&StreamEvent {
+            project_root: project_root.to_path_buf(),
+            stream_id: stream_id.to_string(),
+            work_id,
+            relation,
+            summary,
+        })
+        .map_err(|error| Error::Tool(format!("failed to append project stream event: {error}")))?;
+    Ok(())
+}
+
+fn parse_stream_relation(params: &serde_json::Value) -> Result<Option<StreamRelation>> {
+    let Some(relation) = params.get("relation").and_then(|value| value.as_str()) else {
+        return Ok(None);
+    };
+    let relation = match relation {
+        "opened" => StreamRelation::Opened,
+        "continues" => StreamRelation::Continues,
+        "follow_up_to" => StreamRelation::FollowUpTo,
+        "supersedes" => StreamRelation::Supersedes,
+        "related_to" => StreamRelation::RelatedTo,
+        "derived_from" => StreamRelation::DerivedFrom,
+        "regression_of" => StreamRelation::RegressionOf,
+        "closed" => StreamRelation::Closed,
+        other => {
+            return Err(Error::Tool(format!(
+                "unsupported stream relation `{other}`; expected opened, continues, follow_up_to, supersedes, related_to, derived_from, regression_of, or closed"
+            )))
+        }
+    };
+    Ok(Some(relation))
+}
+
+fn parse_store_source(params: &serde_json::Value) -> Result<storage::WorkStoreSource> {
+    match params.get("store_source").and_then(|value| value.as_str()) {
+        None | Some("project_local") => Ok(storage::WorkStoreSource::ProjectLocal),
+        Some("global_project_scoped") => Ok(storage::WorkStoreSource::GlobalProjectScoped),
+        Some(other) => Err(Error::Tool(format!(
+            "unsupported store_source `{other}`; expected project_local or global_project_scoped"
+        ))),
+    }
 }
 
 fn work_tree(store: &WorkStore) -> Result<ToolOutput> {
@@ -624,7 +818,11 @@ fn ensure_fresh_context(store: &WorkStore, task: &Task) -> Result<()> {
     Ok(())
 }
 
-fn record_outcome(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+fn record_outcome(
+    store: &WorkStore,
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
     let kind = params
         .get("kind")
         .and_then(|value| value.as_str())
@@ -698,6 +896,19 @@ fn record_outcome(store: &WorkStore, params: &serde_json::Value) -> Result<ToolO
     let released_leases = store
         .release_leases_for_work(&task.id)
         .map_err(|error| Error::Tool(format!("failed to release task leases: {error}")))?;
+    let stream_id = optional_string(params, "stream_id");
+    if let Some(stream_id) = stream_id.as_deref() {
+        let scope = storage::WorkScope::for_project_dir(cwd);
+        let global = GlobalWorkStore::open(scope.global_store_root.clone());
+        append_stream_event_for_task(
+            &global,
+            &scope.project_root,
+            stream_id,
+            Some(task.id.clone()),
+            parse_stream_relation(params)?.unwrap_or(StreamRelation::Closed),
+            format!("Outcome {:?} for task {}: {}", outcome, task.id, work_outcome.summary),
+        )?;
+    }
     let text = format!(
         "Recorded {:?} outcome for task {}: {}",
         outcome, updated_task.id, updated_task.title
@@ -720,7 +931,8 @@ fn record_outcome(store: &WorkStore, params: &serde_json::Value) -> Result<ToolO
                 "followup_task_path": persistence.followup_task_path,
                 "stale_context_paths": persistence.stale_context_paths,
                 "released_leases": released_leases,
-            }
+            },
+            "stream_id": stream_id,
         }),
         is_error: false,
     })
@@ -768,6 +980,30 @@ fn validate_store(store: &WorkStore) -> Result<ToolOutput> {
         }),
         is_error: !report.is_ok(),
     })
+}
+
+fn work_scope(_store: &WorkStore, cwd: &std::path::Path) -> Result<ToolOutput> {
+    let scope = storage::WorkScope::for_project_dir(cwd);
+    let text = format!(
+        "imp-work scope\n- active source: project-local\n- project root: {}\n- local store: {}\n- global store: {}\n- migration: {}",
+        scope.project_root.display(),
+        scope.local_store_root.display(),
+        scope.global_store_root.display(),
+        scope.migration_status()
+    );
+    Ok(tool_output(
+        text,
+        json!({
+            "action": "scope",
+            "active_source": scope.active_source,
+            "project_root": scope.project_root,
+            "local_store_root": scope.local_store_root,
+            "global_store_root": scope.global_store_root,
+            "global_store_available": true,
+            "writes_target": scope.writes_target,
+            "migration_status": scope.migration_status(),
+        }),
+    ))
 }
 
 fn edit_dependency(store: &WorkStore, params: &serde_json::Value, add: bool) -> Result<ToolOutput> {
@@ -908,7 +1144,15 @@ fn claim_task(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutpu
     })
 }
 
-fn update_item(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+fn update_item(
+    store: &WorkStore,
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let source = parse_store_source(params)?;
+    if source == storage::WorkStoreSource::GlobalProjectScoped {
+        return update_global_project_scoped_task(cwd, params);
+    }
     let kind = required_str(params, "kind")?;
     let id = required_str(params, "id")?;
     match kind {
@@ -990,7 +1234,116 @@ fn update_item(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutp
     }
 }
 
-fn show_item(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+fn update_global_project_scoped_task(
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let kind = required_str(params, "kind")?;
+    if kind != "task" {
+        return Err(Error::Tool(format!(
+            "store_source=global_project_scoped currently supports update kind=task only; got `{kind}`"
+        )));
+    }
+    let id = WorkId::from(required_str(params, "id")?);
+    let status = params
+        .get("status")
+        .and_then(|value| value.as_str())
+        .map(parse_task_status)
+        .transpose()?;
+    let title = optional_string(params, "title");
+    if status.is_none() && title.is_none() {
+        return Err(Error::Tool(
+            "global task update requires at least one of `status` or `title`".into(),
+        ));
+    }
+    let scope = storage::WorkScope::for_project_dir(cwd);
+    let global = GlobalWorkStore::open(scope.global_store_root.clone());
+    let Some((task, path)) = global
+        .update_task_for_project(&scope.project_root, &id, |task| {
+            if let Some(status) = status {
+                task.status = status;
+            }
+            if let Some(title) = title {
+                task.title = title;
+            }
+        })
+        .map_err(|error| Error::Tool(format!("failed to update global project task: {error}")))?
+    else {
+        return Err(Error::Tool(format!(
+            "global project task `{}` not found for project {}",
+            id,
+            scope.project_root.display()
+        )));
+    };
+    let text = format!(
+        "Updated global project task {} to {:?}",
+        task.id, task.status
+    );
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "action": "update",
+            "kind": "task",
+            "store_source": storage::WorkStoreSource::GlobalProjectScoped,
+            "id": task.id,
+            "status": task.status,
+            "path": path,
+            "project_root": scope.project_root,
+            "global_store_root": scope.global_store_root,
+            "item": task,
+        }),
+        is_error: false,
+    })
+}
+
+fn show_global_project_scoped_task(
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let id = WorkId::from(required_str(params, "id")?);
+    let scope = storage::WorkScope::for_project_dir(cwd);
+    let global = GlobalWorkStore::open(scope.global_store_root.clone());
+    let Some(record) = global
+        .find_task_for_project(&scope.project_root, &id)
+        .map_err(|error| Error::Tool(format!("failed to show global project task: {error}")))?
+    else {
+        return Err(Error::Tool(format!(
+            "global project task `{}` not found for project {}",
+            id,
+            scope.project_root.display()
+        )));
+    };
+    let text = format!(
+        "global project task {} @{}: {}",
+        record.task.id,
+        format_task_status_value(record.task.status),
+        record.task.title
+    );
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "action": "show",
+            "kind": "task",
+            "store_source": storage::WorkStoreSource::GlobalProjectScoped,
+            "id": record.task.id,
+            "project_root": scope.project_root,
+            "global_store_root": scope.global_store_root,
+            "stream_id": record.stream_id,
+            "item": record.task,
+        }),
+        is_error: false,
+    })
+}
+
+fn show_item(
+    store: &WorkStore,
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let source = parse_store_source(params)?;
+    if source == storage::WorkStoreSource::GlobalProjectScoped {
+        return show_global_project_scoped_task(cwd, params);
+    }
     let id = required_str(params, "id")?;
     if let Some(pack) = store
         .load_context_pack(id)
@@ -1705,6 +2058,7 @@ mod tests {
     use crate::config::AgentMode;
     use crate::tools::{AnchorStore, CheckpointState, FileCache, FileTracker, ToolUpdate};
     use crate::ui::NullInterface;
+    use std::fs;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
@@ -1732,6 +2086,31 @@ mod tests {
             supporting_provenance: Vec::new(),
         };
         (ctx, rx)
+    }
+
+    #[tokio::test]
+    async fn work_tool_reports_active_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let tool = WorkTool;
+        let result = tool
+            .execute("scope", json!({ "action": "scope" }), ctx)
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(result.details["action"], "scope");
+        assert_eq!(result.details["active_source"], "project_local");
+        assert_eq!(result.details["writes_target"], "project_local");
+        assert_eq!(
+            result.details["project_root"].as_str().unwrap(),
+            tmp.path().canonicalize().unwrap().to_str().unwrap()
+        );
+        assert!(result.details["global_store_root"]
+            .as_str()
+            .unwrap()
+            .ends_with("/.imp/work"));
+        assert!(result.text_content().unwrap().contains("imp-work scope"));
     }
 
     #[tokio::test]
@@ -1765,7 +2144,309 @@ mod tests {
             .unwrap();
         let text = listed.text_content().unwrap();
         assert!(text.contains("Build native work tool"));
+        assert_eq!(listed.details["store_source"], "project_local");
         assert_eq!(listed.details["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn work_tool_lists_global_project_scoped_tasks_when_requested() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let other_project = tmp.path().join("other-project");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&other_project).unwrap();
+        let scope = storage::WorkScope::for_project_dir(&project);
+        let global = GlobalWorkStore::open(scope.global_store_root.clone());
+        let mut project_task = Task::new("Global project task");
+        project_task.id = WorkId::from("global-project-task");
+        project_task.status = TaskStatus::Ready;
+        let mut other_task = Task::new("Other project task");
+        other_task.id = WorkId::from("other-project-task");
+        other_task.status = TaskStatus::Ready;
+        global.append_task(&project, &project_task).unwrap();
+        global.append_task(&other_project, &other_task).unwrap();
+
+        let (ctx, _rx) = test_ctx(&project);
+        let tool = WorkTool;
+        let listed = tool
+            .execute(
+                "global-list",
+                json!({
+                    "action": "list",
+                    "kind": "task",
+                    "store_source": "global_project_scoped"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        let text = listed.text_content().unwrap();
+        assert!(text.contains("Global project task"));
+        assert!(!text.contains("Other project task"));
+        assert_eq!(listed.details["store_source"], "global_project_scoped");
+        assert_eq!(
+            listed.details["project_root"].as_str().unwrap(),
+            project.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(listed.details["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn work_tool_creates_global_project_scoped_task_when_requested() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let other_project = tmp.path().join("other-project");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&other_project).unwrap();
+        let tool = WorkTool;
+
+        let (ctx, _rx) = test_ctx(&project);
+        let created = tool
+            .execute(
+                "global-create",
+                json!({
+                    "action": "create",
+                    "kind": "task",
+                    "title": "Global created task",
+                    "status": "ready",
+                    "store_source": "global_project_scoped"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!created.is_error);
+        assert_eq!(created.details["store_source"], "global_project_scoped");
+        assert_eq!(created.details["kind"], "task");
+        assert_eq!(
+            created.details["project_root"].as_str().unwrap(),
+            project.canonicalize().unwrap().to_str().unwrap()
+        );
+
+        let (ctx, _rx) = test_ctx(&project);
+        let local_list = tool
+            .execute(
+                "local-list",
+                json!({ "action": "list", "kind": "task" }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!local_list
+            .text_content()
+            .unwrap()
+            .contains("Global created task"));
+        assert_eq!(local_list.details["store_source"], "project_local");
+
+        let (ctx, _rx) = test_ctx(&project);
+        let global_list = tool
+            .execute(
+                "global-list",
+                json!({
+                    "action": "list",
+                    "kind": "task",
+                    "store_source": "global_project_scoped"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(global_list
+            .text_content()
+            .unwrap()
+            .contains("Global created task"));
+        assert_eq!(global_list.details["items"].as_array().unwrap().len(), 1);
+
+        let (ctx, _rx) = test_ctx(&other_project);
+        let other_global_list = tool
+            .execute(
+                "other-global-list",
+                json!({
+                    "action": "list",
+                    "kind": "task",
+                    "store_source": "global_project_scoped"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!other_global_list
+            .text_content()
+            .unwrap()
+            .contains("Global created task"));
+        assert_eq!(
+            other_global_list.details["items"].as_array().unwrap().len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn work_tool_records_project_stream_events_for_create_and_outcome() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let tool = WorkTool;
+
+        let (ctx, _rx) = test_ctx(&project);
+        let created = tool
+            .execute(
+                "stream-local-create",
+                json!({
+                    "action": "create",
+                    "kind": "task",
+                    "title": "Streamed local task"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let id = created.details["id"].as_str().unwrap().to_string();
+
+        let (ctx, _rx) = test_ctx(&project);
+        tool.execute(
+            "stream-global-create",
+            json!({
+                "action": "create",
+                "kind": "task",
+                "title": "Streamed global task",
+                "store_source": "global_project_scoped",
+                "stream_id": "stream-alpha",
+                "relation": "continues"
+            }),
+            ctx,
+        )
+        .await
+        .unwrap();
+
+        let scope = storage::WorkScope::for_project_dir(&project);
+        let global = GlobalWorkStore::open(scope.global_store_root.clone());
+        let events = global
+            .stream_events_for_project_stream(&project, "stream-alpha")
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].relation, StreamRelation::Continues);
+        assert!(events[0].work_id.is_some());
+        assert!(events[0].summary.contains("Created task"));
+
+        let (ctx, _rx) = test_ctx(&project);
+        let outcome = tool
+            .execute(
+                "stream-outcome",
+                json!({
+                    "action": "outcome",
+                    "id": id,
+                    "outcome": "done",
+                    "summary": "Closed streamed task",
+                    "checks_passed": 1,
+                    "checks_failed": 0,
+                    "stream_id": "stream-alpha"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.details["stream_id"], "stream-alpha");
+
+        let events = global
+            .stream_events_for_project_stream(&project, "stream-alpha")
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].relation, StreamRelation::Closed);
+        assert!(events[1].summary.contains("Closed streamed task"));
+    }
+
+    #[tokio::test]
+    async fn work_tool_shows_and_updates_global_project_scoped_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let other_project = tmp.path().join("other-project");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&other_project).unwrap();
+        let scope = storage::WorkScope::for_project_dir(&project);
+        let global = GlobalWorkStore::open(scope.global_store_root.clone());
+        let mut task = Task::new("Original global task");
+        task.id = WorkId::from("global-update-task");
+        task.status = TaskStatus::Ready;
+        global.append_task(&project, &task).unwrap();
+        global.append_task(&other_project, &task).unwrap();
+        let tool = WorkTool;
+
+        let (ctx, _rx) = test_ctx(&project);
+        let shown = tool
+            .execute(
+                "global-show",
+                json!({
+                    "action": "show",
+                    "id": "global-update-task",
+                    "store_source": "global_project_scoped"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(shown
+            .text_content()
+            .unwrap()
+            .contains("Original global task"));
+        assert_eq!(shown.details["store_source"], "global_project_scoped");
+
+        let (ctx, _rx) = test_ctx(&project);
+        let updated = tool
+            .execute(
+                "global-update",
+                json!({
+                    "action": "update",
+                    "kind": "task",
+                    "id": "global-update-task",
+                    "status": "done",
+                    "title": "Updated global task",
+                    "store_source": "global_project_scoped"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.details["store_source"], "global_project_scoped");
+        assert_eq!(updated.details["item"]["status"], "done");
+        assert_eq!(updated.details["item"]["title"], "Updated global task");
+
+        let (ctx, _rx) = test_ctx(&project);
+        let listed = tool
+            .execute(
+                "global-list-after-update",
+                json!({
+                    "action": "list",
+                    "kind": "task",
+                    "store_source": "global_project_scoped"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let items = listed.details["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["title"], "Updated global task");
+        assert_eq!(items[0]["status"], "done");
+
+        let (ctx, _rx) = test_ctx(&other_project);
+        let other_shown = tool
+            .execute(
+                "other-global-show",
+                json!({
+                    "action": "show",
+                    "id": "global-update-task",
+                    "store_source": "global_project_scoped"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(other_shown
+            .text_content()
+            .unwrap()
+            .contains("Original global task"));
+        assert_eq!(other_shown.details["item"]["title"], "Original global task");
     }
 
     #[tokio::test]

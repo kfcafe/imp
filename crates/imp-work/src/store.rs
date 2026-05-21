@@ -264,6 +264,7 @@ impl WorkStore {
             non_goals: Vec::new(),
             acceptance: task.acceptance.clone(),
             memory,
+            stream_history: Vec::new(),
             checks: task
                 .checks
                 .iter()

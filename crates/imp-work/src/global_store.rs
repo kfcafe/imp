@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Task, WorkId};
+use crate::{Decision, MemoryItem, Task, WorkId};
 
 #[derive(Debug, Clone)]
 pub struct GlobalWorkStore {
@@ -16,6 +16,20 @@ pub struct ProjectScopedTask {
     pub project_root: PathBuf,
     pub stream_id: Option<String>,
     pub task: Task,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectScopedMemory {
+    pub project_root: PathBuf,
+    pub stream_id: Option<String>,
+    pub memory: MemoryItem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectScopedDecision {
+    pub project_root: PathBuf,
+    pub stream_id: Option<String>,
+    pub decision: Decision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +83,14 @@ impl GlobalWorkStore {
         self.root.join("stream-events.jsonl")
     }
 
+    pub fn memories_path(&self) -> PathBuf {
+        self.root.join("memories.jsonl")
+    }
+
+    pub fn decisions_path(&self) -> PathBuf {
+        self.root.join("decisions.jsonl")
+    }
+
     pub fn append_task(
         &self,
         project_root: impl AsRef<Path>,
@@ -98,12 +120,19 @@ impl GlobalWorkStore {
 
     pub fn tasks_for_project(&self, project_root: impl AsRef<Path>) -> crate::Result<Vec<Task>> {
         let project_root = normalize_project_root(project_root);
-        Ok(self
+        let mut tasks = Vec::<Task>::new();
+        for record in self
             .load_tasks()?
             .into_iter()
             .filter(|record| record.project_root == project_root)
-            .map(|record| record.task)
-            .collect())
+        {
+            if let Some(existing) = tasks.iter_mut().find(|task| task.id == record.task.id) {
+                *existing = record.task;
+            } else {
+                tasks.push(record.task);
+            }
+        }
+        Ok(tasks)
     }
 
     pub fn tasks_for_stream(
@@ -130,6 +159,115 @@ impl GlobalWorkStore {
             .find(|record| &record.task.id == id))
     }
 
+    pub fn find_task_for_project(
+        &self,
+        project_root: impl AsRef<Path>,
+        id: &WorkId,
+    ) -> crate::Result<Option<ProjectScopedTask>> {
+        let project_root = normalize_project_root(project_root);
+        Ok(self
+            .load_tasks()?
+            .into_iter()
+            .filter(|record| record.project_root == project_root && &record.task.id == id)
+            .last())
+    }
+
+    pub fn update_task_for_project(
+        &self,
+        project_root: impl AsRef<Path>,
+        id: &WorkId,
+        update: impl FnOnce(&mut Task),
+    ) -> crate::Result<Option<(Task, PathBuf)>> {
+        let project_root = normalize_project_root(project_root);
+        let Some(mut record) = self.find_task_for_project(&project_root, id)? else {
+            return Ok(None);
+        };
+        update(&mut record.task);
+        let path =
+            self.append_task_in_stream(&project_root, &record.task, record.stream_id.as_deref())?;
+        Ok(Some((record.task, path)))
+    }
+
+    pub fn append_memory(
+        &self,
+        project_root: impl AsRef<Path>,
+        memory: &MemoryItem,
+    ) -> crate::Result<PathBuf> {
+        self.append_memory_in_stream(project_root, memory, None)
+    }
+
+    pub fn append_memory_in_stream(
+        &self,
+        project_root: impl AsRef<Path>,
+        memory: &MemoryItem,
+        stream_id: Option<&str>,
+    ) -> crate::Result<PathBuf> {
+        let record = ProjectScopedMemory {
+            project_root: normalize_project_root(project_root),
+            stream_id: stream_id.map(str::to_string),
+            memory: memory.clone(),
+        };
+        append_jsonl(&self.memories_path(), &record)?;
+        Ok(self.memories_path())
+    }
+
+    pub fn load_memories(&self) -> crate::Result<Vec<ProjectScopedMemory>> {
+        read_jsonl(&self.memories_path())
+    }
+
+    pub fn memories_for_project(
+        &self,
+        project_root: impl AsRef<Path>,
+    ) -> crate::Result<Vec<MemoryItem>> {
+        let project_root = normalize_project_root(project_root);
+        Ok(self
+            .load_memories()?
+            .into_iter()
+            .filter(|record| record.project_root == project_root)
+            .map(|record| record.memory)
+            .collect())
+    }
+
+    pub fn append_decision(
+        &self,
+        project_root: impl AsRef<Path>,
+        decision: &Decision,
+    ) -> crate::Result<PathBuf> {
+        self.append_decision_in_stream(project_root, decision, None)
+    }
+
+    pub fn append_decision_in_stream(
+        &self,
+        project_root: impl AsRef<Path>,
+        decision: &Decision,
+        stream_id: Option<&str>,
+    ) -> crate::Result<PathBuf> {
+        let record = ProjectScopedDecision {
+            project_root: normalize_project_root(project_root),
+            stream_id: stream_id.map(str::to_string),
+            decision: decision.clone(),
+        };
+        append_jsonl(&self.decisions_path(), &record)?;
+        Ok(self.decisions_path())
+    }
+
+    pub fn load_decisions(&self) -> crate::Result<Vec<ProjectScopedDecision>> {
+        read_jsonl(&self.decisions_path())
+    }
+
+    pub fn decisions_for_project(
+        &self,
+        project_root: impl AsRef<Path>,
+    ) -> crate::Result<Vec<Decision>> {
+        let project_root = normalize_project_root(project_root);
+        Ok(self
+            .load_decisions()?
+            .into_iter()
+            .filter(|record| record.project_root == project_root)
+            .map(|record| record.decision)
+            .collect())
+    }
+
     pub fn append_stream(&self, stream: &ProjectWorkStream) -> crate::Result<PathBuf> {
         let mut stream = stream.clone();
         stream.project_root = normalize_project_root(&stream.project_root);
@@ -151,6 +289,14 @@ impl GlobalWorkStore {
             .into_iter()
             .filter(|stream| stream.project_root == project_root)
             .collect())
+    }
+
+    pub fn stream_events_for_project_stream(
+        &self,
+        project_root: impl AsRef<Path>,
+        stream_id: &str,
+    ) -> crate::Result<Vec<StreamEvent>> {
+        self.stream_events(project_root, stream_id)
     }
 
     pub fn append_stream_event(&self, event: &StreamEvent) -> crate::Result<PathBuf> {
@@ -207,7 +353,7 @@ fn normalize_project_root(path: impl AsRef<Path>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Task, TaskStatus};
+    use crate::{Decision, DecisionStatus, MemoryItem, MemoryKind, Task, TaskStatus};
     use tempfile::tempdir;
 
     fn task(id: &str, title: &str) -> Task {
@@ -215,6 +361,23 @@ mod tests {
         task.id = WorkId::from(id);
         task.status = TaskStatus::Ready;
         task
+    }
+
+    fn memory(id: &str, text: &str) -> MemoryItem {
+        let mut memory = MemoryItem::new(MemoryKind::Fact, text);
+        memory.id = WorkId::from(id);
+        memory
+    }
+
+    fn decision(id: &str, title: &str) -> Decision {
+        Decision {
+            id: WorkId::from(id),
+            title: title.to_string(),
+            status: DecisionStatus::Proposed,
+            rationale: Some("Because tests need decisions.".to_string()),
+            parent_work: None,
+            source_refs: Vec::new(),
+        }
     }
 
     #[test]
@@ -257,6 +420,54 @@ mod tests {
         let found = global.find_task(&WorkId::from("T-find")).unwrap().unwrap();
         assert_eq!(found.project_root, project.canonicalize().unwrap());
         assert_eq!(found.task.title, "Find me");
+    }
+
+    #[test]
+    fn global_store_keeps_two_project_roots_in_memory_and_decision_files() {
+        let temp = tempdir().unwrap();
+        let global = GlobalWorkStore::open(temp.path().join("global-work"));
+        let project_a = temp.path().join("project-a");
+        let project_b = temp.path().join("project-b");
+        fs::create_dir_all(&project_a).unwrap();
+        fs::create_dir_all(&project_b).unwrap();
+
+        global
+            .append_memory(&project_a, &memory("M-a", "A memory"))
+            .unwrap();
+        global
+            .append_memory(&project_b, &memory("M-b", "B memory"))
+            .unwrap();
+        global
+            .append_decision(&project_a, &decision("D-a", "A decision"))
+            .unwrap();
+        global
+            .append_decision(&project_b, &decision("D-b", "B decision"))
+            .unwrap();
+
+        let all_memories = global.load_memories().unwrap();
+        let all_decisions = global.load_decisions().unwrap();
+        assert_eq!(all_memories.len(), 2);
+        assert_eq!(all_decisions.len(), 2);
+        let project_a_memories = global.memories_for_project(&project_a).unwrap();
+        let project_b_memories = global.memories_for_project(&project_b).unwrap();
+        assert_eq!(project_a_memories.len(), 1);
+        assert_eq!(project_b_memories.len(), 1);
+        assert_eq!(project_a_memories[0].id, WorkId::from("M-a"));
+        assert_eq!(project_b_memories[0].id, WorkId::from("M-b"));
+        let project_a_decisions = global.decisions_for_project(&project_a).unwrap();
+        let project_b_decisions = global.decisions_for_project(&project_b).unwrap();
+        assert_eq!(project_a_decisions.len(), 1);
+        assert_eq!(project_b_decisions.len(), 1);
+        assert_eq!(project_a_decisions[0].id, WorkId::from("D-a"));
+        assert_eq!(project_b_decisions[0].id, WorkId::from("D-b"));
+        assert_eq!(
+            all_memories[0].project_root,
+            project_a.canonicalize().unwrap()
+        );
+        assert_eq!(
+            all_decisions[1].project_root,
+            project_b.canonicalize().unwrap()
+        );
     }
 
     #[test]
