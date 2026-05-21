@@ -4,6 +4,7 @@ use serde_json::json;
 use super::{truncate_head, Tool, ToolContext, ToolOutput};
 use crate::config::WriteOverwritePolicy;
 use crate::error::Result;
+use crate::tools::code_intel;
 
 pub struct WriteTool;
 
@@ -23,7 +24,16 @@ impl Tool for WriteTool {
             "type": "object",
             "properties": {
                 "path": { "type": "string" },
-                "content": { "type": "string" }
+                "content": { "type": "string" },
+                "mode": {
+                    "type": "string",
+                    "enum": ["create", "overwrite"],
+                    "description": "Optional safety mode. create fails if the file exists; overwrite makes replacement explicit. Omitted preserves existing behavior."
+                },
+                "validate_syntax": {
+                    "type": "boolean",
+                    "description": "When true, parse source content before writing and reject syntax errors for supported languages."
+                }
             },
             "required": ["path", "content"]
         })
@@ -40,6 +50,11 @@ impl Tool for WriteTool {
     ) -> Result<ToolOutput> {
         let raw_path = params["path"].as_str().unwrap_or("");
         let content = params["content"].as_str().unwrap_or("");
+        let mode = params["mode"].as_str();
+        let validate_syntax = params["validate_syntax"]
+            .as_bool()
+            .or_else(|| params["validateSyntax"].as_bool())
+            .unwrap_or(false);
 
         if raw_path.is_empty() {
             return Ok(ToolOutput::error("Missing required parameter: path"));
@@ -59,6 +74,12 @@ impl Tool for WriteTool {
         }
 
         let existed = path.exists();
+        if matches!(mode, Some("create")) && existed {
+            return Ok(ToolOutput::error(format!(
+                "Write mode create refuses to overwrite existing file: {}",
+                path.display()
+            )));
+        }
 
         let overwrite_check = if existed {
             evaluate_overwrite_policy(&path, &ctx)
@@ -68,6 +89,12 @@ impl Tool for WriteTool {
         if let Some(error) = overwrite_check.error {
             return Ok(ToolOutput::error(error));
         }
+
+        let before_content = if existed {
+            tokio::fs::read_to_string(&path).await.ok()
+        } else {
+            None
+        };
 
         // Create parent directories
         if let Some(parent) = path.parent() {
@@ -101,6 +128,20 @@ impl Tool for WriteTool {
         } else {
             content.replace("\r\n", "\n")
         };
+
+        let syntax_validation =
+            validate_syntax.then(|| code_intel::validate_syntax(&normalized, &path));
+        if let Some(validation) = &syntax_validation {
+            if validation.supported && !validation.valid {
+                return Ok(ToolOutput::error(format!(
+                    "Write would create syntax errors in {raw_path}: {:?}. No changes made.",
+                    validation.errors
+                )));
+            }
+        }
+        let symbol_diff = before_content
+            .as_deref()
+            .map(|before| code_intel::diff_top_level_symbols(before, &normalized, &path));
 
         let bytes_written = normalized.len();
         tokio::fs::write(&path, &normalized).await?;
@@ -155,6 +196,23 @@ impl Tool for WriteTool {
                 "warnings": warnings,
                 "warning_codes": warning_codes,
                 "overwrite_policy": ctx.config.write.overwrite_policy,
+                "mode": mode,
+                "syntax_validation": syntax_validation.as_ref().map(|validation| json!({
+                    "supported": validation.supported,
+                    "valid": validation.valid,
+                    "language": validation.language,
+                    "errors": validation.errors.iter().map(|error| json!({
+                        "start_line": error.start_line,
+                        "end_line": error.end_line,
+                        "kind": error.kind,
+                    })).collect::<Vec<_>>(),
+                })),
+                "symbol_diff": symbol_diff.as_ref().map(|diff| json!({
+                    "added": diff.added.iter().cloned().collect::<Vec<_>>(),
+                    "removed": diff.removed.iter().cloned().collect::<Vec<_>>(),
+                    "before": diff.before.iter().cloned().collect::<Vec<_>>(),
+                    "after": diff.after.iter().cloned().collect::<Vec<_>>(),
+                })),
                 "display_content": display_content,
                 "display_note": display_note,
             }),
@@ -275,6 +333,72 @@ mod tests {
         let mut ctx = test_ctx(dir);
         ctx.run_policy = run_policy;
         ctx
+    }
+
+    #[tokio::test]
+    async fn write_create_mode_refuses_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, "fn old() {}\n").unwrap();
+
+        let tool = WriteTool;
+        let result = tool
+            .execute(
+                "c-create-mode",
+                serde_json::json!({"path": "lib.rs", "content": "fn new() {}\n", "mode": "create"}),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result
+            .text_content()
+            .unwrap()
+            .contains("refuses to overwrite"));
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "fn old() {}\n");
+    }
+
+    #[tokio::test]
+    async fn write_overwrite_reports_symbol_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, "fn old() {}\n").unwrap();
+
+        let tool = WriteTool;
+        let result = tool
+            .execute(
+                "c-symbol-diff",
+                serde_json::json!({"path": "lib.rs", "content": "fn new() {}\n", "mode": "overwrite"}),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(result.details["symbol_diff"]["added"][0], "new");
+        assert_eq!(result.details["symbol_diff"]["removed"][0], "old");
+    }
+
+    #[tokio::test]
+    async fn write_validate_syntax_blocks_invalid_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, "fn old() {}\n").unwrap();
+
+        let tool = WriteTool;
+        let result = tool
+            .execute(
+                "c-write-syntax",
+                serde_json::json!({"path": "lib.rs", "content": "fn broken( {\n", "validateSyntax": true}),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.text_content().unwrap().contains("syntax errors"));
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "fn old() {}\n");
     }
 
     #[tokio::test]

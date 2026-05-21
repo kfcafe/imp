@@ -32,6 +32,7 @@ use serde_json::json;
 
 use super::{truncate_head, truncate_line, Tool, ToolContext, ToolOutput, TruncationResult};
 use crate::error::{Error, Result};
+use crate::tools::code_intel::CodeBlock;
 use types::*;
 
 const MAX_OUTPUT_LINES: usize = 2000;
@@ -59,46 +60,10 @@ const SUPPORTED_LANGUAGES: &[&str] = &[
     "c",
     "csharp",
     "cpp",
+    "php",
+    "scala",
+    "dart",
     "ocaml",
-];
-
-const BLOCK_KINDS: &[&str] = &[
-    // Rust
-    "function_item",
-    "impl_item",
-    "struct_item",
-    "enum_item",
-    "trait_item",
-    "mod_item",
-    "const_item",
-    "static_item",
-    "type_item",
-    "macro_definition",
-    // TypeScript / JavaScript
-    "function_declaration",
-    "method_definition",
-    "class_declaration",
-    "interface_declaration",
-    "type_alias_declaration",
-    "enum_declaration",
-    "export_statement",
-    "lexical_declaration",
-    "variable_declaration",
-    "arrow_function",
-    // Python
-    "function_definition",
-    "class_definition",
-    "decorated_definition",
-    // Kotlin
-    "class_declaration",
-    "object_declaration",
-    "function_declaration",
-    "property_declaration",
-    // Go
-    "function_declaration",
-    "method_declaration",
-    "type_declaration",
-    "type_spec",
 ];
 
 pub struct ScanTool;
@@ -421,6 +386,24 @@ fn extract_files(files: &[PathBuf], cwd: &Path) -> ScanResult {
             "pl" | "pm" | "t" => perl::parse(&source, &rel, &mut result),
             "swift" => swift::parse(&source, &rel, &mut result),
             "js" | "jsx" => typescript::parse(&source, &rel, ext == "jsx", &mut result),
+            "dart" => generic::parse(
+                &source,
+                &rel,
+                tree_sitter_dart::LANGUAGE.into(),
+                &mut result,
+            ),
+            "php" => generic::parse(
+                &source,
+                &rel,
+                tree_sitter_php::LANGUAGE_PHP.into(),
+                &mut result,
+            ),
+            "scala" | "sc" => generic::parse(
+                &source,
+                &rel,
+                tree_sitter_scala::LANGUAGE.into(),
+                &mut result,
+            ),
             _ => {
                 if let Some(language) = language_for_extension(ext) {
                     generic::parse(&source, &rel, language, &mut result);
@@ -449,6 +432,9 @@ fn language_for_extension(ext: &str) -> Option<tree_sitter::Language> {
         "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" => {
             tree_sitter_cpp::LANGUAGE.into()
         }
+        "php" => tree_sitter_php::LANGUAGE_PHP.into(),
+        "scala" | "sc" => tree_sitter_scala::LANGUAGE.into(),
+        "dart" => tree_sitter_dart::LANGUAGE.into(),
         _ => return None,
     };
     Some(language)
@@ -531,6 +517,10 @@ fn is_supported(path: &Path) -> bool {
                 | "hh"
                 | "hxx"
                 | "h++"
+                | "php"
+                | "scala"
+                | "sc"
+                | "dart"
         )
     )
 }
@@ -1506,17 +1496,6 @@ fn truncate_output(text: String) -> String {
     result
 }
 
-struct CodeBlock {
-    file: PathBuf,
-    start_line: usize,
-    end_line: usize,
-    kind: Option<String>,
-    symbol: Option<String>,
-    language: Option<String>,
-    truncated: bool,
-    code: String,
-}
-
 enum Locator {
     Line(usize),
     Range(usize, usize),
@@ -1752,56 +1731,17 @@ fn parse_extract_target(target: &str) -> Option<(String, Locator)> {
     None
 }
 
-fn block_details(block: &CodeBlock) -> serde_json::Value {
-    json!({
-        "path": block.file.to_string_lossy(),
-        "symbol": block.symbol,
-        "kind": block.kind,
-        "language": block.language,
-        "start_line": block.start_line,
-        "end_line": block.end_line,
-        "truncated": block.truncated,
-    })
-}
-
 fn read_text_file(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.contains(&0) {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    std::fs::read_to_string(path).ok()
 }
 
+fn block_details(block: &CodeBlock) -> serde_json::Value {
+    crate::tools::code_intel::block_details(block)
+}
+
+#[cfg(test)]
 fn get_parser(path: &Path) -> Option<tree_sitter::Parser> {
-    let ext = path.extension()?.to_str()?;
-    let language = match ext {
-        "sh" | "bash" | "zsh" | "fish" => tree_sitter_bash::LANGUAGE.into(),
-        "py" | "pyw" => tree_sitter_python::LANGUAGE.into(),
-        "rs" => tree_sitter_rust::LANGUAGE.into(),
-        "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
-        "ts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
-        "go" => tree_sitter_go::LANGUAGE.into(),
-        "ex" | "exs" => tree_sitter_elixir::LANGUAGE.into(),
-        "rb" => tree_sitter_ruby::LANGUAGE.into(),
-        "pl" | "pm" | "t" => tree_sitter_perl::LANGUAGE.into(),
-        "lua" | "luau" => tree_sitter_lua::LANGUAGE.into(),
-        "ml" | "mli" => tree_sitter_ocaml::LANGUAGE_OCAML.into(),
-        "zig" | "zon" => tree_sitter_zig::LANGUAGE.into(),
-        "odin" => tree_sitter_odin::LANGUAGE.into(),
-        "swift" => tree_sitter_swift::LANGUAGE.into(),
-        "kt" | "kts" => tree_sitter_kotlin_ng::LANGUAGE.into(),
-        "java" => tree_sitter_java::LANGUAGE.into(),
-        "c" | "h" => tree_sitter_c::LANGUAGE.into(),
-        "cs" => tree_sitter_c_sharp::LANGUAGE.into(),
-        "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" => {
-            tree_sitter_cpp::LANGUAGE.into()
-        }
-        _ => return None,
-    };
-    let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&language).ok()?;
-    Some(parser)
+    crate::tools::code_intel::parser_for_path(path)
 }
 
 fn extract_blocks_at_lines(
@@ -1809,199 +1749,19 @@ fn extract_blocks_at_lines(
     path: &Path,
     match_lines: &[usize],
 ) -> Option<Vec<CodeBlock>> {
-    let mut parser = get_parser(path)?;
-    let tree = parser.parse(source, None)?;
-    let root = tree.root_node();
-    let lines: Vec<&str> = source.lines().collect();
-
-    let mut blocks = Vec::new();
-    let mut seen_ranges = std::collections::HashSet::new();
-
-    for &line_idx in match_lines {
-        if let Some(node) = find_enclosing_block(root, line_idx) {
-            let start = node.start_position().row;
-            let end = node.end_position().row;
-            let range = (start, end);
-            if seen_ranges.insert(range) {
-                let s = start.min(lines.len());
-                let e = (end + 1).min(lines.len());
-                blocks.push(CodeBlock {
-                    file: PathBuf::new(),
-                    start_line: start + 1,
-                    end_line: end + 1,
-                    kind: Some(node.kind().to_string()),
-                    symbol: None,
-                    language: language_for_path(path).map(str::to_string),
-                    truncated: false,
-                    code: lines[s..e].join("\n"),
-                });
-            }
-        }
-    }
-
-    Some(blocks)
-}
-
-fn find_enclosing_block(root: tree_sitter::Node, target_line: usize) -> Option<tree_sitter::Node> {
-    let mut best: Option<tree_sitter::Node> = None;
-    find_enclosing_block_recursive(root, target_line, &mut best);
-    best
-}
-
-fn find_enclosing_block_recursive<'a>(
-    node: tree_sitter::Node<'a>,
-    target_line: usize,
-    best: &mut Option<tree_sitter::Node<'a>>,
-) {
-    let start = node.start_position().row;
-    let end = node.end_position().row;
-
-    if target_line < start || target_line > end {
-        return;
-    }
-
-    if BLOCK_KINDS.contains(&node.kind()) {
-        *best = Some(node);
-    }
-
-    let mut cursor = node.walk();
-    let children: Vec<_> = node.children(&mut cursor).collect();
-    for child in children {
-        find_enclosing_block_recursive(child, target_line, best);
-    }
+    crate::tools::code_intel::extract_blocks_at_lines(source, path, match_lines)
 }
 
 fn extract_symbol(source: &str, path: &Path, name: &str) -> Option<CodeBlock> {
-    let mut parser = get_parser(path)?;
-    let tree = parser.parse(source, None)?;
-    let root = tree.root_node();
-    let lines: Vec<&str> = source.lines().collect();
-
-    let node = find_symbol_node(root, source, name)?;
-    let start = node.start_position().row;
-    let end = node.end_position().row;
-    let s = start.min(lines.len());
-    let e = (end + 1).min(lines.len());
-
-    Some(CodeBlock {
-        file: PathBuf::new(),
-        start_line: start + 1,
-        end_line: end + 1,
-        kind: Some(node.kind().to_string()),
-        symbol: Some(name.to_string()),
-        language: language_for_path(path).map(str::to_string),
-        truncated: false,
-        code: lines[s..e].join("\n"),
-    })
-}
-
-fn find_symbol_node<'a>(
-    node: tree_sitter::Node<'a>,
-    source: &str,
-    name: &str,
-) -> Option<tree_sitter::Node<'a>> {
-    if BLOCK_KINDS.contains(&node.kind()) && node_has_name(node, source, name) {
-        return Some(node);
-    }
-
-    let mut cursor = node.walk();
-    let children: Vec<_> = node.children(&mut cursor).collect();
-    for child in children {
-        if let Some(found) = find_symbol_node(child, source, name) {
-            return Some(found);
-        }
-    }
-
-    None
-}
-
-fn node_has_name(node: tree_sitter::Node, source: &str, name: &str) -> bool {
-    let mut cursor = node.walk();
-    let children: Vec<_> = node.children(&mut cursor).collect();
-    for child in children {
-        let kind = child.kind();
-        if kind == "identifier"
-            || kind == "type_identifier"
-            || kind == "name"
-            || kind == "property_identifier"
-            || kind == "simple_identifier"
-            || kind == "variable_identifier"
-        {
-            let text = &source[child.byte_range()];
-            if text == name {
-                return true;
-            }
-        }
-        if BLOCK_KINDS.contains(&kind) {
-            continue;
-        }
-        let mut inner_cursor = child.walk();
-        let inner_children: Vec<_> = child.children(&mut inner_cursor).collect();
-        for inner in inner_children {
-            let ik = inner.kind();
-            if ik == "identifier"
-                || ik == "type_identifier"
-                || ik == "name"
-                || ik == "simple_identifier"
-                || ik == "variable_identifier"
-            {
-                let text = &source[inner.byte_range()];
-                if text == name {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+    crate::tools::code_intel::extract_symbol(source, path, name)
 }
 
 fn language_for_path(path: &Path) -> Option<&'static str> {
-    match path.extension().and_then(|e| e.to_str())? {
-        "sh" | "bash" | "zsh" | "fish" => Some("shell"),
-        "py" | "pyw" => Some("python"),
-        "rs" => Some("rust"),
-        "js" | "jsx" | "mjs" | "cjs" => Some("javascript"),
-        "ts" | "tsx" => Some("typescript"),
-        "go" => Some("go"),
-        "ex" | "exs" => Some("elixir"),
-        "rb" => Some("ruby"),
-        "pl" | "pm" | "t" => Some("perl"),
-        "lua" | "luau" => Some("lua"),
-        "zig" | "zon" => Some("zig"),
-        "odin" => Some("odin"),
-        "swift" => Some("swift"),
-        "kt" | "kts" => Some("kotlin"),
-        "java" => Some("java"),
-        "c" | "h" => Some("c"),
-        "cs" => Some("csharp"),
-        "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" => Some("cpp"),
-        _ => None,
-    }
+    crate::tools::code_intel::language_for_path(path)
 }
 
 fn format_blocks(blocks: &[CodeBlock]) -> String {
-    let mut sections = Vec::with_capacity(blocks.len());
-
-    for block in blocks {
-        let mut header = format!(
-            "{}:{}-{}",
-            block.file.display(),
-            block.start_line,
-            block.end_line
-        );
-        if let Some(kind) = &block.kind {
-            header.push_str(&format!(" ({kind})"));
-        }
-        let details = block_details(block);
-
-        let fence = language_for_path(&block.file).unwrap_or("text");
-        sections.push(format!(
-            "{header}\nDetails: {details}\n```{fence}\n{}\n```",
-            block.code
-        ));
-    }
-
-    sections.join("\n\n")
+    crate::tools::code_intel::format_blocks(blocks)
 }
 
 #[cfg(test)]
@@ -2029,6 +1789,9 @@ mod tests {
             ("main.c", "void hello() {}"),
             ("Program.cs", "class Program { void Hello() {} }"),
             ("main.cpp", "void hello() {}"),
+            ("index.php", "<?php function hello() {}"),
+            ("Main.scala", "class Main { def hello(): Unit = () }"),
+            ("main.dart", "void hello() {}"),
         ];
 
         for (file_name, source) in cases {
@@ -2105,6 +1868,24 @@ void hello() {}",
                 "class Greeter { void Hello() {} }",
                 "Greeter",
                 "Hello",
+            ),
+            (
+                "src/index.php",
+                "<?php class Greeter { function hello($name) { return $name; } }",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/Main.scala",
+                "class Greeter { def hello(name: String): String = name }",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/main.dart",
+                "class Greeter { void hello(String name) {} }",
+                "Greeter",
+                "hello",
             ),
             (
                 "src/mod.ex",

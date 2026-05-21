@@ -1,5 +1,6 @@
 pub mod ask;
 pub mod bash;
+pub mod code_intel;
 pub mod edit;
 pub mod git;
 pub mod lua;
