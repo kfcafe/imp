@@ -1,4 +1,5 @@
 pub mod context_pack;
+pub mod event;
 pub mod mana_shadow;
 pub mod memory;
 pub mod model;
@@ -8,10 +9,14 @@ pub mod prototype;
 pub mod runtime;
 pub mod scheduler;
 pub mod store;
+pub mod workflow;
 
 pub use context_pack::{
     ContextCompileRequest, ContextCompiler, ContextFreshness, ContextLaunchKind, ContextRenderer,
     RenderedContextBlock, RenderedContextPack,
+};
+pub use event::{
+    ArtifactKind, ArtifactRef, EventCursor, EventLog, EvidenceSummary, WorkEvent, WorkEventKind,
 };
 pub use mana_shadow::{import_mana_unit_shadow, ManaShadowImport, ManaShadowUnit};
 pub use memory::{
@@ -38,12 +43,18 @@ pub use prototype::{
 };
 pub use runtime::{PrototypeExecutor, RuntimeExecutionResult, TaskExecutor, WorkRuntime};
 pub use scheduler::{
-    CoordinatorSummary, LeaseRecord, LeaseRequest, Scheduler, SchedulerError, WorkOutcome,
-    WorkerProfile,
+    CoordinatorSummary, DispatchBlocker, DispatchBlockerReason, DispatchPlan, LeaseRecord,
+    LeaseRequest, MultiAgentRunPlan, MultiAgentRunResult, PathConflictPolicy, RunPolicy, Scheduler,
+    SchedulerError, WorkOutcome, WorkerCompletion, WorkerProfile,
 };
 pub use store::{
     CoordinatorSnapshot, WorkLayout, WorkStore, WorkValidationIssue, WorkValidationReport,
     WorkValidationSeverity, WorkerPersistence,
+};
+pub use workflow::{
+    build_work_tree, close_task_with_conventions, fail_task_with_conventions, readiness_for,
+    summarize_checks, CloseRequest, CloseResult, FailResult, Readiness, VerifySummary, WorkTree,
+    WorkTreeNode,
 };
 
 #[derive(Debug, thiserror::Error)]
