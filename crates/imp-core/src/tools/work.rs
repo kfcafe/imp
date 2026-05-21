@@ -1,9 +1,11 @@
 use async_trait::async_trait;
 use imp_work::{
-    capture_conversation_memory, ContextRenderer, ConversationMemoryInput, ConversationMemoryQuery,
-    Decision, DecisionStatus, Epic, HypothesisResult, MemoryItem, MemoryKind, Prototype,
-    PrototypeEvidence, PrototypeObservation, PrototypeOutcome, PrototypeRecordPolicy,
-    PrototypeStatus, Run, RunOutcome, Task, TaskStatus, WorkId, WorkItem, WorkKind, WorkStore,
+    build_work_tree, capture_conversation_memory, close_task_with_conventions,
+    fail_task_with_conventions, summarize_checks, CheckResult, CloseRequest, ContextRenderer,
+    ConversationMemoryInput, ConversationMemoryQuery, Decision, DecisionStatus, Epic,
+    HypothesisResult, MemoryItem, MemoryKind, Prototype, PrototypeEvidence, PrototypeObservation,
+    PrototypeOutcome, PrototypeRecordPolicy, PrototypeStatus, Run, RunOutcome, Task, TaskStatus,
+    WorkId, WorkItem, WorkKind, WorkStore,
 };
 use serde_json::json;
 
@@ -33,8 +35,8 @@ impl Tool for WorkTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create", "list", "context", "refresh_context", "next", "show", "update", "claim", "dep_add", "dep_remove", "validate", "search", "outcome", "prototype_outcome", "runs", "remember"],
-                    "description": "Create, list, show, update, claim, remember/search memory, record/inspect task or prototype outcomes, prepare/refresh context packs, or select next ready native imp-work items."
+                    "enum": ["create", "list", "context", "refresh_context", "next", "show", "update", "claim", "dep_add", "dep_remove", "validate", "search", "outcome", "prototype_outcome", "runs", "tree", "verify", "close", "fail", "remember"],
+                    "description": "Create, list, show, update, claim, remember/search memory, record/inspect task or prototype outcomes, prepare/refresh context packs, select next ready native imp-work items, or manage native tree/verify/close/fail workflows."
                 },
                 "kind": {
                     "type": "string",
@@ -85,6 +87,9 @@ impl Tool for WorkTool {
                     "enum": ["supported", "refuted", "inconclusive", "not_assessed"],
                     "description": "Prototype hypothesis result for action=prototype_outcome."
                 },
+                "force": { "type": "boolean", "description": "For close, allow closing a checked task without passing verify when force_reason is provided." },
+                "force_reason": { "type": "string", "description": "Required reason when force-closing a checked task without passing verify." },
+                "next_action": { "type": "string", "description": "For fail, the next useful action to recover from the blocker." },
                 "recommended_action": {
                     "type": "string",
                     "enum": ["promote", "discard", "iterate", "inconclusive"],
@@ -143,9 +148,13 @@ impl Tool for WorkTool {
             "outcome" => record_outcome(&store, &params),
             "prototype_outcome" => record_prototype_outcome(&store, &params),
             "runs" => list_runs(&store, &params),
+            "tree" => work_tree(&store),
+            "verify" => verify_task(&store, &params),
+            "close" => close_task_action(&store, &params),
+            "fail" => fail_task_action(&store, &params),
             "remember" => remember_memory(&store, &params),
             other => Err(Error::Tool(format!(
-                "unsupported work action `{other}`; expected create, list, context, refresh_context, next, show, update, claim, dep_add, dep_remove, validate, search, outcome, prototype_outcome, runs, or remember"
+                "unsupported work action `{other}`; expected create, list, context, refresh_context, next, show, update, claim, dep_add, dep_remove, validate, search, outcome, prototype_outcome, runs, tree, verify, close, fail, or remember"
             ))),
         }
     }
@@ -232,6 +241,177 @@ fn list_items(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutpu
         }),
         is_error: false,
     })
+}
+
+fn work_tree(store: &WorkStore) -> Result<ToolOutput> {
+    let tasks = store
+        .load_tasks()
+        .map_err(|error| Error::Tool(format!("failed to load work tree: {error}")))?;
+    let tree = build_work_tree(&tasks);
+    Ok(tool_output(
+        format!(
+            "Native imp-work tree contains {} root item(s) and {} warning(s)",
+            tree.nodes.len(),
+            tree.warnings.len()
+        ),
+        json!({
+            "action": "tree",
+            "tree": tree,
+        }),
+    ))
+}
+
+fn verify_task(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+    let id = required_str(params, "id")?;
+    let tasks = store
+        .load_tasks()
+        .map_err(|error| Error::Tool(format!("failed to load task for verify: {error}")))?;
+    let task = tasks
+        .iter()
+        .find(|task| task.id.0 == id)
+        .ok_or_else(|| Error::Tool(format!("work item `{id}` not found")))?;
+    let checks_passed = params
+        .get("checks_passed")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(task.checks.len() as u64) as usize;
+    let checks_failed = params
+        .get("checks_failed")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as usize;
+
+    let mut results = Vec::new();
+    for (index, check) in task.checks.iter().enumerate() {
+        results.push(CheckResult {
+            check_id: Some(check.id.clone()),
+            command: check.command.clone(),
+            passed: index < checks_passed && checks_failed == 0,
+            output_ref: None,
+        });
+    }
+    for index in 0..checks_failed {
+        results.push(CheckResult {
+            check_id: Some(WorkId::from(format!("{id}-failed-check-{index}"))),
+            command: None,
+            passed: false,
+            output_ref: None,
+        });
+    }
+    let verify = summarize_checks(results);
+    Ok(tool_output(
+        if verify.passed {
+            format!("Verify passed for {id}")
+        } else {
+            format!("Verify failed for {id}")
+        },
+        json!({
+            "action": "verify",
+            "id": id,
+            "verify": verify,
+        }),
+    ))
+}
+
+fn close_task_action(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+    let id = required_str(params, "id")?;
+    let summary = optional_string(params, "summary").unwrap_or_else(|| "closed".to_string());
+    let tasks = store
+        .load_tasks()
+        .map_err(|error| Error::Tool(format!("failed to load task for close: {error}")))?;
+    let task = tasks
+        .into_iter()
+        .find(|task| task.id.0 == id)
+        .ok_or_else(|| Error::Tool(format!("work item `{id}` not found")))?;
+    let force_reason = optional_string(params, "force_reason").or_else(|| {
+        params
+            .get("force")
+            .and_then(|value| value.as_bool())
+            .filter(|force| *force)
+            .map(|_| "forced without detailed reason".to_string())
+    });
+    let verify = if task.checks.is_empty() {
+        None
+    } else {
+        let checks_passed = params
+            .get("checks_passed")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(task.checks.len() as u64) as usize;
+        let checks_failed = params
+            .get("checks_failed")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        let mut results = Vec::new();
+        for (index, check) in task.checks.iter().enumerate() {
+            results.push(CheckResult {
+                check_id: Some(check.id.clone()),
+                command: check.command.clone(),
+                passed: index < checks_passed && checks_failed == 0,
+                output_ref: None,
+            });
+        }
+        for index in 0..checks_failed {
+            results.push(CheckResult {
+                check_id: Some(WorkId::from(format!("{id}-failed-check-{index}"))),
+                command: None,
+                passed: false,
+                output_ref: None,
+            });
+        }
+        Some(summarize_checks(results))
+    };
+    let close = close_task_with_conventions(
+        task,
+        CloseRequest {
+            verify,
+            force_reason,
+            summary,
+            changed_paths: paths_from_params(params),
+        },
+    )
+    .map_err(Error::Tool)?;
+    store
+        .update_task_status(id, close.task.status)
+        .map_err(|error| Error::Tool(format!("failed to update closed task status: {error}")))?;
+    store
+        .append_run(&close.run)
+        .map_err(|error| Error::Tool(format!("failed to append close run: {error}")))?;
+
+    Ok(tool_output(
+        format!("Closed native imp-work task {id}"),
+        json!({
+            "action": "close",
+            "task": close.task,
+            "run": close.run,
+            "forced": close.forced,
+        }),
+    ))
+}
+
+fn fail_task_action(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+    let id = required_str(params, "id")?;
+    let reason = required_string_any(params, &["reason", "summary", "text"])?;
+    let tasks = store
+        .load_tasks()
+        .map_err(|error| Error::Tool(format!("failed to load task for fail: {error}")))?;
+    let task = tasks
+        .into_iter()
+        .find(|task| task.id.0 == id)
+        .ok_or_else(|| Error::Tool(format!("work item `{id}` not found")))?;
+    let failed = fail_task_with_conventions(task, reason, optional_string(params, "next_action"));
+    store
+        .update_task_status(id, failed.task.status)
+        .map_err(|error| Error::Tool(format!("failed to update failed task status: {error}")))?;
+    store
+        .append_memory(&failed.memory)
+        .map_err(|error| Error::Tool(format!("failed to append failure memory: {error}")))?;
+
+    Ok(tool_output(
+        format!("Marked native imp-work task {id} blocked"),
+        json!({
+            "action": "fail",
+            "task": failed.task,
+            "memory": failed.memory,
+        }),
+    ))
 }
 
 fn remember_memory(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
@@ -1070,15 +1250,22 @@ fn build_task(params: &serde_json::Value) -> Result<Task> {
         .map(parse_task_status)
         .transpose()?
         .unwrap_or(TaskStatus::Todo);
-    task.parent = optional_work_id(params, "parent_work");
+    task.parent =
+        optional_work_id(params, "parent_work").or_else(|| optional_work_id(params, "parent"));
     task.acceptance = string_array(params, "acceptance");
-    for dependency in string_array(params, "depends_on") {
+    for dependency in string_array(params, "depends_on")
+        .into_iter()
+        .chain(string_array(params, "dependencies"))
+    {
         task.links.push(imp_work::Link {
             kind: imp_work::LinkKind::DependsOn,
             target: WorkId::from(dependency.as_str()),
         });
     }
-    for check in string_array(params, "checks") {
+    for check in string_array(params, "checks")
+        .into_iter()
+        .chain(optional_string(params, "verify"))
+    {
         task.checks.push(imp_work::Check {
             id: WorkId::new("C"),
             kind: imp_work::CheckKind::Command,
@@ -1150,6 +1337,16 @@ fn build_prototype(params: &serde_json::Value) -> Result<Prototype> {
         .transpose()?
         .unwrap_or(PrototypeStatus::Planned);
     Ok(prototype)
+}
+
+fn tool_output(content: impl Into<String>, details: serde_json::Value) -> ToolOutput {
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text {
+            text: content.into(),
+        }],
+        details,
+        is_error: false,
+    }
 }
 
 fn required_str<'a>(params: &'a serde_json::Value, key: &str) -> Result<&'a str> {
@@ -3131,6 +3328,122 @@ mod tests {
             markdown.contains("Prototype context packs should carry relevant experiment memory.")
         );
         assert!(markdown.contains("Prototype code is disposable"));
+    }
+
+    #[tokio::test]
+    async fn work_tool_tree_reports_dependency_blockers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = WorkTool;
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let created = tool
+            .execute(
+                "create-blocked-task",
+                json!({
+                    "action": "create",
+                    "kind": "task",
+                    "title": "Needs missing dependency",
+                    "depends_on": ["missing-dep"]
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!created.is_error);
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let tree = tool
+            .execute("tree", json!({ "action": "tree" }), ctx)
+            .await
+            .unwrap();
+
+        assert!(!tree.is_error);
+        assert_eq!(tree.details["action"], "tree");
+        assert!(tree.details["tree"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning.as_str().unwrap().contains("missing")));
+    }
+
+    #[tokio::test]
+    async fn work_tool_verify_close_and_fail_use_native_conventions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = WorkTool;
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let created = tool
+            .execute(
+                "create-task",
+                json!({
+                    "action": "create",
+                    "kind": "task",
+                    "title": "Checked task",
+                    "verify": "cargo test -p imp-work"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let id = created.details["id"].as_str().unwrap().to_string();
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let verify = tool
+            .execute("verify", json!({ "action": "verify", "id": id }), ctx)
+            .await
+            .unwrap();
+        assert!(!verify.is_error);
+        assert_eq!(verify.details["verify"]["passed"], true);
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let close = tool
+            .execute(
+                "close",
+                json!({
+                    "action": "close",
+                    "id": id,
+                    "summary": "verified native close"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!close.is_error);
+        assert_eq!(close.details["task"]["status"], "done");
+        assert_eq!(close.details["run"]["outcome"], "done");
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let created_fail = tool
+            .execute(
+                "create-fail-task",
+                json!({
+                    "action": "create",
+                    "kind": "task",
+                    "title": "Failing task"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let fail_id = created_fail.details["id"].as_str().unwrap().to_string();
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let failed = tool
+            .execute(
+                "fail",
+                json!({
+                    "action": "fail",
+                    "id": fail_id,
+                    "reason": "missing multi-agent runner",
+                    "next_action": "implement bounded jobs"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!failed.is_error);
+        assert_eq!(failed.details["task"]["status"], "blocked");
+        assert!(failed.details["memory"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("bounded jobs"));
     }
 
     #[tokio::test]
