@@ -13,11 +13,16 @@ pub mod java;
 pub mod kotlin;
 pub mod lua;
 pub mod ocaml;
+pub mod odin;
+pub mod perl;
 pub mod python;
 pub mod ruby;
 pub mod rust;
+pub mod shell;
+pub mod swift;
 pub mod types;
 pub mod typescript;
+pub mod zig;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -410,6 +415,11 @@ fn extract_files(files: &[PathBuf], cwd: &Path) -> ScanResult {
             "ex" | "exs" => elixir::parse(&source, &rel, &mut result),
             "lua" | "luau" => lua::parse(&source, &rel, &mut result),
             "ml" | "mli" => ocaml::parse(&source, &rel, &mut result),
+            "zig" | "zon" => zig::parse(&source, &rel, &mut result),
+            "odin" => odin::parse(&source, &rel, &mut result),
+            "sh" | "bash" | "zsh" | "fish" => shell::parse(&source, &rel, &mut result),
+            "pl" | "pm" | "t" => perl::parse(&source, &rel, &mut result),
+            "swift" => swift::parse(&source, &rel, &mut result),
             "js" | "jsx" => typescript::parse(&source, &rel, ext == "jsx", &mut result),
             _ => {
                 if let Some(language) = language_for_extension(ext) {
@@ -1776,6 +1786,7 @@ fn get_parser(path: &Path) -> Option<tree_sitter::Parser> {
         "rb" => tree_sitter_ruby::LANGUAGE.into(),
         "pl" | "pm" | "t" => tree_sitter_perl::LANGUAGE.into(),
         "lua" | "luau" => tree_sitter_lua::LANGUAGE.into(),
+        "ml" | "mli" => tree_sitter_ocaml::LANGUAGE_OCAML.into(),
         "zig" | "zon" => tree_sitter_zig::LANGUAGE.into(),
         "odin" => tree_sitter_odin::LANGUAGE.into(),
         "swift" => tree_sitter_swift::LANGUAGE.into(),
@@ -2408,6 +2419,114 @@ fn internal_helper() {}
 
         let helper = &result.functions["internal_helper"];
         assert_eq!(helper.visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn extract_swift_file_with_rich_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("Greeter.swift");
+        std::fs::write(
+            &file,
+            r#"
+public protocol GreetingService { func greet(name: String) }
+struct Greeter: GreetingService {
+    enum Tone { case friendly, formal }
+    public func greet(name: String) async {}
+    private func helper() {}
+}
+extension Greeter {
+    func extra() {}
+}
+func makeGreeter() -> Greeter { Greeter() }
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(&[file], tmp.path());
+
+        assert_eq!(result.types["GreetingService"].kind, TypeKind::Protocol);
+        assert_eq!(
+            result.types["GreetingService"].visibility,
+            Visibility::Public
+        );
+        assert_eq!(result.types["Greeter"].kind, TypeKind::Struct);
+        assert!(result.types["Greeter"]
+            .implements
+            .contains(&"GreetingService".to_string()));
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"greet".to_string()));
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"helper".to_string()));
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"extra".to_string()));
+        assert_eq!(result.types["Greeter::Tone"].kind, TypeKind::Enum);
+        assert_eq!(
+            result.functions["Greeter::greet"].visibility,
+            Visibility::Public
+        );
+        assert!(result.functions["Greeter::greet"].is_async);
+        assert_eq!(
+            result.functions["Greeter::helper"].visibility,
+            Visibility::Private
+        );
+        assert!(result.functions.contains_key("Greeter::extra"));
+        assert!(result.functions.contains_key("makeGreeter"));
+        assert!(result.functions["makeGreeter"].source.ends_with(":11"));
+    }
+
+    #[test]
+    fn extract_zig_odin_shell_perl_files_with_rich_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zig_file = tmp.path().join("main.zig");
+        std::fs::write(
+            &zig_file,
+            r#"
+pub const Greeter = struct {};
+pub fn hello() void {}
+fn helper() void {}
+"#,
+        )
+        .unwrap();
+        let odin_file = tmp.path().join("main.odin");
+        std::fs::write(
+            &odin_file,
+            r#"
+Greeter :: struct {}
+hello :: proc() {}
+"#,
+        )
+        .unwrap();
+        let shell_file = tmp.path().join("script.sh");
+        std::fs::write(
+            &shell_file,
+            r#"
+hello() { echo hi; }
+function helper { echo ok; }
+"#,
+        )
+        .unwrap();
+        let perl_file = tmp.path().join("Greeter.pm");
+        std::fs::write(
+            &perl_file,
+            r#"
+package Greeter;
+sub hello { return 1; }
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(&[zig_file, odin_file, shell_file, perl_file], tmp.path());
+
+        assert_eq!(result.types["Greeter"].kind, TypeKind::Struct);
+        assert_eq!(result.functions["hello"].visibility, Visibility::Public);
+        assert_eq!(result.functions["helper"].visibility, Visibility::Private);
+        assert!(result.functions["hello"].signature.contains("hello"));
+        assert!(result.functions.contains_key("helper"));
+        assert!(result.types.contains_key("Greeter"));
+        assert!(result.functions.contains_key("Greeter::hello"));
     }
 
     #[test]
