@@ -54,7 +54,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
 use ratatui::Frame;
 
-use crate::animation::{title_spinner_frame, title_working_glyph, AnimationState};
+use crate::animation::{
+    title_loop_frame, title_loop_glyph, title_spinner_frame, title_working_glyph, AnimationState,
+};
 use crate::event_source::TerminalEventSource;
 use crate::highlight::Highlighter;
 use crate::keybindings::{self, Action};
@@ -2396,7 +2398,13 @@ impl App {
             .or_else(|| self.session.title(48))
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| "chat".to_string());
-        let identity = if self.is_streaming
+        let identity = if self.loop_state.is_some() {
+            if self.config.ui.animations == imp_core::config::AnimationLevel::None {
+                title_loop_glyph()
+            } else {
+                title_loop_frame(self.tick)
+            }
+        } else if self.is_streaming
             || self.agent_start_task.is_some()
             || self.compaction_task.is_some()
         {
@@ -9671,6 +9679,39 @@ mod session_lifecycle {
         app.is_streaming = true;
         app.tick = 36;
         assert_eq!(app.terminal_title(), "• — my chat");
+    }
+
+    #[test]
+    fn terminal_title_uses_loop_icon_when_loop_is_active() {
+        let mut app = make_app();
+        app.session.set_name("my chat");
+        app.loop_state = Some(LoopState {
+            message: "keep going".into(),
+            completed_turns: 1,
+            budget: Some(3),
+        });
+        app.is_streaming = true;
+
+        app.tick = 0;
+        assert_eq!(app.terminal_title(), "↻ — my chat");
+        app.tick = 8;
+        assert_eq!(app.terminal_title(), "↻ — my chat");
+    }
+
+    #[test]
+    fn terminal_title_uses_static_loop_glyph_when_animations_are_off() {
+        let mut app = make_app();
+        app.config.ui.animations = imp_core::config::AnimationLevel::None;
+        app.session.set_name("my chat");
+        app.loop_state = Some(LoopState {
+            message: "keep going".into(),
+            completed_turns: 1,
+            budget: Some(3),
+        });
+        app.is_streaming = true;
+        app.tick = 8;
+
+        assert_eq!(app.terminal_title(), "↻ — my chat");
     }
 
     #[test]
