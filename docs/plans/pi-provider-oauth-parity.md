@@ -55,3 +55,36 @@ This section inventories Pi provider/OAuth support against imp's current provide
 - Cursor is unknown/missing in the inspected Pi and imp provider registries.
 - Google Gemini CLI, Antigravity, and GitHub Copilot are the largest missing imp provider/OAuth surfaces.
 - Kimi/Moonshot requires careful naming split: Moonshot API key vs Kimi Code OAuth/coding route.
+
+## Implementation sequence and risk
+
+This section sequences implementation work from the factual inventory. It does not implement providers.
+
+| Rank | Provider | Status | Why | User value | Implementation risk | Auth/storage impact | Likely imp files | Verify strategy | Mana units |
+|---:|---|---|---|---|---|---|---|---|---|
+| 1 | Z.AI | go | Inventory shows API-key/env based support (`ZAI_API_KEY`), not OAuth. This is the smallest missing provider surface. | Adds GLM/Z.AI model access with low auth complexity. | Low/medium: endpoint/model metadata and OpenAI-compatible routing need validation. | Add provider secret/env mapping; no OAuth credential store. | `imp-llm/src/model.rs`, provider registry, auth/env resolution, CLI/TUI setup lists. | provider registry/model tests, env-secret auth tests, provider construction/base URL tests. | Keep/update `275.7`; prior closed zero-test state should be treated as stale until real tests/code exist. |
+| 2 | Google Gemini CLI | go | High-value OAuth route; Pi has concrete reference. imp already has Google API-key provider but lacks CLI/Code Assist OAuth. | Subscription/CLI-style Gemini access without API key. | Medium/high: project discovery/provisioning and Code Assist headers/endpoints must be ported carefully. | New OAuth credential kind/provider ID, token refresh, project/account metadata. | `imp-llm/src/oauth/*`, `auth.rs`, `model.rs`, Google provider routing, `imp-cli`, TUI login/setup. | mocked OAuth URL/scopes/refresh/project discovery tests; model/provider routing checks. | Keep/update `275.5`; prior closed zero-test state should be reopened or superseded by a real implementation unit. |
+| 3 | GitHub Copilot | research then go | Pi has strong reference for device flow and Copilot token exchange, but request routing/model enablement is more complex. | Unlocks existing Copilot subscription models. | High: device polling, enterprise domains, Copilot internal token/base URL, model availability. | New OAuth/device credentials, Copilot token refresh, optional enterprise domain metadata. | OAuth module, auth store, provider routing/headers, model registry, CLI/TUI login. | device-flow parsing/polling tests, token/base URL extraction tests, small model routing fixture. | Keep/update `275.8`; old closed zero-test gate is stale. |
+| 4 | Google Antigravity | defer pending risk acceptance | Pi reference exists but uses more brittle/special Code Assist/Antigravity scopes, endpoints, headers, and fallback project behavior. | Potentially unlocks Gemini 3 / Claude / GPT-OSS via Google route. | Very high: private-ish endpoint compatibility and stability/legal/product risk. | Separate provider/OAuth route if accepted; do not silently mix with Gemini CLI. | Research note first; provider code only after explicit approval. | risk assessment doc and maybe a disposable request-shape prototype without credentials. | Continue `275.6` research; do not implement until accepted. |
+| 5 | Cursor | defer / research more | Inventory found no Pi Cursor implementation and no imp provider route. Official CLI/API docs must be researched safely first. | Cursor subscription/API compatibility if stable official credential route exists. | High/unknown: provider endpoint compatibility and credential storage unknown. | Only official `CURSOR_API_KEY` or user-consented CLI credentials allowed. | Research doc first; no provider files until route is proven. | docs/local metadata research only; no token printing or login mutation. | Continue `275.9`; create implementation only if recommendation becomes go. |
+
+### Cursor safety boundary
+
+Unofficial Cursor work may only use user-consented, stable, official credential paths such as documented API keys (`CURSOR_API_KEY`) or documented CLI browser-login state if it is explicitly intended for CLI/API use. It must not scrape browser cookies, print tokens, silently extract hidden credentials, mutate login/logout state during research, or claim subscription model routing works without proving endpoint/request compatibility.
+
+### Dispatch order
+
+1. Reopen or replace stale zero-test implementation units for Z.AI and Google Gemini CLI with real gates.
+2. Implement Z.AI API-key provider first.
+3. Implement Google Gemini CLI OAuth/provider route second.
+4. Research/implement GitHub Copilot only after the simpler missing provider surfaces are stable.
+5. Complete Google Antigravity risk assessment; defer implementation unless accepted.
+6. Complete Cursor feasibility research; defer implementation unless a safe official credential/provider route is proven.
+
+### Child unit decisions
+
+- `275.5` Google Gemini CLI: keep as implementation target, but its current closed state is not trustworthy because the recorded verification filtered to zero tests. Reopen or create a replacement before implementation.
+- `275.6` Antigravity: keep open as research/risk assessment.
+- `275.7` Z.AI: keep as implementation target, but current closed zero-test state is stale. Reopen or create a replacement with real tests before implementation.
+- `275.8` GitHub Copilot: keep as implementation target after research/sequence, but current closed zero-test state is stale.
+- `275.9` Cursor: keep open as research with strict safety boundary.
