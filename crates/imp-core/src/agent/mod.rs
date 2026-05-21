@@ -1610,6 +1610,110 @@ mod tests {
         }
     }
 
+    #[test]
+    fn workflow_controller_only_overrides_soft_completion() {
+        use crate::agent::run_loop::workflow_controller_may_override_finish;
+
+        assert!(workflow_controller_may_override_finish(
+            &LoopDecision::Finish {
+                status: RunFinalStatus::Done {
+                    reason: StopReason::WorkCompleted,
+                }
+            }
+        ));
+        assert!(workflow_controller_may_override_finish(
+            &LoopDecision::Finish {
+                status: RunFinalStatus::DoneWithConcerns {
+                    reason: StopReason::NoProgress,
+                    concerns: vec!["minor".into()],
+                }
+            }
+        ));
+        assert!(!workflow_controller_may_override_finish(
+            &LoopDecision::Finish {
+                status: RunFinalStatus::Blocked {
+                    reason: StopReason::RepeatedAction,
+                    message: "repeated action".into(),
+                }
+            }
+        ));
+        assert!(!workflow_controller_may_override_finish(
+            &LoopDecision::Finish {
+                status: RunFinalStatus::NeedsUserInput {
+                    question: "which task?".into(),
+                }
+            }
+        ));
+        assert!(!workflow_controller_may_override_finish(
+            &LoopDecision::Continue {
+                reason: ContinueReason::WorkflowCloseout,
+                prompt: "inspect graph".into(),
+            }
+        ));
+    }
+
+    #[test]
+    fn workflow_closeout_does_not_override_repeated_action_finish() {
+        use crate::agent::loop_policy::{DefaultLoopPolicy, LoopPolicy};
+        use crate::agent::run_loop::workflow_controller_may_override_finish;
+        use crate::agent::turn_assessment::{
+            ManaEvidence, PostTurnAssessment, RuntimeEvidence, TextFallbackEvidence,
+        };
+
+        let assessment = PostTurnAssessment {
+            runtime: RuntimeEvidence {
+                repeated_action: true,
+                execution_stop_reason: None,
+                work_completed: false,
+                execution_debt: false,
+                execution_evidence: false,
+                planning_only_progress: false,
+                orchestration_started: false,
+            },
+            mana: ManaEvidence { stop_reason: None },
+            text_fallback: TextFallbackEvidence {
+                planner_stop_reason: None,
+                execution_stop_reason: None,
+            },
+            continue_recommendation: None,
+        };
+        let decision = DefaultLoopPolicy.decide_after_turn(&assessment);
+
+        assert!(matches!(
+            decision,
+            LoopDecision::Finish {
+                status: RunFinalStatus::Blocked {
+                    reason: StopReason::RepeatedAction,
+                    ..
+                }
+            }
+        ));
+        assert!(!workflow_controller_may_override_finish(&decision));
+    }
+
+    #[tokio::test]
+    async fn workflow_closeout_can_follow_soft_done() {
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.workflow_controller.record_mana_graph_changed();
+
+        let decision = LoopDecision::Finish {
+            status: RunFinalStatus::Done {
+                reason: StopReason::WorkCompleted,
+            },
+        };
+
+        assert!(crate::agent::run_loop::workflow_controller_may_override_finish(&decision));
+        assert!(matches!(
+            agent.workflow_controller_continue_decision(),
+            Some(LoopDecision::Continue {
+                reason: ContinueReason::WorkflowCloseout,
+                ..
+            })
+        ));
+    }
+
     fn test_model(provider: Arc<dyn Provider>) -> Model {
         test_model_with_context_window(provider, 200_000)
     }

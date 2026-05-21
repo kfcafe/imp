@@ -834,7 +834,7 @@ impl Agent {
                 .await;
                 turn_state.enter(TurnPhase::DecideNext);
                 let mut decision = self.loop_decision_after_turn(&assessment);
-                if matches!(decision, LoopDecision::Finish { .. }) {
+                if workflow_controller_may_override_finish(&decision) {
                     if let Some(controller_decision) = self.workflow_controller_continue_decision()
                     {
                         decision = controller_decision;
@@ -935,7 +935,7 @@ impl Agent {
             .await;
             turn_state.enter(TurnPhase::DecideNext);
             let mut decision = self.loop_decision_after_turn(&assessment);
-            if matches!(decision, LoopDecision::Finish { .. }) {
+            if workflow_controller_may_override_finish(&decision) {
                 if let Some(controller_decision) = self.workflow_controller_continue_decision() {
                     decision = controller_decision;
                 }
@@ -1170,6 +1170,15 @@ fn evidence_policy_for_autonomy(mode: AutonomyMode) -> EvidencePolicy {
         AutonomyMode::Suggest | AutonomyMode::Safe => {}
     }
     policy
+}
+
+pub(crate) fn workflow_controller_may_override_finish(decision: &LoopDecision) -> bool {
+    matches!(
+        decision,
+        LoopDecision::Finish {
+            status: RunFinalStatus::Done { .. } | RunFinalStatus::DoneWithConcerns { .. }
+        }
+    )
 }
 
 fn evidence_actions_from_messages(messages: &[Message]) -> EvidenceActions {
