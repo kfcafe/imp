@@ -1,5 +1,6 @@
 pub mod context_pack;
 pub mod event;
+pub mod global_store;
 pub mod mana_shadow;
 pub mod memory;
 pub mod model;
@@ -18,6 +19,7 @@ pub use context_pack::{
 pub use event::{
     ArtifactKind, ArtifactRef, EventCursor, EventLog, EvidenceSummary, WorkEvent, WorkEventKind,
 };
+pub use global_store::{GlobalWorkStore, ProjectScopedTask, ProjectWorkStream, StreamEvent};
 pub use mana_shadow::{import_mana_unit_shadow, ManaShadowImport, ManaShadowUnit};
 pub use memory::{
     capture_conversation_memory, classify_memory_kind, ConversationMemoryIndex,
