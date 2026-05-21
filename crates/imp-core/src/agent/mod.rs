@@ -274,13 +274,17 @@ impl Agent {
         let planning_only_progress = execution_debt && !execution_evidence;
         let mana_stop_reason = mana_review_stop_reason(mana_review, self.mode);
         let planner_text_stop_reason = planner_stop_reason(message, self.mode);
-        let execution_text_stop_reason = execution_stop_reason(message, self.mode);
 
         let mana_workflow_progress =
             tool_results_indicate_mana_workflow_progress(tool_results, self.mode);
         let failed_bash_needs_recovery =
             tool_results_indicate_failed_bash_command(tool_results, self.mode)
                 && !self.queued_execution_debt_follow_up;
+        let execution_text_stop_reason = if failed_bash_needs_recovery {
+            None
+        } else {
+            execution_stop_reason(message, self.mode)
+        };
         let continue_recommendation = if orchestration_started {
             Some(ContinueRecommendation {
                 prompt: orchestration_follow_up_text(orchestration_run_id.as_deref()),
@@ -1021,10 +1025,6 @@ fn tool_results_indicate_execution_blocker(
         return None;
     }
 
-    let saw_edit_like_success = tool_results.iter().any(|result| {
-        !result.is_error && matches!(result.tool_name.as_str(), "write" | "edit" | "multi_edit")
-    });
-
     for result in tool_results {
         let action = result.details.get("action").and_then(|v| v.as_str());
 
@@ -1061,10 +1061,8 @@ fn tool_results_indicate_execution_blocker(
                 continue;
             }
 
-            if saw_edit_like_success
-                && (timed_out || cancelled || exit_code.is_some_and(|code| code != 0))
-            {
-                return Some(StopReason::ExecutionBlocked);
+            if timed_out || cancelled || exit_code.is_some_and(|code| code != 0) {
+                continue;
             }
         }
     }
@@ -1296,14 +1294,6 @@ fn tool_results_indicate_work_completed(
             continue;
         }
 
-        let action = result.details.get("action").and_then(|v| v.as_str());
-        let has_closed_unit = result
-            .details
-            .get("unit")
-            .and_then(|unit| unit.get("status"))
-            .and_then(|v| v.as_str())
-            == Some("closed");
-
         if let Some(command) = result.details.get("command").and_then(|v| v.as_str()) {
             let exit_code_ok = result.details.get("exit_code").and_then(|v| v.as_i64()) == Some(0);
             let command_lower = command.to_ascii_lowercase();
@@ -1316,17 +1306,6 @@ fn tool_results_indicate_work_completed(
             if exit_code_ok && looks_like_check {
                 saw_successful_check = true;
             }
-        }
-
-        match action {
-            Some("close") => return true,
-            Some("verify")
-                if result.details.get("passed").and_then(|v| v.as_bool()) == Some(true) =>
-            {
-                return true;
-            }
-            _ if has_closed_unit => return true,
-            _ => {}
         }
     }
 
@@ -2588,6 +2567,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_bash_command_with_completion_text_continues_for_recovery() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_bash",
+                "bash",
+                serde_json::json!({"command": "false", "timeout": 1}),
+                100,
+                20,
+            ),
+            text_response("Done.", 120, 20),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Full;
+        agent.tools.register(Arc::new(crate::tools::bash::BashTool));
+
+        agent
+            .run("Run the command and recover if it fails".to_string())
+            .await
+            .unwrap();
+
+        let user_follow_up = agent.messages.iter().any(|message| {
+            matches!(
+                message,
+                Message::User(user) if user.content.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Text { text } if text == failed_bash_recovery_follow_up_text()
+                ))
+            )
+        });
+        assert!(
+            user_follow_up,
+            "failed bash output should queue a recovery follow-up before completion text can end the run"
+        );
+    }
+
+    #[tokio::test]
     async fn emits_turn_assessment_event_for_continue_recommendation() {
         let provider = Arc::new(MockProvider::new(vec![
             vec![
@@ -2987,6 +3004,45 @@ mod tests {
     }
 
     #[test]
+    fn failed_bash_after_successful_edit_is_recovery_signal_not_runtime_blocker() {
+        let edit_result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_edit".to_string(),
+            tool_name: "edit".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "edited file".to_string(),
+            }],
+            is_error: false,
+            details: serde_json::json!({ "path": "src/lib.rs" }),
+            timestamp: 0,
+        };
+        let bash_result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_bash".to_string(),
+            tool_name: "bash".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "compiler error".to_string(),
+            }],
+            is_error: true,
+            details: serde_json::json!({
+                "command": "cargo check -p imp-core",
+                "exit_code": 101
+            }),
+            timestamp: 0,
+        };
+
+        assert_eq!(
+            tool_results_indicate_execution_blocker(
+                &[edit_result, bash_result.clone()],
+                AgentMode::Full
+            ),
+            None
+        );
+        assert!(tool_results_indicate_failed_bash_command(
+            &[bash_result],
+            AgentMode::Full
+        ));
+    }
+
+    #[test]
     fn tool_results_indicate_execution_blocker_detects_ask_tool_as_user_blocker() {
         let result = imp_llm::ToolResultMessage {
             tool_call_id: "call_ask".to_string(),
@@ -3003,6 +3059,32 @@ mod tests {
             tool_results_indicate_execution_blocker(&[result], AgentMode::Full),
             Some(StopReason::UserBlocker)
         );
+    }
+
+    #[test]
+    fn mana_close_is_workflow_progress_not_runtime_completion() {
+        let result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_mana".to_string(),
+            tool_name: "mana".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "Closed task".to_string(),
+            }],
+            is_error: false,
+            details: serde_json::json!({
+                "action": "close",
+                "unit": { "id": "1", "status": "closed" }
+            }),
+            timestamp: 0,
+        };
+
+        assert!(!tool_results_indicate_work_completed(
+            std::slice::from_ref(&result),
+            AgentMode::Full
+        ));
+        assert!(tool_results_indicate_mana_workflow_progress(
+            &[result],
+            AgentMode::Full
+        ));
     }
 
     #[test]

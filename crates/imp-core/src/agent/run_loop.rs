@@ -944,9 +944,13 @@ impl Agent {
                 decision,
                 LoopDecision::Finish {
                     status: RunFinalStatus::Blocked {
-                        reason: AgentStopReason::RepeatedAction,
+                        reason: AgentStopReason::RepeatedAction
+                            | AgentStopReason::UserBlocker
+                            | AgentStopReason::ExecutionBlocked,
                         ..
-                    }
+                    } | RunFinalStatus::NeedsUserInput { .. }
+                        | RunFinalStatus::Cancelled
+                        | RunFinalStatus::Failed { .. },
                 }
             );
             match decision {
@@ -969,14 +973,8 @@ impl Agent {
             if should_stop_after_tool_turn {
                 break;
             }
-            let should_interpret_tool_results = matches!(
-                final_status,
-                Some(RunFinalStatus::Done {
-                    reason: AgentStopReason::NoAutomaticFollowUp,
-                })
-            );
-            if !should_interpret_tool_results && final_status.is_some() {
-                break;
+            if final_status.is_some() {
+                final_status = None;
             }
             turn_state.record_continue(super::ContinueReason::ToolResultsNeedInterpretation);
             turn += 1;
