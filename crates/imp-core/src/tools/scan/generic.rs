@@ -16,11 +16,18 @@ pub fn parse(source: &str, file: &str, language: Language, result: &mut ScanResu
     let Some(tree) = parser.parse(source, None) else {
         return;
     };
-    extract_node(&tree.root_node(), source, file, result);
+    extract_node(&tree.root_node(), source, file, None, result);
 }
 
-fn extract_node(node: &Node, source: &str, file: &str, result: &mut ScanResult) {
+fn extract_node(
+    node: &Node,
+    source: &str,
+    file: &str,
+    owner: Option<&str>,
+    result: &mut ScanResult,
+) {
     if extract_elixir_call(node, source, file, result)
+        || extract_ocaml_module(node, source, file, owner, result)
         || extract_zig_variable_type(node, source, file, result)
     {
         // Keep walking below so nested function-like declarations are still indexed.
@@ -52,15 +59,18 @@ fn extract_node(node: &Node, source: &str, file: &str, result: &mut ScanResult) 
         | "method_declaration"
         | "method_definition"
         | "procedure_declaration"
+        | "value_definition"
+        | "let_binding"
         | "constructor_declaration" => {
-            extract_function(node, source, file, result);
+            extract_function(node, source, file, owner, result);
         }
         _ => {}
     }
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        extract_node(&child, source, file, result);
+        let child_owner = ocaml_module_name(node, source).or(owner.map(str::to_string));
+        extract_node(&child, source, file, child_owner.as_deref(), result);
     }
 }
 
@@ -120,6 +130,30 @@ fn elixir_def_name(node: &Node, source: &str) -> Option<String> {
     }
 }
 
+fn extract_ocaml_module(
+    node: &Node,
+    source: &str,
+    file: &str,
+    owner: Option<&str>,
+    result: &mut ScanResult,
+) -> bool {
+    if node.kind() != "module_definition" {
+        return false;
+    }
+    let Some(name) = first_identifier_in_kind(node, source, "module_name") else {
+        return false;
+    };
+    let qualified = qualify(owner, &name);
+    result.types.entry(qualified.clone()).or_insert(TypeInfo {
+        name: qualified,
+        source: source_loc(file, node),
+        kind: TypeKind::Class,
+        visibility: Visibility::Private,
+        ..Default::default()
+    });
+    true
+}
+
 fn extract_zig_variable_type(
     node: &Node,
     source: &str,
@@ -161,17 +195,25 @@ fn extract_type(node: &Node, source: &str, file: &str, kind: TypeKind, result: &
     });
 }
 
-fn extract_function(node: &Node, source: &str, file: &str, result: &mut ScanResult) {
+fn extract_function(
+    node: &Node,
+    source: &str,
+    file: &str,
+    owner: Option<&str>,
+    result: &mut ScanResult,
+) {
     let Some(name) = node_name(node, source) else {
         return;
     };
     let signature = signature_line(node, source);
 
+    let qualified = qualify(owner, &name);
+
     result
         .functions
-        .entry(name.clone())
+        .entry(qualified.clone())
         .or_insert(FunctionInfo {
-            name,
+            name: qualified,
             source: source_loc(file, node),
             signature,
             visibility: Visibility::Private,
@@ -189,6 +231,20 @@ fn node_name(node: &Node, source: &str) -> Option<String> {
         }
     }
     identifier_text(node, source)
+}
+
+fn ocaml_module_name(node: &Node, source: &str) -> Option<String> {
+    if node.kind() == "module_definition" {
+        first_identifier_in_kind(node, source, "module_name")
+    } else {
+        None
+    }
+}
+
+fn qualify(owner: Option<&str>, name: &str) -> String {
+    owner
+        .map(|owner| format!("{owner}::{name}"))
+        .unwrap_or_else(|| name.to_string())
 }
 
 fn first_named_child<'a>(node: &Node<'a>) -> Option<Node<'a>> {
@@ -242,6 +298,8 @@ fn is_identifier_kind(kind: &str) -> bool {
             | "type_identifier"
             | "field_identifier"
             | "property_identifier"
+            | "value_name"
+            | "value_pattern"
             | "constant"
             | "simple_identifier"
             | "variable_identifier"

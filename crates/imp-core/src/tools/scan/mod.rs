@@ -3,10 +3,18 @@
 //! Dispatches to language-specific parsers based on file extension.
 //! Produces rich output: visibility, signatures, fields, variants, trait impls.
 
+pub mod c;
+pub mod cpp;
+pub mod csharp;
+pub mod elixir;
 pub mod generic;
 pub mod go;
+pub mod java;
 pub mod kotlin;
+pub mod lua;
+pub mod ocaml;
 pub mod python;
+pub mod ruby;
 pub mod rust;
 pub mod types;
 pub mod typescript;
@@ -46,6 +54,7 @@ const SUPPORTED_LANGUAGES: &[&str] = &[
     "c",
     "csharp",
     "cpp",
+    "ocaml",
 ];
 
 const BLOCK_KINDS: &[&str] = &[
@@ -391,6 +400,16 @@ fn extract_files(files: &[PathBuf], cwd: &Path) -> ScanResult {
             "py" => python::parse(&source, &rel, &mut result),
             "go" => go::parse(&source, &rel, &mut result),
             "kt" | "kts" => kotlin::parse(&source, &rel, &mut result),
+            "java" => java::parse(&source, &rel, &mut result),
+            "cs" => csharp::parse(&source, &rel, &mut result),
+            "c" | "h" => c::parse(&source, &rel, &mut result),
+            "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" => {
+                cpp::parse(&source, &rel, &mut result)
+            }
+            "rb" => ruby::parse(&source, &rel, &mut result),
+            "ex" | "exs" => elixir::parse(&source, &rel, &mut result),
+            "lua" | "luau" => lua::parse(&source, &rel, &mut result),
+            "ml" | "mli" => ocaml::parse(&source, &rel, &mut result),
             "js" | "jsx" => typescript::parse(&source, &rel, ext == "jsx", &mut result),
             _ => {
                 if let Some(language) = language_for_extension(ext) {
@@ -408,6 +427,7 @@ fn language_for_extension(ext: &str) -> Option<tree_sitter::Language> {
         "sh" | "bash" | "zsh" | "fish" => tree_sitter_bash::LANGUAGE.into(),
         "ex" | "exs" => tree_sitter_elixir::LANGUAGE.into(),
         "rb" => tree_sitter_ruby::LANGUAGE.into(),
+        "ml" | "mli" => tree_sitter_ocaml::LANGUAGE_OCAML.into(),
         "pl" | "pm" | "t" => tree_sitter_perl::LANGUAGE.into(),
         "lua" | "luau" => tree_sitter_lua::LANGUAGE.into(),
         "zig" | "zon" => tree_sitter_zig::LANGUAGE.into(),
@@ -2388,6 +2408,242 @@ fn internal_helper() {}
 
         let helper = &result.functions["internal_helper"];
         assert_eq!(helper.visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn extract_ruby_elixir_lua_ocaml_files_with_rich_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ruby_file = tmp.path().join("greeter.rb");
+        std::fs::write(
+            &ruby_file,
+            r#"
+module Services
+  class Greeter
+    def hello(name)
+      name
+    end
+  end
+end
+"#,
+        )
+        .unwrap();
+        let elixir_file = tmp.path().join("greeter.ex");
+        std::fs::write(
+            &elixir_file,
+            r#"
+defmodule Services.Greeter do
+  def hello(name), do: name
+  defp normalize(name), do: name
+end
+"#,
+        )
+        .unwrap();
+        let lua_file = tmp.path().join("greeter.lua");
+        std::fs::write(
+            &lua_file,
+            r#"
+local Greeter = {}
+function Greeter:hello(name) return name end
+function helper(name) return name end
+"#,
+        )
+        .unwrap();
+        let ocaml_file = tmp.path().join("greeter.ml");
+        std::fs::write(
+            &ocaml_file,
+            r#"
+module Greeter = struct
+  type user = { name : string }
+  let hello name = name
+end
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(&[ruby_file, elixir_file, lua_file, ocaml_file], tmp.path());
+
+        assert!(result.types.contains_key("Services"));
+        assert!(result.types.contains_key("Services::Greeter"));
+        assert!(result.types["Services::Greeter"]
+            .methods
+            .contains(&"hello".to_string()));
+        assert!(result.functions.contains_key("Services::Greeter::hello"));
+
+        assert!(result.types.contains_key("Services.Greeter"));
+        assert_eq!(
+            result.functions["Services.Greeter::normalize"].visibility,
+            Visibility::Private
+        );
+
+        assert!(result.types.contains_key("Greeter"));
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"hello".to_string()));
+        assert!(result.functions.contains_key("Greeter:hello"));
+        assert!(result.functions.contains_key("helper"));
+
+        assert!(result.types.contains_key("Greeter::user"));
+        assert!(result.functions.contains_key("Greeter::hello"));
+        assert!(result.functions["Greeter::hello"].source.ends_with(":4"));
+    }
+
+    #[test]
+    fn extract_c_file_with_rich_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("sample.c");
+        std::fs::write(
+            &file,
+            r#"
+typedef unsigned long Size;
+struct User { int id; const char *name; };
+enum Status { Active, Inactive };
+void greet(struct User *user) {}
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(&[file], tmp.path());
+
+        assert_eq!(result.types["Size"].kind, TypeKind::TypeAlias);
+        assert_eq!(result.types["User"].kind, TypeKind::Struct);
+        assert!(result.types["User"]
+            .fields
+            .iter()
+            .any(|field| field.name == "id"));
+        assert_eq!(result.types["Status"].kind, TypeKind::Enum);
+        assert!(result.types["Status"]
+            .variants
+            .contains(&"Active".to_string()));
+        assert!(result.functions["greet"].signature.contains("void greet"));
+        assert!(result.functions["greet"].source.ends_with(":5"));
+    }
+
+    #[test]
+    fn extract_cpp_file_with_rich_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("sample.cpp");
+        std::fs::write(
+            &file,
+            r#"
+using Size = unsigned long;
+enum class Status { Active, Inactive };
+class Greeter {
+    int count;
+    void helper() {}
+};
+void greet(Greeter& greeter) {}
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(&[file], tmp.path());
+
+        assert_eq!(result.types["Size"].kind, TypeKind::TypeAlias);
+        assert_eq!(result.types["Status"].kind, TypeKind::Enum);
+        assert!(result.types["Status"]
+            .variants
+            .contains(&"Active".to_string()));
+        assert_eq!(result.types["Greeter"].kind, TypeKind::Class);
+        assert!(result.types["Greeter"]
+            .fields
+            .iter()
+            .any(|field| field.name == "count"));
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"helper".to_string()));
+        assert!(result.functions.contains_key("Greeter::helper"));
+        assert!(result.functions["greet"].signature.contains("void greet"));
+    }
+
+    #[test]
+    fn extract_java_file_with_rich_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("Greeter.java");
+        std::fs::write(
+            &file,
+            r#"
+public interface GreetingService { void greet(String name); }
+public enum Tone { Friendly, Formal }
+class Greeter implements GreetingService {
+    public Greeter() {}
+    private void helper() {}
+    @Test public void greet(String name) {}
+}
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(&[file], tmp.path());
+
+        assert_eq!(result.types["GreetingService"].kind, TypeKind::Interface);
+        assert_eq!(result.types["Tone"].kind, TypeKind::Enum);
+        assert!(result.types["Tone"]
+            .variants
+            .contains(&"Friendly".to_string()));
+        assert_eq!(result.types["Greeter"].kind, TypeKind::Class);
+        assert_eq!(result.types["Greeter"].visibility, Visibility::Internal);
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"Greeter".to_string()));
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"greet".to_string()));
+
+        assert_eq!(
+            result.functions["Greeter::Greeter"].visibility,
+            Visibility::Public
+        );
+        assert_eq!(
+            result.functions["Greeter::helper"].visibility,
+            Visibility::Private
+        );
+        assert!(result.functions["Greeter::greet"].is_test);
+    }
+
+    #[test]
+    fn extract_csharp_file_with_rich_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("Greeter.cs");
+        std::fs::write(
+            &file,
+            r#"
+public interface IGreeting { void Greet(string name); }
+public enum Tone { Friendly, Formal }
+internal class Greeter : IGreeting {
+    public Greeter() {}
+    private void Helper() {}
+    [Fact] public async Task Greet(string name) {}
+}
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(&[file], tmp.path());
+
+        assert_eq!(result.types["IGreeting"].kind, TypeKind::Interface);
+        assert_eq!(result.types["Tone"].kind, TypeKind::Enum);
+        assert!(result.types["Tone"]
+            .variants
+            .contains(&"Friendly".to_string()));
+        assert_eq!(result.types["Greeter"].kind, TypeKind::Class);
+        assert_eq!(result.types["Greeter"].visibility, Visibility::Internal);
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"Greeter".to_string()));
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"Greet".to_string()));
+
+        assert_eq!(
+            result.functions["Greeter::Greeter"].visibility,
+            Visibility::Public
+        );
+        assert_eq!(
+            result.functions["Greeter::Helper"].visibility,
+            Visibility::Private
+        );
+        assert!(result.functions["Greeter::Greet"].is_async);
+        assert!(result.functions["Greeter::Greet"].is_test);
     }
 
     #[test]
