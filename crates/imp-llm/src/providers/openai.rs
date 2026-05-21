@@ -973,7 +973,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn openai_serialize_text_user_message() {
         let messages = vec![Message::user("Hello, world!")];

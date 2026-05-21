@@ -18,7 +18,6 @@ use imp_core::ui::WidgetContent;
 use imp_core::{mana_run_summary, stop_mana_run, ManaRunSummary, ManaUnitRef, TurnManaReview};
 use mana_core::api;
 
-use imp_lua::loader::discover_extensions;
 use imp_lua::LuaRuntime;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -72,8 +71,8 @@ use crate::views::chat::{
     MessageRole, RenderedChatView,
 };
 use crate::views::command_palette::{
-    builtin_commands, merge_extension_commands, merge_skill_commands, CommandPaletteState,
-    CommandPaletteView,
+    builtin_commands, merge_extension_commands, merge_skill_commands, merge_workflow_commands,
+    CommandPaletteState, CommandPaletteView,
 };
 use crate::views::editor::{EditorState, EditorView, WorkflowMode};
 use crate::views::login_picker::{login_providers, LoginPickerState, LoginPickerView};
@@ -88,8 +87,8 @@ use crate::views::sidebar::{
     sidebar_sub_areas, thinking_detail_render_data, Sidebar, SidebarDetailRenderData, SidebarView,
 };
 use crate::views::startup::{
-    action_block_height, summarize_inline, visible_section_count, StartupAction, StartupPanelData,
-    StartupPanelView, StartupSection,
+    action_block_height, visible_section_count, StartupAction, StartupPanelData, StartupPanelView,
+    StartupSection,
 };
 use crate::views::status::StatusInfo;
 use crate::views::tools::DisplayToolCall;
@@ -432,7 +431,7 @@ struct SidebarDetailCache {
 #[derive(Debug, Clone, Default)]
 struct StartupSurfaceMetadata {
     skills: Vec<imp_core::resources::Skill>,
-    lua_extension_names: Vec<String>,
+    workflows: Vec<WorkflowProfile>,
     provider_id: String,
     provider_auth_ready: bool,
     web_summary: String,
@@ -931,6 +930,7 @@ pub struct App {
     pub is_streaming: bool,
     pub message_queue: Vec<QueuedMessage>,
     pending_agent_prompt: Option<String>,
+    pending_agent_visible_text: Option<String>,
     pending_agent_cwd: Option<PathBuf>,
 
     // Session
@@ -1877,6 +1877,8 @@ fn render_status_text(
     sandbox: Option<&ImproveSandbox>,
     runtime_snapshot: RuntimeStateSnapshot,
     loop_state: Option<&LoopState>,
+    pending_prompt_preview: Option<&str>,
+    queued_messages: &[QueuedMessage],
 ) -> String {
     let mut lines = Vec::new();
     lines.push("Status:".to_string());
@@ -1935,6 +1937,15 @@ fn render_status_text(
         }
     } else if let Some(message) = snapshot.stale_improve_metadata_message.as_ref() {
         lines.extend(message.lines().map(str::to_string));
+    }
+    if let Some(prompt) = pending_prompt_preview {
+        lines.push(format!("pending prompt: {}", single_line_preview(prompt)));
+    }
+    if !queued_messages.is_empty() {
+        lines.push(format!("queued prompts: {}", queued_messages.len()));
+        for message in queued_messages.iter().take(3) {
+            lines.push(format!("  - {}", single_line_preview(message.text())));
+        }
     }
     if let Some(state) = loop_state {
         match state.budget {
@@ -2222,6 +2233,7 @@ impl App {
             is_streaming: false,
             message_queue: Vec::new(),
             pending_agent_prompt: None,
+            pending_agent_visible_text: None,
             pending_agent_cwd: None,
             session,
             config,
@@ -3319,10 +3331,10 @@ impl App {
 
         StartupSurfaceMetadata {
             skills: imp_core::resources::discover_skills(cwd, &user_config_dir),
-            lua_extension_names: discover_extensions(&user_config_dir, Some(cwd))
-                .into_iter()
-                .map(|ext| ext.name)
-                .collect(),
+            workflows: config
+                .workflow_registry()
+                .map(|registry| registry.iter().cloned().collect())
+                .unwrap_or_default(),
             provider_id,
             provider_auth_ready,
             web_summary,
@@ -3339,8 +3351,6 @@ impl App {
             .unwrap_or("this project")
             .to_string();
 
-        let lua_extension_summary =
-            summarize_inline(self.startup_surface_metadata.lua_extension_names.clone(), 3);
         let provider_id = self.startup_surface_metadata.provider_id.as_str();
         let provider_auth = if self.startup_surface_metadata.provider_auth_ready {
             "ready"
@@ -3414,12 +3424,15 @@ impl App {
                 .collect::<Vec<_>>()
         };
 
-        let extension_lines = vec![
-            format!("• lua: {lua_extension_summary}"),
-            "• commands: /command".to_string(),
-            "• shell: /new, /model, /mana, /resume, /settings, /personality, /setup".to_string(),
-            format!("• mode: {mode}"),
-        ];
+        let workflow_lines = if self.startup_surface_metadata.workflows.is_empty() {
+            vec!["• none configured".to_string()]
+        } else {
+            self.startup_surface_metadata
+                .workflows
+                .iter()
+                .map(|workflow| format!("• /{}: {}", workflow.name, workflow.description))
+                .collect::<Vec<_>>()
+        };
 
         let sections = vec![
             StartupSection {
@@ -3435,8 +3448,8 @@ impl App {
                 lines: skill_lines,
             },
             StartupSection {
-                title: "extensions".to_string(),
-                lines: extension_lines,
+                title: "workflows".to_string(),
+                lines: workflow_lines,
             },
         ];
 
@@ -5138,8 +5151,8 @@ impl App {
             }
         }
 
-        self.pending_agent_prompt = None;
-        self.pending_agent_cwd = None;
+        self.clear_pending_agent_turn();
+        self.message_queue.clear();
         self.loop_state = None;
         self.improve_auto_turns = 0;
         self.improve_sandbox = None;
@@ -5162,6 +5175,31 @@ impl App {
         }
 
         self.push_system_msg("Stopped active imp work.");
+    }
+
+    fn cancel_pending_work(&mut self) -> bool {
+        let had_pending = self.pending_agent_prompt.is_some();
+        let had_queued = !self.message_queue.is_empty();
+        let had_loop = self.loop_state.is_some();
+        if !(had_pending || had_queued || had_loop) {
+            return false;
+        }
+
+        self.clear_pending_agent_turn();
+        self.message_queue.clear();
+        self.loop_state = None;
+        let mut parts = Vec::new();
+        if had_pending {
+            parts.push("pending prompt");
+        }
+        if had_queued {
+            parts.push("queued follow-up");
+        }
+        if had_loop {
+            parts.push("loop");
+        }
+        self.push_system_msg(&format!("Cleared {}.", parts.join(", ")));
+        true
     }
 
     fn handle_cancel(&mut self) {
@@ -5195,6 +5233,8 @@ impl App {
             if let Some(last) = self.latest_streaming_message_mut() {
                 last.is_streaming = false;
             }
+            self.ctrl_c_count = 0;
+        } else if self.cancel_pending_work() {
             self.ctrl_c_count = 0;
         } else {
             // Third: quit
@@ -5279,6 +5319,7 @@ impl App {
         if self.workflow_mode != WorkflowMode::Improve
             || self.is_streaming
             || self.pending_agent_prompt.is_some()
+            || !self.message_queue.is_empty()
         {
             return;
         }
@@ -5318,19 +5359,21 @@ impl App {
                 sandbox.worktree.display()
             ));
         }
-        self.pending_agent_prompt = Some(prompt);
-        self.pending_agent_cwd = if self.improve_safe_mode {
+        let pending_cwd = if self.improve_safe_mode {
             None
         } else {
             self.improve_sandbox
                 .as_ref()
                 .map(|sandbox| sandbox.worktree.clone())
         };
-        self.needs_redraw = true;
+        self.set_pending_agent_turn(prompt, None, pending_cwd);
     }
 
     fn queue_loop_continuation_if_ready(&mut self) {
-        if self.is_streaming || self.pending_agent_prompt.is_some() {
+        if self.is_streaming
+            || self.pending_agent_prompt.is_some()
+            || !self.message_queue.is_empty()
+        {
             return;
         }
         let Some(state) = self.loop_state.as_mut() else {
@@ -5427,6 +5470,11 @@ impl App {
         let improve_safe_mode = self.improve_safe_mode;
         let loop_state = self.loop_state.clone();
         let runtime_snapshot = self.runtime_snapshot.clone();
+        let pending_prompt_preview = self
+            .pending_agent_visible_text
+            .clone()
+            .or_else(|| self.pending_agent_prompt.clone());
+        let queued_messages = self.message_queue.clone();
         let signal_tx = self.runtime_signal_tx.clone();
         self.push_system_msg("Loading status…");
         self.status_command_task = Some(tokio::spawn(async move {
@@ -5445,6 +5493,8 @@ impl App {
                         sandbox.as_ref(),
                         runtime_snapshot,
                         loop_state.as_ref(),
+                        pending_prompt_preview.as_deref(),
+                        &queued_messages,
                     ),
                 }
             })
@@ -5552,16 +5602,79 @@ impl App {
         }));
     }
 
-    fn start_loop_command(&mut self, message: &str) {
-        let message = message.trim();
-        if message.is_empty() {
-            self.push_system_msg("Usage: /loop <message>");
+    fn queue_command(&mut self, args: &str) {
+        let arg = args.trim();
+        if arg.eq_ignore_ascii_case("clear") {
+            let had_pending = self.pending_agent_prompt.is_some();
+            let queued = self.message_queue.len();
+            self.clear_pending_agent_turn();
+            self.message_queue.clear();
+            self.push_system_msg(&format!(
+                "Cleared queue{}{}.",
+                if had_pending {
+                    " and pending prompt"
+                } else {
+                    ""
+                },
+                if queued > 0 {
+                    format!(" ({queued} queued)")
+                } else {
+                    String::new()
+                }
+            ));
             return;
         }
+
+        let mut lines = Vec::new();
+        if let Some(prompt) = self
+            .pending_agent_visible_text
+            .as_ref()
+            .or(self.pending_agent_prompt.as_ref())
+        {
+            lines.push(format!("pending prompt: {}", single_line_preview(prompt)));
+        }
+        if self.message_queue.is_empty() {
+            lines.push("queued prompts: none".to_string());
+        } else {
+            lines.push(format!("queued prompts: {}", self.message_queue.len()));
+            for message in &self.message_queue {
+                lines.push(format!("- {}", single_line_preview(message.text())));
+            }
+        }
+        lines.push("Use /queue clear to clear pending and queued prompts.".to_string());
+        self.push_system_msg(&lines.join("\n"));
+    }
+
+    fn loop_continue_message(&self) -> String {
+        if let Some(visible) = self.pending_agent_visible_text.as_ref() {
+            return visible.clone();
+        }
+        if let Some(scope) = self.active_mana_scope.as_ref() {
+            return format!(
+                "Continue working on active mana scope {} until the requested outcome is complete, blocked, or no runnable work remains.",
+                scope.id
+            );
+        }
+        if let Some(run) = self.active_mana_run.as_ref() {
+            return format!(
+                "Continue supervising active mana run {} until it is complete, blocked, or no runnable work remains.",
+                run.run_id
+            );
+        }
+        "continue".to_string()
+    }
+
+    fn start_loop_command(&mut self, message: &str) {
+        let message = message.trim();
+        let message = if message.is_empty() || message.eq_ignore_ascii_case("continue") {
+            self.loop_continue_message()
+        } else {
+            message.to_string()
+        };
         let budget =
             (self.config.ui.loop_turn_budget > 0).then_some(self.config.ui.loop_turn_budget);
         self.loop_state = Some(LoopState {
-            message: message.to_string(),
+            message,
             completed_turns: 0,
             budget,
         });
@@ -5858,7 +5971,24 @@ impl App {
         self.tool_focus = None;
         self.tool_focus_pinned = false;
         self.sidebar_auto_follow = true;
+        self.set_pending_agent_turn(agent_prompt, Some(visible_text), None);
+    }
+
+    fn set_pending_agent_turn(
+        &mut self,
+        agent_prompt: String,
+        visible_text: Option<String>,
+        cwd: Option<PathBuf>,
+    ) {
         self.pending_agent_prompt = Some(agent_prompt);
+        self.pending_agent_visible_text = visible_text;
+        self.pending_agent_cwd = cwd;
+        self.needs_redraw = true;
+    }
+
+    fn clear_pending_agent_turn(&mut self) {
+        self.pending_agent_prompt = None;
+        self.pending_agent_visible_text = None;
         self.pending_agent_cwd = None;
     }
 
@@ -5998,6 +6128,7 @@ impl App {
         let Some(text) = self.pending_agent_prompt.take() else {
             return;
         };
+        self.pending_agent_visible_text = None;
         let agent_cwd = self
             .pending_agent_cwd
             .take()
@@ -6450,6 +6581,9 @@ impl App {
   :cd <path>    Change working directory\n\
   :pwd          Show working directory\n\
   : <cmd>       Run shell command\n\
+  Esc           Cancel current turn; when idle, clear pending prompt/queue/loop
+  /stop         Stop active work and clear pending prompt/queue/loop
+  /queue clear  Clear queued follow-up prompts
   PageUp/Down   Scroll",
                 );
             }
@@ -6469,6 +6603,7 @@ impl App {
             "autonomy" => self.autonomy_command(args),
             "clean" => self.clean_command(args),
             "loop" => self.start_loop_command(args),
+            "queue" => self.queue_command(args),
             "scope" | "mana-scope" => self.set_active_mana_scope(args),
             "run" => self.set_active_mana_run(args),
             "stop" => self.stop_active_work(),
@@ -6580,9 +6715,10 @@ impl App {
                     "  /improve merge --confirm — merge active Improve branch\n",
                     "  /status    — show active work status\n",
                     "  /autonomy <mode> — set autonomy mode\n",
-                    "  /loop <msg> — repeat a prompt until stopped/budgeted\n",
+                    "  /loop [msg] — repeat a prompt until stopped/budgeted; no msg or `continue` continues current mana work\n",
                     "  /clean     — clean active sandbox/artifacts safely\n",
-                    "  /stop       — stop active imp work\n",
+                    "  /queue      — show or clear queued follow-up prompts\n",
+                    "  /stop       — stop active imp work and clear pending/queued loop work\n",
                     "  /compact    — compress context\n",
                     "  /resume     — resume/search sessions\n",
                     "  /session    — legacy alias (defunct)\n",
@@ -6882,9 +7018,8 @@ impl App {
             .and_then(|runtime| runtime.lock().ok().map(|guard| guard.command_summaries()))
             .unwrap_or_default();
         let commands = merge_extension_commands(builtin_commands(), extension_commands);
-        let commands = merge_skill_commands(commands, self.skill_summaries());
-        match self.config.workflow_registry() {
-            Ok(registry) => merge_skill_commands(
+        let commands = match self.config.workflow_registry() {
+            Ok(registry) => merge_workflow_commands(
                 commands,
                 registry
                     .iter()
@@ -6892,7 +7027,8 @@ impl App {
                     .collect::<Vec<_>>(),
             ),
             Err(_) => commands,
-        }
+        };
+        merge_skill_commands(commands, self.skill_summaries())
     }
 
     fn skill_summaries(&self) -> Vec<(String, String)> {
@@ -12330,6 +12466,8 @@ mod session_lifecycle {
             app.improve_sandbox.as_ref(),
             runtime_snapshot,
             app.loop_state.as_ref(),
+            None,
+            &[],
         );
 
         assert!(status.contains("children:"));
@@ -12366,6 +12504,8 @@ mod session_lifecycle {
             app.improve_sandbox.as_ref(),
             RuntimeStateSnapshot::default(),
             app.loop_state.as_ref(),
+            None,
+            &[],
         );
 
         assert!(status.contains("loop: 2/3"));

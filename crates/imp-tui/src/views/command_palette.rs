@@ -8,11 +8,31 @@ use ratatui::widgets::{Block, Borders, Clear, Widget};
 
 use crate::theme::Theme;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SlashCommandKind {
+    Builtin,
+    Extension,
+    Workflow,
+    Skill,
+}
+
+impl SlashCommandKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Builtin => "commands",
+            Self::Extension => "extensions",
+            Self::Workflow => "workflows",
+            Self::Skill => "skills",
+        }
+    }
+}
+
 /// A slash command definition.
 #[derive(Debug, Clone)]
 pub struct SlashCommand {
     pub name: String,
     pub description: String,
+    pub kind: SlashCommandKind,
 }
 
 /// Merge built-in and extension-provided slash commands for discovery menus.
@@ -28,6 +48,7 @@ pub fn merge_extension_commands(
     for (name, description) in extension_commands {
         by_name.entry(name.clone()).or_insert_with(|| SlashCommand {
             name,
+            kind: SlashCommandKind::Extension,
             description: if description.trim().is_empty() {
                 "Extension command".into()
             } else {
@@ -52,6 +73,7 @@ pub fn merge_skill_commands(
     for (name, description) in skills {
         by_name.entry(name.clone()).or_insert_with(|| SlashCommand {
             name,
+            kind: SlashCommandKind::Skill,
             description: if description.trim().is_empty() {
                 "Skill".into()
             } else {
@@ -63,137 +85,200 @@ pub fn merge_skill_commands(
     by_name.into_values().collect()
 }
 
+/// Merge workflow commands into the slash menu without overriding real commands.
+pub fn merge_workflow_commands(
+    mut commands: Vec<SlashCommand>,
+    workflows: impl IntoIterator<Item = (String, String)>,
+) -> Vec<SlashCommand> {
+    let mut by_name: BTreeMap<String, SlashCommand> = commands
+        .drain(..)
+        .map(|command| (command.name.clone(), command))
+        .collect();
+
+    for (name, description) in workflows {
+        by_name.entry(name.clone()).or_insert_with(|| SlashCommand {
+            name,
+            kind: SlashCommandKind::Workflow,
+            description: if description.trim().is_empty() {
+                "Workflow".into()
+            } else {
+                format!("Workflow: {description}")
+            },
+        });
+    }
+
+    by_name.into_values().collect()
+}
+
 pub fn builtin_commands() -> Vec<SlashCommand> {
     vec![
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "improve".into(),
             description: "Switch workflow mode to Improve in a sandbox branch/worktree".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "improve-safe".into(),
             description: "Switch workflow mode to research-only Improve".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "improve-merge".into(),
             description: "Merge active Improve branch after reviewing changelog".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "improve-help".into(),
             description: "Explain Improve autoresearch guardrails".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "eval".into(),
             description: "Save latest run as an eval candidate (/eval <expected> [--note ...] [--verifier ...])".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "status".into(),
             description: "Show active imp work status".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "autonomy".into(),
             description: "Set autonomy mode (/autonomy safe|local-auto|allow-all-local)".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "clean".into(),
             description: "Clean active sandbox/artifacts safely".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "loop".into(),
-            description: "Loop a prompt (/loop <message>)".into(),
+            description: "Loop current mana work or a prompt (/loop [message|continue])".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
+            name: "queue".into(),
+            description: "Show or clear queued follow-up prompts (/queue clear)".into(),
+        },
+        SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "run".into(),
             description: "Set active mana run (/run <id>, /run clear)".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "stop".into(),
-            description: "Stop active imp work".into(),
+            description: "Stop active imp work and clear pending/queued loop work".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "scope".into(),
             description: "Set active mana scope (/scope <id>, /scope clear)".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "model".into(),
             description: "Select model".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "settings".into(),
             description: "Open settings".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "mana".into(),
             description: "Open mana work graph navigator".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "tree".into(),
             description: "Session tree view".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "fork".into(),
             description: "Fork session at current point".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "compact".into(),
             description: "Compact context".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "new".into(),
             description: "New session".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "resume".into(),
             description: "Resume/search sessions".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "name".into(),
             description: "Name current session".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "copy".into(),
             description: "Copy last response".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "export".into(),
             description: "Export session".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "personality".into(),
             description: "Customize imp personality".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "memory".into(),
             description: "View/edit agent memory".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "checkpoints".into(),
             description: "List recorded file checkpoints".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "restore-checkpoint".into(),
             description: "Restore files from a checkpoint by id or label".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "reload".into(),
             description: "Reload extensions".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "hotkeys".into(),
             description: "Show keyboard shortcuts".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "login".into(),
             description: "OAuth login for Anthropic or OpenAI/ChatGPT".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "secrets".into(),
             description: "Configure API keys / multi-field service secrets".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "setup".into(),
             description: "Run setup wizard".into(),
         },
         SlashCommand {
+            kind: SlashCommandKind::Builtin,
             name: "quit".into(),
             description: "Quit".into(),
         },
@@ -329,6 +414,7 @@ impl Widget for CommandPaletteView<'_> {
         } else {
             0
         };
+        let show_kind_labels = filtered.windows(2).any(|pair| pair[0].kind != pair[1].kind);
 
         for (i, cmd) in filtered.iter().skip(scroll_offset).enumerate() {
             if i >= visible {
@@ -363,9 +449,16 @@ impl Widget for CommandPaletteView<'_> {
                 self.theme.muted_style()
             };
 
+            let kind_text = if show_kind_labels {
+                format!(" [{:<10}]", cmd.kind.label())
+            } else {
+                String::new()
+            };
+
             let line = Line::from(vec![
                 Span::styled(indicator, row_style),
                 Span::styled(name_text, name_style),
+                Span::styled(kind_text, desc_style),
                 Span::styled("  ", row_style),
                 Span::styled(&cmd.description, desc_style),
             ]);
