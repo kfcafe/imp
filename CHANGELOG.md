@@ -6,7 +6,13 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## [Unreleased]
 
-Use this section for changes that have landed on `main` after the 0.1.3 draft.
+Use this section for changes that have landed on `main` after the 0.2.2 release.
+
+## [0.2.2] - 2026-05-21
+
+### Fixed
+
+- Fixed over-eager runtime stopping after tool observations so `read`, `edit`, failed `bash`, and mana close results are interpreted by the agent instead of ending work prematurely.
 
 ### Added
 

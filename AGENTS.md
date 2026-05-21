@@ -23,6 +23,20 @@ Use the vocabulary in new architecture docs and migration plans, but do not mech
 
 Prioritize work that improves agent quality, runtime boundaries, context assembly, policy enforcement, tool behavior, embedding/hostability, extension seams, and structured outcomes back into mana.
 
+## Execution standard
+
+Agents working in this repo should build the right version of a change, not the smallest demo that technically satisfies the words of a request.
+
+- Start from the intended product/runtime behavior and make the implementation match that intent.
+- Prefer complete, durable solutions over thin shims, placeholders, mocked behavior, or partial paths that only pass the happy case.
+- Keep changes focused, but do not underbuild core behavior just to minimize the diff.
+- Follow the real control flow, persistence model, policy boundaries, error handling, and user-facing UX that production code requires.
+- When a request implies a workflow, implement the full workflow end-to-end unless scope, risk, or missing context requires asking first.
+- Preserve existing architecture when it is sound; improve the seam when the current seam would force a brittle or fake solution.
+- Include meaningful tests or verification for the behavior that matters, including important failure and edge paths.
+- Do not leave TODO-driven behavior, silent fallbacks, or intentionally incomplete implementations unless explicitly agreed and documented.
+- If the complete solution is materially larger than expected, pause and explain the scope tradeoff instead of silently shipping a minimal substitute.
+
 ## Extension reality
 
 Current shipped extension support is Lua. Treat TypeScript extensions as the preferred future direction, but do not describe them as already shipped unless the repo implements them.
