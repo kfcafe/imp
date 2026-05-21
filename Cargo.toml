@@ -20,6 +20,7 @@ resolver = "2"
 default-members = [
     "crates/imp-llm",
     "crates/imp-core",
+    "crates/imp-work",
     "crates/imp-lua",
     "crates/imp-tui",
     "crates/imp-cli",
@@ -28,6 +29,7 @@ default-members = [
 members = [
     "crates/imp-llm",
     "crates/imp-core",
+    "crates/imp-work",
     "crates/imp-lua",
     "crates/imp-tui",
     "crates/imp-cli",
@@ -78,6 +80,7 @@ tree-sitter-kotlin-ng = "1.1.0"
 tree-sitter-bash = "0.25"
 tree-sitter-elixir = "0.3"
 tree-sitter-ruby = "0.23"
+tree-sitter-ocaml = "0.25"
 tree-sitter-perl = "1.1"
 tree-sitter-lua = "0.5"
 tree-sitter-zig = "1.1"
@@ -94,6 +97,7 @@ mana-core = "0.3.2"
 
 imp-llm = { version = "0.2.0", path = "crates/imp-llm" }
 imp-core = { version = "0.2.0", path = "crates/imp-core" }
+imp-work = { version = "0.2.0", path = "crates/imp-work" }
 imp-lua = { version = "0.2.0", path = "crates/imp-lua" }
 imp-tui = { version = "0.2.0", path = "crates/imp-tui" }
 imp-gui = { version = "0.2.0", path = "crates/imp-gui" }

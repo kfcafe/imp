@@ -276,10 +276,25 @@ impl Agent {
         let planner_text_stop_reason = planner_stop_reason(message, self.mode);
         let execution_text_stop_reason = execution_stop_reason(message, self.mode);
 
+        let mana_workflow_progress =
+            tool_results_indicate_mana_workflow_progress(tool_results, self.mode);
+        let failed_bash_needs_recovery =
+            tool_results_indicate_failed_bash_command(tool_results, self.mode)
+                && !self.queued_execution_debt_follow_up;
         let continue_recommendation = if orchestration_started {
             Some(ContinueRecommendation {
                 prompt: orchestration_follow_up_text(orchestration_run_id.as_deref()),
                 reason: ContinueReason::OrchestrationProgress,
+            })
+        } else if mana_workflow_progress {
+            Some(ContinueRecommendation {
+                prompt: mana_workflow_follow_up_text().to_string(),
+                reason: ContinueReason::ManaWorkflowProgress,
+            })
+        } else if failed_bash_needs_recovery {
+            Some(ContinueRecommendation {
+                prompt: failed_bash_recovery_follow_up_text().to_string(),
+                reason: ContinueReason::ExecutionDebt,
             })
         } else if should_queue_mana_externalization_follow_up(
             message,
@@ -490,6 +505,7 @@ impl Agent {
             ContinueReason::ToolResultsNeedInterpretation
             | ContinueReason::QueuedUserFollowUp
             | ContinueReason::OrchestrationProgress
+            | ContinueReason::ManaWorkflowProgress
             | ContinueReason::WorkflowCloseout
             | ContinueReason::WorkflowBootstrap
             | ContinueReason::WorkflowDecomposition => {}
@@ -820,6 +836,14 @@ fn orchestration_follow_up_text(run_id: Option<&str>) -> String {
     crate::workflow::workflow_supervision_prompt()
 }
 
+fn mana_workflow_follow_up_text() -> &'static str {
+    "A mana task was closed, verified, or materially advanced, but that only proves the current unit changed. Inspect the active mana scope with mana(action=\"next\") or mana(action=\"status\"), continue any ready work, and only stop when the requested outcome is complete, blocked by a concrete decision, or no runnable work remains."
+}
+
+fn failed_bash_recovery_follow_up_text() -> &'static str {
+    "The last bash command failed, but a failed command is usually diagnostic evidence, not a stopping condition. Inspect the command output, identify the root cause, make the smallest useful fix or choose a better command, and rerun the relevant check. Stop only if the failure proves a concrete blocker that needs user input."
+}
+
 fn execution_debt_follow_up_text() -> &'static str {
     "You have recorded or planned work, but the requested outcome is not satisfied yet. Continue working until the user's requested outcome is satisfied, or until concrete evidence shows it cannot be completed. Do not stop merely because you recorded a plan, updated mana, or completed one intermediate step."
 }
@@ -964,6 +988,28 @@ fn tool_results_indicate_repeated_action(tool_results: &[imp_llm::ToolResultMess
     })
 }
 
+fn tool_results_indicate_failed_bash_command(
+    tool_results: &[imp_llm::ToolResultMessage],
+    mode: AgentMode,
+) -> bool {
+    if !matches!(
+        mode,
+        AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker
+    ) {
+        return false;
+    }
+
+    tool_results.iter().any(|result| {
+        if !(result.tool_name == "bash" || result.tool_name == "shell") {
+            return false;
+        }
+        let exit_code = result.details.get("exit_code").and_then(|v| v.as_i64());
+        let timed_out = result.details.get("timed_out").and_then(|v| v.as_bool()) == Some(true);
+        let cancelled = result.details.get("cancelled").and_then(|v| v.as_bool()) == Some(true);
+        result.is_error || timed_out || cancelled || exit_code.is_some_and(|code| code != 0)
+    })
+}
+
 fn tool_results_indicate_execution_blocker(
     tool_results: &[imp_llm::ToolResultMessage],
     mode: AgentMode,
@@ -1012,7 +1058,7 @@ fn tool_results_indicate_execution_blocker(
             if looks_like_check
                 && (timed_out || cancelled || exit_code.is_some_and(|code| code != 0))
             {
-                return Some(StopReason::ExecutionBlocked);
+                continue;
             }
 
             if saw_edit_like_success
@@ -1190,6 +1236,36 @@ fn tool_results_indicate_execution_evidence(
     })
 }
 
+fn tool_results_indicate_mana_workflow_progress(
+    tool_results: &[imp_llm::ToolResultMessage],
+    mode: AgentMode,
+) -> bool {
+    if !matches!(
+        mode,
+        AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker
+    ) {
+        return false;
+    }
+
+    tool_results.iter().any(|result| {
+        if result.is_error || result.tool_name != "mana" {
+            return false;
+        }
+
+        let action = result.details.get("action").and_then(|v| v.as_str());
+        let has_closed_unit = result
+            .details
+            .get("unit")
+            .and_then(|unit| unit.get("status"))
+            .and_then(|v| v.as_str())
+            == Some("closed");
+
+        matches!(action, Some("close"))
+            || matches!(action, Some("verify") if result.details.get("passed").and_then(|v| v.as_bool()) == Some(true))
+            || has_closed_unit
+    })
+}
+
 fn tool_results_indicate_work_completed(
     tool_results: &[imp_llm::ToolResultMessage],
     mode: AgentMode,
@@ -1214,6 +1290,10 @@ fn tool_results_indicate_work_completed(
         }
         if result.tool_name == "read" && saw_edit_like_success {
             return true;
+        }
+
+        if result.tool_name == "mana" {
+            continue;
         }
 
         let action = result.details.get("action").and_then(|v| v.as_str());
@@ -2492,14 +2572,17 @@ mod tests {
         });
 
         let assessment = assessment.expect("turn assessment emitted");
-        assert_eq!(
-            assessment.runtime.execution_stop_reason.as_deref(),
-            Some("execution_blocked")
-        );
+        assert_eq!(assessment.runtime.execution_stop_reason.as_deref(), None);
+        let recommendation = assessment
+            .continue_recommendation
+            .as_ref()
+            .expect("failed bash check should request recovery follow-up");
+        assert_eq!(recommendation.reason, "execution_debt");
         assert_eq!(
             assessment.chosen_action,
-            NextActionDebugView::Stop {
-                reason: "execution_blocked".to_string(),
+            NextActionDebugView::Continue {
+                prompt: failed_bash_recovery_follow_up_text().to_string(),
+                reason: "execution_debt".to_string(),
             }
         );
     }
@@ -2878,6 +2961,32 @@ mod tests {
     }
 
     #[test]
+    fn failed_bash_check_is_recovery_signal_not_immediate_blocker() {
+        let result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_bash".to_string(),
+            tool_name: "bash".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "cargo test failed".to_string(),
+            }],
+            is_error: true,
+            details: serde_json::json!({
+                "command": "cargo test -p imp-core",
+                "exit_code": 101
+            }),
+            timestamp: 0,
+        };
+
+        assert_eq!(
+            tool_results_indicate_execution_blocker(&[result.clone()], AgentMode::Full),
+            None
+        );
+        assert!(tool_results_indicate_failed_bash_command(
+            &[result],
+            AgentMode::Full
+        ));
+    }
+
+    #[test]
     fn tool_results_indicate_execution_blocker_detects_ask_tool_as_user_blocker() {
         let result = imp_llm::ToolResultMessage {
             tool_call_id: "call_ask".to_string(),
@@ -2950,7 +3059,7 @@ mod tests {
             timestamp: 0,
         };
 
-        assert!(tool_results_indicate_work_completed(
+        assert!(tool_results_indicate_mana_workflow_progress(
             &[result],
             AgentMode::Full
         ));

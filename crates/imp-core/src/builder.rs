@@ -498,8 +498,9 @@ fn apply_role_tool_policy(tools: &mut ToolRegistry, role: &Role) {
 /// This is the canonical list — update here when adding or removing tools.
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
-        ask::AskTool, bash::BashTool, edit::EditTool, git::GitTool, mana::ManaTool, read::ReadTool,
-        scan::ScanTool, session_search::SessionSearchTool, web::WebTool, worktree::WorktreeTool,
+        ask::AskTool, bash::BashTool, edit::EditTool, git::GitTool, mana::ManaTool,
+        prototype::PrototypeTool, read::ReadTool, scan::ScanTool,
+        session_search::SessionSearchTool, web::WebTool, work::WorkTool, worktree::WorktreeTool,
         write::WriteTool,
     };
 
@@ -508,11 +509,13 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     tools.register(Arc::new(EditTool));
     tools.register(Arc::new(GitTool));
     tools.register(Arc::new(ManaTool::default()));
+    tools.register(Arc::new(PrototypeTool));
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ScanTool));
     tools.register(Arc::new(SessionSearchTool));
     tools.register(Arc::new(WebTool));
+    tools.register(Arc::new(WorkTool));
     tools.register(Arc::new(WorktreeTool));
     tools.register_alias("session_search", "recall");
 }

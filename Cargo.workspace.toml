@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/imp-llm",
     "crates/imp-core",
+    "crates/imp-work",
     "crates/imp-lua",
     "crates/imp-tui",
     "crates/imp-cli",
@@ -58,5 +59,6 @@ mana-core = "0.3"
 
 imp-llm = { path = "crates/imp-llm" }
 imp-core = { path = "crates/imp-core" }
+imp-work = { path = "crates/imp-work" }
 imp-lua = { path = "crates/imp-lua" }
 imp-tui = { path = "crates/imp-tui" }

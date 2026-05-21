@@ -12,6 +12,7 @@ categories.workspace = true
 
 [dependencies]
 imp-llm.workspace = true
+imp-work.workspace = true
 mana-core.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 mana = { version = "0.3.2", package = "mana-cli" }
@@ -44,6 +45,7 @@ tree-sitter-kotlin-ng.workspace = true
 tree-sitter-bash.workspace = true
 tree-sitter-elixir.workspace = true
 tree-sitter-ruby.workspace = true
+tree-sitter-ocaml.workspace = true
 tree-sitter-perl.workspace = true
 tree-sitter-lua.workspace = true
 tree-sitter-zig.workspace = true

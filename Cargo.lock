@@ -1555,9 +1555,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.15.0"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "email_address"
@@ -2650,6 +2650,7 @@ dependencies = [
  "glob",
  "ignore",
  "imp-llm",
+ "imp-work",
  "jsonschema",
  "libc",
  "mana-cli",
@@ -2679,6 +2680,7 @@ dependencies = [
  "tree-sitter-javascript",
  "tree-sitter-kotlin-ng",
  "tree-sitter-lua",
+ "tree-sitter-ocaml",
  "tree-sitter-odin",
  "tree-sitter-perl",
  "tree-sitter-python",
@@ -2771,6 +2773,17 @@ dependencies = [
  "unicode-width 0.2.0",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "imp-work"
+version = "0.2.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -6001,6 +6014,16 @@ name = "tree-sitter-lua"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8daaf5f4235188a58603c39760d5fa5d4b920d36a299c934adddae757f32a10c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-ocaml"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b943275476bac8f73e08bc4050e21d89d61ff68e1751b789ba74917b9147a85"
 dependencies = [
  "cc",
  "tree-sitter-language",

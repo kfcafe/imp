@@ -6,12 +6,14 @@ pub mod lua;
 pub mod mana;
 pub mod memory;
 pub mod multi_edit;
+pub mod prototype;
 pub mod query;
 pub mod read;
 pub mod scan;
 pub mod session_search;
 pub mod shell;
 pub mod web;
+pub mod work;
 pub mod worktree;
 pub mod write;
 
