@@ -480,10 +480,10 @@ fn render_visible_lines(lines: &[Line<'_>], area: Rect, buf: &mut Buffer, scroll
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct VisibleLineWindow {
-    scroll_offset: usize,
-    start: usize,
-    end: usize,
+pub(crate) struct VisibleLineWindow {
+    pub(crate) scroll_offset: usize,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
 }
 
 fn clamp_scroll_offset_to_view(
@@ -494,7 +494,7 @@ fn clamp_scroll_offset_to_view(
     scroll_offset.min(total_lines.saturating_sub(visible_height))
 }
 
-fn visible_line_window(
+pub(crate) fn visible_line_window(
     total_lines: usize,
     visible_height: usize,
     scroll_offset: usize,

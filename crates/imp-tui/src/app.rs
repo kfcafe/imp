@@ -69,8 +69,8 @@ use crate::turn_tracker::TurnTracker;
 use crate::views::ask_bar::AskState;
 use crate::views::chat::{
     build_chat_render_data, build_click_map_from_rendered_lines, build_text_surface_from_lines,
-    clamped_scroll_offset_for_total_lines, scroll_offset_for_message_at_top, DisplayMessage,
-    MessageRole, RenderedChatView,
+    clamped_scroll_offset_for_total_lines, scroll_offset_for_message_at_top, visible_line_window,
+    DisplayMessage, MessageRole, RenderedChatView,
 };
 use crate::views::command_palette::{
     builtin_commands, merge_extension_commands, merge_skill_commands, merge_workflow_commands,
@@ -4595,9 +4595,33 @@ impl App {
         if row < chat_area.y || row >= chat_area.y.saturating_add(chat_area.height) {
             return None;
         }
-        self.chat_tool_click_map
+
+        if let Some(tool_id) = self
+            .chat_tool_click_map
             .iter()
             .find_map(|(tool_row, tool_id)| (*tool_row == row).then(|| tool_id.clone()))
+        {
+            return Some(tool_id);
+        }
+
+        // Fall back to the render data's tool-line indices. The cached click map is
+        // derived from rendered text for selection support, but styling/format
+        // changes can make text parsing miss valid tool headers. The render data is
+        // the authoritative source of which visual chat lines belong to tool calls.
+        let Some(render) = self.chat_render_cache.as_ref().map(|cache| &cache.render) else {
+            return None;
+        };
+        let total_lines = render.lines.len();
+        let window = visible_line_window(
+            total_lines,
+            chat_area.height as usize,
+            self.scroll_offset,
+        );
+        let line_index = window.start + (row - chat_area.y) as usize;
+        render
+            .tool_line_indices
+            .iter()
+            .find_map(|(tool_line, tool_id)| (*tool_line == line_index).then(|| tool_id.clone()))
     }
 
     /// Total number of tool calls across all display messages.
@@ -11672,6 +11696,62 @@ mod session_lifecycle {
         app.messages.push(DisplayMessage {
             role: MessageRole::Assistant,
             content: "checking...".into(),
+            thinking: None,
+            tool_calls: vec![crate::views::tools::DisplayToolCall {
+                id: "tc-42".into(),
+                name: "bash".into(),
+                args_summary: "$ ls".into(),
+                output: Some("file1\nfile2".into()),
+                details: serde_json::Value::Null,
+                is_error: false,
+                expanded: false,
+                streaming_lines: Vec::new(),
+                streaming_output: String::new(),
+            }],
+            assistant_blocks: Vec::new(),
+            is_streaming: false,
+            timestamp: 0,
+        });
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 4,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        });
+
+        assert!(app.sidebar.open);
+        assert_eq!(app.tool_focus, Some(0));
+        assert_eq!(app.active_pane, Pane::SidebarDetail);
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn mouse_click_on_chat_tool_line_uses_render_indices_when_click_map_misses() {
+        let mut app = make_app();
+        app.config.ui.sidebar_style = imp_core::config::SidebarStyle::Inspector;
+        app.chat_surface = Some(TextSurface::new(
+            SelectablePane::Chat,
+            Rect::new(0, 0, 80, 5),
+            vec!["  ✓ bash $ ls".into()],
+            0,
+        ));
+        app.chat_tool_click_map.clear();
+        app.chat_render_cache = Some(ChatRenderCache {
+            key: app.chat_render_cache_key(
+                80,
+                None,
+                app.config.ui.effective_chat_tool_display(),
+                AnimationState::Idle,
+            ),
+            render: crate::views::chat::ChatRenderData {
+                lines: vec![ratatui::text::Line::raw("  ✓ bash $ ls")],
+                tool_line_indices: vec![(0, "tc-42".into())],
+            },
+        });
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
             thinking: None,
             tool_calls: vec![crate::views::tools::DisplayToolCall {
                 id: "tc-42".into(),
