@@ -30,6 +30,19 @@ pub fn styled_tool_output_lines(
     }
 }
 
+pub fn styled_sidebar_tool_output_lines(
+    tc: &DisplayToolCall,
+    highlighter: &Highlighter,
+    theme: &Theme,
+    with_line_numbers: bool,
+) -> Vec<Line<'static>> {
+    if tc.name == "git" && tc.details.get("action").and_then(|v| v.as_str()) == Some("diff") {
+        styled_git_diff_output_with_line_numbers(tc, theme)
+    } else {
+        styled_tool_output_lines(tc, highlighter, theme, with_line_numbers)
+    }
+}
+
 pub fn wrap_styled_lines(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
     let mut wrapped = Vec::new();
     for line in lines {
@@ -44,13 +57,7 @@ fn styled_read_output(
     theme: &Theme,
     with_line_numbers: bool,
 ) -> Vec<Line<'static>> {
-    let Some(output) = tc.output.as_deref().or({
-        if tc.streaming_output.is_empty() {
-            None
-        } else {
-            Some(tc.streaming_output.as_str())
-        }
-    }) else {
+    let Some(output) = tool_output_text(tc) else {
         return vec![Line::from(Span::styled("Running…", theme.muted_style()))];
     };
 
@@ -207,6 +214,22 @@ fn styled_git_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> 
     styled_plain_output_with(tc, theme, git_line_style)
 }
 
+fn styled_git_diff_output_with_line_numbers(
+    tc: &DisplayToolCall,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let Some(output) = tool_output_text(tc) else {
+        return vec![Line::from(Span::styled("Running…", theme.muted_style()))];
+    };
+
+    let lines = git_diff_lines_with_line_numbers(output, theme, tc.is_error);
+    if lines.is_empty() {
+        vec![Line::from(Span::styled("(no output)", theme.muted_style()))]
+    } else {
+        lines
+    }
+}
+
 fn styled_scan_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
     styled_plain_output_with(tc, theme, scan_line_style)
 }
@@ -236,13 +259,7 @@ fn styled_plain_output_with(
     theme: &Theme,
     style_for_line: fn(&str, &Theme, bool) -> Style,
 ) -> Vec<Line<'static>> {
-    let Some(output) = tc.output.as_deref().or({
-        if tc.streaming_output.is_empty() {
-            None
-        } else {
-            Some(tc.streaming_output.as_str())
-        }
-    }) else {
+    let Some(output) = tool_output_text(tc) else {
         return vec![Line::from(Span::styled("Running…", theme.muted_style()))];
     };
 
@@ -261,6 +278,115 @@ fn styled_plain_output_with(
     } else {
         rendered
     }
+}
+
+fn tool_output_text(tc: &DisplayToolCall) -> Option<&str> {
+    tc.output.as_deref().or({
+        if tc.streaming_output.is_empty() {
+            None
+        } else {
+            Some(tc.streaming_output.as_str())
+        }
+    })
+}
+
+fn git_diff_lines_with_line_numbers(
+    output: &str,
+    theme: &Theme,
+    is_error: bool,
+) -> Vec<Line<'static>> {
+    let mut old_line: Option<usize> = None;
+    let mut new_line: Option<usize> = None;
+    let mut rendered = Vec::new();
+
+    for raw_line in output.lines() {
+        if let Some((old_start, new_start)) = parse_unified_hunk_header(raw_line) {
+            old_line = Some(old_start);
+            new_line = Some(new_start);
+            rendered.push(Line::from(Span::styled(
+                raw_line.to_string(),
+                git_line_style(raw_line, theme, is_error),
+            )));
+            continue;
+        }
+
+        if is_diff_metadata_line(raw_line) || old_line.is_none() || new_line.is_none() {
+            rendered.push(Line::from(Span::styled(
+                raw_line.to_string(),
+                git_line_style(raw_line, theme, is_error),
+            )));
+            continue;
+        }
+
+        let (old_label, new_label, advance_old, advance_new) = if raw_line.starts_with('+') {
+            (String::new(), format_line_number(new_line), false, true)
+        } else if raw_line.starts_with('-') {
+            (format_line_number(old_line), String::new(), true, false)
+        } else if raw_line.starts_with('\\') {
+            (String::new(), String::new(), false, false)
+        } else {
+            (
+                format_line_number(old_line),
+                format_line_number(new_line),
+                true,
+                true,
+            )
+        };
+
+        let content_style = git_line_style(raw_line, theme, is_error);
+        rendered.push(Line::from(vec![
+            Span::styled(format!("{old_label:>4}"), theme.muted_style()),
+            Span::styled("│", theme.muted_style()),
+            Span::styled(format!("{new_label:>4}"), theme.muted_style()),
+            Span::styled("│ ", theme.muted_style()),
+            Span::styled(raw_line.to_string(), content_style),
+        ]));
+
+        if advance_old {
+            old_line = old_line.map(|line| line + 1);
+        }
+        if advance_new {
+            new_line = new_line.map(|line| line + 1);
+        }
+    }
+
+    rendered
+}
+
+fn format_line_number(line: Option<usize>) -> String {
+    line.map(|line| line.to_string()).unwrap_or_default()
+}
+
+fn is_diff_metadata_line(line: &str) -> bool {
+    line.starts_with("diff --git")
+        || line.starts_with("index ")
+        || line.starts_with("new file mode ")
+        || line.starts_with("deleted file mode ")
+        || line.starts_with("old mode ")
+        || line.starts_with("new mode ")
+        || line.starts_with("similarity index ")
+        || line.starts_with("rename from ")
+        || line.starts_with("rename to ")
+        || line.starts_with("--- ")
+        || line.starts_with("+++ ")
+}
+
+fn parse_unified_hunk_header(line: &str) -> Option<(usize, usize)> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (old_range, rest) = rest.split_once(' ')?;
+    let rest = rest.strip_prefix('+')?;
+    let (new_range, _) = rest.split_once(' ')?;
+
+    Some((parse_hunk_start(old_range)?, parse_hunk_start(new_range)?))
+}
+
+fn parse_hunk_start(range: &str) -> Option<usize> {
+    range
+        .split_once(',')
+        .map(|(start, _)| start)
+        .unwrap_or(range)
+        .parse()
+        .ok()
 }
 
 fn plain_line_style(_line: &str, theme: &Theme, is_error: bool) -> Style {
@@ -629,5 +755,44 @@ mod tests {
 
         assert_eq!(plain[0], "src/main.rs: 42 bytes created");
         assert!(plain.iter().any(|line| line.contains("fn main()")));
+    }
+
+    #[test]
+    fn git_diff_sidebar_output_adds_compact_line_number_gutter() {
+        let mut tc = make_tc(
+            "git",
+            Some(
+                "diff --git a/src/main.rs b/src/main.rs\n@@ -10,3 +10,4 @@ fn main() {\n context\n-old\n+new\n+extra\n",
+            ),
+        );
+        tc.details = json!({ "action": "diff" });
+
+        let lines =
+            styled_sidebar_tool_output_lines(&tc, &Highlighter::new(), &Theme::default(), false);
+        let plain: Vec<String> = lines
+            .into_iter()
+            .map(|line| line.spans.into_iter().map(|span| span.content).collect())
+            .collect();
+
+        assert_eq!(plain[0], "diff --git a/src/main.rs b/src/main.rs");
+        assert_eq!(plain[1], "@@ -10,3 +10,4 @@ fn main() {");
+        assert_eq!(plain[2], "  10│  10│  context");
+        assert_eq!(plain[3], "  11│    │ -old");
+        assert_eq!(plain[4], "    │  11│ +new");
+        assert_eq!(plain[5], "    │  12│ +extra");
+    }
+
+    #[test]
+    fn git_diff_line_numbers_are_sidebar_only() {
+        let mut tc = make_tc("git", Some("@@ -1 +1 @@\n-old\n+new\n"));
+        tc.details = json!({ "action": "diff" });
+
+        let lines = styled_tool_output_lines(&tc, &Highlighter::new(), &Theme::default(), false);
+        let plain: Vec<String> = lines
+            .into_iter()
+            .map(|line| line.spans.into_iter().map(|span| span.content).collect())
+            .collect();
+
+        assert_eq!(plain, vec!["@@ -1 +1 @@", "-old", "+new"]);
     }
 }

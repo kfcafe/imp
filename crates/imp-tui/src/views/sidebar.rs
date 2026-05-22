@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::highlight::Highlighter;
 use crate::selection::TextSurface;
 use crate::theme::Theme;
-use crate::views::tool_output::{styled_tool_output_lines, wrap_styled_lines};
+use crate::views::tool_output::{styled_sidebar_tool_output_lines, wrap_styled_lines};
 use crate::views::tools::DisplayToolCall;
 
 #[derive(Debug, Clone)]
@@ -918,7 +918,7 @@ fn styled_output_lines(
         );
     }
 
-    let styled = styled_tool_output_lines(tc, highlighter, theme, tc.name == "read");
+    let styled = styled_sidebar_tool_output_lines(tc, highlighter, theme, tc.name == "read");
     let styled = apply_styled_tool_output_limit(styled, config, theme);
     if config.word_wrap && width > 0 {
         wrap_styled_lines(&styled, width.saturating_sub(2))

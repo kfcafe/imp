@@ -3705,8 +3705,8 @@ impl App {
             self.sidebar.list_height = sub.0.height;
             let detail_plain_lines = detail_render
                 .as_ref()
-                .map(|render| render.plain_lines.clone())
-                .unwrap_or_default();
+                .map(|render| render.plain_lines.as_slice())
+                .unwrap_or(&[]);
             self.sidebar_detail_surface = Some(build_detail_text_surface_from_plain_lines(
                 &detail_plain_lines,
                 sub.1,
@@ -4612,11 +4612,8 @@ impl App {
             return None;
         };
         let total_lines = render.lines.len();
-        let window = visible_line_window(
-            total_lines,
-            chat_area.height as usize,
-            self.scroll_offset,
-        );
+        let window =
+            visible_line_window(total_lines, chat_area.height as usize, self.scroll_offset);
         let line_index = window.start + (row - chat_area.y) as usize;
         render
             .tool_line_indices
@@ -4659,6 +4656,10 @@ impl App {
         if self.scroll_offset == 0 {
             self.auto_scroll = true;
         }
+    }
+
+    fn sidebar_mouse_scroll_lines(&self) -> usize {
+        1
     }
 
     fn scroll_active_pane_up(&mut self, lines: usize) {
@@ -5045,12 +5046,12 @@ impl App {
                 if in_list && !is_inspector {
                     self.active_pane = Pane::SidebarList;
                     self.sidebar
-                        .scroll_list_up(self.config.ui.mouse_scroll_lines);
+                        .scroll_list_up(self.sidebar_mouse_scroll_lines());
                 } else if in_detail || (in_sidebar && (is_stream || is_inspector)) {
                     self.active_pane = Pane::SidebarDetail;
                     self.sidebar_auto_follow = false;
                     self.sidebar
-                        .scroll_detail_up(self.config.ui.mouse_scroll_lines);
+                        .scroll_detail_up(self.sidebar_mouse_scroll_lines());
                 } else {
                     self.active_pane = Pane::Chat;
                     self.scroll_chat_up(self.config.ui.mouse_scroll_lines);
@@ -5060,12 +5061,12 @@ impl App {
                 if in_list && !is_inspector {
                     self.active_pane = Pane::SidebarList;
                     self.sidebar
-                        .scroll_list_down(self.config.ui.mouse_scroll_lines);
+                        .scroll_list_down(self.sidebar_mouse_scroll_lines());
                 } else if in_detail || (in_sidebar && (is_stream || is_inspector)) {
                     self.active_pane = Pane::SidebarDetail;
                     self.sidebar_auto_follow = false;
                     self.sidebar
-                        .scroll_detail_down(self.config.ui.mouse_scroll_lines);
+                        .scroll_detail_down(self.sidebar_mouse_scroll_lines());
                 } else {
                     self.active_pane = Pane::Chat;
                     self.scroll_chat_down(self.config.ui.mouse_scroll_lines);
@@ -11504,7 +11505,7 @@ mod session_lifecycle {
             modifiers: KeyModifiers::empty(),
         };
         app.handle_mouse(mouse_detail);
-        assert_eq!(app.sidebar.detail_scroll, 3);
+        assert_eq!(app.sidebar.detail_scroll, 1);
         // Chat scroll should be unchanged
         assert_eq!(app.scroll_offset, 3);
 
@@ -11518,7 +11519,7 @@ mod session_lifecycle {
             modifiers: KeyModifiers::empty(),
         };
         app.handle_mouse(mouse_list);
-        assert_eq!(app.sidebar.list_scroll, 3);
+        assert_eq!(app.sidebar.list_scroll, 1);
     }
 
     #[test]
