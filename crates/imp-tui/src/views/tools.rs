@@ -165,7 +165,7 @@ impl DisplayToolCall {
         }
         let tool_icon = tool_display_icon(&self.name);
         spans.push(Span::styled(
-            tool_icon.to_string(),
+            format_tool_icon_for_label(tool_icon, &self.name),
             Style::default().fg(theme.accent),
         ));
         spans.push(Span::styled(
@@ -221,7 +221,10 @@ impl DisplayToolCall {
         let tool_icon = tool_display_icon(&self.name);
         let mut spans = vec![
             Span::styled("✓ ", icon_style),
-            Span::styled(tool_icon.to_string(), Style::default().fg(theme.accent)),
+            Span::styled(
+                format_tool_icon_for_label(tool_icon, &self.name),
+                Style::default().fg(theme.accent),
+            ),
             Span::styled(
                 tool_display_name(&self.name),
                 Style::default()
@@ -646,6 +649,14 @@ pub fn tool_display_icon(name: &str) -> &'static str {
     }
 }
 
+fn format_tool_icon_for_label(icon: &str, tool_name: &str) -> String {
+    if matches!(tool_name, "bash" | "shell") {
+        icon.to_string()
+    } else {
+        format!("{icon} ")
+    }
+}
+
 pub fn tool_display_name(name: &str) -> String {
     match name {
         "ask_user" => "Ask".to_string(),
@@ -973,7 +984,7 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert!(text.contains("✓ ⚗Prototype"));
+        assert!(text.contains("✓ ⚗ Prototype"));
     }
 
     #[test]
@@ -985,7 +996,7 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert!(text.contains("✓ ▣Work"));
+        assert!(text.contains("✓ ▣ Work"));
 
         let running = make_tc("bash", "check", None, false);
         let running_text = running
