@@ -252,6 +252,12 @@ impl Tool for ReadTool {
                 "lines": result.output_lines,
                 "total_lines": total_file_lines,
                 "range_total_lines": result.total_lines,
+                "lines_read": result.output_lines,
+                "files": [{
+                    "path": path.display().to_string(),
+                    "status": "read",
+                    "lines_read": result.output_lines,
+                }],
                 "bytes": result.output_bytes,
                 "total_bytes": metadata.len(),
                 "range_total_bytes": result.total_bytes,
@@ -542,6 +548,10 @@ mod tests {
         assert!(!text.contains("d"));
         assert_eq!(result.details["start_line"], 2);
         assert_eq!(result.details["end_line"], 3);
+        assert_eq!(result.details["lines"], 2);
+        assert_eq!(result.details["lines_read"], 2);
+        assert_eq!(result.details["files"][0]["status"], "read");
+        assert_eq!(result.details["files"][0]["lines_read"], 2);
     }
 
     #[tokio::test]

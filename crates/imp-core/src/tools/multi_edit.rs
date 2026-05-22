@@ -3,7 +3,9 @@ use imp_llm::truncate_chars_with_suffix;
 use serde_json::json;
 
 use super::edit::apply_edit;
-use super::{generate_diff, suggest_similar_files, Tool, ToolContext, ToolOutput};
+use super::{
+    generate_diff, line_change_counts, suggest_similar_files, Tool, ToolContext, ToolOutput,
+};
 use crate::error::Result;
 
 pub struct MultiEditTool;
@@ -150,6 +152,7 @@ impl Tool for MultiEditTool {
 
             total_edits += file_edits.len();
             let diff = generate_diff(&edit_path, &original, &current);
+            let (lines_added, lines_removed) = line_change_counts(&original, &current);
             let final_content = if has_crlf {
                 current.replace('\n', "\r\n")
             } else {
@@ -160,6 +163,8 @@ impl Tool for MultiEditTool {
                 path,
                 final_content,
                 diff,
+                lines_added,
+                lines_removed,
                 edit_count: file_edits.len(),
             });
         }
@@ -213,7 +218,12 @@ impl Tool for MultiEditTool {
                     "path": prepared.path.display().to_string(),
                     "input_path": prepared.input_path,
                     "edit_count": prepared.edit_count,
+                    "status": "modified",
+                    "lines_added": prepared.lines_added,
+                    "lines_removed": prepared.lines_removed,
                 })).collect::<Vec<_>>(),
+                "lines_added": prepared.iter().map(|prepared| prepared.lines_added).sum::<usize>(),
+                "lines_removed": prepared.iter().map(|prepared| prepared.lines_removed).sum::<usize>(),
                 "edit_count": total_edits,
                 "edits_applied": if dry_run { 0 } else { total_edits },
                 "fuzzy_match": any_fuzzy,
@@ -229,6 +239,8 @@ struct PreparedEditFile {
     path: std::path::PathBuf,
     final_content: String,
     diff: String,
+    lines_added: usize,
+    lines_removed: usize,
     edit_count: usize,
 }
 

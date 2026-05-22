@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use super::{truncate_head, Tool, ToolContext, ToolOutput};
+use super::{line_change_counts, truncate_head, Tool, ToolContext, ToolOutput};
 use crate::config::WriteOverwritePolicy;
 use crate::error::Result;
 use crate::tools::code_intel;
@@ -144,6 +144,11 @@ impl Tool for WriteTool {
             .map(|before| code_intel::diff_top_level_symbols(before, &normalized, &path));
 
         let bytes_written = normalized.len();
+        let (lines_added, lines_removed) = if let Some(before) = before_content.as_deref() {
+            line_change_counts(before, &normalized)
+        } else {
+            (normalized.lines().count(), 0)
+        };
         tokio::fs::write(&path, &normalized).await?;
 
         let action = if existed { "overwritten" } else { "created" };
@@ -190,6 +195,14 @@ impl Tool for WriteTool {
                 "line_ending": if normalized.contains("\r\n") { "crlf" } else { "lf" },
                 "created": !existed,
                 "overwritten": existed,
+                "lines_added": lines_added,
+                "lines_removed": lines_removed,
+                "files": [{
+                    "path": display,
+                    "status": if existed { "modified" } else { "created" },
+                    "lines_added": lines_added,
+                    "lines_removed": lines_removed,
+                }],
                 "checkpoint_id": checkpoint.as_ref().map(|c| c.id.clone()),
                 "checkpoint_label": checkpoint.as_ref().and_then(|c| c.label.clone()),
                 "summary": summary,

@@ -225,8 +225,8 @@ fn create_item(
         "prototype" => WorkItem::Prototype(build_prototype(params)?),
         other => {
             return Err(Error::Tool(format!(
-                "unsupported work kind `{other}`; expected task, epic, memory, decision, or prototype"
-            )))
+            "unsupported work kind `{other}`; expected task, epic, memory, decision, or prototype"
+        )))
         }
     };
     let path = store
@@ -252,7 +252,6 @@ fn create_item(
     })
 }
 
-
 fn create_global_project_scoped_item(
     store: &WorkStore,
     cwd: &std::path::Path,
@@ -264,16 +263,18 @@ fn create_global_project_scoped_item(
             "store_source=global_project_scoped currently supports create kind=task only; got `{kind}`"
         )));
     }
-    let task = build_task(params)?;
+    let task = build_task(store, params)?;
     let scope = storage::WorkScope::for_project_dir(cwd);
     let global = GlobalWorkStore::open(scope.global_store_root.clone());
     let stream_id = optional_string(params, "stream_id");
     let path = global
         .append_task_in_stream(&scope.project_root, &task, stream_id.as_deref())
         .map_err(|error| Error::Tool(format!("failed to create global project task: {error}")))?;
-    store
-        .append_task(&task)
-        .map_err(|error| Error::Tool(format!("failed to mirror task into global work graph: {error}")))?;
+    store.append_task(&task).map_err(|error| {
+        Error::Tool(format!(
+            "failed to mirror task into global work graph: {error}"
+        ))
+    })?;
     if let Some(stream_id) = stream_id.as_deref() {
         let relation = parse_stream_relation(params)?.unwrap_or(StreamRelation::Opened);
         append_stream_event_for_task(
@@ -967,7 +968,10 @@ fn record_outcome(
             stream_id,
             Some(task.id.clone()),
             parse_stream_relation(params)?.unwrap_or(StreamRelation::Closed),
-            format!("Outcome {:?} for task {}: {}", outcome, task.id, work_outcome.summary),
+            format!(
+                "Outcome {:?} for task {}: {}",
+                outcome, task.id, work_outcome.summary
+            ),
         )?;
     }
     let text = format!(
@@ -1097,15 +1101,16 @@ fn work_scope(_store: &WorkStore, cwd: &std::path::Path) -> Result<ToolOutput> {
     ))
 }
 
-fn stream_history_for_task(
-    cwd: &std::path::Path,
-    task: &Task,
-) -> Result<Vec<String>> {
+fn stream_history_for_task(cwd: &std::path::Path, task: &Task) -> Result<Vec<String>> {
     let scope = storage::WorkScope::for_project_dir(cwd);
     let global = GlobalWorkStore::open(scope.global_store_root.clone());
     let stream_id = match global
         .find_task_for_project(&scope.project_root, &task.id)
-        .map_err(|error| Error::Tool(format!("failed to load global task stream metadata: {error}")))?
+        .map_err(|error| {
+            Error::Tool(format!(
+                "failed to load global task stream metadata: {error}"
+            ))
+        })?
         .and_then(|record| record.stream_id)
         .or_else(|| {
             global
@@ -1397,7 +1402,9 @@ fn update_global_project_scoped_task(
     };
     store
         .update_task_status(&id.0, task.status)
-        .map_err(|error| Error::Tool(format!("failed to update global work graph task: {error}")))?;
+        .map_err(|error| {
+            Error::Tool(format!("failed to update global work graph task: {error}"))
+        })?;
     let text = format!(
         "Updated global project task {} to {:?}",
         task.id, task.status
@@ -1489,7 +1496,10 @@ fn show_item(
     }
 }
 
-fn show_project_local_legacy_item(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+fn show_project_local_legacy_item(
+    store: &WorkStore,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
     let id = required_str(params, "id")?;
     if let Some(pack) = store
         .load_context_pack(id)
@@ -1760,8 +1770,58 @@ fn context_memory_query(params: &serde_json::Value, id: &str) -> ConversationMem
     }
 }
 
-fn build_task(params: &serde_json::Value) -> Result<Task> {
-    let mut task = Task::new(required_title(params)?);
+fn slug_fragment(text: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+    for ch in text.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash && !slug.is_empty() {
+            slug.push('-');
+            last_was_dash = true;
+        }
+        if slug.len() >= 40 {
+            break;
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+fn readable_work_id(prefix: &str, title: &str) -> WorkId {
+    let slug = slug_fragment(title);
+    if slug.is_empty() {
+        WorkId::new(prefix)
+    } else {
+        WorkId::from(format!("{prefix}-{slug}"))
+    }
+}
+
+fn unique_task_id(store: &WorkStore, base: WorkId) -> Result<WorkId> {
+    let existing = store
+        .load_tasks()
+        .map_err(|error| Error::Tool(format!("failed to load existing task ids: {error}")))?;
+    if existing.iter().all(|task| task.id != base) {
+        return Ok(base);
+    }
+
+    for suffix in 2..=999 {
+        let candidate = WorkId::from(format!("{}-{suffix}", base.0));
+        if existing.iter().all(|task| task.id != candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(Error::Tool(format!(
+        "failed to allocate unique task id for `{}` after 999 attempts",
+        base
+    )))
+}
+
+fn build_task(store: &WorkStore, params: &serde_json::Value) -> Result<Task> {
+    let title = required_title(params)?;
+    let mut task = Task::new(title);
+    task.id = unique_task_id(store, readable_work_id("T", &task.title))?;
     task.status = params
         .get("status")
         .and_then(|value| value.as_str())
@@ -2266,7 +2326,10 @@ mod tests {
         assert!(!overview.is_error);
         assert_eq!(overview.details["action"], "guide");
         assert_eq!(overview.details["topic"], "overview");
-        assert!(overview.text_content().unwrap().contains("global project-scoped"));
+        assert!(overview
+            .text_content()
+            .unwrap()
+            .contains("global project-scoped"));
 
         let (ctx, _rx) = test_ctx(tmp.path());
         let global_store = tool
@@ -2339,6 +2402,7 @@ mod tests {
             .unwrap();
         assert!(!created.is_error);
         assert_eq!(created.details["kind"], "task");
+        assert_eq!(created.details["id"], "T-build-native-work-tool");
 
         let (ctx, _rx) = test_ctx(tmp.path());
         let listed = tool
@@ -2349,6 +2413,41 @@ mod tests {
         assert!(text.contains("Build native work tool"));
         assert_eq!(listed.details["store_source"], "global_project_scoped");
         assert_eq!(listed.details["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn work_tool_deduplicates_readable_task_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = WorkTool;
+
+        for call_id in ["call-1", "call-2"] {
+            let (ctx, _rx) = test_ctx(tmp.path());
+            tool.execute(
+                call_id,
+                json!({
+                    "action": "create",
+                    "kind": "task",
+                    "title": "Improve sidebar detail"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        }
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let listed = tool
+            .execute("call-3", json!({ "action": "list", "kind": "task" }), ctx)
+            .await
+            .unwrap();
+        let ids = listed.details["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"T-improve-sidebar-detail".to_string()));
+        assert!(ids.contains(&"T-improve-sidebar-detail-2".to_string()));
     }
 
     #[tokio::test]
@@ -4192,7 +4291,9 @@ mod tests {
                 assert!(std::path::Path::new(json_path).exists());
                 assert!(std::path::Path::new(markdown_path).exists());
                 let markdown = std::fs::read_to_string(markdown_path).unwrap();
-                assert!(markdown.contains("Native context packs should include retrieved work memory."));
+                assert!(
+                    markdown.contains("Native context packs should include retrieved work memory.")
+                );
                 assert!(context.details["stable_prefix_hash"].as_str().is_some());
                 let (ctx, _rx) = test_ctx(tmp.path());
                 let shown = tool
@@ -4411,7 +4512,11 @@ mod tests {
 
         let (ctx, _rx) = test_ctx(tmp.path());
         let listed = tool
-            .execute("call-list", json!({ "action": "list", "kind": "epic", "limit": 10 }), ctx)
+            .execute(
+                "call-list",
+                json!({ "action": "list", "kind": "epic", "limit": 10 }),
+                ctx,
+            )
             .await
             .unwrap();
         let text = listed.text_content().unwrap();
@@ -4419,7 +4524,11 @@ mod tests {
 
         let (ctx, _rx) = test_ctx(tmp.path());
         let listed = tool
-            .execute("call-list", json!({ "action": "list", "kind": "memory", "limit": 10 }), ctx)
+            .execute(
+                "call-list",
+                json!({ "action": "list", "kind": "memory", "limit": 10 }),
+                ctx,
+            )
             .await
             .unwrap();
         let text = listed.text_content().unwrap();
@@ -4427,7 +4536,11 @@ mod tests {
 
         let (ctx, _rx) = test_ctx(tmp.path());
         let listed = tool
-            .execute("call-list", json!({ "action": "list", "kind": "decision", "limit": 10 }), ctx)
+            .execute(
+                "call-list",
+                json!({ "action": "list", "kind": "decision", "limit": 10 }),
+                ctx,
+            )
             .await
             .unwrap();
         let text = listed.text_content().unwrap();
@@ -4435,7 +4548,11 @@ mod tests {
 
         let (ctx, _rx) = test_ctx(tmp.path());
         let listed = tool
-            .execute("call-list", json!({ "action": "list", "kind": "prototype", "limit": 10 }), ctx)
+            .execute(
+                "call-list",
+                json!({ "action": "list", "kind": "prototype", "limit": 10 }),
+                ctx,
+            )
             .await
             .unwrap();
         let text = listed.text_content().unwrap();

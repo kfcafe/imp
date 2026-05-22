@@ -5,7 +5,9 @@ use imp_llm::truncate_chars_with_suffix;
 use serde_json::json;
 
 use super::fuzzy;
-use super::{generate_diff, suggest_similar_files, Tool, ToolContext, ToolOutput};
+use super::{
+    generate_diff, line_change_counts, suggest_similar_files, Tool, ToolContext, ToolOutput,
+};
 use crate::error::Result;
 use crate::tools::code_intel;
 
@@ -217,6 +219,7 @@ impl Tool for EditTool {
         let symbol_diff = code_intel::diff_top_level_symbols(&content, &new_content, &path);
 
         let diff = generate_diff(raw_path, &content, &new_content);
+        let (lines_added, lines_removed) = line_change_counts(&content, &new_content);
 
         // Restore original line endings if needed
         let final_content = if has_crlf {
@@ -269,6 +272,14 @@ impl Tool for EditTool {
                         "kind": error.kind,
                     })).collect::<Vec<_>>(),
                 })),
+                "lines_added": lines_added,
+                "lines_removed": lines_removed,
+                "files": [{
+                    "path": path.display().to_string(),
+                    "status": "modified",
+                    "lines_added": lines_added,
+                    "lines_removed": lines_removed,
+                }],
                 "changed_symbols": {
                     "added": symbol_diff.added.iter().cloned().collect::<Vec<_>>(),
                     "removed": symbol_diff.removed.iter().cloned().collect::<Vec<_>>(),
@@ -388,6 +399,7 @@ async fn execute_anchor_edit(
     }
 
     let diff = generate_diff(raw_path, &content, &new_content);
+    let (lines_added, lines_removed) = line_change_counts(&content, &new_content);
     let final_content = if has_crlf {
         new_content.replace('\n', "\r\n")
     } else {
@@ -425,6 +437,14 @@ async fn execute_anchor_edit(
             "anchored": true,
             "start_line": start_anchor.line,
             "end_line": end_anchor.line,
+            "lines_added": lines_added,
+            "lines_removed": lines_removed,
+            "files": [{
+                "path": path.display().to_string(),
+                "status": "modified",
+                "lines_added": lines_added,
+                "lines_removed": lines_removed,
+            }],
             "refreshed_anchors": refreshed.iter().map(|anchor| json!({
                 "line": anchor.line,
                 "anchor": anchor.id,
