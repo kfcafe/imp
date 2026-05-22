@@ -499,8 +499,7 @@ fn apply_role_tool_policy(tools: &mut ToolRegistry, role: &Role) {
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
         ask::AskTool, bash::BashTool, edit::EditTool, git::GitTool, mana::ManaTool,
-        prototype::PrototypeTool, read::ReadTool, scan::ScanTool,
-        session_search::SessionSearchTool, web::WebTool, work::WorkTool, worktree::WorktreeTool,
+        prototype::PrototypeTool, read::ReadTool, scan::ScanTool, web::WebTool, work::WorkTool,
         write::WriteTool,
     };
 
@@ -513,11 +512,8 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ScanTool));
-    tools.register(Arc::new(SessionSearchTool));
     tools.register(Arc::new(WebTool));
     tools.register(Arc::new(WorkTool));
-    tools.register(Arc::new(WorktreeTool));
-    tools.register_alias("session_search", "recall");
 }
 
 #[cfg(test)]
@@ -726,9 +722,10 @@ mod tests {
         assert!(agent.tools.get("edit").is_some());
         assert!(agent.tools.get("multi_edit").is_none());
         assert!(agent.tools.get("memory").is_none());
-        assert!(agent.tools.get("recall").is_some());
-        assert!(agent.tools.get("session_search").is_some());
+        assert!(agent.tools.get("recall").is_none());
+        assert!(agent.tools.get("session_search").is_none());
         assert!(agent.tools.get("git").is_some());
+        assert!(agent.tools.get("worktree").is_none());
 
         let mut definition_names: Vec<_> = agent
             .tools
@@ -744,9 +741,10 @@ mod tests {
         assert!(definition_names.contains(&"edit".to_string()));
         assert!(!definition_names.contains(&"imp".to_string()));
         assert!(!definition_names.contains(&"multi_edit".to_string()));
-        assert!(definition_names.contains(&"recall".to_string()));
+        assert!(!definition_names.contains(&"recall".to_string()));
         assert!(!definition_names.contains(&"session_search".to_string()));
         assert!(!definition_names.contains(&"memory".to_string()));
+        assert!(!definition_names.contains(&"worktree".to_string()));
     }
 
     #[test]

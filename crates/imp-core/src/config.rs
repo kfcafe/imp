@@ -33,12 +33,12 @@ pub enum AgentMode {
 }
 
 const WORKER_TOOLS: &[&str] = &[
-    "read", "scan", "web", "recall", "write", "edit", "bash", "git", "mana", "ask_user",
+    "read", "scan", "web", "write", "edit", "bash", "git", "mana", "ask_user",
 ];
-const ORCHESTRATOR_TOOLS: &[&str] = &["read", "scan", "web", "recall", "mana", "git", "ask_user"];
-const PLANNER_TOOLS: &[&str] = &["read", "scan", "web", "recall", "git", "mana", "ask_user"];
-const REVIEWER_TOOLS: &[&str] = &["read", "scan", "web", "recall", "git", "ask_user"];
-const AUDITOR_TOOLS: &[&str] = &["read", "scan", "web", "recall", "git", "mana"];
+const ORCHESTRATOR_TOOLS: &[&str] = &["read", "scan", "web", "mana", "git", "ask_user"];
+const PLANNER_TOOLS: &[&str] = &["read", "scan", "web", "git", "mana", "ask_user"];
+const REVIEWER_TOOLS: &[&str] = &["read", "scan", "web", "git", "ask_user"];
+const AUDITOR_TOOLS: &[&str] = &["read", "scan", "web", "git", "mana"];
 
 const WORKER_MANA_ACTIONS: &[&str] = &[
     "show",
@@ -1664,7 +1664,7 @@ model = "sonnet"
         assert!(mode.allows_tool("scan"));
         assert!(mode.allows_tool("web"));
         assert!(mode.allows_tool("git"));
-        assert!(mode.allows_tool("recall"));
+        assert!(!mode.allows_tool("recall"));
         assert!(mode.allows_tool("mana"));
         assert!(mode.allows_tool("ask_user"));
     }

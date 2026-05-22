@@ -355,16 +355,6 @@ mod tests {
         .unwrap();
     }
 
-    fn write_pi_fallback_package(dir: &Path, name: &str) {
-        let package_dir = dir.join(name);
-        std::fs::create_dir_all(&package_dir).unwrap();
-        std::fs::write(
-            package_dir.join("index.ts"),
-            "export default function(pi) {}\n",
-        )
-        .unwrap();
-    }
-
     #[test]
     fn detect_pi_skills() {
         let home = TempDir::new().unwrap();
@@ -383,7 +373,6 @@ mod tests {
         assert!(names.contains(&"testing"));
     }
 
-    #[test]
     #[test]
     fn detect_pi_agents_md() {
         let home = TempDir::new().unwrap();
@@ -492,8 +481,6 @@ mod tests {
         assert_eq!(content, "existing");
     }
 
-    #[test]
-    #[test]
     #[test]
     fn import_agents_md_copies_file() {
         let home = TempDir::new().unwrap();

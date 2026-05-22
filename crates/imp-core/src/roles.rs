@@ -362,7 +362,7 @@ impl Role {
 }
 
 fn readonly_tools() -> Vec<String> {
-    vec!["read".into(), "scan".into(), "web".into(), "recall".into()]
+    vec!["read".into(), "scan".into(), "web".into()]
 }
 
 fn readonly_tool_set() -> ToolSet {
@@ -579,16 +579,15 @@ fn known_tool(name: &str) -> bool {
             | "mana"
             | "openrouter_secret_run"
             | "read"
-            | "recall"
             | "scan"
             | "web"
-            | "worktree"
+            | "work"
             | "write"
     )
 }
 
 fn write_capable_tool(name: &str) -> bool {
-    matches!(name, "edit" | "extend" | "write" | "worktree")
+    matches!(name, "edit" | "extend" | "write")
 }
 
 fn validate_role_name(name: &str) -> Result<(), RoleRegistryError> {

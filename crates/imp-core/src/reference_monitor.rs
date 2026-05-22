@@ -920,11 +920,11 @@ impl ToolActionKind {
     pub fn from_tool_name(name: &str) -> Self {
         match name {
             "read" => Self::Read,
-            "scan" | "search" | "session_search" | "memory" => Self::Search,
+            "scan" | "search" | "memory" => Self::Search,
             "write" => Self::Write,
             "edit" | "multi_edit" => Self::Edit,
             "bash" | "shell" => Self::Execute,
-            "git" | "worktree" => Self::Git,
+            "git" => Self::Git,
             "mana" => Self::Mana,
             "web" => Self::Network,
             "ask" | "ask_user" => Self::AskUser,
