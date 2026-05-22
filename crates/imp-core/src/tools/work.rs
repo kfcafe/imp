@@ -4,9 +4,10 @@ use imp_work::{
     build_work_tree, capture_conversation_memory, close_task_with_conventions,
     fail_task_with_conventions, summarize_checks, CheckResult, CloseRequest, ContextRenderer,
     ConversationMemoryInput, ConversationMemoryQuery, Decision, DecisionStatus, Epic,
-    GlobalWorkStore, HypothesisResult, MemoryItem, MemoryKind, Prototype, PrototypeEvidence,
-    PrototypeObservation, PrototypeOutcome, PrototypeRecordPolicy, PrototypeStatus, Run,
-    RunOutcome, StreamEvent, Task, TaskStatus, WorkId, WorkItem, WorkKind, WorkStore,
+    GlobalWorkStore, HypothesisResult, Link, LinkKind, MemoryItem, MemoryKind, Prototype,
+    PrototypeEvidence, PrototypeObservation, PrototypeOutcome, PrototypeRecordPolicy,
+    PrototypeStatus, Run, RunOutcome, StreamEvent, Task, TaskStatus, WorkId, WorkItem, WorkKind,
+    WorkRunEngine, WorkRunPolicyInput, WorkStore,
 };
 use serde_json::json;
 
@@ -37,15 +38,15 @@ impl Tool for WorkTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create", "list", "context", "refresh_context", "next", "show", "update", "claim", "dep_add", "dep_remove", "validate", "scope", "guide", "search", "outcome", "prototype_outcome", "runs", "tree", "verify", "close", "fail", "remember"],
-                    "description": "Create, list, show, update, claim, report active store scope, show the imp-work guide, remember/search memory, record/inspect task or prototype outcomes, prepare/refresh context packs, select next ready native imp-work items, or manage native tree/verify/close/fail workflows."
+                    "enum": ["create", "list", "context", "refresh_context", "next", "show", "update", "claim", "dep_add", "dep_remove", "validate", "scope", "guide", "search", "outcome", "prototype_outcome", "run", "run_state", "run_list", "run_pause", "run_resume", "run_cancel", "run_retry", "runs", "tree", "verify", "close", "fail", "remember"],
+                    "description": "Create, list, show, update, claim, report active store scope, show the imp-work guide, remember/search memory, record/inspect task or prototype outcomes, run native WorkRun orchestration, prepare/refresh context packs, select next ready native imp-work items, or manage native tree/verify/close/fail workflows."
                 },
                 "kind": {
                     "type": "string",
                     "enum": ["task", "epic", "memory", "decision", "prototype", "context_pack"],
                     "description": "Work item kind for create/list/context. Create supports task, epic, memory, decision, prototype. Context supports task/prototype. List/show support context_pack too."
                 },
-                "id": { "type": "string", "description": "Existing work item id for show/update/claim/context/dependency actions." },
+                "id": { "type": "string", "description": "Existing work item id for show/update/claim/context/dependency actions, root work id for action=run, or WorkRun id for action=run_state." },
                 "dependency_id": { "type": "string", "description": "Dependency task id for dep_add/dep_remove." },
                 "title": { "type": "string", "description": "Title for tasks, epics, decisions, and prototypes." },
                 "text": { "type": "string", "description": "Memory text, or fallback title/question text." },
@@ -79,7 +80,10 @@ impl Tool for WorkTool {
                 "worker_id": { "type": "string", "description": "Worker id for claim leases. Defaults to imp." },
                 "worktree": { "type": "string", "description": "Optional worktree path for claim leases." },
                 "path_locks": { "type": "array", "items": { "type": "string" }, "description": "Optional path locks for claim leases." },
-                "require_context": { "type": "boolean", "description": "For next/claim, require tasks to have a current non-stale context pack." },
+                "require_context": { "type": "boolean", "description": "For next/claim/run, require tasks to have a current non-stale context pack." },
+                "dry_run": { "type": "boolean", "description": "For action=run, return a dispatch plan without creating a WorkRun." },
+                "jobs": { "type": "number", "description": "For action=run, maximum concurrent worker assignments to plan/start." },
+                "ignore_path_conflicts": { "type": "boolean", "description": "For action=run, ignore path conflicts when planning assignments." },
                 "outcome": {
                     "type": "string",
                     "enum": ["done", "done_with_concerns", "blocked", "needs_context", "failed"],
@@ -140,30 +144,37 @@ impl Tool for WorkTool {
         ctx: ToolContext,
     ) -> Result<ToolOutput> {
         let action = required_str(&params, "action")?;
-        let scope = storage::WorkScope::for_project_dir(&ctx.cwd);
+        let scope = work_scope_from_params(&ctx, &params);
         let store = WorkStore::open(global_project_work_store_root(&scope));
         match action {
-            "create" => create_item(&store, &ctx.cwd, &params),
-            "list" => list_items(&store, &ctx.cwd, &params),
-            "context" => create_context_pack(&store, &ctx.cwd, &params),
-            "refresh_context" => refresh_context_pack(&store, &params),
-            "next" => next_ready_tasks(&store, &params),
-            "show" => show_item(&store, &ctx.cwd, &params),
-            "update" => update_item(&store, &ctx.cwd, &params),
-            "claim" => claim_task(&store, &params),
-            "dep_add" => edit_dependency(&store, &params, true),
-            "dep_remove" => edit_dependency(&store, &params, false),
-            "validate" => validate_store(&store),
-            "scope" => work_scope(&store, &ctx.cwd),
+            "create" => create_item(&store, &scope.project_root, &params),
+            "list" => list_items(&store, &scope.project_root, &params),
+            "context" => create_context_pack(&store, &scope.project_root, &params),
+            "refresh_context" => refresh_context_pack(&store, &scope.project_root, &params),
+            "next" => next_ready_tasks(&store, &scope.project_root, &params),
+            "show" => show_item(&store, &scope.project_root, &params),
+            "update" => update_item(&store, &scope.project_root, &params),
+            "claim" => claim_task(&store, &scope.project_root, &params),
+            "dep_add" => edit_dependency(&store, &scope.project_root, &params, true),
+            "dep_remove" => edit_dependency(&store, &scope.project_root, &params, false),
+            "validate" => validate_store(&store, &scope.project_root),
+            "scope" => work_scope(&store, &scope.project_root),
             "guide" => work_guide(&params),
             "search" => search_memory(&store, &params),
-            "outcome" => record_outcome(&store, &ctx.cwd, &params),
+            "outcome" => record_outcome(&store, &scope.project_root, &params),
             "prototype_outcome" => record_prototype_outcome(&store, &params),
+            "run" => run_work_action(&store, &scope.project_root, &params),
+            "run_state" => run_state_action(&store, &params),
+            "run_pause" => run_lifecycle_action(&store, &params, "pause"),
+            "run_resume" => run_lifecycle_action(&store, &params, "resume"),
+            "run_cancel" => run_lifecycle_action(&store, &params, "cancel"),
+            "run_retry" => run_retry_action(&store, &params),
+            "run_list" => run_list_action(&store, &params),
             "runs" => list_runs(&store, &params),
-            "tree" => work_tree(&store),
-            "verify" => verify_task(&store, &params),
-            "close" => close_task_action(&store, &params),
-            "fail" => fail_task_action(&store, &params),
+            "tree" => work_tree(&store, &scope.project_root),
+            "verify" => verify_task(&store, &scope.project_root, &params),
+            "close" => close_task_action(&store, &scope.project_root, &params),
+            "fail" => fail_task_action(&store, &scope.project_root, &params),
             "remember" => remember_memory(&store, &params),
             other => Err(Error::Tool(format!(
                 "unsupported work action `{other}`; expected create, list, context, refresh_context, next, show, update, claim, dep_add, dep_remove, validate, scope, guide, search, outcome, prototype_outcome, runs, tree, verify, close, fail, or remember"
@@ -172,24 +183,23 @@ impl Tool for WorkTool {
     }
 }
 
-fn scope_from_global_project_store(root: &std::path::Path) -> Option<storage::WorkScope> {
-    let project_hash = root.file_name()?.to_str()?;
-    let projects_dir = root.parent()?;
-    if projects_dir.file_name()?.to_str()? != "projects" {
-        return None;
-    }
-    let global_store_root = projects_dir.parent()?.to_path_buf();
-    let mut candidates = std::env::current_dir().ok().into_iter().collect::<Vec<_>>();
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(std::path::PathBuf::from(home));
-    }
-    for candidate in candidates {
-        let scope = storage::WorkScope::with_global_root(&candidate, global_store_root.clone());
-        if global_project_hash(&scope.project_root) == project_hash {
-            return Some(scope);
+fn work_scope_from_params(ctx: &ToolContext, params: &serde_json::Value) -> storage::WorkScope {
+    if let Some(worktree) = optional_string(params, "worktree") {
+        if !worktree.trim().is_empty() {
+            return storage::WorkScope::for_project_dir(std::path::Path::new(&worktree));
         }
     }
-    None
+    if matches!(
+        optional_string(params, "store_source").as_deref(),
+        Some("global_project_scoped")
+    ) {
+        if let Some(path) = optional_string(params, "path") {
+            if !path.trim().is_empty() {
+                return storage::WorkScope::for_project_dir(std::path::Path::new(&path));
+            }
+        }
+    }
+    storage::WorkScope::for_project_dir(&ctx.cwd)
 }
 
 fn global_project_hash(project_root: &std::path::Path) -> String {
@@ -263,18 +273,17 @@ fn create_global_project_scoped_item(
             "store_source=global_project_scoped currently supports create kind=task only; got `{kind}`"
         )));
     }
-    let task = build_task(store, params)?;
+    let mut task = build_task(store, params)?;
+    task.id = unique_task_id_for_tasks(
+        &load_project_scoped_tasks(store, cwd)?,
+        readable_work_id("T", &task.title),
+    )?;
     let scope = storage::WorkScope::for_project_dir(cwd);
     let global = GlobalWorkStore::open(scope.global_store_root.clone());
     let stream_id = optional_string(params, "stream_id");
     let path = global
         .append_task_in_stream(&scope.project_root, &task, stream_id.as_deref())
         .map_err(|error| Error::Tool(format!("failed to create global project task: {error}")))?;
-    store.append_task(&task).map_err(|error| {
-        Error::Tool(format!(
-            "failed to mirror task into global work graph: {error}"
-        ))
-    })?;
     if let Some(stream_id) = stream_id.as_deref() {
         let relation = parse_stream_relation(params)?.unwrap_or(StreamRelation::Opened);
         append_stream_event_for_task(
@@ -326,6 +335,11 @@ fn list_items(
     let mut items = store
         .load_work_items()
         .map_err(|error| Error::Tool(format!("failed to list work items: {error}")))?;
+    items.extend(
+        load_project_scoped_tasks(store, cwd)?
+            .into_iter()
+            .map(WorkItem::Task),
+    );
     if let Some(kind_filter) = kind_filter {
         let expected = parse_work_kind(kind_filter)?;
         items.retain(|item| item.kind() == expected);
@@ -365,6 +379,117 @@ fn list_items(
     })
 }
 
+fn load_project_scoped_tasks(store: &WorkStore, cwd: &std::path::Path) -> Result<Vec<Task>> {
+    let scope = storage::WorkScope::for_project_dir(cwd);
+    let global = GlobalWorkStore::open(scope.global_store_root.clone());
+    let mut tasks = global
+        .tasks_for_project(&scope.project_root)
+        .map_err(|error| Error::Tool(format!("failed to load global project tasks: {error}")))?;
+    for task in store
+        .load_tasks()
+        .map_err(|error| Error::Tool(format!("failed to load project store tasks: {error}")))?
+    {
+        if let Some(existing) = tasks.iter_mut().find(|existing| existing.id == task.id) {
+            *existing = task;
+        } else {
+            tasks.push(task);
+        }
+    }
+    Ok(tasks)
+}
+
+fn task_by_id(store: &WorkStore, cwd: &std::path::Path, id: &str) -> Result<Option<Task>> {
+    Ok(load_project_scoped_tasks(store, cwd)?
+        .into_iter()
+        .find(|task| task.id.0 == id))
+}
+
+fn is_open_task_status(status: TaskStatus) -> bool {
+    matches!(
+        status,
+        TaskStatus::Todo | TaskStatus::Ready | TaskStatus::Active | TaskStatus::Review
+    )
+}
+
+fn open_child_tasks(tasks: &[Task], parent_id: &WorkId) -> Vec<Task> {
+    tasks
+        .iter()
+        .filter(|task| task.parent.as_ref() == Some(parent_id) && is_open_task_status(task.status))
+        .cloned()
+        .collect()
+}
+
+fn parent_closeout_blocker(tasks: &[Task], task: &Task) -> Option<Vec<Task>> {
+    let open_children = open_child_tasks(tasks, &task.id);
+    (!open_children.is_empty()).then_some(open_children)
+}
+
+fn parent_closeout_blocked_output(action: &str, id: &str, open_children: Vec<Task>) -> ToolOutput {
+    let child_summaries = open_children
+        .iter()
+        .map(|child| {
+            json!({
+                "id": child.id,
+                "title": child.title,
+                "status": child.status,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut text = format!(
+        "Blocked {action} for task {id}: {} open child task(s) remain",
+        child_summaries.len()
+    );
+    for child in &open_children {
+        text.push_str(&format!(
+            "\n- task {} @{}: {}",
+            child.id,
+            format_task_status_value(child.status),
+            child.title
+        ));
+    }
+    text.push_str("\nClose, complete, block, or explicitly force/defer open children before closing the parent.");
+    ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "action": action,
+            "id": id,
+            "blocked": true,
+            "reason": "open_child_tasks",
+            "open_children": child_summaries,
+        }),
+        is_error: true,
+    }
+}
+
+fn update_project_scoped_task(
+    _store: &WorkStore,
+    cwd: &std::path::Path,
+    task: &Task,
+) -> Result<()> {
+    let scope = storage::WorkScope::for_project_dir(cwd);
+    let global = GlobalWorkStore::open(scope.global_store_root.clone());
+    let updated = global
+        .update_task_for_project(&scope.project_root, &task.id, |stored| {
+            *stored = task.clone();
+        })
+        .map_err(|error| Error::Tool(format!("failed to update global project task: {error}")))?;
+    if updated.is_none() {
+        return Err(Error::Tool(format!("task `{}` not found", task.id)));
+    }
+    Ok(())
+}
+
+fn project_scoped_scheduler(
+    store: &WorkStore,
+    cwd: &std::path::Path,
+) -> Result<imp_work::Scheduler> {
+    let mut scheduler = imp_work::Scheduler::new();
+    for task in load_project_scoped_tasks(store, cwd)? {
+        scheduler.add_task(task);
+    }
+    Ok(scheduler)
+}
+
 fn list_global_project_scoped_tasks(
     store: &WorkStore,
     cwd: &std::path::Path,
@@ -380,21 +505,7 @@ fn list_global_project_scoped_tasks(
         .get("limit")
         .and_then(|value| value.as_u64())
         .unwrap_or(50) as usize;
-    let scope = storage::WorkScope::for_project_dir(cwd);
-    let global = GlobalWorkStore::open(scope.global_store_root.clone());
-    let mut tasks = global
-        .tasks_for_project(&scope.project_root)
-        .map_err(|error| Error::Tool(format!("failed to list global project tasks: {error}")))?;
-    for task in store
-        .load_tasks()
-        .map_err(|error| Error::Tool(format!("failed to list global work graph tasks: {error}")))?
-    {
-        if let Some(existing) = tasks.iter_mut().find(|existing| existing.id == task.id) {
-            *existing = task;
-        } else {
-            tasks.push(task);
-        }
-    }
+    let mut tasks = load_project_scoped_tasks(store, cwd)?;
     if let Some(status_filter) = optional_string(params, "status") {
         let expected = parse_task_status(&status_filter)?;
         tasks.retain(|task| task.status == expected);
@@ -425,6 +536,7 @@ fn list_global_project_scoped_tasks(
             task.title
         ));
     }
+    let scope = storage::WorkScope::for_project_dir(cwd);
     Ok(ToolOutput {
         content: vec![imp_llm::ContentBlock::Text { text }],
         details: json!({
@@ -493,10 +605,8 @@ fn ensure_global_task_source(params: &serde_json::Value) -> Result<()> {
     }
 }
 
-fn work_tree(store: &WorkStore) -> Result<ToolOutput> {
-    let tasks = store
-        .load_tasks()
-        .map_err(|error| Error::Tool(format!("failed to load work tree: {error}")))?;
+fn work_tree(store: &WorkStore, cwd: &std::path::Path) -> Result<ToolOutput> {
+    let tasks = load_project_scoped_tasks(store, cwd)?;
     let tree = build_work_tree(&tasks);
     Ok(tool_output(
         format!(
@@ -511,14 +621,13 @@ fn work_tree(store: &WorkStore) -> Result<ToolOutput> {
     ))
 }
 
-fn verify_task(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+fn verify_task(
+    store: &WorkStore,
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
     let id = required_str(params, "id")?;
-    let tasks = store
-        .load_tasks()
-        .map_err(|error| Error::Tool(format!("failed to load task for verify: {error}")))?;
-    let task = tasks
-        .iter()
-        .find(|task| task.id.0 == id)
+    let task = task_by_id(store, cwd, id)?
         .ok_or_else(|| Error::Tool(format!("work item `{id}` not found")))?;
     let checks_passed = params
         .get("checks_passed")
@@ -561,15 +670,14 @@ fn verify_task(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutp
     ))
 }
 
-fn close_task_action(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+fn close_task_action(
+    store: &WorkStore,
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
     let id = required_str(params, "id")?;
     let summary = optional_string(params, "summary").unwrap_or_else(|| "closed".to_string());
-    let tasks = store
-        .load_tasks()
-        .map_err(|error| Error::Tool(format!("failed to load task for close: {error}")))?;
-    let task = tasks
-        .into_iter()
-        .find(|task| task.id.0 == id)
+    let task = task_by_id(store, cwd, id)?
         .ok_or_else(|| Error::Tool(format!("work item `{id}` not found")))?;
     let force_reason = optional_string(params, "force_reason").or_else(|| {
         params
@@ -578,6 +686,12 @@ fn close_task_action(store: &WorkStore, params: &serde_json::Value) -> Result<To
             .filter(|force| *force)
             .map(|_| "forced without detailed reason".to_string())
     });
+    let all_tasks = load_project_scoped_tasks(store, cwd)?;
+    if force_reason.is_none() {
+        if let Some(open_children) = parent_closeout_blocker(&all_tasks, &task) {
+            return Ok(parent_closeout_blocked_output("close", id, open_children));
+        }
+    }
     let verify = if task.checks.is_empty() {
         None
     } else {
@@ -618,9 +732,7 @@ fn close_task_action(store: &WorkStore, params: &serde_json::Value) -> Result<To
         },
     )
     .map_err(Error::Tool)?;
-    store
-        .update_task_status(id, close.task.status)
-        .map_err(|error| Error::Tool(format!("failed to update closed task status: {error}")))?;
+    update_project_scoped_task(store, cwd, &close.task)?;
     store
         .append_run(&close.run)
         .map_err(|error| Error::Tool(format!("failed to append close run: {error}")))?;
@@ -636,20 +748,17 @@ fn close_task_action(store: &WorkStore, params: &serde_json::Value) -> Result<To
     ))
 }
 
-fn fail_task_action(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+fn fail_task_action(
+    store: &WorkStore,
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
     let id = required_str(params, "id")?;
     let reason = required_string_any(params, &["reason", "summary", "text"])?;
-    let tasks = store
-        .load_tasks()
-        .map_err(|error| Error::Tool(format!("failed to load task for fail: {error}")))?;
-    let task = tasks
-        .into_iter()
-        .find(|task| task.id.0 == id)
+    let task = task_by_id(store, cwd, id)?
         .ok_or_else(|| Error::Tool(format!("work item `{id}` not found")))?;
     let failed = fail_task_with_conventions(task, reason, optional_string(params, "next_action"));
-    store
-        .update_task_status(id, failed.task.status)
-        .map_err(|error| Error::Tool(format!("failed to update failed task status: {error}")))?;
+    update_project_scoped_task(store, cwd, &failed.task)?;
     store
         .append_memory(&failed.memory)
         .map_err(|error| Error::Tool(format!("failed to append failure memory: {error}")))?;
@@ -896,12 +1005,14 @@ fn record_outcome(
         .transpose()?
         .ok_or_else(|| Error::Tool("missing `outcome` for work outcome".into()))?;
     let summary = required_str(params, "summary")?.to_string();
-    let task = store
-        .load_tasks()
-        .map_err(|error| Error::Tool(format!("failed to load tasks: {error}")))?
-        .into_iter()
-        .find(|task| task.id.0 == id)
-        .ok_or_else(|| Error::Tool(format!("task `{id}` not found")))?;
+    let task =
+        task_by_id(store, cwd, id)?.ok_or_else(|| Error::Tool(format!("task `{id}` not found")))?;
+    let all_tasks = load_project_scoped_tasks(store, cwd)?;
+    if matches!(outcome, RunOutcome::Done | RunOutcome::DoneWithConcerns) {
+        if let Some(open_children) = parent_closeout_blocker(&all_tasks, &task) {
+            return Ok(parent_closeout_blocked_output("outcome", id, open_children));
+        }
+    }
     let work_outcome = imp_work::WorkOutcome {
         work_id: task.id.clone(),
         outcome,
@@ -931,16 +1042,9 @@ fn record_outcome(
         checks: Vec::new(),
     };
     let task_status = task_status_for_outcome(outcome);
-    let updated_task = store
-        .update_task_status(id, task_status)
-        .map_err(|error| Error::Tool(format!("failed to update task status: {error}")))?
-        .ok_or_else(|| Error::Tool(format!("task `{id}` not found while updating status")))?;
-    if let Some(scope) = scope_from_global_project_store(store.root()) {
-        let global = GlobalWorkStore::open(scope.global_store_root.clone());
-        let _ = global.update_task_for_project(&scope.project_root, &task.id, |task| {
-            task.status = updated_task.status;
-        });
-    }
+    let mut updated_task = task.clone();
+    updated_task.status = task_status;
+    update_project_scoped_task(store, cwd, &updated_task)?;
     let coordinator_summary = imp_work::CoordinatorSummary {
         done: usize::from(matches!(
             outcome,
@@ -952,12 +1056,21 @@ fn record_outcome(
         recent_outcomes: vec![work_outcome.clone()],
         ..imp_work::CoordinatorSummary::default()
     };
+    if !work_outcome.followups.is_empty() {
+        store
+            .record_outcome_followups_with_status(&work_outcome, TaskStatus::Ready)
+            .map_err(|error| Error::Tool(format!("failed to record ready followups: {error}")))?;
+    }
     let persistence = store
         .persist_worker_result(&run, &work_outcome, &coordinator_summary)
         .map_err(|error| Error::Tool(format!("failed to persist outcome: {error}")))?;
     let released_leases = store
         .release_leases_for_work(&task.id)
         .map_err(|error| Error::Tool(format!("failed to release task leases: {error}")))?;
+    let tasks = load_project_scoped_tasks(store, cwd)?;
+    let work_run_view = WorkRunEngine::new(store)
+        .record_assignment_outcome(&task.id, outcome, &work_outcome.summary, tasks)
+        .map_err(|error| Error::Tool(format!("failed to advance work run: {error}")))?;
     let stream_id = optional_string(params, "stream_id");
     if let Some(stream_id) = stream_id.as_deref() {
         let scope = storage::WorkScope::for_project_dir(cwd);
@@ -996,6 +1109,7 @@ fn record_outcome(
                 "followup_task_path": persistence.followup_task_path,
                 "stale_context_paths": persistence.stale_context_paths,
                 "released_leases": released_leases,
+                "work_run": work_run_view,
             },
             "stream_id": stream_id,
         }),
@@ -1003,9 +1117,10 @@ fn record_outcome(
     })
 }
 
-fn validate_store(store: &WorkStore) -> Result<ToolOutput> {
+fn validate_store(store: &WorkStore, cwd: &std::path::Path) -> Result<ToolOutput> {
+    let tasks = load_project_scoped_tasks(store, cwd)?;
     let report = store
-        .validate()
+        .validate_with_tasks(tasks)
         .map_err(|error| Error::Tool(format!("failed to validate work store: {error}")))?;
     let error_count = report
         .issues
@@ -1130,20 +1245,33 @@ fn stream_history_for_task(cwd: &std::path::Path, task: &Task) -> Result<Vec<Str
         .collect())
 }
 
-fn edit_dependency(store: &WorkStore, params: &serde_json::Value, add: bool) -> Result<ToolOutput> {
+fn edit_dependency(
+    store: &WorkStore,
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+    add: bool,
+) -> Result<ToolOutput> {
     let id = required_str(params, "id")?;
     let dependency_id = required_str(params, "dependency_id")?;
     let dependency = WorkId::from(dependency_id);
-    let task = if add {
-        store
-            .add_task_dependency(id, dependency.clone())
-            .map_err(|error| Error::Tool(format!("failed to add dependency: {error}")))?
+    let mut task =
+        task_by_id(store, cwd, id)?.ok_or_else(|| Error::Tool(format!("task `{id}` not found")))?;
+    if add {
+        if !task
+            .links
+            .iter()
+            .any(|link| link.kind == LinkKind::DependsOn && link.target == dependency)
+        {
+            task.links.push(Link {
+                kind: LinkKind::DependsOn,
+                target: dependency.clone(),
+            });
+        }
     } else {
-        store
-            .remove_task_dependency(id, &dependency)
-            .map_err(|error| Error::Tool(format!("failed to remove dependency: {error}")))?
+        task.links
+            .retain(|link| !(link.kind == LinkKind::DependsOn && link.target == dependency));
     }
-    .ok_or_else(|| Error::Tool(format!("task `{id}` not found")))?;
+    update_project_scoped_task(store, cwd, &task)?;
     let action = if add { "dep_add" } else { "dep_remove" };
     let text = if add {
         format!("Added dependency {dependency_id} to task {}", task.id)
@@ -1197,10 +1325,12 @@ fn search_memory(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOu
     })
 }
 
-fn claim_task(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
-    let scheduler = store
-        .load_scheduler()
-        .map_err(|error| Error::Tool(format!("failed to load scheduler: {error}")))?;
+fn claim_task(
+    store: &WorkStore,
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let scheduler = project_scoped_scheduler(store, cwd)?;
     let require_context = params
         .get("require_context")
         .and_then(|value| value.as_bool())
@@ -1234,10 +1364,10 @@ fn claim_task(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutpu
         })?
     };
 
-    let task = store
-        .update_task_status(&task_id, TaskStatus::Active)
-        .map_err(|error| Error::Tool(format!("failed to claim task: {error}")))?
+    let mut task = task_by_id(store, cwd, &task_id)?
         .ok_or_else(|| Error::Tool(format!("task `{task_id}` not found")))?;
+    task.status = TaskStatus::Active;
+    update_project_scoped_task(store, cwd, &task)?;
     let lease = imp_work::Lease {
         id: WorkId::new("L"),
         work_id: task.id.clone(),
@@ -1359,7 +1489,7 @@ fn update_item(
 }
 
 fn update_global_project_scoped_task(
-    store: &WorkStore,
+    _store: &WorkStore,
     cwd: &std::path::Path,
     params: &serde_json::Value,
 ) -> Result<ToolOutput> {
@@ -1376,9 +1506,11 @@ fn update_global_project_scoped_task(
         .map(parse_task_status)
         .transpose()?;
     let title = optional_string(params, "title");
-    if status.is_none() && title.is_none() {
+    let context_pack = optional_string(params, "context_pack").map(WorkId::from);
+    if status.is_none() && title.is_none() && context_pack.is_none() {
         return Err(Error::Tool(
-            "global task update requires at least one of `status` or `title`".into(),
+            "global task update requires at least one of `status`, `title`, or `context_pack`"
+                .into(),
         ));
     }
     let scope = storage::WorkScope::for_project_dir(cwd);
@@ -1391,6 +1523,9 @@ fn update_global_project_scoped_task(
             if let Some(title) = title {
                 task.title = title;
             }
+            if let Some(context_pack) = context_pack.clone() {
+                task.context_pack = Some(context_pack);
+            }
         })
         .map_err(|error| Error::Tool(format!("failed to update global project task: {error}")))?
     else {
@@ -1400,11 +1535,6 @@ fn update_global_project_scoped_task(
             scope.project_root.display()
         )));
     };
-    store
-        .update_task_status(&id.0, task.status)
-        .map_err(|error| {
-            Error::Tool(format!("failed to update global work graph task: {error}"))
-        })?;
     let text = format!(
         "Updated global project task {} to {:?}",
         task.id, task.status
@@ -1553,7 +1683,11 @@ fn show_project_local_legacy_item(
     })
 }
 
-fn refresh_context_pack(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+fn refresh_context_pack(
+    store: &WorkStore,
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
     let kind = params
         .get("kind")
         .and_then(|value| value.as_str())
@@ -1564,12 +1698,8 @@ fn refresh_context_pack(store: &WorkStore, params: &serde_json::Value) -> Result
         )));
     }
     let id = required_str(params, "id")?;
-    let task = store
-        .load_tasks()
-        .map_err(|error| Error::Tool(format!("failed to load tasks: {error}")))?
-        .into_iter()
-        .find(|task| task.id.0 == id)
-        .ok_or_else(|| Error::Tool(format!("task `{id}` not found")))?;
+    let task =
+        task_by_id(store, cwd, id)?.ok_or_else(|| Error::Tool(format!("task `{id}` not found")))?;
     let previous_id = task
         .context_pack
         .clone()
@@ -1582,21 +1712,9 @@ fn refresh_context_pack(store: &WorkStore, params: &serde_json::Value) -> Result
     let next = store
         .refresh_task_context_with_memory(&previous, &task, query, Vec::new())
         .map_err(|error| Error::Tool(format!("failed to refresh context pack: {error}")))?;
-    store
-        .update_task_context_pack(id, next.id.clone())
-        .map_err(|error| Error::Tool(format!("failed to relink refreshed context pack: {error}")))?
-        .ok_or_else(|| {
-            Error::Tool(format!(
-                "task `{id}` not found while relinking context pack"
-            ))
-        })?;
-    if let Some(scope) = scope_from_global_project_store(store.root()) {
-        let global = GlobalWorkStore::open(scope.global_store_root.clone());
-        let _ = global.update_task_for_project(&scope.project_root, &task.id, |task| {
-            task.context_pack = Some(next.id.clone());
-        });
-        let _ = store.update_task_context_pack(id, next.id.clone());
-    }
+    let mut updated_task = task.clone();
+    updated_task.context_pack = Some(next.id.clone());
+    update_project_scoped_task(store, cwd, &updated_task)?;
     let _ = store
         .mark_context_pack_stale(&previous_id.0)
         .map_err(|error| Error::Tool(format!("failed to mark previous context stale: {error}")))?;
@@ -1622,7 +1740,233 @@ fn refresh_context_pack(store: &WorkStore, params: &serde_json::Value) -> Result
     })
 }
 
-fn next_ready_tasks(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+fn task_has_fresh_context(store: &WorkStore, task: &Task) -> bool {
+    let Some(context_pack_id) = &task.context_pack else {
+        return false;
+    };
+    matches!(
+        store.load_context_pack(&context_pack_id.0),
+        Ok(Some(pack)) if pack.status == imp_work::ContextPackStatus::Ready
+    )
+}
+
+fn run_tasks_for_root(tasks: Vec<Task>, root_id: &WorkId) -> Vec<Task> {
+    let root_is_task = tasks.iter().any(|task| task.id == *root_id);
+    if root_is_task {
+        return tasks
+            .into_iter()
+            .filter(|task| task.id == *root_id || task.parent.as_ref() == Some(root_id))
+            .collect();
+    }
+    tasks
+        .into_iter()
+        .filter(|task| task.parent.as_ref() == Some(root_id))
+        .collect()
+}
+
+fn run_policy_from_params(params: &serde_json::Value) -> WorkRunPolicyInput {
+    WorkRunPolicyInput {
+        max_jobs: params
+            .get("jobs")
+            .and_then(|value| value.as_u64())
+            .map(|value| value as usize)
+            .unwrap_or(1)
+            .max(1),
+        path_conflicts: if params
+            .get("ignore_path_conflicts")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            imp_work::PathConflictPolicy::Ignore
+        } else {
+            imp_work::PathConflictPolicy::Block
+        },
+        require_context: params
+            .get("require_context")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        keep_going: params
+            .get("keep_going")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+    }
+}
+
+fn run_work_action(
+    store: &WorkStore,
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
+    let id = required_str(params, "id")?;
+    let root_id = WorkId::from(id);
+    let mut tasks = run_tasks_for_root(load_project_scoped_tasks(store, cwd)?, &root_id);
+    let policy = run_policy_from_params(params);
+    if policy.require_context {
+        tasks.retain(|task| task_has_fresh_context(store, task));
+    }
+    let root_title = tasks
+        .iter()
+        .find(|task| task.id == root_id)
+        .map(|task| task.title.clone());
+    let engine = WorkRunEngine::new(store);
+    let plan = engine.plan(root_id.clone(), root_title.clone(), tasks, policy.clone());
+    let dry_run = params
+        .get("dry_run")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if dry_run {
+        let text = format!(
+            "Planned work run for {root_id}: {} dispatchable, {} blocked",
+            plan.dispatch.dispatchable.len(),
+            plan.dispatch.blocked.len()
+        );
+        return Ok(ToolOutput {
+            content: vec![imp_llm::ContentBlock::Text { text }],
+            details: json!({
+                "action": "run",
+                "mode": "dry_run",
+                "root": { "id": root_id, "title": root_title },
+                "policy": {
+                    "max_jobs": plan.policy.max_jobs,
+                    "path_conflicts": match plan.policy.path_conflicts {
+                        imp_work::PathConflictPolicy::Block => "block",
+                        imp_work::PathConflictPolicy::Ignore => "ignore",
+                    },
+                    "require_context": plan.policy.require_context,
+                    "keep_going": plan.policy.keep_going,
+                },
+                "dispatchable": plan.dispatch.dispatchable,
+                "blocked": plan.dispatch.blocked,
+            }),
+            is_error: false,
+        });
+    }
+
+    let view = engine
+        .start_or_resume(&plan)
+        .map_err(|error| Error::Tool(format!("failed to start work run: {error}")))?;
+    let text = format!(
+        "Started work run {} for {}: {} assignment(s), {} blocked",
+        view.run.id,
+        root_id,
+        view.run.assignments.len(),
+        view.run.blocked.len()
+    );
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "action": "run",
+            "mode": "start",
+            "root": { "id": root_id, "title": root_title },
+            "view": view,
+        }),
+        is_error: false,
+    })
+}
+
+fn run_state_action(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+    let id = required_str(params, "id")?;
+    let engine = WorkRunEngine::new(store);
+    let Some(view) = engine
+        .state(id, None)
+        .map_err(|error| Error::Tool(format!("failed to load work run state: {error}")))?
+    else {
+        return Err(Error::Tool(format!("work run `{id}` not found")));
+    };
+    let text = format!(
+        "Work run {} is {:?}: {} assignment(s), {} blocked",
+        view.run.id,
+        view.run.status,
+        view.run.assignments.len(),
+        view.run.blocked.len()
+    );
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "action": "run_state",
+            "view": view,
+        }),
+        is_error: false,
+    })
+}
+
+fn run_lifecycle_action(
+    store: &WorkStore,
+    params: &serde_json::Value,
+    transition: &str,
+) -> Result<ToolOutput> {
+    let id = required_str(params, "id")?;
+    let engine = WorkRunEngine::new(store);
+    let view = match transition {
+        "pause" => engine.pause(id),
+        "resume" => engine.resume(id),
+        "cancel" => engine.cancel(id, optional_string(params, "reason")),
+        _ => unreachable!("unknown lifecycle transition"),
+    }
+    .map_err(|error| Error::Tool(format!("failed to transition work run: {error}")))?
+    .ok_or_else(|| Error::Tool(format!("work run `{id}` not found")))?;
+    let action = format!("run_{transition}");
+    let text = format!("Work run {} is now {:?}", view.run.id, view.run.status);
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "action": action,
+            "view": view,
+        }),
+        is_error: false,
+    })
+}
+
+fn run_retry_action(store: &WorkStore, params: &serde_json::Value) -> Result<ToolOutput> {
+    let id = required_str(params, "id")?;
+    let work_id = WorkId::from(
+        required_str(params, "dependency_id").or_else(|_| required_str(params, "work_id"))?,
+    );
+    let engine = WorkRunEngine::new(store);
+    let view = engine
+        .retry_assignment(id, &work_id)
+        .map_err(|error| Error::Tool(format!("failed to retry work run assignment: {error}")))?
+        .ok_or_else(|| {
+            Error::Tool(format!(
+                "work run `{id}` or assignment `{work_id}` not found"
+            ))
+        })?;
+    let text = format!("Retried assignment {work_id} in work run {}", view.run.id);
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "action": "run_retry",
+            "work_id": work_id,
+            "view": view,
+        }),
+        is_error: false,
+    })
+}
+
+fn run_list_action(store: &WorkStore, _params: &serde_json::Value) -> Result<ToolOutput> {
+    let runs = store
+        .load_work_runs()
+        .map_err(|error| Error::Tool(format!("failed to list work runs: {error}")))?;
+    let text = if runs.is_empty() {
+        "No work runs found".to_string()
+    } else {
+        format!("{} work run(s)", runs.len())
+    };
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "action": "run_list",
+            "runs": runs,
+        }),
+        is_error: false,
+    })
+}
+
+fn next_ready_tasks(
+    store: &WorkStore,
+    cwd: &std::path::Path,
+    params: &serde_json::Value,
+) -> Result<ToolOutput> {
     let limit = params
         .get("limit")
         .and_then(|value| value.as_u64())
@@ -1631,9 +1975,7 @@ fn next_ready_tasks(store: &WorkStore, params: &serde_json::Value) -> Result<Too
         .get("require_context")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
-    let scheduler = store
-        .load_scheduler()
-        .map_err(|error| Error::Tool(format!("failed to load scheduler: {error}")))?;
+    let scheduler = project_scoped_scheduler(store, cwd)?;
     let ready = scheduler.ready_queue();
     let ready = ready
         .into_iter()
@@ -1655,9 +1997,32 @@ fn next_ready_tasks(store: &WorkStore, params: &serde_json::Value) -> Result<Too
         })
         .collect::<Vec<_>>();
 
+    let actionable_todo = load_project_scoped_tasks(store, cwd)?
+        .into_iter()
+        .filter(|task| task.status == TaskStatus::Todo && task.parent.is_some())
+        .take(limit.max(1))
+        .collect::<Vec<_>>();
+
     let mut text = format!("{} ready task(s)", items.len());
     for task in ready.iter().take(limit.max(1)) {
         text.push_str(&format!("\n- task {}: {}", task.id, task.title));
+    }
+    if !actionable_todo.is_empty() {
+        text.push_str(&format!(
+            "\n{} todo child task(s) remain in active work trees; mark ready, defer/block, or close them before claiming no work remains.",
+            actionable_todo.len()
+        ));
+        for task in &actionable_todo {
+            text.push_str(&format!(
+                "\n- task {} @todo parent={}: {}",
+                task.id,
+                task.parent
+                    .as_ref()
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                task.title
+            ));
+        }
     }
 
     Ok(ToolOutput {
@@ -1665,6 +2030,7 @@ fn next_ready_tasks(store: &WorkStore, params: &serde_json::Value) -> Result<Too
         details: json!({
             "action": "next",
             "items": items,
+            "todo_children": actionable_todo,
         }),
         is_error: false,
     })
@@ -1680,30 +2046,16 @@ fn create_context_pack(
     let query = context_memory_query(params, id);
     let (pack, item_title) = match kind {
         "task" => {
-            let task = store
-                .load_tasks()
-                .map_err(|error| Error::Tool(format!("failed to load tasks: {error}")))?
-                .into_iter()
-                .find(|task| task.id.0 == id)
+            let task = task_by_id(store, cwd, id)?
                 .ok_or_else(|| Error::Tool(format!("task `{id}` not found")))?;
             let stream_history = stream_history_for_task(cwd, &task)?;
             let pack = store
                 .compile_task_context_with_stream_history(&task, query, Vec::new(), stream_history)
                 .map_err(|error| Error::Tool(format!("failed to compile task context: {error}")))?;
             let title = task.title.clone();
-            store
-                .update_task_context_pack(id, pack.id.clone())
-                .map_err(|error| Error::Tool(format!("failed to link task context pack: {error}")))?
-                .ok_or_else(|| {
-                    Error::Tool(format!("task `{id}` not found while linking context pack"))
-                })?;
-            if let Some(scope) = scope_from_global_project_store(store.root()) {
-                let global = GlobalWorkStore::open(scope.global_store_root.clone());
-                let _ = global.update_task_for_project(&scope.project_root, &task.id, |task| {
-                    task.context_pack = Some(pack.id.clone());
-                });
-                let _ = store.update_task_context_pack(id, pack.id.clone());
-            }
+            let mut updated_task = task.clone();
+            updated_task.context_pack = Some(pack.id.clone());
+            update_project_scoped_task(store, cwd, &updated_task)?;
             (pack, title)
         }
         "prototype" => {
@@ -1797,10 +2149,7 @@ fn readable_work_id(prefix: &str, title: &str) -> WorkId {
     }
 }
 
-fn unique_task_id(store: &WorkStore, base: WorkId) -> Result<WorkId> {
-    let existing = store
-        .load_tasks()
-        .map_err(|error| Error::Tool(format!("failed to load existing task ids: {error}")))?;
+fn unique_task_id_for_tasks(existing: &[Task], base: WorkId) -> Result<WorkId> {
     if existing.iter().all(|task| task.id != base) {
         return Ok(base);
     }
@@ -1816,6 +2165,13 @@ fn unique_task_id(store: &WorkStore, base: WorkId) -> Result<WorkId> {
         "failed to allocate unique task id for `{}` after 999 attempts",
         base
     )))
+}
+
+fn unique_task_id(store: &WorkStore, base: WorkId) -> Result<WorkId> {
+    let existing = store
+        .load_tasks()
+        .map_err(|error| Error::Tool(format!("failed to load existing task ids: {error}")))?;
+    unique_task_id_for_tasks(&existing, base)
 }
 
 fn build_task(store: &WorkStore, params: &serde_json::Value) -> Result<Task> {
@@ -2476,7 +2832,8 @@ mod tests {
                 json!({
                     "action": "list",
                     "kind": "task",
-                    "store_source": "global_project_scoped"
+                    "store_source": "global_project_scoped",
+                    "status": "ready"
                 }),
                 ctx,
             )
@@ -2711,6 +3068,162 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].relation, StreamRelation::Closed);
         assert!(events[1].summary.contains("Closed streamed task"));
+    }
+
+    #[tokio::test]
+    async fn work_tool_next_uses_global_project_scoped_tasks_and_dependencies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let tool = WorkTool;
+
+        let (ctx, _rx) = test_ctx(&project);
+        let upstream = tool
+            .execute(
+                "create-upstream",
+                json!({
+                    "action": "create",
+                    "kind": "task",
+                    "title": "Finish base slice",
+                    "status": "ready",
+                    "store_source": "global_project_scoped"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let upstream_id = upstream.details["id"].as_str().unwrap().to_string();
+
+        let (ctx, _rx) = test_ctx(&project);
+        let downstream = tool
+            .execute(
+                "create-downstream",
+                json!({
+                    "action": "create",
+                    "kind": "task",
+                    "title": "Continue run implementation",
+                    "status": "ready",
+                    "store_source": "global_project_scoped"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let downstream_id = downstream.details["id"].as_str().unwrap().to_string();
+
+        let (ctx, _rx) = test_ctx(&project);
+        tool.execute(
+            "link-dependency",
+            json!({
+                "action": "dep_add",
+                "id": downstream_id,
+                "dependency_id": upstream_id,
+                "store_source": "global_project_scoped"
+            }),
+            ctx,
+        )
+        .await
+        .unwrap();
+
+        let (ctx, _rx) = test_ctx(&project);
+        let initial_next = tool
+            .execute(
+                "next-before-done",
+                json!({ "action": "next", "store_source": "global_project_scoped" }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let initial_text = initial_next.text_content().unwrap();
+        assert!(
+            initial_text.contains(&upstream_id),
+            "next output was: {initial_text}"
+        );
+        assert!(!initial_text.contains(&downstream_id));
+
+        let (ctx, _rx) = test_ctx(&project);
+        let updated = tool
+            .execute(
+                "mark-upstream-done",
+                json!({
+                    "action": "update",
+                    "kind": "task",
+                    "id": upstream_id,
+                    "status": "done",
+                    "store_source": "global_project_scoped"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.details["item"]["status"], "done");
+
+        let (ctx, _rx) = test_ctx(&project);
+        let next = tool
+            .execute(
+                "next-after-done",
+                json!({ "action": "next", "store_source": "global_project_scoped" }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let text = next.text_content().unwrap();
+        assert!(text.contains(&downstream_id), "next output was: {text}");
+    }
+
+    #[tokio::test]
+    async fn work_tool_path_parameter_overrides_runtime_cwd_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outer = tmp.path().join("outer");
+        let project = outer.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let tool = WorkTool;
+
+        let (ctx, _rx) = test_ctx(&outer);
+        let created = tool
+            .execute(
+                "create-with-path-scope",
+                json!({
+                    "action": "create",
+                    "kind": "task",
+                    "title": "Path-scoped task",
+                    "path": project,
+                    "store_source": "global_project_scoped"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let task_id = created.details["id"].as_str().unwrap().to_string();
+
+        let (ctx, _rx) = test_ctx(&outer);
+        let next = tool
+            .execute(
+                "next-with-path-scope",
+                json!({
+                    "action": "next",
+                    "path": project,
+                    "store_source": "global_project_scoped"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(next.text_content().unwrap().contains(&task_id));
+
+        let (ctx, _rx) = test_ctx(&outer);
+        let outer_next = tool
+            .execute(
+                "next-without-path-scope",
+                json!({
+                    "action": "next",
+                    "store_source": "global_project_scoped"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!outer_next.text_content().unwrap().contains(&task_id));
     }
 
     #[tokio::test]
@@ -3409,6 +3922,208 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn work_tool_run_actions_plan_start_state_and_list_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = WorkTool;
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let created = tool
+            .execute(
+                "create-run-root",
+                json!({
+                    "action": "create",
+                    "kind": "task",
+                    "title": "Run through tool",
+                    "status": "ready"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let task_id = created.details["id"].as_str().unwrap().to_string();
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let dry_run = tool
+            .execute(
+                "run-dry-run",
+                json!({
+                    "action": "run",
+                    "id": task_id,
+                    "dry_run": true,
+                    "jobs": 2
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(dry_run.details["mode"], "dry_run");
+        assert_eq!(dry_run.details["dispatchable"].as_array().unwrap().len(), 1);
+
+        let task_id = dry_run.details["root"]["id"].as_str().unwrap().to_string();
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let started = tool
+            .execute(
+                "run-start",
+                json!({
+                    "action": "run",
+                    "id": task_id,
+                    "jobs": 2
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.details["mode"], "start");
+        let run_id = started.details["view"]["run"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let state = tool
+            .execute(
+                "run-state",
+                json!({
+                    "action": "run_state",
+                    "id": run_id
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(state.details["view"]["run"]["status"], "running");
+        assert_eq!(
+            state.details["view"]["run"]["assignments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let paused = tool
+            .execute(
+                "run-pause",
+                json!({
+                    "action": "run_pause",
+                    "id": run_id
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(paused.details["view"]["run"]["status"], "paused");
+
+        let run_id = paused.details["view"]["run"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let resumed = tool
+            .execute(
+                "run-resume",
+                json!({
+                    "action": "run_resume",
+                    "id": run_id
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed.details["view"]["run"]["status"], "running");
+
+        let run_id = resumed.details["view"]["run"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let cancelled = tool
+            .execute(
+                "run-cancel",
+                json!({
+                    "action": "run_cancel",
+                    "id": run_id,
+                    "reason": "test cleanup"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.details["view"]["run"]["status"], "cancelled");
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let list = tool
+            .execute("run-list", json!({ "action": "run_list" }), ctx)
+            .await
+            .unwrap();
+        assert_eq!(list.details["runs"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn work_tool_outcome_advances_active_work_run_assignment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = WorkTool;
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let created = tool
+            .execute(
+                "create-task",
+                json!({
+                    "action": "create",
+                    "kind": "task",
+                    "title": "Run assignment outcome",
+                    "status": "ready"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let task_id = created.details["id"].as_str().unwrap().to_string();
+
+        let scope = storage::WorkScope::for_project_dir(tmp.path());
+        let store = WorkStore::open(global_project_work_store_root(&scope));
+        let task = task_by_id(&store, tmp.path(), &task_id)
+            .unwrap()
+            .expect("task exists");
+        let engine = WorkRunEngine::new(&store);
+        let plan = engine.plan(
+            WorkId::from("E-test"),
+            Some("Test run".into()),
+            vec![task],
+            imp_work::WorkRunPolicyInput::default(),
+        );
+        let run_view = engine.start_or_resume(&plan).unwrap();
+        assert_eq!(run_view.run.assignments.len(), 1);
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let outcome = tool
+            .execute(
+                "record-outcome",
+                json!({
+                    "action": "outcome",
+                    "kind": "task",
+                    "id": task_id,
+                    "outcome": "done",
+                    "summary": "WorkRun should advance."
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let work_run = &outcome.details["persistence"]["work_run"];
+        assert_eq!(work_run["run"]["status"], "completed");
+        assert_eq!(work_run["run"]["assignments"][0]["status"], "completed");
+        assert!(work_run["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["kind"]["type"] == "worker_completed"));
+        assert!(work_run["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["kind"]["type"] == "handoff_recorded"));
+    }
+
+    #[tokio::test]
     async fn work_tool_records_structured_task_outcome() {
         let tmp = tempfile::tempdir().unwrap();
         let tool = WorkTool;
@@ -3460,9 +4175,9 @@ mod tests {
             .unwrap()
             .contains("Structured outcomes persist task learnings."));
         let followup_path = persistence["followup_task_path"].as_str().unwrap();
-        assert!(std::fs::read_to_string(followup_path)
-            .unwrap()
-            .contains("Add richer outcome check results."));
+        let followup_contents = std::fs::read_to_string(followup_path).unwrap();
+        assert!(followup_contents.contains("Add richer outcome check results."));
+        assert!(followup_contents.contains("@ready"));
 
         let (ctx, _rx) = test_ctx(tmp.path());
         let shown = tool
@@ -3718,11 +4433,20 @@ mod tests {
             .await
             .unwrap();
         let task_id = created.details["id"].as_str().unwrap().to_string();
-        let scope = storage::WorkScope::for_project_dir(tmp.path());
-        let store = WorkStore::open(global_project_work_store_root(&scope));
-        store
-            .update_task_context_pack(&task_id, WorkId::from("CTX-missing-validation"))
-            .unwrap();
+        let (ctx, _rx) = test_ctx(tmp.path());
+        tool.execute(
+            "add-missing-context",
+            json!({
+                "action": "update",
+                "kind": "task",
+                "id": task_id,
+                "status": "ready",
+                "context_pack": "CTX-missing-validation"
+            }),
+            ctx,
+        )
+        .await
+        .unwrap();
 
         let (ctx, _rx) = test_ctx(tmp.path());
         let validation = tool
@@ -4229,6 +4953,132 @@ mod tests {
         let items = next.details["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["title"], "Ready task");
+    }
+
+    #[tokio::test]
+    async fn work_tool_blocks_parent_close_with_open_children() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = WorkTool;
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let parent = tool
+            .execute(
+                "create-parent",
+                json!({ "action": "create", "kind": "task", "title": "Parent", "status": "active" }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let parent_id = parent.details["id"].as_str().unwrap().to_string();
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        tool.execute(
+            "create-child",
+            json!({ "action": "create", "kind": "task", "title": "Child", "status": "ready", "parent_work": parent_id }),
+            ctx,
+        )
+        .await
+        .unwrap();
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let close = tool
+            .execute(
+                "close-parent",
+                json!({ "action": "close", "id": parent_id, "summary": "try close" }),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(close.is_error);
+        assert_eq!(close.details["reason"], "open_child_tasks");
+        assert!(close
+            .text_content()
+            .unwrap()
+            .contains("open child task(s) remain"));
+    }
+
+    #[tokio::test]
+    async fn work_tool_blocks_parent_outcome_with_open_children() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = WorkTool;
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let parent = tool
+            .execute(
+                "create-parent",
+                json!({ "action": "create", "kind": "task", "title": "Parent outcome", "status": "active" }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let parent_id = parent.details["id"].as_str().unwrap().to_string();
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        tool.execute(
+            "create-child",
+            json!({ "action": "create", "kind": "task", "title": "Open child", "status": "ready", "parent_work": parent_id }),
+            ctx,
+        )
+        .await
+        .unwrap();
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let outcome = tool
+            .execute(
+                "outcome-parent",
+                json!({
+                    "action": "outcome",
+                    "kind": "task",
+                    "id": parent_id,
+                    "outcome": "done",
+                    "summary": "try outcome"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.is_error);
+        assert_eq!(outcome.details["reason"], "open_child_tasks");
+        assert!(outcome
+            .text_content()
+            .unwrap()
+            .contains("open child task(s) remain"));
+    }
+
+    #[tokio::test]
+    async fn work_tool_next_reports_todo_children_when_no_ready_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = WorkTool;
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let parent = tool
+            .execute(
+                "create-parent",
+                json!({ "action": "create", "kind": "task", "title": "Parent", "status": "active" }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let parent_id = parent.details["id"].as_str().unwrap().to_string();
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        tool.execute(
+            "create-child",
+            json!({ "action": "create", "kind": "task", "title": "Todo child", "status": "todo", "parent_work": parent_id }),
+            ctx,
+        )
+        .await
+        .unwrap();
+
+        let (ctx, _rx) = test_ctx(tmp.path());
+        let next = tool
+            .execute("next", json!({ "action": "next", "limit": 10 }), ctx)
+            .await
+            .unwrap();
+
+        assert!(!next.is_error);
+        assert!(next.text_content().unwrap().contains("todo child task(s)"));
+        assert_eq!(next.details["items"].as_array().unwrap().len(), 1);
+        assert_eq!(next.details["todo_children"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]

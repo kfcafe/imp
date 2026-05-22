@@ -59,7 +59,10 @@ pub enum AgentCommand {
 
 mod turn_assessment;
 
-use autonomy::{failed_command_recovery_obligation, AutonomousObjective, ObligationLedger};
+use autonomy::{
+    edited_files_verification_obligation, failed_command_recovery_obligation, AutonomousObjective,
+    ObligationLedger,
+};
 use turn_assessment::{
     ContinueRecommendation, ManaEvidence, PostTurnAssessment, RuntimeEvidence, TextFallbackEvidence,
 };
@@ -470,6 +473,14 @@ impl Agent {
         if tool_results_indicate_failed_bash_command(tool_results, self.mode) {
             self.obligation_ledger
                 .add(failed_command_recovery_obligation());
+        }
+        if tool_results_include_successful_edit(tool_results) {
+            self.obligation_ledger
+                .add(edited_files_verification_obligation());
+        }
+        if tool_results_include_successful_check(tool_results) {
+            self.obligation_ledger
+                .resolve_kind(autonomy::ObligationKind::EditedFilesVerification);
         }
         if tool_results_indicate_execution_evidence(tool_results, self.mode) {
             self.obligation_ledger
@@ -1103,6 +1114,19 @@ fn mutation_record_from_mana_result(
         field_changes: Vec::new(),
         notes_appended: Vec::new(),
         decision_events: Vec::new(),
+    })
+}
+
+fn tool_results_include_successful_edit(tool_results: &[imp_llm::ToolResultMessage]) -> bool {
+    tool_results.iter().any(|result| {
+        !result.is_error && matches!(result.tool_name.as_str(), "write" | "edit" | "multi_edit")
+    })
+}
+
+fn tool_results_include_successful_check(tool_results: &[imp_llm::ToolResultMessage]) -> bool {
+    tool_results.iter().any(|result| {
+        matches!(result.tool_name.as_str(), "bash" | "shell")
+            && bash_result_is_successful_check(result)
     })
 }
 
@@ -3411,6 +3435,55 @@ mod tests {
             &[bash_result],
             AgentMode::Full
         ));
+    }
+
+    #[test]
+    fn records_and_resolves_edited_files_verification_obligation() {
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Full;
+
+        let edit_result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_edit".to_string(),
+            tool_name: "edit".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "edited file".to_string(),
+            }],
+            is_error: false,
+            details: serde_json::json!({ "path": "src/lib.rs" }),
+            timestamp: 0,
+        };
+        agent.record_obligations_from_tool_results(&[edit_result]);
+
+        assert!(agent
+            .obligation_ledger
+            .contains(autonomy::ObligationKind::EditedFilesVerification));
+        let (prompt, reason) = agent
+            .obligation_ledger
+            .next_continue()
+            .expect("edit should create verification obligation");
+        assert_eq!(reason, ContinueReason::ExecutionDebt);
+        assert!(prompt.contains("run the narrowest relevant verification"));
+
+        let check_result = imp_llm::ToolResultMessage {
+            tool_call_id: "call_check".to_string(),
+            tool_name: "bash".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "ok".to_string(),
+            }],
+            is_error: false,
+            details: serde_json::json!({
+                "exit_code": 0,
+                "command": "cargo check -p imp-core"
+            }),
+            timestamp: 0,
+        };
+        agent.record_obligations_from_tool_results(&[check_result]);
+
+        assert!(!agent
+            .obligation_ledger
+            .contains(autonomy::ObligationKind::EditedFilesVerification));
     }
 
     #[test]

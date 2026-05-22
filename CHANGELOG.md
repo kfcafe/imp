@@ -6,7 +6,25 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## [Unreleased]
 
-Use this section for changes that have landed on `main` after the 0.2.4 release.
+Use this section for changes that have landed on `main` after the 0.2.5 release.
+
+## [0.2.5] - 2026-05-22
+
+### Added
+
+- Added autonomous runtime objective and obligation tracking for failed-command recovery and edited-file verification.
+
+### Changed
+
+- Made imp-work follow-up tasks created from outcomes ready by default so active continuation work remains discoverable.
+- Made work tool operations honor explicit project paths for global project-scoped stores.
+
+### Fixed
+
+- Prevented explanation-only answers from creating durable imp-work tasks unless the user explicitly asks for durable work structure.
+- Blocked parent task close/outcome when open child tasks remain, unless explicitly forced.
+- Made `work(action="next")` report todo child tasks so agents do not confuse “no ready tasks” with “no work remains.”
+- Fixed imp-work validation and discovery to account for merged global project-scoped and local task state.
 
 ## [0.2.4] - 2026-05-22
 

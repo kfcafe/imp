@@ -505,13 +505,25 @@ impl WorkStore {
     }
 
     pub fn record_outcome_followups(&self, outcome: &WorkOutcome) -> Result<Option<PathBuf>> {
+        self.record_outcome_followups_with_status(outcome, TaskStatus::Todo)
+    }
+
+    pub fn record_outcome_followups_with_status(
+        &self,
+        outcome: &WorkOutcome,
+        status: TaskStatus,
+    ) -> Result<Option<PathBuf>> {
         if outcome.followups.is_empty() {
             return Ok(None);
         }
         let layout = self.ensure_layout()?;
         let mut entry = String::new();
         for followup in &outcome.followups {
-            entry.push_str(&format!("- {} @task @todo\n", one_line(followup)));
+            entry.push_str(&format!(
+                "- {} @task @{}\n",
+                one_line(followup),
+                format_task_status(status)
+            ));
             entry.push_str(&format!("  id: {}\n", crate::model::WorkId::new("T")));
             entry.push_str(&format!("  parent_work: {}\n", outcome.work_id));
             entry.push_str("  source: worker_outcome\n");
@@ -534,7 +546,11 @@ impl WorkStore {
         let outcome_path = self.append_outcome(outcome)?;
         let summary_path = self.write_coordinator_summary(summary)?;
         let memory_paths = self.record_outcome_memory_updates(outcome)?;
-        let followup_task_path = self.record_outcome_followups(outcome)?;
+        let followup_task_path = if outcome.followups.is_empty() {
+            None
+        } else {
+            self.record_outcome_followups(outcome)?
+        };
         let stale_context_paths = self.mark_contexts_stale_after_outcome(outcome)?;
         Ok(WorkerPersistence {
             run_path,
@@ -802,7 +818,10 @@ impl WorkStore {
     }
 
     pub fn validate(&self) -> Result<WorkValidationReport> {
-        let tasks = self.load_tasks()?;
+        self.validate_with_tasks(self.load_tasks()?)
+    }
+
+    pub fn validate_with_tasks(&self, tasks: Vec<Task>) -> Result<WorkValidationReport> {
         let memories = self.load_memory_index()?.recent(usize::MAX);
         let decisions = self.load_decisions()?;
         let prototypes = self.load_prototypes()?;

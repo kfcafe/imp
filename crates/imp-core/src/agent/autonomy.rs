@@ -29,6 +29,7 @@ impl AutonomousObjective {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ObligationKind {
     FailedCommandRecovery,
+    EditedFilesVerification,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,7 +63,9 @@ impl ObligationLedger {
     pub(crate) fn next_continue(&self) -> Option<(String, ContinueReason)> {
         self.obligations.first().map(|obligation| {
             let reason = match obligation.kind {
-                ObligationKind::FailedCommandRecovery => ContinueReason::ExecutionDebt,
+                ObligationKind::FailedCommandRecovery | ObligationKind::EditedFilesVerification => {
+                    ContinueReason::ExecutionDebt
+                }
             };
             (obligation.prompt.clone(), reason)
         })
@@ -80,6 +83,13 @@ pub(crate) fn failed_command_recovery_obligation() -> Obligation {
     Obligation {
         kind: ObligationKind::FailedCommandRecovery,
         prompt: super::failed_bash_recovery_follow_up_text().to_string(),
+    }
+}
+
+pub(crate) fn edited_files_verification_obligation() -> Obligation {
+    Obligation {
+        kind: ObligationKind::EditedFilesVerification,
+        prompt: "Files were changed. Review the diff, run the narrowest relevant verification command, and fix any failures before summarizing completion.".to_string(),
     }
 }
 
