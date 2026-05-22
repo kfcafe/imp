@@ -6,7 +6,28 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## [Unreleased]
 
-Use this section for changes that have landed on `main` after the 0.2.2 release.
+Use this section for changes that have landed on `main` after the 0.2.3 release.
+
+## [0.2.3] - 2026-05-22
+
+### Added
+
+- Added the native `work` tool as imp's durable work system, replacing mana as the default agent workflow for tasks, lifecycle state, context, verification, and handoff.
+- Added global project-scoped imp-work storage under `~/.imp/work`, with normal work actions keyed by canonical project root instead of cwd-local `.imp/work`.
+- Added `work(action="guide")` for agent-facing imp-work operating guidance and `work(action="scope")` for explicit store/source visibility.
+- Added project stream events and automatic stream-history loading into task context packs so follow-up work can retain continuity after prior tasks close.
+- Added an offline `scripts/migrate-mana-to-imp-work` migration command for importing existing `.mana` units into global imp-work storage.
+- Added Z.AI provider/model metadata and aliases for GLM models.
+
+### Changed
+
+- Switched system prompt, mode guidance, and agent workflow nudges from mana-first durable work to native imp-work.
+- Made global imp-work the normal backend for work create/list/show/update and lifecycle graph flows; project-local work stores are now migration input only.
+- Moved migration out of the normal work tool API so migration remains transitional tooling rather than an everyday agent action.
+
+### Fixed
+
+- Kept imp-work lifecycle, verification, dependency, context, and tree flows coherent after the global-only backend switch.
 
 ## [0.2.2] - 2026-05-21
 
