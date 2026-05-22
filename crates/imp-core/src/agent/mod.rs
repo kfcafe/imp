@@ -25,6 +25,7 @@ use crate::tools::{LuaToolLoader, ToolRegistry};
 use crate::trace::TraceWriter;
 use crate::workflow::WorkflowContract;
 
+mod autonomy;
 mod events;
 mod loop_policy;
 mod loop_state;
@@ -58,6 +59,7 @@ pub enum AgentCommand {
 
 mod turn_assessment;
 
+use autonomy::{failed_command_recovery_obligation, AutonomousObjective, ObligationLedger};
 use turn_assessment::{
     ContinueRecommendation, ManaEvidence, PostTurnAssessment, RuntimeEvidence, TextFallbackEvidence,
 };
@@ -142,6 +144,10 @@ pub struct Agent {
     trace_writer: Arc<Mutex<Option<TraceWriter>>>,
     /// Active run artifact id for trace correlation.
     run_id: Arc<Mutex<Option<String>>>,
+    /// Runtime-owned objective for this run, classified from the initial user prompt.
+    pub(crate) active_objective: Option<AutonomousObjective>,
+    /// Runtime-owned autonomy TODO list used to continue until obligations resolve.
+    pub(crate) obligation_ledger: ObligationLedger,
 
     event_tx: mpsc::Sender<AgentEvent>,
     command_tx: mpsc::Sender<AgentCommand>,
@@ -238,6 +244,8 @@ impl Agent {
             worktree_run_metadata: None,
             trace_writer: Arc::new(Mutex::new(None)),
             run_id: Arc::new(Mutex::new(None)),
+            active_objective: None,
+            obligation_ledger: ObligationLedger::default(),
             lua_tool_loader: None,
 
             event_tx,
@@ -280,6 +288,10 @@ impl Agent {
         let failed_bash_needs_recovery =
             tool_results_indicate_failed_bash_command(tool_results, self.mode)
                 && self.queued_execution_debt_follow_up_count == 0;
+        let mut obligation_ledger = self.obligation_ledger.clone();
+        if failed_bash_needs_recovery {
+            obligation_ledger.add(failed_command_recovery_obligation());
+        }
         let execution_text_stop_reason = if failed_bash_needs_recovery
             || self.should_retry_unanswered_execution_debt(tool_results, execution_evidence)
         {
@@ -302,6 +314,8 @@ impl Agent {
                 prompt: failed_bash_recovery_follow_up_text().to_string(),
                 reason: ContinueReason::ExecutionDebt,
             })
+        } else if let Some((prompt, reason)) = obligation_ledger.next_continue() {
+            Some(ContinueRecommendation { prompt, reason })
         } else if self.should_retry_unanswered_execution_debt(tool_results, execution_evidence) {
             Some(ContinueRecommendation {
                 prompt: execution_debt_follow_up_text().to_string(),
@@ -309,6 +323,7 @@ impl Agent {
             })
         } else if should_queue_mana_externalization_follow_up(
             message,
+            self.initial_user_prompt(),
             self.mode,
             self.has_mana_skill,
             self.queued_mana_externalization_nudge,
@@ -416,6 +431,19 @@ impl Agent {
         Ok(())
     }
 
+    fn initial_user_prompt(&self) -> &str {
+        self.messages
+            .iter()
+            .find_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .unwrap_or("")
+    }
+
     fn should_retry_unanswered_execution_debt(
         &self,
         tool_results: &[imp_llm::ToolResultMessage],
@@ -427,6 +455,20 @@ impl Agent {
             && tool_results
                 .iter()
                 .all(|result| result.is_error || result.tool_name == "work")
+    }
+
+    fn record_obligations_from_tool_results(
+        &mut self,
+        tool_results: &[imp_llm::ToolResultMessage],
+    ) {
+        if tool_results_indicate_failed_bash_command(tool_results, self.mode) {
+            self.obligation_ledger
+                .add(failed_command_recovery_obligation());
+        }
+        if tool_results_indicate_execution_evidence(tool_results, self.mode) {
+            self.obligation_ledger
+                .resolve_kind(autonomy::ObligationKind::FailedCommandRecovery);
+        }
     }
 
     fn record_workflow_obligations_from_tool_results(
@@ -711,6 +753,7 @@ fn should_queue_execution_debt_follow_up(
 
 fn should_queue_mana_externalization_follow_up(
     message: &AssistantMessage,
+    user_prompt: &str,
     mode: AgentMode,
     _has_mana_skill: bool,
     already_queued: bool,
@@ -730,35 +773,17 @@ fn should_queue_mana_externalization_follow_up(
         return false;
     }
 
+    if !user_prompt_requests_durable_externalization(user_prompt) {
+        return false;
+    }
+
     let text = assistant_message_text(message);
-    durable_mana_externalization_signal(&text)
+    assistant_described_externalizable_plan(&text)
 }
 
-fn durable_mana_externalization_signal(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    let durable_state_signal = [
-        "acceptance",
-        "architecture decision",
-        "blocker",
-        "blocked by",
-        "dependency",
-        "dependencies",
-        "durable",
-        "follow-up work",
-        "handoff",
-        "migration",
-        "orchestration",
-        "parallel",
-        "phase 1",
-        "phase 2",
-        "verify gate",
-        "worker",
-        "workers",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-
-    let explicit_work_signal = [
+fn user_prompt_requests_durable_externalization(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    let explicit_phrase = [
         "create imp-work",
         "create work",
         "externalize",
@@ -768,16 +793,54 @@ fn durable_mana_externalization_signal(text: &str) -> bool {
         "record this",
         "save this plan",
         "split this into tasks",
+        "split this into units",
         "turn this into imp-work",
+        "decompose this into tasks",
+        "decompose this into units",
     ]
     .iter()
     .any(|needle| lower.contains(needle));
 
-    durable_state_signal || explicit_work_signal
+    explicit_phrase
+        || ((lower.contains("split") || lower.contains("decompose"))
+            && (lower.contains("task")
+                || lower.contains("tasks")
+                || lower.contains("unit")
+                || lower.contains("units")))
+}
+
+fn assistant_described_externalizable_plan(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let has_plan_shape = [
+        "acceptance",
+        "dependency",
+        "dependencies",
+        "phase",
+        "phase 1",
+        "phase 2",
+        "verify gate",
+        "verification",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+
+    let has_work_product = [
+        "task",
+        "tasks",
+        "unit",
+        "units",
+        "work item",
+        "work items",
+        "split this",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+
+    has_plan_shape && has_work_product
 }
 
 fn mana_externalization_follow_up_text() -> &'static str {
-    "Before you continue: externalize the durable plan or decomposition you just described into native imp-work now. Create or update the relevant task(s) with native work actions, prefer global project scope, and avoid extra chat restatement when the work tool/UI already makes the delta obvious."
+    "Before you continue: the user explicitly asked for durable work structure. Externalize the plan or decomposition you just described into native imp-work now. Create or update the relevant task(s) with native work actions, prefer global project scope, and avoid extra chat restatement when the work tool/UI already makes the delta obvious."
 }
 
 fn should_queue_confidence_continue_follow_up(
@@ -2271,7 +2334,11 @@ mod tests {
     #[tokio::test]
     async fn agent_queues_mana_externalization_follow_up_after_planning_turn() {
         let provider = Arc::new(MockProvider::new(vec![
-            text_response("Here is the plan: split this into phases, add dependencies, and define verify steps.", 100, 20),
+            text_response(
+                "Here is the rollout decomposition: split this into phases and tasks, add dependencies, and define verification steps.",
+                100,
+                20,
+            ),
             text_response("Externalized into mana.", 120, 25),
         ]));
 
@@ -2280,7 +2347,10 @@ mod tests {
         agent.has_mana_skill = true;
         agent.mode = AgentMode::Planner;
 
-        agent.run("Plan the rollout".to_string()).await.unwrap();
+        agent
+            .run("Please split this rollout into tasks".to_string())
+            .await
+            .unwrap();
 
         let user_texts: Vec<String> = agent
             .messages
@@ -2295,8 +2365,79 @@ mod tests {
             .collect();
 
         assert_eq!(user_texts.len(), 2);
-        assert_eq!(user_texts[0], "Plan the rollout");
-        assert!(user_texts[1].contains("externalize the durable plan"));
+        assert_eq!(user_texts[0], "Please split this rollout into tasks");
+        assert!(user_texts[1].contains("explicitly asked for durable work structure"));
+    }
+
+    #[tokio::test]
+    async fn agent_does_not_externalize_explanatory_taxonomy_answers() {
+        let provider = Arc::new(MockProvider::new(vec![text_response(
+            "Skills are reusable playbooks. Workflows are process lanes. Subagents are delegated workers. They compose, but they are not interchangeable.",
+            100,
+            20,
+        )]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.has_mana_skill = true;
+        agent.mode = AgentMode::Planner;
+
+        agent
+            .run("How do workflows differ from skills or subagents?".to_string())
+            .await
+            .unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            user_texts,
+            vec!["How do workflows differ from skills or subagents?".to_string()]
+        );
+    }
+
+    #[test]
+    fn externalization_follow_up_requires_user_externalization_intent() {
+        let explanatory = AssistantMessage {
+            content: vec![ContentBlock::Text {
+                text: "Skills are reusable playbooks. Workflows are process lanes. Subagents are delegated workers.".into(),
+            }],
+            usage: None,
+            stop_reason: LlmStopReason::EndTurn,
+            timestamp: 0,
+        };
+        assert!(!should_queue_mana_externalization_follow_up(
+            &explanatory,
+            "How do workflows differ from skills or subagents?",
+            AgentMode::Planner,
+            true,
+            false,
+        ));
+
+        let plan = AssistantMessage {
+            content: vec![ContentBlock::Text {
+                text: "Here is the rollout decomposition: split this into phases and tasks, add dependencies, and define verification steps.".into(),
+            }],
+            usage: None,
+            stop_reason: LlmStopReason::EndTurn,
+            timestamp: 0,
+        };
+        assert!(should_queue_mana_externalization_follow_up(
+            &plan,
+            "Please split this rollout into tasks",
+            AgentMode::Planner,
+            true,
+            false,
+        ));
     }
 
     #[tokio::test]
@@ -4035,7 +4176,10 @@ mod tests {
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
 
         let events_task = tokio::spawn(collect_events(handle));
-        agent.run("Recover after partial stream failure".to_string()).await.unwrap();
+        agent
+            .run("Recover after partial stream failure".to_string())
+            .await
+            .unwrap();
         drop(agent);
 
         let events = events_task.await.unwrap();
@@ -4098,7 +4242,9 @@ mod tests {
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
 
         let events_task = tokio::spawn(collect_events(handle));
-        let result = agent.run("Fail after repeated stream recovery failures".to_string()).await;
+        let result = agent
+            .run("Fail after repeated stream recovery failures".to_string())
+            .await;
         drop(agent);
 
         assert!(result.is_err());
@@ -4153,7 +4299,10 @@ mod tests {
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
 
         let events_task = tokio::spawn(collect_events(handle));
-        agent.run("Recover from silent eof".to_string()).await.unwrap();
+        agent
+            .run("Recover from silent eof".to_string())
+            .await
+            .unwrap();
         drop(agent);
 
         let events = events_task.await.unwrap();

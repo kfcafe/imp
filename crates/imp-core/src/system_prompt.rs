@@ -235,10 +235,8 @@ fn identity_layer(
     s.push_str("- Ask one focused question when uncertainty changes scope, risk, architecture, destructive action, or user-visible behavior; otherwise proceed on low-risk local assumptions.\n");
     s.push_str("- Keep replies concise and evidence-oriented: what changed or was found, how it was verified, and what remains.\n");
     s.push_str("- Use native imp-work when durable work structure, verification, dependencies, retries, decisions, handoff, or recovery matter; make tasks detailed enough for another agent to execute cold.\n");
-    s.push_str("- During planning/design, externalize real durable structure only when it changes project/work state the user is actively developing: concrete goals, decompositions, decisions, dependencies, follow-ups, blockers, or handoff context.\n");
-    s.push_str("- Do not create imp-work artifacts from explanation-only answers, hypotheticals, commentary about external content, brainstorming with no adopted next step, or conversational asides. When unsure whether discussion became durable work, ask or just answer in chat.\n");
-    s.push_str("- For real durable structure, use epics/tasks/notes/decisions deliberately, reserve memory/facts for verifiable claims, and avoid noisy writes for small one-pass work.\n");
-    s.push_str("- Update imp-work after failures or material planning changes before relying on chat memory.\n");
+    s.push_str("- For durable project work, use epics/tasks/notes/decisions deliberately, keep artifacts tied to an adopted goal, and avoid noisy writes for small one-pass work.\n");
+    s.push_str("- Record progress after failures or material planning changes before relying on chat memory.\n");
     s.push_str("- When working from an imp-work task, treat its scope, dependencies, acceptance criteria, and verify command as the execution contract; do not broaden into unrelated cleanup.\n");
     s.push_str("- Stop only on verified completion, a real blocker, or a user-facing decision point; imp-work writes are checkpoints, not proof of completion.\n");
 
@@ -597,7 +595,9 @@ fn headless_execution_layer(task: &TaskContext) -> String {
         s.push_str("- If the verify command fails, either fix the issue or report the exact blocker. Do not claim completion anyway.\n");
     }
     s.push_str("- In batch-verify flows, treat your goal as leaving the task ready for verify rather than assuming verify already passed.\n");
-    s.push_str("- Respect parent/child structure: finish this task's outcome, not the whole feature.\n");
+    s.push_str(
+        "- Respect parent/child structure: finish this task's outcome, not the whole feature.\n",
+    );
     s
 }
 
@@ -772,16 +772,11 @@ mod tests {
     fn system_prompt_includes_conversation_time_imp_work_planning_doctrine() {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
-        assert!(result.text.contains(
-            "During planning/design, externalize real durable structure only when it changes project/work state the user is actively developing"
-        ));
-        assert!(result
-            .text
-            .contains("Do not create imp-work artifacts from explanation-only answers"));
+        assert!(result.text.contains("For durable project work"));
+        assert!(result.text.contains("tied to an adopted goal"));
         assert!(result.text.contains("epics/tasks/notes/decisions"));
-        assert!(result.text.contains("reserve memory/facts for verifiable claims"));
         assert!(result.text.contains(
-            "Update imp-work after failures or material planning changes before relying on chat memory"
+            "Record progress after failures or material planning changes before relying on chat memory"
         ));
         assert!(result
             .text
@@ -794,6 +789,7 @@ mod tests {
             1,
             "imp-work checkpoint guidance should appear once"
         );
+        assert!(!result.text.contains("explanation-only answers"));
         assert!(!result.text.contains("Imp-work doctrine:"));
         assert!(!result
             .text
@@ -829,7 +825,9 @@ mod tests {
         assert!(result
             .text
             .contains("Prefer native `work` actions for durable imp-work"));
-        assert!(result.text.contains("Use native imp-work when durable work"));
+        assert!(result
+            .text
+            .contains("Use native imp-work when durable work"));
         assert!(!result.text.contains("Use mana when durable work"));
     }
 

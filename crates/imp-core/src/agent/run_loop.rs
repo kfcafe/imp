@@ -44,7 +44,9 @@ fn recoverable_stream_failure_message(error: &str) -> Option<String> {
         || error.contains("Provider stream failed before output")
         || error.contains("missing terminal completion event")
     {
-        Some(format!("{STREAM_RECOVERY_FOLLOW_UP}\n\nProvider error: {error}"))
+        Some(format!(
+            "{STREAM_RECOVERY_FOLLOW_UP}\n\nProvider error: {error}"
+        ))
     } else {
         None
     }
@@ -349,6 +351,7 @@ impl Agent {
         trace_run("hook_agent_start", phase_started);
         let phase_started = std::time::Instant::now();
 
+        self.active_objective = Some(super::AutonomousObjective::from_prompt(&prompt));
         self.messages.push(Message::user(&prompt));
 
         self.cancel_token
@@ -746,7 +749,8 @@ impl Agent {
                             if stream_recovery_attempts < MAX_STREAM_RECOVERY_ATTEMPTS {
                                 stream_recovery_attempts += 1;
                                 queued_follow_ups.push_back(follow_up);
-                                turn_state.record_continue(super::ContinueReason::QueuedUserFollowUp);
+                                turn_state
+                                    .record_continue(super::ContinueReason::QueuedUserFollowUp);
                                 turn += 1;
                                 continue 'turns;
                             }
@@ -934,6 +938,7 @@ impl Agent {
             }
 
             record_mana_mutation_results(&self.turn_mana_review, &results);
+            self.record_obligations_from_tool_results(&results);
             self.record_workflow_obligations_from_tool_results(&results);
             let mana_review = self.finish_turn_mana_review(turn);
             self.emit(AgentEvent::TurnEnd {
