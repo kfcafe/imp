@@ -930,6 +930,17 @@ fn push_tool_call_chat_lines(
         tool_line_indices.push((header_start + offset, tc.id.clone()));
     }
     all_lines.extend(header_lines);
+    let detail_lines = tc.summary_detail_lines(theme);
+    if chat_tool_display == ChatToolDisplay::Summary && !detail_lines.is_empty() {
+        for line in detail_lines {
+            let line_start = all_lines.len();
+            let wrapped = wrap_line_with_prefix(&line, &rail, &rail, width, word_wrap);
+            for offset in 0..wrapped.len() {
+                tool_line_indices.push((line_start + offset, tc.id.clone()));
+            }
+            all_lines.extend(wrapped);
+        }
+    }
 
     if chat_tool_display == ChatToolDisplay::Summary {
         return;
@@ -1445,7 +1456,7 @@ mod tests {
             .unwrap();
         let tool_idx = rendered
             .iter()
-            .position(|line| line.contains("read") && line.contains("src/main.rs"))
+            .position(|line| line.contains("Read") && line.contains("src/main.rs"))
             .unwrap();
         let second_thought_idx = rendered
             .iter()
@@ -1533,7 +1544,7 @@ mod tests {
             .unwrap();
         let tool_idx = rendered
             .iter()
-            .position(|line| line.contains("read") && line.contains("src/main.rs"))
+            .position(|line| line.contains("Read") && line.contains("src/main.rs"))
             .unwrap();
         let after_idx = rendered
             .iter()
@@ -1578,7 +1589,7 @@ mod tests {
         assert_eq!(visible_tools.len(), 1);
         assert!(rendered
             .iter()
-            .any(|line| line.contains("read") && line.contains("src/main.rs")));
+            .any(|line| line.contains("Read") && line.contains("src/main.rs")));
         assert!(!rendered.iter().any(|line| line.contains("fn main() {}")));
     }
 
@@ -1614,7 +1625,7 @@ mod tests {
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
         assert_eq!(visible_tools.len(), 1);
         assert!(rendered.iter().any(|line| line.contains("▸")
-            && line.contains("read")
+            && line.contains("Read")
             && line.contains("src/main.rs")));
     }
 

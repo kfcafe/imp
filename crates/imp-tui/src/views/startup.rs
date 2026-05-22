@@ -259,6 +259,13 @@ fn render_section(area: Rect, buf: &mut Buffer, theme: &Theme, section: &Startup
 }
 
 fn render_section_line(line: &str, theme: &Theme) -> Line<'static> {
+    if let Some((icon, label)) = parse_tool_icon_line(line) {
+        return Line::from(vec![
+            Span::styled(format!("{icon} "), theme.accent_style()),
+            Span::raw(label.to_string()),
+        ]);
+    }
+
     if let Some(rest) = line.strip_prefix("• ") {
         if let Some((label, value)) = rest.split_once(':') {
             return Line::from(vec![
@@ -275,6 +282,15 @@ fn render_section_line(line: &str, theme: &Theme) -> Line<'static> {
     }
 
     Line::from(Span::styled(line.to_string(), theme.muted_style()))
+}
+
+fn parse_tool_icon_line(line: &str) -> Option<(&str, &str)> {
+    let (icon, label) = line.split_once(' ')?;
+    if matches!(icon, "▣" | "$" | "◧" | "✎" | "◇" | "◆" | "⌕" | "◎" | "⚗") {
+        Some((icon, label))
+    } else {
+        None
+    }
 }
 
 pub fn action_block_height(width: u16, action_count: usize) -> u16 {
@@ -361,7 +377,11 @@ pub fn truncate_preview(text: &str, max_lines: usize, max_chars: usize) -> Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{summarize_inline, summarize_lines, truncate_preview, visible_section_count};
+    use super::{
+        render_section_line, summarize_inline, summarize_lines, truncate_preview,
+        visible_section_count,
+    };
+    use crate::theme::Theme;
 
     #[test]
     fn summarize_lines_appends_hidden_count() {
@@ -383,6 +403,15 @@ mod tests {
             2,
         );
         assert_eq!(text, "ask, bash … +2 more");
+    }
+
+    #[test]
+    fn render_section_line_styles_tool_icon_and_label_consistently() {
+        let line = render_section_line("◧ Read", &Theme::default());
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].content.as_ref(), "◧ ");
+        assert_eq!(line.spans[1].content.as_ref(), "Read");
+        assert_eq!(line.spans[1].style.fg, None);
     }
 
     #[test]

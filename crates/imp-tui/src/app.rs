@@ -93,7 +93,7 @@ use crate::views::startup::{
     StartupSection,
 };
 use crate::views::status::StatusInfo;
-use crate::views::tools::DisplayToolCall;
+use crate::views::tools::{tool_display_icon, tool_display_name, DisplayToolCall};
 use crate::views::tree::{flatten_tree, TreeView, TreeViewState};
 use crate::views::welcome::{needs_welcome, WelcomeState, WelcomeStep, WelcomeView};
 
@@ -3420,7 +3420,7 @@ impl App {
 
         let tool_lines = visible_prompt_tools
             .iter()
-            .map(|name| format!("• {name}"))
+            .map(|name| format!("{} {}", tool_display_icon(name), tool_display_name(name)))
             .collect::<Vec<_>>();
 
         let skill_lines = if skills.is_empty() {
@@ -4291,6 +4291,16 @@ impl App {
                 }
                 _ => {}
             },
+            Some(Action::OverlayLeft) => {
+                if let UiMode::CommandPalette(s) = &mut self.mode {
+                    s.prev_page();
+                }
+            }
+            Some(Action::OverlayRight) => {
+                if let UiMode::CommandPalette(s) = &mut self.mode {
+                    s.next_page();
+                }
+            }
             Some(Action::OverlaySelect) => {
                 self.handle_overlay_select();
             }
@@ -11257,6 +11267,22 @@ mod session_lifecycle {
         assert!(!app.sidebar.open);
         assert_eq!(app.active_pane, Pane::Chat);
         assert!(app.selection.is_some());
+    }
+
+    #[test]
+    fn startup_surface_uses_tool_icons() {
+        let app = make_app();
+        let startup = app.build_startup_surface();
+        let tools = startup
+            .panel
+            .sections
+            .iter()
+            .find(|section| section.title == "tools")
+            .expect("tools section present");
+
+        assert!(tools.lines.iter().any(|line| line == "▣ Work"));
+        assert!(tools.lines.iter().any(|line| line == "$ Terminal"));
+        assert!(!tools.lines.iter().any(|line| line.starts_with("• work")));
     }
 
     #[test]

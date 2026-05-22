@@ -44,6 +44,8 @@ pub enum Action {
     // Overlay navigation
     OverlayUp,
     OverlayDown,
+    OverlayLeft,
+    OverlayRight,
     OverlaySelect,
     OverlayDismiss,
     OverlayFilter(char),
@@ -131,6 +133,8 @@ pub fn resolve_overlay(key: KeyEvent) -> Option<Action> {
         KeyCode::BackTab => Some(Action::OverlayUp),
         KeyCode::Char('n') if ctrl => Some(Action::OverlayDown),
         KeyCode::Char('p') if ctrl => Some(Action::OverlayUp),
+        KeyCode::Left => Some(Action::OverlayLeft),
+        KeyCode::Right => Some(Action::OverlayRight),
         KeyCode::Enter => Some(Action::OverlaySelect),
         KeyCode::Esc => Some(Action::OverlayDismiss),
         KeyCode::Backspace => Some(Action::OverlayBackspace),
