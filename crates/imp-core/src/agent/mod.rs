@@ -3820,19 +3820,99 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_surfaces_error_after_partial_stream_without_retrying() {
-        let provider = Arc::new(MockProvider::new_results(vec![vec![
-            Ok(StreamEvent::TextDelta {
-                text: "partial".to_string(),
-            }),
-            Err(imp_llm::Error::Stream("mid-stream failure".into())),
-        ]]));
+    async fn agent_recovers_after_partial_stream_failure() {
+        let provider = Arc::new(MockProvider::new_results(vec![
+            vec![
+                Ok(StreamEvent::TextDelta {
+                    text: "partial".to_string(),
+                }),
+                Err(imp_llm::Error::Stream("mid-stream failure".into())),
+            ],
+            vec![
+                Ok(StreamEvent::TextDelta {
+                    text: "recovered".to_string(),
+                }),
+                Ok(StreamEvent::MessageEnd {
+                    message: AssistantMessage {
+                        content: vec![ContentBlock::Text {
+                            text: "recovered".to_string(),
+                        }],
+                        usage: Some(Usage::default()),
+                        stop_reason: LlmStopReason::EndTurn,
+                        timestamp: 1000,
+                    },
+                }),
+            ],
+        ]));
 
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
 
         let events_task = tokio::spawn(collect_events(handle));
-        let result = agent.run("Fail midway".to_string()).await;
+        agent.run("Recover after partial stream failure".to_string()).await.unwrap();
+        drop(agent);
+
+        let events = events_task.await.unwrap();
+        let error_idx = events.iter().position(|e| {
+            matches!(
+                e,
+                AgentEvent::Error { error }
+                if error.contains("Provider stream failed after partial output")
+                    && error.contains("mid-stream failure")
+            )
+        });
+        let recovered_idx = events.iter().position(|e| {
+            matches!(
+                e,
+                AgentEvent::MessageDelta {
+                    delta: StreamEvent::TextDelta { text }
+                } if text == "recovered"
+            )
+        });
+        let failed_end = events.iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::AgentEnd {
+                    status: RunFinalStatus::Failed { .. },
+                    ..
+                }
+            )
+        });
+
+        assert!(error_idx.is_some());
+        assert!(recovered_idx.is_some());
+        assert!(error_idx.unwrap() < recovered_idx.unwrap());
+        assert!(!failed_end);
+    }
+
+    #[tokio::test]
+    async fn agent_surfaces_error_after_repeated_partial_stream_failures() {
+        let provider = Arc::new(MockProvider::new_results(vec![
+            vec![
+                Ok(StreamEvent::TextDelta {
+                    text: "partial-1".to_string(),
+                }),
+                Err(imp_llm::Error::Stream("mid-stream failure 1".into())),
+            ],
+            vec![
+                Ok(StreamEvent::TextDelta {
+                    text: "partial-2".to_string(),
+                }),
+                Err(imp_llm::Error::Stream("mid-stream failure 2".into())),
+            ],
+            vec![
+                Ok(StreamEvent::TextDelta {
+                    text: "partial-3".to_string(),
+                }),
+                Err(imp_llm::Error::Stream("mid-stream failure 3".into())),
+            ],
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        let result = agent.run("Fail after repeated stream recovery failures".to_string()).await;
         drop(agent);
 
         assert!(result.is_err());
@@ -3843,7 +3923,7 @@ mod tests {
                 e,
                 AgentEvent::MessageDelta {
                     delta: StreamEvent::TextDelta { text }
-                } if text == "partial"
+                } if text == "partial-1"
             )
         });
         let error_idx = events.iter().position(|e| {
@@ -3861,21 +3941,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_treats_silent_eof_without_message_end_as_error() {
-        let provider = Arc::new(MockProvider::new_results(vec![vec![Ok(
-            StreamEvent::TextDelta {
+    async fn agent_recovers_after_silent_eof_without_message_end() {
+        let provider = Arc::new(MockProvider::new_results(vec![
+            vec![Ok(StreamEvent::TextDelta {
                 text: "partial".to_string(),
-            },
-        )]]));
+            })],
+            vec![
+                Ok(StreamEvent::TextDelta {
+                    text: "recovered".to_string(),
+                }),
+                Ok(StreamEvent::MessageEnd {
+                    message: AssistantMessage {
+                        content: vec![ContentBlock::Text {
+                            text: "recovered".to_string(),
+                        }],
+                        usage: Some(Usage::default()),
+                        stop_reason: LlmStopReason::EndTurn,
+                        timestamp: 1000,
+                    },
+                }),
+            ],
+        ]));
 
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
 
         let events_task = tokio::spawn(collect_events(handle));
-        let result = agent.run("Fail with silent eof".to_string()).await;
+        agent.run("Recover from silent eof".to_string()).await.unwrap();
         drop(agent);
-
-        assert!(result.is_err());
 
         let events = events_task.await.unwrap();
         let text_delta = events.iter().position(|e| {
@@ -3893,14 +3986,20 @@ mod tests {
                 if error.contains("missing terminal completion event")
             )
         });
-        let turn_end_idx = events
-            .iter()
-            .position(|e| matches!(e, AgentEvent::TurnEnd { .. }));
+        let recovered_idx = events.iter().position(|e| {
+            matches!(
+                e,
+                AgentEvent::MessageDelta {
+                    delta: StreamEvent::TextDelta { text }
+                } if text == "recovered"
+            )
+        });
 
         assert!(text_delta.is_some());
         assert!(error_idx.is_some());
-        assert!(turn_end_idx.is_none());
+        assert!(recovered_idx.is_some());
         assert!(text_delta.unwrap() < error_idx.unwrap());
+        assert!(error_idx.unwrap() < recovered_idx.unwrap());
     }
 
     // ── Test 1: Simple text response ───────────────────────────────

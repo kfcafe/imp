@@ -85,6 +85,24 @@ struct SseResponse {
     status: Option<String>,
     #[serde(default)]
     usage: Option<SseUsage>,
+    #[serde(default)]
+    error: Option<SseResponseError>,
+    #[serde(default)]
+    incomplete_details: Option<SseIncompleteDetails>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SseResponseError {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SseIncompleteDetails {
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -451,6 +469,18 @@ fn push_thinking_block(content: &mut Vec<ContentBlock>, text: String) {
     }
 }
 
+fn format_openai_response_error(resp: &SseResponse) -> String {
+    match resp.error.as_ref() {
+        Some(error) => match (error.code.as_deref(), error.message.as_deref()) {
+            (Some(code), Some(message)) if !message.is_empty() => format!("{code}: {message}"),
+            (Some(code), _) => code.to_string(),
+            (_, Some(message)) if !message.is_empty() => message.to_string(),
+            _ => "response.failed".to_string(),
+        },
+        None => "response.failed".to_string(),
+    }
+}
+
 fn process_sse_event(event: SseEvent, state: &mut StreamState) -> Vec<StreamEvent> {
     process_openai_stream_event(event, state)
 }
@@ -531,32 +561,43 @@ fn process_openai_stream_event(event: SseEvent, state: &mut StreamState) -> Vec<
                 }
             }
         }
-        "response.completed" => {
+        "response.completed" | "response.incomplete" | "response.failed" => {
             state.finished = true;
             if let Some(resp) = event.response {
-                if let Some(u) = resp.usage {
+                if let Some(ref u) = resp.usage {
                     state.usage.input_tokens = u.input_tokens;
                     state.usage.output_tokens = u.output_tokens;
-                    if let Some(details) = u.input_tokens_details {
+                    if let Some(details) = &u.input_tokens_details {
                         state.usage.cache_read_tokens = details.cached_tokens;
                     }
                 }
 
-                state.stop_reason = match resp.status.as_deref() {
-                    Some("completed") => {
-                        if state
-                            .content
-                            .iter()
-                            .any(|c| matches!(c, ContentBlock::ToolCall { .. }))
-                        {
-                            StopReason::ToolUse
-                        } else {
-                            StopReason::EndTurn
+                state.stop_reason = match event.event_type.as_str() {
+                    "response.failed" => StopReason::Error(format_openai_response_error(&resp)),
+                    "response.incomplete" => match resp
+                        .incomplete_details
+                        .as_ref()
+                        .and_then(|details| details.reason.as_deref())
+                    {
+                        Some("max_output_tokens") | None => StopReason::MaxTokens,
+                        Some(reason) => StopReason::Error(reason.to_string()),
+                    },
+                    _ => match resp.status.as_deref() {
+                        Some("completed") => {
+                            if state
+                                .content
+                                .iter()
+                                .any(|c| matches!(c, ContentBlock::ToolCall { .. }))
+                            {
+                                StopReason::ToolUse
+                            } else {
+                                StopReason::EndTurn
+                            }
                         }
-                    }
-                    Some("incomplete") => StopReason::MaxTokens,
-                    Some(other) => StopReason::Error(other.to_string()),
-                    None => StopReason::EndTurn,
+                        Some("incomplete") => StopReason::MaxTokens,
+                        Some(other) => StopReason::Error(other.to_string()),
+                        None => StopReason::EndTurn,
+                    },
                 };
             }
 
@@ -1223,6 +1264,44 @@ mod tests {
         assert_eq!(events.len(), 1);
         if let StreamEvent::MessageEnd { message } = &events[0] {
             assert_eq!(message.stop_reason, StopReason::MaxTokens);
+        } else {
+            panic!("expected MessageEnd");
+        }
+    }
+
+    #[test]
+    fn openai_response_incomplete_event_maps_to_max_tokens_and_finishes() {
+        let mut state = StreamState::new();
+        let data = r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":7,"output_tokens":11}}}"#;
+        let event = parse_sse_event(data).unwrap().unwrap();
+        let events = process_sse_event(event, &mut state);
+
+        assert!(state.finished);
+        assert_eq!(events.len(), 1);
+        if let StreamEvent::MessageEnd { message } = &events[0] {
+            assert_eq!(message.stop_reason, StopReason::MaxTokens);
+            let usage = message.usage.as_ref().unwrap();
+            assert_eq!(usage.input_tokens, 7);
+            assert_eq!(usage.output_tokens, 11);
+        } else {
+            panic!("expected MessageEnd");
+        }
+    }
+
+    #[test]
+    fn openai_response_failed_event_finishes_with_error_reason() {
+        let mut state = StreamState::new();
+        let data = r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"upstream disconnected"}}}"#;
+        let event = parse_sse_event(data).unwrap().unwrap();
+        let events = process_sse_event(event, &mut state);
+
+        assert!(state.finished);
+        assert_eq!(events.len(), 1);
+        if let StreamEvent::MessageEnd { message } = &events[0] {
+            assert_eq!(
+                message.stop_reason,
+                StopReason::Error("server_error: upstream disconnected".into())
+            );
         } else {
             panic!("expected MessageEnd");
         }

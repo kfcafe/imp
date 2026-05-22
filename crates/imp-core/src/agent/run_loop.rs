@@ -36,6 +36,20 @@ use super::{
     push_stream_thinking_block, record_mana_mutation_results,
 };
 
+const STREAM_RECOVERY_FOLLOW_UP: &str = "The provider stream failed before completing the previous assistant message. Continue from the last completed conversation state. Do not repeat already completed tool side effects; if you need to retry, first inspect current state and proceed safely.";
+const MAX_STREAM_RECOVERY_ATTEMPTS: u32 = 2;
+
+fn recoverable_stream_failure_message(error: &str) -> Option<String> {
+    if error.contains("Provider stream failed after partial output")
+        || error.contains("Provider stream failed before output")
+        || error.contains("missing terminal completion event")
+    {
+        Some(format!("{STREAM_RECOVERY_FOLLOW_UP}\n\nProvider error: {error}"))
+    } else {
+        None
+    }
+}
+
 impl Agent {
     pub(super) async fn reconcile_recovery_before_turn(
         &self,
@@ -347,6 +361,7 @@ impl Agent {
             std::collections::VecDeque::new();
         let mut queued_pre_turn_follow_ups: std::collections::VecDeque<String> =
             std::collections::VecDeque::new();
+        let mut stream_recovery_attempts: u32 = 0;
         trace_run("init_loop_state", phase_started);
 
         if let Some(nudge) = mana_skill_follow_up_hint(
@@ -360,7 +375,7 @@ impl Agent {
             queued_pre_turn_follow_ups.push_back(nudge.to_string());
         }
 
-        loop {
+        'turns: loop {
             self.bootstrap_workflow_if_required(&prompt).await;
             let mut turn_state = TurnState::new(turn);
             self.workflow_controller.tick_turn();
@@ -389,7 +404,10 @@ impl Agent {
             }
 
             if turn > 0 {
-                if let Some(follow_up) = queued_pre_turn_follow_ups.pop_front() {
+                if let Some(follow_up) = queued_pre_turn_follow_ups
+                    .pop_front()
+                    .or_else(|| queued_follow_ups.pop_front())
+                {
                     turn_state.record_continue(super::ContinueReason::QueuedUserFollowUp);
                     self.messages.push(Message::user(&follow_up));
                 }
@@ -724,6 +742,15 @@ impl Agent {
                             error: error.clone(),
                         })
                         .await;
+                        if let Some(follow_up) = recoverable_stream_failure_message(&error) {
+                            if stream_recovery_attempts < MAX_STREAM_RECOVERY_ATTEMPTS {
+                                stream_recovery_attempts += 1;
+                                queued_follow_ups.push_back(follow_up);
+                                turn_state.record_continue(super::ContinueReason::QueuedUserFollowUp);
+                                turn += 1;
+                                continue 'turns;
+                            }
+                        }
                         let cost = total_usage.cost(&self.model.meta.pricing);
                         self.emit(AgentEvent::AgentEnd {
                             usage: total_usage,
@@ -769,6 +796,15 @@ impl Agent {
                         error: error.clone(),
                     })
                     .await;
+                    if let Some(follow_up) = recoverable_stream_failure_message(&error) {
+                        if stream_recovery_attempts < MAX_STREAM_RECOVERY_ATTEMPTS {
+                            stream_recovery_attempts += 1;
+                            queued_follow_ups.push_back(follow_up);
+                            turn_state.record_continue(super::ContinueReason::QueuedUserFollowUp);
+                            turn += 1;
+                            continue;
+                        }
+                    }
                     let cost = total_usage.cost(&self.model.meta.pricing);
                     self.emit(AgentEvent::AgentEnd {
                         usage: total_usage,
