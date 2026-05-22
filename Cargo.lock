@@ -2630,6 +2630,7 @@ dependencies = [
  "imp-llm",
  "imp-lua",
  "imp-tui",
+ "imp-work",
  "mana-core",
  "serde",
  "serde_json",
