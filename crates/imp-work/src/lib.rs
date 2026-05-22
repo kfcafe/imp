@@ -19,8 +19,15 @@ pub use context_pack::{
 pub use event::{
     ArtifactKind, ArtifactRef, EventCursor, EventLog, EvidenceSummary, WorkEvent, WorkEventKind,
 };
-pub use global_store::{GlobalWorkStore, ProjectScopedTask, ProjectWorkStream, StreamEvent};
-pub use mana_shadow::{import_mana_unit_shadow, ManaShadowImport, ManaShadowUnit};
+pub use global_store::{
+    GlobalWorkStore, ProjectScopedDecision, ProjectScopedMemory, ProjectScopedTask,
+    ProjectWorkStream, StreamEvent, StreamRelation,
+};
+pub use mana_shadow::{
+    dry_run_mana_migration, dry_run_project_local_migration, import_mana_unit_shadow,
+    migrate_mana_to_store, migrate_project_local_to_global, ManaHistoryRef, ManaMigrationReport,
+    ManaShadowImport, ManaShadowUnit, ProjectLocalMigrationReport,
+};
 pub use memory::{
     capture_conversation_memory, classify_memory_kind, ConversationMemoryIndex,
     ConversationMemoryInput, ConversationMemoryMatch, ConversationMemoryQuery,

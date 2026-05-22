@@ -181,12 +181,44 @@ impl WorkStore {
         query: ConversationMemoryQuery,
         prior_attempts: Vec<String>,
     ) -> Result<ContextPack> {
+        self.compile_task_context_with_stream_history(task, query, prior_attempts, Vec::new())
+    }
+
+    pub fn compile_task_context_with_stream_history(
+        &self,
+        task: &Task,
+        query: ConversationMemoryQuery,
+        prior_attempts: Vec<String>,
+        stream_history: Vec<String>,
+    ) -> Result<ContextPack> {
         let memory = self
             .retrieve_memory(query)?
             .into_iter()
             .map(|memory_match| memory_match.memory)
             .collect();
-        Ok(ContextCompiler::compile_task(task, memory, prior_attempts))
+        Ok(ContextCompiler::compile(crate::context_pack::ContextCompileRequest {
+            work_id: task.id.clone(),
+            version: 1,
+            token_budget: None,
+            objective: task.title.clone(),
+            non_goals: Vec::new(),
+            acceptance: task.acceptance.clone(),
+            memory,
+            stream_history,
+            checks: task
+                .checks
+                .iter()
+                .map(|check| {
+                    check
+                        .command
+                        .clone()
+                        .unwrap_or_else(|| check.description.clone())
+                })
+                .collect(),
+            prior_attempts,
+            source_refs: task.source_refs.clone(),
+            launch_kind: crate::context_pack::ContextLaunchKind::Task,
+        }))
     }
 
     pub fn compile_prototype_context_with_memory(

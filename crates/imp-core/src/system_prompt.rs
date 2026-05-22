@@ -222,8 +222,8 @@ fn identity_layer(
     if defs.iter().any(|def| def.name == "git") {
         s.push_str("- Use `git` for local repo/worktree operations; use `bash` for uncovered git commands.\n");
     }
-    if defs.iter().any(|def| def.name == "mana") {
-        s.push_str("- Prefer native `mana` actions over shell for mana work.\n");
+    if defs.iter().any(|def| def.name == "work") {
+        s.push_str("- Prefer native `work` actions for durable imp-work; use `work(action=\"guide\")` when workflow guidance is needed.\n");
     }
     s.push_str("- Use `read` before explaining or editing specific files; use `edit`/`write` for file changes.\n");
 
@@ -234,13 +234,13 @@ fn identity_layer(
     s.push_str("- Treat failed commands, compiler errors, and missing evidence as blockers to resolve or report; never claim unverified success.\n");
     s.push_str("- Ask one focused question when uncertainty changes scope, risk, architecture, destructive action, or user-visible behavior; otherwise proceed on low-risk local assumptions.\n");
     s.push_str("- Keep replies concise and evidence-oriented: what changed or was found, how it was verified, and what remains.\n");
-    s.push_str("- Use mana when durable work structure, verification, dependencies, retries, decisions, handoff, or recovery matter; make units detailed enough for another agent to execute cold.\n");
+    s.push_str("- Use native imp-work when durable work structure, verification, dependencies, retries, decisions, handoff, or recovery matter; make tasks detailed enough for another agent to execute cold.\n");
     s.push_str("- During planning/design, externalize real durable structure only when it changes project/work state the user is actively developing: concrete goals, decompositions, decisions, dependencies, follow-ups, blockers, or handoff context.\n");
-    s.push_str("- Do not create mana artifacts from explanation-only answers, hypotheticals, commentary about external content, brainstorming with no adopted next step, or conversational asides. When unsure whether discussion became durable work, ask or just answer in chat.\n");
-    s.push_str("- For real durable structure, use epics/tasks/notes/decisions deliberately, reserve facts for verifiable claims, and avoid noisy mana writes for small one-pass work.\n");
-    s.push_str("- Update mana after failures or material planning changes before relying on chat memory.\n");
-    s.push_str("- When working from a mana unit, treat its scope, dependencies, acceptance criteria, and verify command as the execution contract; do not broaden into unrelated cleanup.\n");
-    s.push_str("- Stop only on verified completion, a real blocker, or a user-facing decision point; mana writes are checkpoints, not proof of completion.\n");
+    s.push_str("- Do not create imp-work artifacts from explanation-only answers, hypotheticals, commentary about external content, brainstorming with no adopted next step, or conversational asides. When unsure whether discussion became durable work, ask or just answer in chat.\n");
+    s.push_str("- For real durable structure, use epics/tasks/notes/decisions deliberately, reserve memory/facts for verifiable claims, and avoid noisy writes for small one-pass work.\n");
+    s.push_str("- Update imp-work after failures or material planning changes before relying on chat memory.\n");
+    s.push_str("- When working from an imp-work task, treat its scope, dependencies, acceptance criteria, and verify command as the execution contract; do not broaden into unrelated cleanup.\n");
+    s.push_str("- Stop only on verified completion, a real blocker, or a user-facing decision point; imp-work writes are checkpoints, not proof of completion.\n");
 
     // Append role instructions after identity layer
     if let Some(role) = role {
@@ -584,22 +584,20 @@ fn task_layer(task: &TaskContext) -> String {
 
 fn headless_execution_layer(task: &TaskContext) -> String {
     let mut s = String::from("## Headless execution contract\n");
-    s.push_str("- You are executing an explicit mana unit, not exploring broadly.\n");
-    s.push_str("- Treat the unit title, description, notes, acceptance criteria, and verify gate as the source of truth for scope and success.\n");
+    s.push_str("- You are executing an explicit imp-work task, not exploring broadly.\n");
+    s.push_str("- Treat the task title, description, notes, acceptance criteria, and verify gate as the source of truth for scope and success.\n");
     s.push_str("- Execute the assigned outcome before expanding into adjacent cleanup, refactors, or unrelated improvements.\n");
     s.push_str("- Use explicit file references and prefilled context first before searching more broadly.\n");
     s.push_str(
-        "- If the unit includes prior failed attempts, do not retry the same plan unchanged.\n",
+        "- If the task includes prior failed attempts, do not retry the same plan unchanged.\n",
     );
     s.push_str("- If dependency state or prerequisite decisions are unresolved, treat that as a blocker rather than improvising around it.\n");
-    s.push_str("- Keep progress updates concise and useful. Record meaningful discoveries, blockers, and revised plans with `mana update`.\n");
+    s.push_str("- Keep progress updates concise and useful. Record meaningful discoveries, blockers, and revised plans with native imp-work updates.\n");
     if task.verify.is_some() {
         s.push_str("- If the verify command fails, either fix the issue or report the exact blocker. Do not claim completion anyway.\n");
     }
-    s.push_str("- In batch-verify flows, treat your goal as leaving the unit ready for verify rather than assuming verify already passed.\n");
-    s.push_str(
-        "- Respect parent/child structure: finish this unit's outcome, not the whole feature.\n",
-    );
+    s.push_str("- In batch-verify flows, treat your goal as leaving the task ready for verify rather than assuming verify already passed.\n");
+    s.push_str("- Respect parent/child structure: finish this task's outcome, not the whole feature.\n");
     s
 }
 
@@ -771,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_includes_conversation_time_mana_planning_doctrine() {
+    fn system_prompt_includes_conversation_time_imp_work_planning_doctrine() {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(result.text.contains(
@@ -779,24 +777,24 @@ mod tests {
         ));
         assert!(result
             .text
-            .contains("Do not create mana artifacts from explanation-only answers"));
+            .contains("Do not create imp-work artifacts from explanation-only answers"));
         assert!(result.text.contains("epics/tasks/notes/decisions"));
-        assert!(result.text.contains("reserve facts for verifiable claims"));
+        assert!(result.text.contains("reserve memory/facts for verifiable claims"));
         assert!(result.text.contains(
-            "Update mana after failures or material planning changes before relying on chat memory"
+            "Update imp-work after failures or material planning changes before relying on chat memory"
         ));
         assert!(result
             .text
-            .contains("mana writes are checkpoints, not proof of completion"));
+            .contains("imp-work writes are checkpoints, not proof of completion"));
         assert_eq!(
             result
                 .text
-                .matches("mana writes are checkpoints, not proof of completion")
+                .matches("imp-work writes are checkpoints, not proof of completion")
                 .count(),
             1,
-            "mana checkpoint guidance should appear once"
+            "imp-work checkpoint guidance should appear once"
         );
-        assert!(!result.text.contains("Mana doctrine:"));
+        assert!(!result.text.contains("Imp-work doctrine:"));
         assert!(!result
             .text
             .contains("between-turn mana update before the substantive reply"));
@@ -819,32 +817,34 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_mana_guidance_prefers_native_tool_when_available() {
+    fn system_prompt_work_guidance_prefers_native_tool_when_available() {
         let mut reg = make_registry();
         reg.register(Arc::new(FakeTool {
-            name: "mana",
-            description: "Manage mana work natively",
+            name: "work",
+            description: "Manage imp-work natively",
             readonly: false,
         }));
 
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(result
             .text
-            .contains("Prefer native `mana` actions over shell for mana work."));
+            .contains("Prefer native `work` actions for durable imp-work"));
+        assert!(result.text.contains("Use native imp-work when durable work"));
+        assert!(!result.text.contains("Use mana when durable work"));
     }
 
     #[test]
-    fn system_prompt_mana_guidance_omitted_without_mana_tool() {
+    fn system_prompt_work_guidance_omitted_without_work_tool() {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(!result
             .text
-            .contains("Prefer native `mana` actions over shell for mana work."));
+            .contains("Prefer native `work` actions for durable imp-work"));
     }
 
     #[test]
-    fn system_prompt_no_mana_guidance_or_delegation_in_prompt() {
-        // Extended mana guidance lives in native `mana guide`/`mana template` affordances.
+    fn system_prompt_no_legacy_mana_guidance_or_delegation_in_prompt() {
+        // Extended imp-work guidance lives in native `work guide` affordances.
         // Verify large legacy prompt blocks no longer appear regardless of tool availability.
         let mut reg = make_registry();
         reg.register(Arc::new(FakeTool {

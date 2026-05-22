@@ -21,6 +21,7 @@ pub struct ContextCompileRequest {
     pub checks: Vec<String>,
     pub prior_attempts: Vec<String>,
     pub source_refs: Vec<SourceRef>,
+    pub stream_history: Vec<String>,
     pub launch_kind: ContextLaunchKind,
 }
 
@@ -118,6 +119,14 @@ impl ContextCompiler {
             Vec::new(),
         );
 
+        push_list_block(
+            &mut blocks,
+            "Project stream history",
+            &request.stream_history,
+            ContextBlockStability::ProjectStable,
+            Vec::new(),
+        );
+
         let output_contract = match request.launch_kind {
             ContextLaunchKind::Task => TASK_OUTPUT_CONTRACT,
             ContextLaunchKind::Prototype => PROTOTYPE_OUTPUT_CONTRACT,
@@ -165,6 +174,7 @@ impl ContextCompiler {
                 .collect(),
             prior_attempts,
             source_refs: task.source_refs.clone(),
+            stream_history: Vec::new(),
             launch_kind: ContextLaunchKind::Task,
         })
     }
@@ -195,6 +205,7 @@ impl ContextCompiler {
             checks: Vec::new(),
             prior_attempts: prototype.learnings.clone(),
             source_refs: Vec::new(),
+            stream_history: Vec::new(),
             launch_kind: ContextLaunchKind::Prototype,
         })
     }
@@ -364,6 +375,33 @@ mod tests {
 
         assert!(freshness.stale);
         assert_eq!(freshness.stale_sources.len(), 2);
+    }
+
+    #[test]
+    fn context_renderer_includes_project_stream_history() {
+        let request = ContextCompileRequest {
+            work_id: WorkId::from("T-stream"),
+            version: 1,
+            token_budget: Some(2000),
+            objective: "Continue stream work".to_string(),
+            non_goals: Vec::new(),
+            acceptance: Vec::new(),
+            memory: Vec::new(),
+            stream_history: vec![
+                "Closed task T-old: shipped first slice".to_string(),
+                "Follow-up task T-new continues the stream".to_string(),
+            ],
+            checks: Vec::new(),
+            prior_attempts: Vec::new(),
+            source_refs: Vec::new(),
+            launch_kind: ContextLaunchKind::Task,
+        };
+        let pack = ContextCompiler::compile(request);
+        let rendered = ContextRenderer::render_markdown(&pack);
+
+        assert!(rendered.contains("Project stream history"));
+        assert!(rendered.contains("Closed task T-old"));
+        assert!(rendered.contains("Follow-up task T-new"));
     }
 
     #[test]

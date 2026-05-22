@@ -291,6 +291,21 @@ impl GlobalWorkStore {
             .collect())
     }
 
+    pub fn stream_id_for_work(
+        &self,
+        project_root: impl AsRef<Path>,
+        work_id: &WorkId,
+    ) -> crate::Result<Option<String>> {
+        let project_root = normalize_project_root(project_root);
+        Ok(read_jsonl::<StreamEvent>(&self.stream_events_path())?
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event.project_root == project_root && event.work_id.as_ref() == Some(work_id)
+            })
+            .map(|event| event.stream_id))
+    }
+
     pub fn stream_events_for_project_stream(
         &self,
         project_root: impl AsRef<Path>,

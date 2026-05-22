@@ -50,8 +50,8 @@ impl ConversationMemoryIndex {
         item
     }
 
-    pub fn add(&mut self, item: MemoryItem) {
-        self.items.push(item);
+    pub fn all_items(&self) -> &[MemoryItem] {
+        &self.items
     }
 
     pub fn recent(&self, limit: usize) -> Vec<MemoryItem> {

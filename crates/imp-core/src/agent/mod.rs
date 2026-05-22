@@ -738,25 +738,26 @@ fn durable_mana_externalization_signal(text: &str) -> bool {
     .iter()
     .any(|needle| lower.contains(needle));
 
-    let explicit_mana_signal = [
-        "create mana",
-        "create a mana",
+    let explicit_work_signal = [
+        "create imp-work",
+        "create work",
         "externalize",
-        "mana unit",
-        "mana units",
+        "imp-work task",
+        "work task",
+        "work tasks",
         "record this",
         "save this plan",
-        "split this into units",
-        "turn this into mana",
+        "split this into tasks",
+        "turn this into imp-work",
     ]
     .iter()
     .any(|needle| lower.contains(needle));
 
-    durable_state_signal || explicit_mana_signal
+    durable_state_signal || explicit_work_signal
 }
 
 fn mana_externalization_follow_up_text() -> &'static str {
-    "Before you continue: externalize the durable plan or decomposition you just described into mana now. Create or update the relevant unit(s) with native mana actions, prefer root scope for cross-project work, and avoid extra chat restatement when the mana tool/UI already makes the delta obvious."
+    "Before you continue: externalize the durable plan or decomposition you just described into native imp-work now. Create or update the relevant task(s) with native work actions, prefer global project scope, and avoid extra chat restatement when the work tool/UI already makes the delta obvious."
 }
 
 fn should_queue_confidence_continue_follow_up(
@@ -827,13 +828,13 @@ fn should_queue_confidence_continue_follow_up(
 }
 
 fn confidence_continue_follow_up_text() -> &'static str {
-    "Confidence is high and the mana delta is already visible. Continue to the next small, well-bounded step now using native mana-backed workflow, unless a consequential decision or blocker appears. Do not re-summarize the same visible mana change in chat unless new context needs to be called out."
+    "Confidence is high and the imp-work delta is already visible. Continue to the next small, well-bounded step now using native work-backed workflow, unless a consequential decision or blocker appears. Do not re-summarize the same visible work change in chat unless new context needs to be called out."
 }
 
 fn orchestration_follow_up_text(run_id: Option<&str>) -> String {
     if let Some(run_id) = run_id {
         return format!(
-            "Orchestration has started as {run_id}, but the requested outcome is not complete yet. Inspect mana(action=\"run_state\", run_id=\"{run_id}\") and mana(action=\"logs\", run_id=\"{run_id}\"), continue coordinating ready work, retry or escalate failed units, and only stop when the workflow is verified complete, blocked by a concrete decision, or no runnable work remains."
+            "Orchestration has started as {run_id}, but the requested outcome is not complete yet. Inspect work(action=\"runs\", run_id=\"{run_id}\") or the relevant native imp-work run state/logs, continue coordinating ready work, retry or escalate failed tasks, and only stop when the workflow is verified complete, blocked by a concrete decision, or no runnable work remains."
         );
     }
 
@@ -841,7 +842,7 @@ fn orchestration_follow_up_text(run_id: Option<&str>) -> String {
 }
 
 fn mana_workflow_follow_up_text() -> &'static str {
-    "A mana task was closed, verified, or materially advanced, but that only proves the current unit changed. Inspect the active mana scope with mana(action=\"next\") or mana(action=\"status\"), continue any ready work, and only stop when the requested outcome is complete, blocked by a concrete decision, or no runnable work remains."
+    "An imp-work task was closed, verified, or materially advanced, but that only proves the current task changed. Inspect the active work scope with work(action=\"next\") or work(action=\"validate\"), continue any ready work, and only stop when the requested outcome is complete, blocked by a concrete decision, or no runnable work remains."
 }
 
 fn failed_bash_recovery_follow_up_text() -> &'static str {
@@ -1246,21 +1247,21 @@ fn tool_results_indicate_mana_workflow_progress(
     }
 
     tool_results.iter().any(|result| {
-        if result.is_error || result.tool_name != "mana" {
+        if result.is_error || result.tool_name != "work" {
             return false;
         }
 
         let action = result.details.get("action").and_then(|v| v.as_str());
-        let has_closed_unit = result
+        let has_closed_task = result
             .details
-            .get("unit")
-            .and_then(|unit| unit.get("status"))
+            .get("item")
+            .and_then(|item| item.get("status"))
             .and_then(|v| v.as_str())
-            == Some("closed");
+            == Some("done");
 
         matches!(action, Some("close"))
             || matches!(action, Some("verify") if result.details.get("passed").and_then(|v| v.as_bool()) == Some(true))
-            || has_closed_unit
+            || has_closed_task
     })
 }
 
@@ -1466,7 +1467,7 @@ fn mana_bash_equivalent_hint(command: &str) -> Option<&'static str> {
     match action {
         "status" | "list" | "ls" | "show" | "read" | "create" | "close" | "update" | "run"
         | "run_state" | "evaluate" | "agents" | "logs" | "next" | "claim" | "release" | "tree" => {
-            Some("Use the native mana tool instead of `bash` for this mana command. For orchestration, the native tool supports canonical target selection (`id`, `targets`, or all ready work) plus background run tracking.")
+            Some("Mana is retired from the default workflow. Use native imp-work actions instead, starting with `work(action=\"guide\")`, `work(action=\"next\")`, or `work(action=\"migrate\")` as appropriate.")
         }
         _ => None,
     }
@@ -1497,33 +1498,33 @@ fn mana_skill_follow_up_hint(
         "bounded helper",
         "orchestrate",
         "orchestration",
-        "create a unit",
-        "create units",
-        "mana run",
+        "create a task",
+        "create tasks",
+        "work guide",
     ]
     .iter()
     .any(|needle| lower.contains(needle));
 
-    let mana_signal = [
-        " mana ",
-        "mana status",
-        "mana list",
-        "mana show",
-        "mana update",
-        "mana create",
-        "mana run",
+    let work_signal = [
+        " imp-work ",
+        "work next",
+        "work list",
+        "work show",
+        "work update",
+        "work create",
+        "work guide",
     ]
     .iter()
     .any(|needle| lower.contains(needle));
 
     match mode {
         AgentMode::Full | AgentMode::Orchestrator | AgentMode::Planner
-            if orchestration_signal || mana_signal =>
+            if orchestration_signal || work_signal =>
         {
-            Some("Before you continue: use native mana `guide` or `template` actions if you need extra help with unit design, decomposition, retries, or worker handoff.")
+            Some("Before you continue: use native imp-work `guide` when you need extra help with task design, decomposition, retries, or worker handoff.")
         }
-        AgentMode::Worker | AgentMode::Auditor if mana_signal => {
-            Some("Before you continue: use the native mana tool and stay within this mode's allowed mana workflow. Use the `guide` action if you need help.")
+        AgentMode::Worker | AgentMode::Auditor if work_signal => {
+            Some("Before you continue: use the native work tool and stay within this mode's allowed imp-work workflow. Use the `guide` action if you need help.")
         }
         _ => None,
     }

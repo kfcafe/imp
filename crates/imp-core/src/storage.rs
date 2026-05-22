@@ -4,6 +4,48 @@ use std::path::{Path, PathBuf};
 
 const IMP_DIR_NAME: &str = ".imp";
 const LEGACY_APP_NAME: &str = "imp";
+const WORK_DIR_NAME: &str = "work";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkStoreSource {
+    ProjectLocal,
+    GlobalProjectScoped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WorkScope {
+    pub project_root: PathBuf,
+    pub local_store_root: PathBuf,
+    pub global_store_root: PathBuf,
+    pub active_source: WorkStoreSource,
+    pub writes_target: WorkStoreSource,
+}
+
+impl WorkScope {
+    pub fn for_project_dir(project_dir: &Path) -> Self {
+        Self::with_global_root(project_dir, global_root())
+    }
+
+    pub fn with_global_root(project_dir: &Path, global_root: PathBuf) -> Self {
+        let project_root = canonicalize_lossy(project_dir);
+        Self {
+            local_store_root: project_root.join(IMP_DIR_NAME).join(WORK_DIR_NAME),
+            global_store_root: global_root.join(WORK_DIR_NAME),
+            project_root,
+            active_source: WorkStoreSource::GlobalProjectScoped,
+            writes_target: WorkStoreSource::GlobalProjectScoped,
+        }
+    }
+
+    pub fn migration_status(&self) -> &'static str {
+        "global project-scoped store is the normal imp-work backend; project-local stores are migration input only"
+    }
+}
+
+fn canonicalize_lossy(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
 
 pub fn global_root() -> PathBuf {
     global_root_from_env(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
@@ -579,6 +621,26 @@ mod tests {
         let base = temp.path().join("runs");
         let artifacts = run_artifacts_under(base.clone(), "run-abc_123").unwrap();
         assert!(artifacts.root().starts_with(&base));
+    }
+
+    #[test]
+    fn work_scope_uses_project_local_store_and_global_work_root() {
+        let temp = TempDir::new().unwrap();
+        let global = temp.path().join("home").join(".imp");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+
+        let scope = WorkScope::with_global_root(&project, global.clone());
+
+        assert_eq!(scope.project_root, project.canonicalize().unwrap());
+        assert_eq!(
+            scope.local_store_root,
+            project.canonicalize().unwrap().join(".imp").join("work")
+        );
+        assert_eq!(scope.global_store_root, global.join("work"));
+        assert_eq!(scope.active_source, WorkStoreSource::GlobalProjectScoped);
+        assert_eq!(scope.writes_target, WorkStoreSource::GlobalProjectScoped);
+        assert!(scope.migration_status().contains("migration input only"));
     }
 
     #[test]

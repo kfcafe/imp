@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    Check, CheckKind, Link, LinkKind, MemoryItem, MemoryKind, SourceKind, SourceRef, Task,
-    TaskStatus, WorkId, WorkStore,
+    Check, CheckKind, GlobalWorkStore, Link, LinkKind, MemoryItem, MemoryKind, SourceKind,
+    SourceRef, Task, TaskStatus, WorkId, WorkStore,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +69,20 @@ pub struct ManaHistoryRef {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectLocalMigrationReport {
+    pub source: PathBuf,
+    pub project_root: PathBuf,
+    pub global_store_root: PathBuf,
+    pub dry_run: bool,
+    pub tasks: usize,
+    pub memory_items: usize,
+    pub decisions: usize,
+    pub skipped: Vec<String>,
+    pub conflicts: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
 impl ManaMigrationReport {
     pub fn parity_summary(&self) -> String {
         format!(
@@ -92,6 +106,75 @@ pub fn migrate_mana_to_store(
     store: &WorkStore,
 ) -> crate::Result<ManaMigrationReport> {
     migrate_mana(path, Some(store))
+}
+
+pub fn dry_run_project_local_migration(
+    project_root: impl AsRef<Path>,
+    local_store: &WorkStore,
+    global_store: &GlobalWorkStore,
+) -> crate::Result<ProjectLocalMigrationReport> {
+    project_local_migration_report(project_root, local_store, global_store, true)
+}
+
+pub fn migrate_project_local_to_global(
+    project_root: impl AsRef<Path>,
+    local_store: &WorkStore,
+    global_store: &GlobalWorkStore,
+) -> crate::Result<ProjectLocalMigrationReport> {
+    let report = project_local_migration_report(&project_root, local_store, global_store, false)?;
+    let project_root = normalize_project_root(project_root);
+    for task in local_store.load_tasks()? {
+        global_store.append_task(&project_root, &task)?;
+    }
+    for memory in local_store.load_memory_index()?.all_items() {
+        global_store.append_memory(&project_root, memory)?;
+    }
+    for decision in local_store.load_decisions()? {
+        global_store.append_decision(&project_root, &decision)?;
+    }
+    Ok(report)
+}
+
+fn project_local_migration_report(
+    project_root: impl AsRef<Path>,
+    local_store: &WorkStore,
+    global_store: &GlobalWorkStore,
+    dry_run: bool,
+) -> crate::Result<ProjectLocalMigrationReport> {
+    let project_root = normalize_project_root(project_root);
+    let tasks = local_store.load_tasks()?;
+    let memory = local_store.load_memory_index()?;
+    let decisions = local_store.load_decisions()?;
+    let existing = global_store.tasks_for_project(&project_root)?;
+    let mut conflicts = Vec::new();
+    for task in &tasks {
+        if existing.iter().any(|candidate| candidate.id == task.id) {
+            conflicts.push(format!("task {} already exists in global project store", task.id));
+        }
+    }
+    let mut warnings = Vec::new();
+    if tasks.is_empty() && memory.all_items().is_empty() && decisions.is_empty() {
+        warnings.push("project-local imp-work store contains no migratable tasks, memory, or decisions".to_string());
+    }
+    Ok(ProjectLocalMigrationReport {
+        source: local_store.root().to_path_buf(),
+        project_root,
+        global_store_root: global_store.root().to_path_buf(),
+        dry_run,
+        tasks: tasks.len(),
+        memory_items: memory.all_items().len(),
+        decisions: decisions.len(),
+        skipped: Vec::new(),
+        conflicts,
+        warnings,
+    })
+}
+
+fn normalize_project_root(project_root: impl AsRef<Path>) -> PathBuf {
+    project_root
+        .as_ref()
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.as_ref().to_path_buf())
 }
 
 fn migrate_mana(
@@ -580,6 +663,59 @@ fn shadow_memory(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn project_local_migration_dry_run_reports_without_writing_global_store() {
+        let temp = tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let local = WorkStore::open(project.join(".imp").join("work"));
+        let global = GlobalWorkStore::open(temp.path().join("global-work"));
+        let mut task = Task::new("Local task");
+        task.id = WorkId::from("local-task");
+        local.append_task(&task).unwrap();
+        local
+            .append_memory(&MemoryItem::new(MemoryKind::Fact, "Local memory"))
+            .unwrap();
+
+        let report = dry_run_project_local_migration(&project, &local, &global).unwrap();
+
+        assert!(report.dry_run);
+        assert_eq!(report.source, local.root());
+        assert_eq!(report.project_root, project.canonicalize().unwrap());
+        assert_eq!(report.global_store_root, global.root());
+        assert_eq!(report.tasks, 1);
+        assert_eq!(report.memory_items, 1);
+        assert_eq!(report.decisions, 0);
+        assert!(report.conflicts.is_empty());
+        assert!(global.tasks_for_project(&project).unwrap().is_empty());
+        assert!(global.memories_for_project(&project).unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_local_migration_write_mode_imports_project_scoped_records_and_reports_conflicts() {
+        let temp = tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let local = WorkStore::open(project.join(".imp").join("work"));
+        let global = GlobalWorkStore::open(temp.path().join("global-work"));
+        let mut task = Task::new("Local task");
+        task.id = WorkId::from("local-task");
+        local.append_task(&task).unwrap();
+        global.append_task(&project, &task).unwrap();
+
+        let dry_run = dry_run_project_local_migration(&project, &local, &global).unwrap();
+        assert_eq!(dry_run.conflicts.len(), 1);
+        assert!(dry_run.conflicts[0].contains("local-task"));
+
+        let report = migrate_project_local_to_global(&project, &local, &global).unwrap();
+
+        assert!(!report.dry_run);
+        assert_eq!(report.conflicts.len(), 1);
+        let tasks = global.tasks_for_project(&project).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, WorkId::from("local-task"));
+    }
 
     #[test]
     fn mana_migration_dry_run_imports_real_frontmatter_shape_without_writing() {
