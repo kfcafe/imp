@@ -109,6 +109,10 @@ pub struct Agent {
     pub anchor_store: Arc<crate::tools::AnchorStore>,
     /// Max lines the read tool may return before truncating. 0 means unlimited.
     pub read_max_lines: usize,
+    /// Stable persisted session id for provider-side request grouping.
+    pub session_id: Option<String>,
+    /// Stable cache namespace id for provider-side prompt caching.
+    pub thread_id: Option<String>,
     /// Cache options for LLM requests.
     pub cache_options: imp_llm::CacheOptions,
     /// In-memory recovery checkpoints for this run. Session persistence can seed this ledger later.
@@ -220,6 +224,8 @@ impl Agent {
             anchor_store: Arc::new(crate::tools::AnchorStore::new()),
             read_max_lines: 500,
             auth_store: None,
+            session_id: None,
+            thread_id: None,
             cache_options: imp_llm::CacheOptions {
                 cache_system_prompt: true,
                 cache_tools: true,

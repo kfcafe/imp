@@ -473,6 +473,8 @@ impl Agent {
             // Build context and options for the LLM
             let context = Context {
                 messages: self.messages.clone(),
+                session_id: self.session_id.clone(),
+                thread_id: self.thread_id.clone(),
             };
 
             let options = RequestOptions {

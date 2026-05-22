@@ -899,6 +899,7 @@ mod tests {
                     timestamp: 0,
                 }),
             ],
+            ..Default::default()
         };
         let options = RequestOptions {
             system_prompt: "You are a helpful coding assistant.".into(),

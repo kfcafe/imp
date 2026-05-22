@@ -421,6 +421,11 @@ impl ImpSession {
             SessionChoice::Open(ref path) => SessionManager::open(path)?,
         };
 
+        let mut agent = agent;
+        let stable_session_id = session_mgr.session_id();
+        agent.session_id = stable_session_id.clone();
+        agent.thread_id = stable_session_id;
+
         Ok(Self {
             agent: Some(agent),
             handle,
@@ -654,6 +659,9 @@ impl ImpSession {
         if let Some(ref mut agent) = self.agent {
             agent.model = clone_model(&self.model);
             agent.api_key = api_key;
+            let stable_session_id = self.session_mgr.session_id();
+            agent.session_id = stable_session_id.clone();
+            agent.thread_id = stable_session_id;
         }
 
         Ok(())

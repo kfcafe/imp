@@ -1949,6 +1949,7 @@ data: {\"type\":\"message_stop\"}\n\
                     timestamp: 0,
                 }),
             ],
+            ..Default::default()
         };
 
         let options = RequestOptions {
