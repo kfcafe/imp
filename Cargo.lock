@@ -2620,7 +2620,7 @@ dependencies = [
 
 [[package]]
 name = "imp-cli"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "clap",
@@ -2642,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "imp-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2700,7 +2700,7 @@ dependencies = [
 
 [[package]]
 name = "imp-gui"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "eframe",
  "egui",
@@ -2713,7 +2713,7 @@ dependencies = [
 
 [[package]]
 name = "imp-install"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "imp-cli",
  "tokio",
@@ -2721,7 +2721,7 @@ dependencies = [
 
 [[package]]
 name = "imp-llm"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "base64",
@@ -2743,7 +2743,7 @@ dependencies = [
 
 [[package]]
 name = "imp-lua"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "imp-core",
@@ -2758,7 +2758,7 @@ dependencies = [
 
 [[package]]
 name = "imp-tui"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "crossterm 0.28.1",
@@ -2781,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "imp-work"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",

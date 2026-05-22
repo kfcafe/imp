@@ -6,7 +6,31 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## [Unreleased]
 
-Use this section for changes that have landed on `main` after the 0.2.3 release.
+Use this section for changes that have landed on `main` after the 0.2.4 release.
+
+## [0.2.4] - 2026-05-22
+
+### Added
+
+- Added native `imp run <work-id> --dry-run` planning for imp-work task and epic dispatch, including dependency, context, and path-conflict blockers.
+- Added `imp stats` reports for local session, token, cost, tool, file-change, project, and wrapped-style usage summaries.
+- Added persisted imp-work coordinator run records and event logs for future multi-agent work orchestration.
+- Added structured file and line-change metadata to read/write/edit tool results so UI, stats, evidence, and handoff surfaces can summarize tool effects reliably.
+- Added richer TUI tool cards, tool icons, command-palette pages for commands/skills/workflows, and sidebar detail cards for common tools.
+- Added design planning docs for Droid parity, mission-mode vs imp-work, host sync, and OSS launch readiness.
+
+### Changed
+
+- Folded worktree management into the native `git` tool as `worktree_list`, `worktree_add`, and `worktree_remove`; removed the standalone `worktree` tool.
+- Removed the legacy `session_search`/`recall` native tool from the default registry and mode tool lists.
+- Tightened autonomous continuation behavior so failed shell commands are treated as recoverable obligations while durable-work externalization is only nudged when the user explicitly asks for durable work structure.
+- Refreshed the README around the current local-first imp surface, native imp-work, providers, safety controls, and extension support.
+- Standardized TUI tool label rendering so icons sit directly next to names, including `$Terminal`.
+
+### Fixed
+
+- Fixed sidebar and chat rendering expectations around the new tool card headers and summary detail lines.
+- Fixed readable imp-work task IDs to be deterministic from titles and deduplicated with numeric suffixes.
 
 ## [0.2.3] - 2026-05-22
 
