@@ -9,7 +9,7 @@ use crate::memory::{
 };
 use crate::model::{
     Check, CheckKind, ContextPack, Decision, DecisionStatus, Epic, Link, LinkKind, MemoryItem,
-    MemoryKind, Run, Task, TaskStatus, WorkId, WorkItem,
+    MemoryKind, Run, Task, TaskStatus, WorkId, WorkItem, WorkRun, WorkRunEvent,
 };
 use crate::prototype::{
     Prototype, PrototypeJournal, PrototypeObservation, PrototypeRecordPolicy, PrototypeStatus,
@@ -196,29 +196,31 @@ impl WorkStore {
             .into_iter()
             .map(|memory_match| memory_match.memory)
             .collect();
-        Ok(ContextCompiler::compile(crate::context_pack::ContextCompileRequest {
-            work_id: task.id.clone(),
-            version: 1,
-            token_budget: None,
-            objective: task.title.clone(),
-            non_goals: Vec::new(),
-            acceptance: task.acceptance.clone(),
-            memory,
-            stream_history,
-            checks: task
-                .checks
-                .iter()
-                .map(|check| {
-                    check
-                        .command
-                        .clone()
-                        .unwrap_or_else(|| check.description.clone())
-                })
-                .collect(),
-            prior_attempts,
-            source_refs: task.source_refs.clone(),
-            launch_kind: crate::context_pack::ContextLaunchKind::Task,
-        }))
+        Ok(ContextCompiler::compile(
+            crate::context_pack::ContextCompileRequest {
+                work_id: task.id.clone(),
+                version: 1,
+                token_budget: None,
+                objective: task.title.clone(),
+                non_goals: Vec::new(),
+                acceptance: task.acceptance.clone(),
+                memory,
+                stream_history,
+                checks: task
+                    .checks
+                    .iter()
+                    .map(|check| {
+                        check
+                            .command
+                            .clone()
+                            .unwrap_or_else(|| check.description.clone())
+                    })
+                    .collect(),
+                prior_attempts,
+                source_refs: task.source_refs.clone(),
+                launch_kind: crate::context_pack::ContextLaunchKind::Task,
+            },
+        ))
     }
 
     pub fn compile_prototype_context_with_memory(
@@ -383,6 +385,90 @@ impl WorkStore {
     ) -> Result<Option<PathBuf>> {
         self.ensure_layout()?;
         PrototypeJournal::open(&self.root).record(policy, observation)
+    }
+
+    pub fn append_work_run_event(&self, event: &WorkRunEvent) -> Result<PathBuf> {
+        let layout = self.ensure_layout()?;
+        let run_dir = layout.runs_dir.join(&event.run_id.0);
+        fs::create_dir_all(&run_dir)?;
+        let path = run_dir.join("events.jsonl");
+        let mut line = serde_json::to_string(event)?;
+        line.push('\n');
+        append_to_file(&path, &line)?;
+        Ok(path)
+    }
+
+    pub fn create_work_run(&self, run: &WorkRun) -> Result<PathBuf> {
+        let layout = self.ensure_layout()?;
+        let run_dir = layout.runs_dir.join(&run.id.0);
+        fs::create_dir_all(&run_dir)?;
+        let path = run_dir.join("run.json");
+        fs::write(&path, serde_json::to_vec_pretty(run)?)?;
+        self.append_work_run_event(&WorkRunEvent {
+            sequence: self.next_work_run_event_sequence(&run.id)?,
+            run_id: run.id.clone(),
+            timestamp: run.started_at.clone(),
+            kind: crate::model::WorkRunEventKind::RunCreated {
+                root_work_id: run.root_work_id.clone(),
+            },
+        })?;
+        Ok(path)
+    }
+
+    pub fn update_work_run(&self, run: &WorkRun) -> Result<PathBuf> {
+        let layout = self.ensure_layout()?;
+        let run_dir = layout.runs_dir.join(&run.id.0);
+        fs::create_dir_all(&run_dir)?;
+        let path = run_dir.join("run.json");
+        fs::write(&path, serde_json::to_vec_pretty(run)?)?;
+        Ok(path)
+    }
+
+    pub fn load_work_run(&self, run_id: &str) -> Result<Option<WorkRun>> {
+        let layout = self.ensure_layout()?;
+        let path = layout.runs_dir.join(run_id).join("run.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_slice(&fs::read(path)?)?))
+    }
+
+    pub fn load_work_runs(&self) -> Result<Vec<WorkRun>> {
+        let layout = self.ensure_layout()?;
+        let mut runs = Vec::new();
+        for entry in fs::read_dir(&layout.runs_dir)? {
+            let entry = entry?;
+            let path = entry.path().join("run.json");
+            if path.exists() {
+                runs.push(serde_json::from_slice(&fs::read(path)?)?);
+            }
+        }
+        runs.sort_by(|left: &WorkRun, right: &WorkRun| left.id.0.cmp(&right.id.0));
+        Ok(runs)
+    }
+
+    pub fn load_work_run_events(&self, run_id: &WorkId) -> Result<Vec<WorkRunEvent>> {
+        let layout = self.ensure_layout()?;
+        let path = layout.runs_dir.join(&run_id.0).join("events.jsonl");
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let mut events: Vec<WorkRunEvent> = fs::read_to_string(path)?
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).map_err(crate::Error::from))
+            .collect::<Result<Vec<_>>>()?;
+        events.sort_by_key(|event| event.sequence);
+        Ok(events)
+    }
+
+    pub fn next_work_run_event_sequence(&self, run_id: &WorkId) -> Result<u64> {
+        Ok(self
+            .load_work_run_events(run_id)?
+            .last()
+            .map(|event| event.sequence + 1)
+            .unwrap_or(1))
     }
 
     pub fn append_run(&self, run: &Run) -> Result<PathBuf> {
@@ -2580,6 +2666,66 @@ mod tests {
 
         assert!(rendered.contains("Memory-aware context compilation"));
         assert!(rendered.contains("context includes retrieved memory"));
+    }
+
+    #[test]
+    fn store_persists_work_run_and_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = WorkStore::open(tmp.path());
+        let run = WorkRun {
+            id: WorkId::from("WR-test"),
+            root_work_id: WorkId::from("E-root"),
+            status: crate::model::WorkRunStatus::Running,
+            policy: crate::model::WorkRunPolicy {
+                max_jobs: 2,
+                path_conflicts: "block".into(),
+                require_context: true,
+                keep_going: false,
+            },
+            current_wave: 1,
+            started_at: "2026-05-22T00:00:00Z".into(),
+            updated_at: "2026-05-22T00:00:00Z".into(),
+            assignments: vec![crate::model::WorkRunAssignment {
+                work_id: WorkId::from("T-ready"),
+                lease_id: Some(WorkId::from("L-ready")),
+                worker_id: Some("imp-worker".into()),
+                status: "leased".into(),
+            }],
+            blocked: vec![WorkId::from("T-blocked")],
+            summary: Some("Fixture work run".into()),
+        };
+        let run_path = store.create_work_run(&run).unwrap();
+        assert_eq!(
+            run_path.file_name().and_then(|name| name.to_str()),
+            Some("run.json")
+        );
+        store
+            .append_work_run_event(&WorkRunEvent {
+                sequence: store.next_work_run_event_sequence(&run.id).unwrap(),
+                run_id: run.id.clone(),
+                timestamp: "2026-05-22T00:01:00Z".into(),
+                kind: crate::model::WorkRunEventKind::WavePlanned {
+                    wave: 1,
+                    assigned: vec![WorkId::from("T-ready")],
+                    blocked: vec![WorkId::from("T-blocked")],
+                },
+            })
+            .unwrap();
+
+        assert_eq!(store.load_work_run("WR-test").unwrap(), Some(run.clone()));
+        assert_eq!(store.load_work_runs().unwrap(), vec![run.clone()]);
+        let events = store.load_work_run_events(&run.id).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].sequence, 1);
+        assert_eq!(events[1].sequence, 2);
+        assert!(matches!(
+            events[0].kind,
+            crate::model::WorkRunEventKind::RunCreated { .. }
+        ));
+        assert!(matches!(
+            events[1].kind,
+            crate::model::WorkRunEventKind::WavePlanned { .. }
+        ));
     }
 
     #[test]

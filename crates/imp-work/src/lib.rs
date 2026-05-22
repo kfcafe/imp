@@ -36,7 +36,8 @@ pub use model::{
     Check, CheckKind, CheckResult, ContextBlock, ContextBlockStability, ContextPack,
     ContextPackStatus, Decision, DecisionStatus, Epic, Lease, Link, LinkKind, MemoryItem,
     MemoryKind, Run, RunOutcome, SourceKind, SourceRef, Task, TaskStatus, WorkId, WorkItem,
-    WorkKind,
+    WorkKind, WorkRun, WorkRunAssignment, WorkRunEvent, WorkRunEventKind, WorkRunPolicy,
+    WorkRunStatus,
 };
 pub use prepared_prototype::{
     compile_prepared_prototype_context, PreparedPrototypeError, PreparedPrototypeLaunch,
