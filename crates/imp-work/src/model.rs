@@ -221,6 +221,98 @@ pub struct ContextBlock {
     pub source_refs: Vec<SourceRef>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkRunStatus {
+    Planning,
+    Running,
+    Paused,
+    Blocked,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkRunPolicy {
+    pub max_jobs: usize,
+    pub path_conflicts: String,
+    pub require_context: bool,
+    pub keep_going: bool,
+}
+
+impl Default for WorkRunPolicy {
+    fn default() -> Self {
+        Self {
+            max_jobs: 1,
+            path_conflicts: "block".to_string(),
+            require_context: false,
+            keep_going: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkRunAssignment {
+    pub work_id: WorkId,
+    pub lease_id: Option<WorkId>,
+    pub worker_id: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkRun {
+    pub id: WorkId,
+    pub root_work_id: WorkId,
+    pub status: WorkRunStatus,
+    pub policy: WorkRunPolicy,
+    pub current_wave: u32,
+    pub started_at: String,
+    pub updated_at: String,
+    pub assignments: Vec<WorkRunAssignment>,
+    pub blocked: Vec<WorkId>,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkRunEvent {
+    pub sequence: u64,
+    pub run_id: WorkId,
+    pub timestamp: String,
+    pub kind: WorkRunEventKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum WorkRunEventKind {
+    RunCreated {
+        root_work_id: WorkId,
+    },
+    WavePlanned {
+        wave: u32,
+        assigned: Vec<WorkId>,
+        blocked: Vec<WorkId>,
+    },
+    WorkerLeased {
+        work_id: WorkId,
+        lease_id: WorkId,
+    },
+    WorkerCompleted {
+        work_id: WorkId,
+        outcome: RunOutcome,
+    },
+    HandoffRecorded {
+        work_id: WorkId,
+        summary: String,
+    },
+    RunPaused,
+    RunResumed,
+    RunCompleted,
+    RunFailed {
+        reason: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Run {
     pub id: WorkId,

@@ -40,7 +40,9 @@ fn run() -> Result<(), String> {
         .canonicalize()
         .map_err(|error| format!("failed to canonicalize project root: {error}"))?;
     let mana_path = project_root.join(".mana");
-    let global_root = global_work_root()?.join("projects").join(project_hash(&project_root));
+    let global_root = global_work_root()?
+        .join("projects")
+        .join(project_hash(&project_root));
     let report = if write {
         let store = WorkStore::open(&global_root);
         migrate_mana_to_store(&mana_path, &store)

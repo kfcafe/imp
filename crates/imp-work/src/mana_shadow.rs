@@ -149,12 +149,18 @@ fn project_local_migration_report(
     let mut conflicts = Vec::new();
     for task in &tasks {
         if existing.iter().any(|candidate| candidate.id == task.id) {
-            conflicts.push(format!("task {} already exists in global project store", task.id));
+            conflicts.push(format!(
+                "task {} already exists in global project store",
+                task.id
+            ));
         }
     }
     let mut warnings = Vec::new();
     if tasks.is_empty() && memory.all_items().is_empty() && decisions.is_empty() {
-        warnings.push("project-local imp-work store contains no migratable tasks, memory, or decisions".to_string());
+        warnings.push(
+            "project-local imp-work store contains no migratable tasks, memory, or decisions"
+                .to_string(),
+        );
     }
     Ok(ProjectLocalMigrationReport {
         source: local_store.root().to_path_buf(),
