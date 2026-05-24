@@ -7,6 +7,7 @@ pub mod model;
 pub mod prepared_prototype;
 pub mod prepared_worker;
 pub mod prototype;
+pub mod run_engine;
 pub mod runtime;
 pub mod scheduler;
 pub mod store;
@@ -50,6 +51,10 @@ pub use prepared_worker::{
 pub use prototype::{
     HypothesisResult, Prototype, PrototypeDecision, PrototypeEvidence, PrototypeJournal,
     PrototypeObservation, PrototypeOutcome, PrototypeRecordPolicy, PrototypeStatus,
+};
+pub use run_engine::{
+    active_work_run_status, next_actions_for_run, WorkRunEngine, WorkRunPlan, WorkRunPolicyInput,
+    WorkRunView,
 };
 pub use runtime::{PrototypeExecutor, RuntimeExecutionResult, TaskExecutor, WorkRuntime};
 pub use scheduler::{

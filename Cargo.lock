@@ -2766,7 +2766,6 @@ dependencies = [
  "imp-core",
  "imp-llm",
  "imp-lua",
- "imp-work",
  "mana-core",
  "ratatui",
  "serde",
