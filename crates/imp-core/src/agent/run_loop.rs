@@ -13,27 +13,16 @@ use crate::agent::{
     StopReason as AgentStopReason, TimingEvent, TimingStage, TurnPhase, TurnState,
 };
 use crate::error::Result;
-use crate::eval_candidate::{redact_eval_candidate, EvalArtifactRef};
-use crate::eval_candidate_closeout::{eval_candidate_for_closeout, EvalCandidateCloseoutContext};
-use crate::evidence::{
-    EvidenceActions, EvidenceArtifact, EvidencePacket, EvidencePolicy, EvidenceTrustSummary,
-    EvidenceVerificationGate,
-};
 use crate::hooks::HookEvent;
 use crate::ui::NotifyLevel;
 use crate::workflow::{
-    capture_worktree_diff_artifacts, write_worktree_metadata, AutonomyMode, VerificationGateRunner,
+    capture_worktree_diff_artifacts, write_worktree_metadata, VerificationGateRunner,
     WorktreeRunMetadata,
 };
-use crate::{
-    storage,
-    trace::TraceWriter,
-    trust::{Provenance, RiskLabel, TrustLabel},
-};
+use crate::{storage, trace::TraceWriter};
 
 use super::{
-    build_assistant_message, clone_model, mana_skill_follow_up_hint, push_stream_text_block,
-    push_stream_thinking_block, record_mana_mutation_results,
+    build_assistant_message, clone_model, push_stream_text_block, push_stream_thinking_block,
 };
 
 const STREAM_RECOVERY_FOLLOW_UP: &str = "The provider stream failed before completing the previous assistant message. Continue from the last completed conversation state. Do not repeat already completed tool side effects; if you need to retry, first inspect current state and proceed safely.";
@@ -142,160 +131,6 @@ impl Agent {
         }
     }
 
-    async fn write_run_evidence(
-        &self,
-        run_id: &str,
-        artifacts: &storage::RunArtifacts,
-        worktree_metadata: Option<&WorktreeRunMetadata>,
-        prompt: &str,
-        status: &RunFinalStatus,
-    ) {
-        let mut packet = EvidencePacket::new(run_id, prompt);
-        packet.workflow_id = self
-            .workflow_contract
-            .id
-            .clone()
-            .or_else(|| self.workflow_contract.mana_unit_ref.clone());
-        packet.workflow_type = Some(format!("{:?}", self.workflow_contract.workflow_type));
-        packet.risk_level = Some(format!("{:?}", self.workflow_contract.risk_level));
-        packet.autonomy_mode = Some(self.workflow_contract.autonomy_mode.to_string());
-        packet.final_status = Some(format!("{:?}", status));
-        packet.policy = evidence_policy_for_autonomy(self.workflow_contract.autonomy_mode);
-        packet.trust = evidence_trust_summary_from_messages(&self.messages);
-        packet
-            .summary
-            .push("Agent run completed; inspect trace.jsonl for structured event details.".into());
-        packet.actions = evidence_actions_from_messages(&self.messages);
-        packet.verification = self
-            .verification_gates
-            .iter()
-            .map(evidence_verification_gate)
-            .collect();
-        if let Some(metadata) = worktree_metadata {
-            packet.summary.push(format!(
-                "Worktree-auto changes ran in {} on branch {}; inspect worktree artifacts for status and patch.",
-                metadata.worktree_path.display(),
-                metadata.branch
-            ));
-        }
-        packet.artifacts = vec![
-            EvidenceArtifact {
-                kind: "trace".into(),
-                path: artifacts.trace_path(),
-                summary: Some("Structured runtime event trace".into()),
-            },
-            EvidenceArtifact {
-                kind: "workflow-contract".into(),
-                path: artifacts.workflow_contract_path(),
-                summary: Some("Workflow contract snapshot".into()),
-            },
-        ];
-        if let Some(metadata) = worktree_metadata {
-            let worktree_dir = artifacts.root().join("worktree");
-            packet.artifacts.extend([
-                EvidenceArtifact {
-                    kind: "worktree-status".into(),
-                    path: metadata.status_path.clone(),
-                    summary: Some(format!(
-                        "Worktree status for {} ({})",
-                        metadata.worktree_path.display(),
-                        if metadata.clean { "clean" } else { "dirty" }
-                    )),
-                },
-                EvidenceArtifact {
-                    kind: "worktree-diff-stat".into(),
-                    path: metadata.stat_path.clone(),
-                    summary: Some("Worktree diff summary".into()),
-                },
-                EvidenceArtifact {
-                    kind: "worktree-diff".into(),
-                    path: metadata.patch_path.clone(),
-                    summary: Some("Binary-safe worktree patch".into()),
-                },
-                EvidenceArtifact {
-                    kind: "worktree-metadata".into(),
-                    path: worktree_dir.join("worktree-metadata.json"),
-                    summary: Some(format!(
-                        "Worktree {} on branch {}",
-                        metadata.worktree_path.display(),
-                        metadata.branch
-                    )),
-                },
-            ]);
-        }
-        let evidence_path = artifacts.evidence_path();
-        if packet.write_markdown(&evidence_path).is_ok() {
-            self.write_trace_event(&AgentEvent::EvidenceWritten {
-                path: evidence_path.clone(),
-            });
-            let _ = self
-                .event_tx
-                .send(AgentEvent::EvidenceWritten {
-                    path: evidence_path,
-                })
-                .await;
-        }
-    }
-
-    async fn write_closeout_eval_candidate(
-        &self,
-        run_id: &str,
-        artifacts: &storage::RunArtifacts,
-        prompt: &str,
-        status: &RunFinalStatus,
-    ) {
-        let candidate_id = format!("{run_id}-closeout");
-        let context = EvalCandidateCloseoutContext {
-            candidate_id: candidate_id.clone(),
-            run_id: Some(run_id.to_string()),
-            workflow_id: self
-                .workflow_contract
-                .id
-                .clone()
-                .or_else(|| self.workflow_contract.mana_unit_ref.clone()),
-            session_id: None,
-            prompt: Some(prompt.to_string()),
-            expected_summary: Some(
-                "Agent run should satisfy its workflow contract and required verification gates"
-                    .into(),
-            ),
-            verifiers: Vec::new(),
-            artifact_refs: vec![
-                EvalArtifactRef {
-                    kind: "trace".into(),
-                    path: artifacts.trace_path(),
-                    summary: Some("Structured runtime event trace".into()),
-                    sha256: None,
-                },
-                EvalArtifactRef {
-                    kind: "evidence".into(),
-                    path: artifacts.evidence_path(),
-                    summary: Some("Run evidence packet".into()),
-                    sha256: None,
-                },
-                EvalArtifactRef {
-                    kind: "workflow-contract".into(),
-                    path: artifacts.workflow_contract_path(),
-                    summary: Some("Workflow contract snapshot".into()),
-                    sha256: None,
-                },
-            ],
-        };
-        let Some(candidate) =
-            eval_candidate_for_closeout(status, &self.verification_gates, context)
-        else {
-            return;
-        };
-        let path = artifacts.eval_candidate_path(&candidate_id);
-        if let Some(parent) = path.parent() {
-            if std::fs::create_dir_all(parent).is_err() {
-                return;
-            }
-        }
-        if let Ok(json) = serde_json::to_string_pretty(&redact_eval_candidate(candidate)) {
-            let _ = std::fs::write(path, json);
-        }
-    }
     pub async fn run(&mut self, prompt: String) -> Result<()> {
         let trace_path = std::env::var_os("IMP_TUI_TRACE").map(std::path::PathBuf::from);
         let trace_run = |phase: &str, started: std::time::Instant| {
@@ -325,10 +160,7 @@ impl Agent {
                     *active_trace_writer = Some(writer);
                 }
             }
-            let _ = std::fs::write(
-                artifacts.workflow_contract_path(),
-                serde_json::to_string_pretty(&self.workflow_contract).unwrap_or_default(),
-            );
+            self.write_workflow_contract_snapshot(artifacts);
         }
         trace_run("artifacts", phase_started);
         let phase_started = std::time::Instant::now();
@@ -367,30 +199,15 @@ impl Agent {
         let mut stream_recovery_attempts: u32 = 0;
         trace_run("init_loop_state", phase_started);
 
-        if let Some(nudge) = mana_skill_follow_up_hint(
-            &prompt,
-            self.mode,
-            !self.tools.is_empty(),
-            self.has_mana_skill,
-            self.has_mana_basics_skill,
-            self.has_mana_delegation_skill,
-        ) {
+        if let Some(nudge) = self.workflow_pre_turn_follow_up_hint(&prompt, !self.tools.is_empty())
+        {
             queued_pre_turn_follow_ups.push_back(nudge.to_string());
         }
 
         'turns: loop {
-            self.bootstrap_workflow_if_required(&prompt).await;
+            self.begin_workflow_turn(&prompt, run_artifacts.as_ref())
+                .await;
             let mut turn_state = TurnState::new(turn);
-            self.workflow_controller.tick_turn();
-            if let Some(artifacts) = &run_artifacts {
-                let _ = self
-                    .workflow_controller
-                    .save_to_path(&artifacts.workflow_controller_path());
-            }
-            self.emit(AgentEvent::WorkflowControllerSnapshot {
-                snapshot: self.workflow_controller.snapshot(),
-            })
-            .await;
             turn_state.enter(TurnPhase::ReceiveCommands);
 
             if let Some(reconciliation) = self.reconcile_recovery_before_turn(turn).await {
@@ -438,9 +255,7 @@ impl Agent {
 
             turn_state.enter(TurnPhase::PreTurn);
             self.emit(AgentEvent::TurnStart { index: turn }).await;
-            if let Ok(mut review) = self.turn_mana_review.lock() {
-                review.begin_turn(turn);
-            }
+            self.begin_turn_mana_review(turn);
             let turn_started_at = Instant::now();
             turn_state.enter(TurnPhase::BuildContext);
             self.emit_timing(
@@ -875,13 +690,9 @@ impl Agent {
                 })
                 .await;
                 turn_state.enter(TurnPhase::DecideNext);
-                let mut decision = self.loop_decision_after_turn(&assessment);
-                if workflow_controller_may_override_finish(&decision) {
-                    if let Some(controller_decision) = self.workflow_controller_continue_decision()
-                    {
-                        decision = controller_decision;
-                    }
-                }
+                let decision = self.override_finish_with_workflow_decision(
+                    self.loop_decision_after_turn(&assessment),
+                );
                 match decision {
                     LoopDecision::Continue { prompt, reason } => {
                         self.mark_continue_reason(reason);
@@ -939,7 +750,7 @@ impl Agent {
                 self.messages.push(Message::ToolResult(result.clone()));
             }
 
-            record_mana_mutation_results(&self.turn_mana_review, &results);
+            self.record_turn_mana_mutations(&results);
             self.record_obligations_from_tool_results(&results);
             self.record_workflow_obligations_from_tool_results(&results);
             let mana_review = self.finish_turn_mana_review(turn);
@@ -977,12 +788,8 @@ impl Agent {
             })
             .await;
             turn_state.enter(TurnPhase::DecideNext);
-            let mut decision = self.loop_decision_after_turn(&assessment);
-            if workflow_controller_may_override_finish(&decision) {
-                if let Some(controller_decision) = self.workflow_controller_continue_decision() {
-                    decision = controller_decision;
-                }
-            }
+            let decision = self
+                .override_finish_with_workflow_decision(self.loop_decision_after_turn(&assessment));
             let should_stop_after_tool_turn = matches!(
                 decision,
                 LoopDecision::Finish {
@@ -1037,7 +844,7 @@ impl Agent {
             status = enforce_verification_closeout(status, &self.verification_gates);
         }
         if !cancelled {
-            status = self.workflow_controller.enforce_closeout_status(status);
+            status = self.enforce_workflow_closeout_status(status);
         }
         let worktree_metadata = if let Some(artifacts) = &run_artifacts {
             self.capture_worktree_run_artifacts(artifacts).await
@@ -1055,13 +862,8 @@ impl Agent {
             .await;
             self.write_closeout_eval_candidate(&run_id, artifacts, &prompt, &status)
                 .await;
-            let _ = self
-                .workflow_controller
-                .save_to_path(&artifacts.workflow_controller_path());
-            self.emit(AgentEvent::WorkflowControllerSnapshot {
-                snapshot: self.workflow_controller.snapshot(),
-            })
-            .await;
+            self.persist_workflow_controller_snapshot(Some(artifacts))
+                .await;
         }
         let cost = total_usage.cost(&self.model.meta.pricing);
         self.emit(AgentEvent::AgentEnd {
@@ -1084,191 +886,4 @@ impl Agent {
 
         Ok(())
     }
-}
-
-fn evidence_trust_summary_from_messages(messages: &[Message]) -> EvidenceTrustSummary {
-    let mut summary = EvidenceTrustSummary::default();
-    for message in messages {
-        let Message::ToolResult(result) = message else {
-            continue;
-        };
-        let Some(provenance) = result
-            .details
-            .get("provenance")
-            .and_then(|value| serde_json::from_value::<Provenance>(value.clone()).ok())
-        else {
-            continue;
-        };
-        record_evidence_provenance(&mut summary, &provenance);
-    }
-    summary.sources.sort();
-    summary.sources.dedup();
-    summary.low_trust_influences.sort();
-    summary.low_trust_influences.dedup();
-    summary.warnings.sort();
-    summary.warnings.dedup();
-    summary
-}
-
-fn record_evidence_provenance(summary: &mut EvidenceTrustSummary, provenance: &Provenance) {
-    summary.sources.push(format!(
-        "source={:?}; trust={:?}; origin={}",
-        provenance.source,
-        provenance.trust,
-        provenance.origin.as_deref().unwrap_or("unknown")
-    ));
-    if provenance.is_low_trust() {
-        summary.low_trust_influences.push(format!(
-            "low-trust source observed: {}",
-            provenance.origin.as_deref().unwrap_or("unknown")
-        ));
-    }
-    if provenance.risk.iter().any(|risk| {
-        matches!(
-            risk,
-            RiskLabel::PossiblePromptInjection | RiskLabel::ContainsInstructions
-        )
-    }) {
-        summary.warnings.push(format!(
-            "instruction-like low-trust content observed from {}",
-            provenance.origin.as_deref().unwrap_or("unknown")
-        ));
-    }
-    if provenance.trust == TrustLabel::ExternalUntrusted {
-        summary
-            .warnings
-            .push("external/untrusted content cannot authorize policy or tool escalation".into());
-    }
-}
-
-fn evidence_verification_gate(
-    gate: &crate::workflow::VerificationGate,
-) -> EvidenceVerificationGate {
-    EvidenceVerificationGate {
-        name: if gate.name.is_empty() {
-            gate.id.clone()
-        } else {
-            gate.name.clone()
-        },
-        required: gate.is_required(),
-        status: format!("{:?}", gate.status).to_lowercase(),
-        command: gate.command.as_ref().map(|command| command.command.clone()),
-        exit_code: gate.result.as_ref().and_then(|result| result.exit_code),
-        artifact_path: gate
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.kind == "status")
-            .or_else(|| gate.artifacts.first())
-            .map(|artifact| artifact.path.clone()),
-    }
-}
-
-fn evidence_policy_for_autonomy(mode: AutonomyMode) -> EvidencePolicy {
-    let mut policy = EvidencePolicy::default();
-    policy.decisions.push(format!("autonomy mode: {mode}"));
-    policy
-        .decisions
-        .push("policy.checked trace events record mode, scope, and decision context when policy checks run".into());
-    policy
-        .denials
-        .push("hard-rail bypass: none recorded; dangerous grants are not implemented".into());
-    match mode {
-        AutonomyMode::LocalAuto | AutonomyMode::WorktreeAuto => {
-            policy.decisions.push(
-                "autonomous local actions remain subject to workspace, network, secret, and hard-rail policy".into(),
-            );
-            policy.approvals.push(
-                "network, outside-workspace, destructive, and secret-sensitive actions require approval or are denied".into(),
-            );
-        }
-        AutonomyMode::AllowAllLocal => {
-            policy
-                .decisions
-                .push("allow-all-local remained scoped to local workspace/worktree actions".into());
-            policy.decisions.push(
-                "notable high-risk actions should be inspected in policy.checked trace events"
-                    .into(),
-            );
-            policy.approvals.push(
-                "network, outside-workspace, production, secret, and dangerous-grant actions were not silently allowed".into(),
-            );
-        }
-        AutonomyMode::AllowAll => {
-            policy.decisions.push(
-                "allow-all mode was active; audit evidence and policy.checked trace events remain enabled".into(),
-            );
-            policy.decisions.push(
-                "notable high-risk actions should be inspected in policy.checked trace events"
-                    .into(),
-            );
-            policy.approvals.push(
-                "secret exfiltration, dangerous grants, and unsupported outside-scope mutations were not silently allowed".into(),
-            );
-        }
-        AutonomyMode::Ci => {
-            policy.decisions.push(
-                "ci mode fails closed for prompts/approvals not declared ahead of time".into(),
-            );
-        }
-        AutonomyMode::Suggest | AutonomyMode::Safe => {}
-    }
-    policy
-}
-
-pub(crate) fn workflow_controller_may_override_finish(decision: &LoopDecision) -> bool {
-    matches!(
-        decision,
-        LoopDecision::Finish {
-            status: RunFinalStatus::Done { .. } | RunFinalStatus::DoneWithConcerns { .. }
-        }
-    )
-}
-
-fn evidence_actions_from_messages(messages: &[Message]) -> EvidenceActions {
-    let mut actions = EvidenceActions::default();
-    for message in messages {
-        let Message::Assistant(assistant) = message else {
-            continue;
-        };
-        for block in &assistant.content {
-            let ContentBlock::ToolCall {
-                name, arguments, ..
-            } = block
-            else {
-                continue;
-            };
-            actions.tools.push(name.clone());
-            match name.as_str() {
-                "read" => {
-                    if let Some(path) = arguments.get("path").and_then(|value| value.as_str()) {
-                        actions.files_inspected.push(path.to_string());
-                    }
-                }
-                "write" | "edit" => {
-                    if let Some(path) = arguments.get("path").and_then(|value| value.as_str()) {
-                        actions.files_changed.push(path.to_string());
-                    }
-                }
-                "bash" => {
-                    if let Some(command) = arguments.get("command").and_then(|value| value.as_str())
-                    {
-                        actions.commands_run.push(command.to_string());
-                    }
-                }
-                "scan" => actions.searches.push(format!("scan {arguments}")),
-                _ => {}
-            }
-        }
-    }
-    actions.files_inspected.sort();
-    actions.files_inspected.dedup();
-    actions.files_changed.sort();
-    actions.files_changed.dedup();
-    actions.commands_run.sort();
-    actions.commands_run.dedup();
-    actions.searches.sort();
-    actions.searches.dedup();
-    actions.tools.sort();
-    actions.tools.dedup();
-    actions
 }

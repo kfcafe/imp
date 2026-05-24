@@ -337,10 +337,10 @@ impl Agent {
         );
         policy_context.run_id = self.run_id.lock().ok().and_then(|run_id| run_id.clone());
         policy_context.workflow_id = self
-            .workflow_contract
+            .workflow_contract()
             .id
             .clone()
-            .or_else(|| self.workflow_contract.mana_unit_ref.clone());
+            .or_else(|| self.workflow_contract().mana_unit_ref.clone());
         policy_context.turn = Some(turn);
         policy_context.tool_call_id = Some(call_id.to_string());
         policy_context.args = args.clone();
@@ -352,7 +352,7 @@ impl Agent {
             policy_context.metadata = metadata;
         }
         policy_context.mode = self.mode;
-        policy_context.apply_workflow_contract(&self.workflow_contract);
+        policy_context.apply_workflow_contract(self.workflow_contract());
 
         let policy_record =
             crate::reference_monitor::ReferenceMonitor.evaluate(&policy_context, &self.run_policy);
@@ -510,7 +510,7 @@ impl Agent {
                     lua_tool_loader: self.lua_tool_loader.clone(),
                     mode: self.mode,
                     read_max_lines: self.read_max_lines,
-                    turn_mana_review: self.turn_mana_review.clone(),
+                    turn_mana_review: self.turn_mana_review_accumulator(),
                     config: self.config.clone(),
                     run_policy: self.run_policy.clone(),
                     supporting_provenance: policy_context.supporting_provenance.clone(),

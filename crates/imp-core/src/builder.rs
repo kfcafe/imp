@@ -351,7 +351,7 @@ impl AgentBuilder {
         agent.run_policy = self.run_policy;
         agent.verification_gates = self.verification_gates;
         if let Some(contract) = self.workflow_contract.clone() {
-            agent.workflow_contract = contract;
+            agent.set_workflow_contract(contract);
         }
         agent.worktree_run_metadata = self.worktree_run_metadata;
         agent.lua_tool_loader = self.lua_tool_loader.clone();
@@ -392,10 +392,14 @@ impl AgentBuilder {
             let soul = resources::discover_soul(&self.cwd, &user_config_dir);
             let skills = resources::discover_skills(&self.cwd, &user_config_dir);
             trace_phase("resources_discovery", resource_started);
-            agent.has_mana_skill = skills.iter().any(|skill| skill.name == "mana");
-            agent.has_mana_basics_skill = skills.iter().any(|skill| skill.name == "mana-basics");
-            agent.has_mana_delegation_skill =
-                skills.iter().any(|skill| skill.name == "mana-delegation");
+            agent
+                .set_workflow_mana_skill_available(skills.iter().any(|skill| skill.name == "mana"));
+            agent.set_workflow_mana_basics_skill_available(
+                skills.iter().any(|skill| skill.name == "mana-basics"),
+            );
+            agent.set_workflow_mana_delegation_skill_available(
+                skills.iter().any(|skill| skill.name == "mana-delegation"),
+            );
 
             let (memory_block, user_block) = if self.config.learning.enabled {
                 let memory_started = Instant::now();
@@ -959,17 +963,17 @@ mod tests {
             .system_prompt
             .contains("Make the smallest coherent code change"));
         assert!(agent
-            .workflow_contract
+            .workflow_contract()
             .closeout_criteria
             .criteria
             .iter()
             .any(|criterion| criterion.contains("diff-summary")));
         assert!(agent
-            .workflow_contract
+            .workflow_contract()
             .tool_permissions
             .allowed_tools
             .contains("edit"));
-        assert!(agent.workflow_contract.required_verification.is_empty());
+        assert!(agent.workflow_contract().required_verification.is_empty());
     }
 
     #[test]
@@ -995,9 +999,9 @@ mod tests {
         assert!(agent
             .system_prompt
             .contains("Run only declared or clearly relevant verification commands"));
-        assert_eq!(agent.workflow_contract.required_verification.len(), 1);
+        assert_eq!(agent.workflow_contract().required_verification.len(), 1);
         assert!(agent
-            .workflow_contract
+            .workflow_contract()
             .closeout_criteria
             .criteria
             .iter()
@@ -1019,7 +1023,7 @@ mod tests {
         assert!(agent.tools.get("edit").is_some());
         assert!(agent.tools.get("write").is_some());
         assert!(agent
-            .workflow_contract
+            .workflow_contract()
             .closeout_criteria
             .criteria
             .is_empty());
