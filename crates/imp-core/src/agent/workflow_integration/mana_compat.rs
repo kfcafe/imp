@@ -214,7 +214,7 @@ fn mana_result_parent_id(result: &imp_llm::ToolResultMessage) -> Option<String> 
         .map(ToString::to_string)
 }
 
-pub(super) fn mana_run_status_from_result(
+pub(crate) fn mana_run_status_from_result(
     result: &imp_llm::ToolResultMessage,
 ) -> Option<(String, crate::workflow::WorkflowChildRunStatus)> {
     if result.is_error || result.tool_name != "mana" {

@@ -6,5 +6,9 @@
 mod mana_compat;
 mod recipe_runtime;
 
+#[cfg(test)]
+pub(super) use mana_compat::mana_run_status_from_result;
 pub(crate) use mana_compat::orchestration_follow_up_text;
+#[cfg(test)]
+pub(super) use recipe_runtime::workflow_layer_may_override_finish;
 pub(crate) use recipe_runtime::WorkflowRuntimeLayer;

@@ -27,6 +27,7 @@ mod events;
 mod loop_policy;
 mod loop_state;
 mod mana_loop;
+mod subagent;
 mod workflow_integration;
 #[cfg(not(test))]
 pub(crate) use mana_loop::ManaPolicyDecision;
@@ -46,6 +47,11 @@ pub use loop_state::{
 };
 pub use recovery::{
     IncompleteToolRecovery, IncompleteToolState, RecoveryLedger, RecoveryReconciliation,
+};
+pub use subagent::{
+    ParentRunId, SubagentArtifactRef, SubagentConfidence, SubagentContext, SubagentEvent,
+    SubagentFileContext, SubagentInput, SubagentMergePolicy, SubagentOutcome,
+    SubagentResourceLimits, SubagentRole, SubagentRunId, SubagentStatus,
 };
 
 /// Commands sent to the agent (from UI or orchestrator).
