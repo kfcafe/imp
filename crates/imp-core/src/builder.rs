@@ -519,8 +519,6 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ScanTool));
     tools.register(Arc::new(WebTool));
-    #[cfg(feature = "work-integration")]
-    tools.register(Arc::new(crate::tools::work::WorkTool));
 }
 
 #[cfg(test)]

@@ -14,8 +14,6 @@ pub mod read;
 pub mod scan;
 pub mod shell;
 pub mod web;
-#[cfg(feature = "work-integration")]
-pub mod work;
 pub mod write;
 
 use std::collections::hash_map::DefaultHasher;

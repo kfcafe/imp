@@ -2,11 +2,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use async_trait::async_trait;
-#[cfg(feature = "work-integration")]
-use imp_work::{
-    HypothesisResult, PrototypeEvidence, PrototypeObservation, PrototypeOutcome,
-    PrototypeRecordPolicy, WorkStore,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -16,7 +11,6 @@ use super::{truncate_tail, Tool, ToolContext, ToolOutput, ToolUpdate, Truncation
 use crate::error::{Error, Result};
 use crate::reference_monitor::{ToolActionKind, ToolMetadata};
 
-#[cfg(not(feature = "work-integration"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 enum HypothesisResult {
@@ -27,7 +21,6 @@ enum HypothesisResult {
     NotAssessed,
 }
 
-#[cfg(not(feature = "work-integration"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 enum PrototypeOutcome {
@@ -38,7 +31,6 @@ enum PrototypeOutcome {
     Inconclusive,
 }
 
-#[cfg(not(feature = "work-integration"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 enum PrototypeRecordPolicy {
@@ -48,7 +40,6 @@ enum PrototypeRecordPolicy {
     Prototype,
 }
 
-#[cfg(not(feature = "work-integration"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PrototypeEvidence {
     claim: String,
@@ -56,7 +47,6 @@ struct PrototypeEvidence {
     artifact: Option<PathBuf>,
 }
 
-#[cfg(not(feature = "work-integration"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PrototypeObservation {
     prototype_id: String,
@@ -74,10 +64,8 @@ struct PrototypeObservation {
     artifacts: Vec<PathBuf>,
 }
 
-#[cfg(not(feature = "work-integration"))]
 struct WorkStore;
 
-#[cfg(not(feature = "work-integration"))]
 impl WorkStore {
     fn open(_root: &Path) -> Self {
         Self
