@@ -49,9 +49,11 @@ pub use recovery::{
     IncompleteToolRecovery, IncompleteToolState, RecoveryLedger, RecoveryReconciliation,
 };
 pub use subagent::{
-    ParentRunId, SubagentArtifactRef, SubagentConfidence, SubagentContext, SubagentEvent,
-    SubagentFileContext, SubagentInput, SubagentMergePolicy, SubagentOutcome,
-    SubagentResourceLimits, SubagentRole, SubagentRunId, SubagentStatus,
+    NoopSubagentCoordinator, ParentRunId, SubagentArtifactRef, SubagentCancelResult,
+    SubagentConfidence, SubagentContext, SubagentCoordinator, SubagentCoordinatorError,
+    SubagentEvent, SubagentFileContext, SubagentInput, SubagentMergePolicy, SubagentMergeResult,
+    SubagentOutcome, SubagentPlan, SubagentResourceLimits, SubagentRole, SubagentRunId,
+    SubagentSpawnResult, SubagentStatus,
 };
 
 /// Commands sent to the agent (from UI or orchestrator).

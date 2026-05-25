@@ -209,6 +209,107 @@ pub enum SubagentEvent {
     },
 }
 
+/// Planned bounded subagent execution that has not been spawned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentPlan {
+    pub input: SubagentInput,
+}
+
+/// Result of requesting a bounded subagent spawn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentSpawnResult {
+    pub child_run_id: SubagentRunId,
+    pub events: Vec<SubagentEvent>,
+}
+
+/// Result of requesting cancellation for a bounded subagent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentCancelResult {
+    pub child_run_id: SubagentRunId,
+    pub event: SubagentEvent,
+}
+
+/// Result of merging a bounded subagent outcome into the parent run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentMergeResult {
+    pub child_run_id: SubagentRunId,
+    pub policy: SubagentMergePolicy,
+    pub event: SubagentEvent,
+}
+
+/// Error returned by a bounded subagent coordinator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentCoordinatorError {
+    Unsupported { operation: String },
+    InvalidInput { reason: String },
+    NotFound { child_run_id: SubagentRunId },
+    Failed { reason: String },
+}
+
+impl SubagentCoordinatorError {
+    pub fn unsupported(operation: impl Into<String>) -> Self {
+        Self::Unsupported {
+            operation: operation.into(),
+        }
+    }
+}
+
+/// Runtime-local coordinator for bounded subagents.
+///
+/// This is intentionally scoped to imp runtime orchestration. Implementations
+/// must not assume durable task ids, leases, board status, or scheduler state.
+pub trait SubagentCoordinator {
+    fn plan(&self, input: SubagentInput) -> Result<SubagentPlan, SubagentCoordinatorError>;
+
+    fn spawn(&self, plan: SubagentPlan) -> Result<SubagentSpawnResult, SubagentCoordinatorError>;
+
+    fn cancel(
+        &self,
+        child_run_id: &SubagentRunId,
+        reason: Option<String>,
+    ) -> Result<SubagentCancelResult, SubagentCoordinatorError>;
+
+    fn merge(
+        &self,
+        outcome: SubagentOutcome,
+        policy: SubagentMergePolicy,
+    ) -> Result<SubagentMergeResult, SubagentCoordinatorError>;
+}
+
+/// Default coordinator used until a real bounded subagent executor is enabled.
+///
+/// Planning is allowed because it has no side effects. Execution operations
+/// return explicit unsupported errors instead of silently succeeding.
+#[derive(Debug, Clone, Default)]
+pub struct NoopSubagentCoordinator;
+
+impl SubagentCoordinator for NoopSubagentCoordinator {
+    fn plan(&self, input: SubagentInput) -> Result<SubagentPlan, SubagentCoordinatorError> {
+        Ok(SubagentPlan { input })
+    }
+
+    fn spawn(&self, _plan: SubagentPlan) -> Result<SubagentSpawnResult, SubagentCoordinatorError> {
+        Err(SubagentCoordinatorError::unsupported("spawn"))
+    }
+
+    fn cancel(
+        &self,
+        _child_run_id: &SubagentRunId,
+        _reason: Option<String>,
+    ) -> Result<SubagentCancelResult, SubagentCoordinatorError> {
+        Err(SubagentCoordinatorError::unsupported("cancel"))
+    }
+
+    fn merge(
+        &self,
+        _outcome: SubagentOutcome,
+        _policy: SubagentMergePolicy,
+    ) -> Result<SubagentMergeResult, SubagentCoordinatorError> {
+        Err(SubagentCoordinatorError::unsupported("merge"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +323,69 @@ mod tests {
         assert!(SubagentStatus::Blocked.is_terminal());
         assert!(SubagentStatus::Failed.is_terminal());
         assert!(SubagentStatus::Cancelled.is_terminal());
+    }
+
+    fn sample_subagent_input() -> SubagentInput {
+        SubagentInput {
+            parent_run_id: ParentRunId::new("parent-1"),
+            child_run_id: SubagentRunId::new("child-1"),
+            role: SubagentRole::Verifier,
+            objective: "Check the patch".to_string(),
+            context: SubagentContext::default(),
+            resource_limits: SubagentResourceLimits::default(),
+            merge_policy: SubagentMergePolicy::Verify,
+            output_contract: None,
+        }
+    }
+
+    #[test]
+    fn noop_coordinator_plans_without_execution() {
+        let coordinator = NoopSubagentCoordinator;
+        let input = sample_subagent_input();
+
+        let plan = coordinator.plan(input.clone()).expect("plan subagent");
+        assert_eq!(plan.input, input);
+    }
+
+    #[test]
+    fn noop_coordinator_rejects_execution_operations_explicitly() {
+        let coordinator = NoopSubagentCoordinator;
+        let input = sample_subagent_input();
+        let plan = coordinator.plan(input.clone()).expect("plan subagent");
+
+        assert_eq!(
+            coordinator.spawn(plan),
+            Err(SubagentCoordinatorError::Unsupported {
+                operation: "spawn".to_string()
+            })
+        );
+        assert_eq!(
+            coordinator.cancel(&input.child_run_id, Some("stop".to_string())),
+            Err(SubagentCoordinatorError::Unsupported {
+                operation: "cancel".to_string()
+            })
+        );
+
+        let outcome = SubagentOutcome {
+            child_run_id: input.child_run_id,
+            role: input.role,
+            status: SubagentStatus::Success,
+            summary: "verified".to_string(),
+            evidence: Vec::new(),
+            files_changed: Vec::new(),
+            files_inspected: Vec::new(),
+            verification_results: Vec::new(),
+            blockers: Vec::new(),
+            follow_ups: Vec::new(),
+            diagnostics: Vec::new(),
+            confidence: Some(SubagentConfidence::High),
+        };
+        assert_eq!(
+            coordinator.merge(outcome, SubagentMergePolicy::Verify),
+            Err(SubagentCoordinatorError::Unsupported {
+                operation: "merge".to_string()
+            })
+        );
     }
 
     #[test]
