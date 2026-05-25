@@ -221,10 +221,7 @@ pub async fn plan_worktree_run(
     let main_worktree = main_worktree(cwd)
         .await?
         .unwrap_or_else(|| repo_root.clone());
-    let already_in_worktree = mana_core::worktree::detect_worktree(cwd)
-        .ok()
-        .flatten()
-        .is_some();
+    let already_in_worktree = current_is_secondary_worktree(cwd).await?;
 
     if !spec.allow_dirty_main {
         let dirty = git_status_short(&main_worktree).await?;
@@ -570,6 +567,32 @@ async fn repo_root(cwd: &Path) -> WorktreeRunResult<PathBuf> {
     Ok(PathBuf::from(stdout_trimmed(&output)))
 }
 
+async fn current_is_secondary_worktree(cwd: &Path) -> WorktreeRunResult<bool> {
+    let output = run_git(cwd, ["worktree", "list", "--porcelain"]).await?;
+    if !output.status.success() {
+        return Err(WorktreeRunError::GitFailed(format!(
+            "git worktree list failed: {}",
+            stderr_trimmed(&output)
+        )));
+    }
+
+    let current = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let mut first_worktree: Option<PathBuf> = None;
+    for line in output.stdout.split(|byte| *byte == b'\n') {
+        let line = String::from_utf8_lossy(line);
+        let Some(path) = line.strip_prefix("worktree ") else {
+            continue;
+        };
+        let path = PathBuf::from(path);
+        if first_worktree.is_none() {
+            first_worktree = Some(path.clone());
+        }
+        if same_path(&path, &current) {
+            return Ok(first_worktree.as_ref() != Some(&path));
+        }
+    }
+    Ok(false)
+}
 async fn main_worktree(cwd: &Path) -> WorktreeRunResult<Option<PathBuf>> {
     let output = run_git(cwd, ["worktree", "list", "--porcelain"]).await?;
     if !output.status.success() {

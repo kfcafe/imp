@@ -18,11 +18,14 @@ pub mod hooks;
 pub mod imp_session;
 pub mod import;
 pub mod learning;
+#[cfg(feature = "mana-integration")]
 pub mod mana_next;
+#[cfg(feature = "mana-integration")]
 pub mod mana_prompt_context;
 pub mod mana_review;
 #[cfg(feature = "mana-integration")]
 pub mod mana_run_state;
+#[cfg(feature = "mana-integration")]
 pub mod mana_worker;
 pub mod memory;
 pub mod personality;

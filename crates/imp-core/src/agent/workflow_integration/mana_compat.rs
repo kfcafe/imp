@@ -1,5 +1,8 @@
 //! Mana/work-graph compatibility support for imp workflow integration.
 
+#[cfg(feature = "mana-integration")]
+use std::path::{Path, PathBuf};
+
 use crate::agent::{
     mana_loop::{self, ManaActionClass},
     Agent, AgentEvent, ContentBlock, ContinueReason, ContinueRecommendation, LoopDecision, Message,
@@ -17,6 +20,18 @@ use super::super::{
     assistant_message_contains_mana_tool_call, assistant_message_text,
     bash_result_is_successful_check,
 };
+
+#[cfg(feature = "mana-integration")]
+fn find_mana_dir(cwd: &Path) -> Option<PathBuf> {
+    let mut current = if cwd.is_file() { cwd.parent()? } else { cwd };
+    loop {
+        let candidate = current.join(".mana");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        current = current.parent()?;
+    }
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct WorkflowPostTurnSignals {
@@ -777,30 +792,38 @@ impl Agent {
             &shape,
         );
 
-        let Ok(mana_dir) = mana_core::discovery::find_mana_dir(&self.cwd) else {
-            self.workflow_layer.controller_mut().skip_bootstrap(format!(
-                "mana bootstrap unavailable: no .mana found for {}",
-                self.cwd.display()
-            ));
-            return;
-        };
-
-        let request = crate::workflow::WorkflowBootstrapRequest::from_prompt(prompt, &self.cwd);
-        match crate::workflow::create_native_mana_root(&mana_dir, request) {
-            Ok(root) => {
-                self.workflow_layer
-                    .controller_mut()
-                    .bind_mana_root(root.mana_root_id);
-                self.workflow_layer
-                    .controller_mut()
-                    .record_mana_graph_changed();
-            }
-            Err(err) => {
-                self.workflow_layer.controller_mut().closeout.blocker = Some(format!(
-                    "workflow bootstrap failed to create mana root: {err}"
+        #[cfg(feature = "mana-integration")]
+        {
+            let Some(mana_dir) = find_mana_dir(&self.cwd) else {
+                self.workflow_layer.controller_mut().skip_bootstrap(format!(
+                    "mana bootstrap unavailable: no .mana found for {}",
+                    self.cwd.display()
                 ));
+                return;
+            };
+
+            let request = crate::workflow::WorkflowBootstrapRequest::from_prompt(prompt, &self.cwd);
+            match crate::workflow::create_native_mana_root(&mana_dir, request) {
+                Ok(root) => {
+                    self.workflow_layer
+                        .controller_mut()
+                        .bind_mana_root(root.mana_root_id);
+                    self.workflow_layer
+                        .controller_mut()
+                        .record_mana_graph_changed();
+                }
+                Err(err) => {
+                    self.workflow_layer.controller_mut().closeout.blocker = Some(format!(
+                        "workflow bootstrap failed to create mana root: {err}"
+                    ));
+                }
             }
         }
+
+        #[cfg(not(feature = "mana-integration"))]
+        self.workflow_layer.controller_mut().skip_bootstrap(
+            "mana bootstrap unavailable: imp-core built without mana-integration".to_string(),
+        );
     }
 
     pub fn resume_workflow_controller_from_project_run(

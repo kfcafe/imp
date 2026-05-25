@@ -288,7 +288,7 @@ struct AgentStartRequest {
     runtime_signal_tx: tokio::sync::mpsc::Sender<RuntimeSignal>,
     ui_tx: tokio::sync::mpsc::Sender<crate::tui_interface::UiRequest>,
     preloaded_lua_tools: Option<ToolRegistry>,
-    prompt_context: Option<imp_core::mana_prompt_context::SessionPromptContext>,
+    prompt_context: Option<imp_core::builder::PromptContext>,
     tui_trace: Option<TuiTrace>,
 }
 
@@ -5782,7 +5782,7 @@ impl App {
             runtime_signal_tx: self.runtime_signal_tx.clone(),
             ui_tx,
             preloaded_lua_tools: self.preloaded_lua_tools(),
-            prompt_context: Some(imp_core::mana_prompt_context::SessionPromptContext::default()),
+            prompt_context: Some(imp_core::builder::PromptContext::from_facts(Vec::new())),
             tui_trace: self.tui_trace.clone(),
         }
     }

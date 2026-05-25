@@ -293,7 +293,7 @@ async fn status_action(cwd: &Path, repo_root: &Path) -> Result<ToolOutput> {
     let head = head_sha_short(cwd)
         .await
         .unwrap_or_else(|| "unknown".to_string());
-    let secondary = mana_core::worktree::detect_worktree(cwd).ok().flatten();
+    let secondary = current_secondary_worktree(cwd).await?;
     let clean = entries.is_empty();
 
     let mut text = String::new();
@@ -383,7 +383,7 @@ async fn worktree_list_action(cwd: &Path, repo_root: &Path) -> Result<ToolOutput
     }
 
     let entries = parse_worktree_list(&stdout_lossy(&output));
-    let current_secondary = mana_core::worktree::detect_worktree(cwd).ok().flatten();
+    let current_secondary = current_secondary_worktree(cwd).await?;
     let mut text = String::new();
     text.push_str(&format!("repo: {}\n", repo_root.display()));
     match &current_secondary {
@@ -617,6 +617,44 @@ async fn worktree_remove_action(
         }),
         is_error: false,
     })
+}
+
+async fn current_secondary_worktree(cwd: &Path) -> Result<Option<CurrentSecondaryWorktree>> {
+    let output = run_git(cwd, ["worktree", "list", "--porcelain"]).await?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let entries = parse_worktree_list(&stdout_lossy(&output));
+    let current = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let Some(current_entry) = entries
+        .iter()
+        .find(|entry| same_path(Path::new(&entry.path), &current))
+    else {
+        return Ok(None);
+    };
+    let Some(main_entry) = entries.first() else {
+        return Ok(None);
+    };
+    if current_entry.path == main_entry.path {
+        return Ok(None);
+    }
+
+    Ok(Some(CurrentSecondaryWorktree {
+        main_path: PathBuf::from(&main_entry.path),
+        worktree_path: PathBuf::from(&current_entry.path),
+        branch: current_entry
+            .branch
+            .clone()
+            .unwrap_or_else(|| "(detached)".to_string()),
+    }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CurrentSecondaryWorktree {
+    main_path: PathBuf,
+    worktree_path: PathBuf,
+    branch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

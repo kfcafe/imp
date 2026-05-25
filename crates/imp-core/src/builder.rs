@@ -9,7 +9,6 @@ use imp_llm::Model;
 use crate::agent::{Agent, AgentHandle};
 use crate::config::{Config, LuaCapabilityPolicy};
 use crate::error::Result;
-use crate::mana_prompt_context;
 use crate::policy::RunPolicy;
 use crate::resources;
 use crate::roles::{Role, RoleToolPolicy};
@@ -19,6 +18,21 @@ use crate::workflow::{
     AutonomyMode, ImplicitWorkflowContractInput, VerificationGate, VerificationRequirement,
     WorkflowContract, WorktreeRunMetadata, WorktreeRunPlan,
 };
+
+#[derive(Clone)]
+pub struct PromptContext {
+    pub facts: Vec<Fact>,
+    pub project_memory_status: Option<String>,
+}
+
+impl PromptContext {
+    pub fn from_facts(facts: Vec<Fact>) -> Self {
+        Self {
+            facts,
+            project_memory_status: None,
+        }
+    }
+}
 
 fn load_scoped_memory_block(
     cwd: &std::path::Path,
@@ -85,7 +99,7 @@ pub struct AgentBuilder {
     /// Per-run tool/write policy layered on top of AgentMode.
     run_policy: RunPolicy,
     /// Preloaded mana prompt context; avoids duplicate mana reads for worker mode.
-    preloaded_prompt_context: Option<mana_prompt_context::SessionPromptContext>,
+    preloaded_prompt_context: Option<PromptContext>,
     /// Optional workflow contract override. If absent, build creates an implicit contract.
     pub verification_gates: Vec<VerificationGate>,
     workflow_contract: Option<WorkflowContract>,
@@ -209,10 +223,7 @@ impl AgentBuilder {
     }
 
     /// Use preloaded mana prompt context instead of loading it during build.
-    pub fn preloaded_prompt_context(
-        mut self,
-        context: mana_prompt_context::SessionPromptContext,
-    ) -> Self {
+    pub fn preloaded_prompt_context(mut self, context: PromptContext) -> Self {
         self.preloaded_prompt_context = Some(context);
         self
     }
@@ -425,26 +436,9 @@ impl AgentBuilder {
             let prompt_context = if self.facts.is_empty() {
                 self.preloaded_prompt_context
                     .clone()
-                    .unwrap_or_else(|| mana_prompt_context::load_session_prompt_context(&self.cwd))
+                    .unwrap_or_else(|| PromptContext::from_facts(Vec::new()))
             } else {
-                mana_prompt_context::SessionPromptContext {
-                    facts: self.facts.clone(),
-                    fact_provenance: self
-                        .facts
-                        .iter()
-                        .map(|fact| {
-                            crate::trust::TrustedContext::new(
-                                fact.text.clone(),
-                                crate::trust::Provenance::mana_record(
-                                    crate::trust::ManaRecordKind::Fact,
-                                    "builder-fact",
-                                ),
-                            )
-                        })
-                        .collect(),
-                    project_memory_status: None,
-                    project_memory_status_provenance: None,
-                }
+                PromptContext::from_facts(self.facts.clone())
             };
             trace_phase("mana_prompt_context", prompt_context_started);
 

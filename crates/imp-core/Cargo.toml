@@ -12,7 +12,7 @@ categories.workspace = true
 
 [dependencies]
 imp-llm.workspace = true
-mana-core.workspace = true
+mana-core = { workspace = true, optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 mana = { version = "0.3.2", package = "mana-cli", optional = true }
 serde.workspace = true
@@ -75,7 +75,7 @@ libc = "0.2"
 # rush-backend = ["rush"]
 # For now, declare the feature so cfg(feature = "rush-backend") compiles without warnings.
 rush-backend = []
-mana-integration = ["dep:mana"]
+mana-integration = ["dep:mana", "dep:mana-core"]
 
 [[bench]]
 name = "core_hot_paths"
