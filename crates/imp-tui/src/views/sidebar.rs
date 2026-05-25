@@ -1709,7 +1709,10 @@ mod tests {
             80,
         );
 
-        assert!(render.plain_lines.iter().any(|line| line.contains("Terminal")));
+        assert!(render
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("Terminal")));
         assert!(render.plain_lines.iter().any(|line| line == "line1"));
         assert!(render.plain_lines.iter().any(|line| line == "line2"));
         assert!(!render.plain_lines.iter().any(|line| line == "…"));

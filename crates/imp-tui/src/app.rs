@@ -8867,6 +8867,8 @@ impl App {
                         };
                         let context = LlmContext {
                             messages: vec![Message::user(prompt)],
+                            session_id: None,
+                            thread_id: None,
                         };
                         let options = RequestOptions {
                             thinking_level,

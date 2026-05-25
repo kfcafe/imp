@@ -97,9 +97,6 @@ use imp_core::eval_candidate::{
 use imp_core::format_error_for_display;
 use imp_core::tools::web::types::SearchProvider;
 use imp_core::workflow::{AutonomyMode, VerificationGate};
-use imp_work::{
-    DispatchBlockerReason, GlobalWorkStore, PathConflictPolicy, RunPolicy, Task, WorkId, WorkStore,
-};
 use std::ffi::OsString;
 
 use imp_core::imp_session::{
@@ -361,27 +358,6 @@ struct HeadlessManaArgs {
 }
 
 #[derive(Args, Debug, Clone)]
-struct WorkRunArgs {
-    /// Native imp-work task or epic id to plan/run
-    work_id: String,
-    /// Show the next runnable wave without claiming work
-    #[arg(long)]
-    dry_run: bool,
-    /// Maximum concurrent worker assignments to plan
-    #[arg(long, default_value_t = 1)]
-    jobs: usize,
-    /// Require each dispatchable task to have a current context pack
-    #[arg(long)]
-    require_context: bool,
-    /// Ignore path conflicts when planning the ready wave
-    #[arg(long)]
-    ignore_path_conflicts: bool,
-    /// Emit machine-readable JSON
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Args, Debug, Clone)]
 struct ManaNamespaceArgs {
     /// Mana operator verb or unit ID
     target: String,
@@ -428,8 +404,6 @@ enum Commands {
     Config,
     /// Enter the mana-aware operator namespace. Use `imp mana <unit-id>` to run one unit.
     Mana(ManaNamespaceArgs),
-    /// Run or plan native imp-work orchestration for a task/epic
-    Run(WorkRunArgs),
     /// Local statistics from persisted imp sessions
     Stats {
         #[command(subcommand)]
@@ -1222,13 +1196,6 @@ pub async fn run() {
                     }
                 }
             },
-            Commands::Run(args) => {
-                if let Err(e) = run_native_work(&cli, args) {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
-                }
-                return;
-            }
             Commands::Stats { command } => {
                 if let Err(e) = stats_report::run_stats_command(command) {
                     eprintln!("Error: {e}");
@@ -2328,189 +2295,6 @@ fn worker_status_counts_as_success(status: imp_core::mana_worker::WorkerStatus) 
         imp_core::mana_worker::WorkerStatus::Completed
             | imp_core::mana_worker::WorkerStatus::AwaitingVerify
     )
-}
-
-fn run_native_work(cli: &Cli, args: &WorkRunArgs) -> Result<(), Box<dyn std::error::Error>> {
-    if !args.dry_run {
-        return Err("native `imp run` currently supports planning only; use --dry-run for the first implementation slice".into());
-    }
-
-    let cwd = std::env::current_dir()?;
-    let scope = imp_core::storage::WorkScope::for_project_dir(&cwd);
-    let store_root = native_work_store_root(&scope);
-    let store = WorkStore::open(&store_root);
-    let mut tasks = load_native_work_tasks(&store, &scope)?;
-    let root_id = WorkId::from(args.work_id.as_str());
-    let root_title = tasks
-        .iter()
-        .find(|task| task.id == root_id)
-        .map(|task| task.title.clone())
-        .or_else(|| find_epic_title(&store, &root_id).ok().flatten())
-        .unwrap_or_else(|| "native imp-work run".to_string());
-
-    tasks = tasks_for_run_root(tasks, &root_id);
-    if args.require_context {
-        tasks.retain(|task| task_has_fresh_context(&store, task));
-    }
-
-    let mut scheduler = imp_work::Scheduler::new();
-    for task in tasks {
-        scheduler.add_task(task);
-    }
-    let policy = RunPolicy {
-        max_jobs: args.jobs.max(1),
-        path_conflicts: if args.ignore_path_conflicts {
-            PathConflictPolicy::Ignore
-        } else {
-            PathConflictPolicy::Block
-        },
-    };
-    let plan = scheduler.plan_dispatch(&policy);
-
-    if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "action": "run",
-                "mode": "dry_run",
-                "root": { "id": root_id, "title": root_title },
-                "policy": policy,
-                "dispatchable": plan.dispatchable,
-                "blocked": plan.blocked,
-            }))?
-        );
-        return Ok(());
-    }
-
-    print_work_run_plan(&root_id, &root_title, &policy, &plan);
-    if plan.dispatchable.is_empty() {
-        println!("\nNo ready work can be dispatched for this run.");
-        println!(
-            "Next: inspect blockers with `imp run {} --dry-run --json` or `imp work next`.",
-            root_id
-        );
-    } else {
-        println!("\nStart this run after the durable coordinator lands:");
-        println!("  imp run {} --jobs {}", root_id, policy.max_jobs);
-    }
-    if cli.verbose {
-        eprintln!("work store: {}", store_root.display());
-    }
-    Ok(())
-}
-
-fn native_work_store_root(scope: &imp_core::storage::WorkScope) -> PathBuf {
-    scope
-        .global_store_root
-        .join("projects")
-        .join(native_work_project_hash(&scope.project_root))
-}
-
-fn native_work_project_hash(project_root: &Path) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    project_root.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
-fn load_native_work_tasks(
-    store: &WorkStore,
-    scope: &imp_core::storage::WorkScope,
-) -> imp_work::Result<Vec<Task>> {
-    let global = GlobalWorkStore::open(scope.global_store_root.clone());
-    let mut tasks = global.tasks_for_project(&scope.project_root)?;
-    for task in store.load_tasks()? {
-        if let Some(existing) = tasks.iter_mut().find(|existing| existing.id == task.id) {
-            *existing = task;
-        } else {
-            tasks.push(task);
-        }
-    }
-    Ok(tasks)
-}
-
-fn find_epic_title(store: &WorkStore, id: &WorkId) -> imp_work::Result<Option<String>> {
-    Ok(store
-        .load_epics()?
-        .into_iter()
-        .find(|epic| epic.id == *id)
-        .map(|epic| epic.title))
-}
-
-fn tasks_for_run_root(tasks: Vec<Task>, root_id: &WorkId) -> Vec<Task> {
-    let root_is_task = tasks.iter().any(|task| task.id == *root_id);
-    if root_is_task {
-        return tasks
-            .into_iter()
-            .filter(|task| task.id == *root_id || task.parent.as_ref() == Some(root_id))
-            .collect();
-    }
-    tasks
-        .into_iter()
-        .filter(|task| task.parent.as_ref() == Some(root_id))
-        .collect()
-}
-
-fn task_has_fresh_context(store: &WorkStore, task: &Task) -> bool {
-    let Some(context_pack_id) = &task.context_pack else {
-        return false;
-    };
-    matches!(
-        store.load_context_pack(&context_pack_id.0),
-        Ok(Some(pack)) if pack.status == imp_work::ContextPackStatus::Ready
-    )
-}
-
-fn print_work_run_plan(
-    root_id: &WorkId,
-    root_title: &str,
-    policy: &RunPolicy,
-    plan: &imp_work::DispatchPlan,
-) {
-    println!("Work run dry-run for {root_id}");
-    println!("{root_title}\n");
-    println!("Ready this wave");
-    if plan.dispatchable.is_empty() {
-        println!("  none");
-    } else {
-        for id in &plan.dispatchable {
-            println!("  {id}");
-        }
-    }
-    println!("\nBlocked");
-    if plan.blocked.is_empty() {
-        println!("  none");
-    } else {
-        for blocker in &plan.blocked {
-            println!(
-                "  {}  {}",
-                blocker.work_id,
-                format_dispatch_blocker(&blocker.reason)
-            );
-        }
-    }
-    println!("\nPolicy");
-    println!("  jobs: {}", policy.max_jobs);
-    println!(
-        "  path conflicts: {}",
-        match policy.path_conflicts {
-            PathConflictPolicy::Block => "block",
-            PathConflictPolicy::Ignore => "ignore",
-        }
-    );
-}
-
-fn format_dispatch_blocker(reason: &DispatchBlockerReason) -> String {
-    match reason {
-        DispatchBlockerReason::MaxJobsReached => "waiting: max jobs reached".to_string(),
-        DispatchBlockerReason::PathConflict { path, held_by } => {
-            format!(
-                "blocked: path conflict on {} with {}",
-                path.display(),
-                held_by
-            )
-        }
-    }
 }
 
 async fn run_headless_mode(
@@ -5691,25 +5475,9 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_run_as_native_imp_work_planning_command() {
-        let cli = Cli::try_parse_from(["imp", "run", "T-123", "--dry-run", "--jobs", "3"])
-            .expect("parse native work run");
-        match cli.command {
-            Some(Commands::Run(args)) => {
-                assert_eq!(args.work_id, "T-123");
-                assert!(args.dry_run);
-                assert_eq!(args.jobs, 3);
-                assert!(!args.require_context);
-                assert!(!args.ignore_path_conflicts);
-            }
-            other => panic!("expected native work run command, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn cli_rejects_old_run_mana_flags() {
         let err = match Cli::try_parse_from(["imp", "run", "5.1", "--defer-verify"]) {
-            Ok(_) => panic!("old mana run flags should not parse on native imp run"),
+            Ok(_) => panic!("legacy native work run flags should not parse"),
             Err(err) => err,
         };
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
