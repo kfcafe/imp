@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-imp-core.workspace = true
+imp-core = { workspace = true, features = ["mana-integration"] }
 serde.workspace = true
 imp-llm.workspace = true
 serde_json.workspace = true
