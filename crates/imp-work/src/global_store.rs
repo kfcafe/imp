@@ -168,8 +168,7 @@ impl GlobalWorkStore {
         Ok(self
             .load_tasks()?
             .into_iter()
-            .filter(|record| record.project_root == project_root && &record.task.id == id)
-            .last())
+            .rfind(|record| record.project_root == project_root && &record.task.id == id))
     }
 
     pub fn update_task_for_project(

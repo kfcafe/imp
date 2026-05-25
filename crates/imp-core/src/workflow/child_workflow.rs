@@ -75,9 +75,10 @@ impl Default for ChildWorkflowSpec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ChildWorkflowStatus {
+    #[default]
     Planned,
     Queued,
     Starting,
@@ -93,12 +94,6 @@ pub enum ChildWorkflowStatus {
     Done,
     DoneWithConcerns,
     Integrated,
-}
-
-impl Default for ChildWorkflowStatus {
-    fn default() -> Self {
-        Self::Planned
-    }
 }
 
 impl ChildWorkflowStatus {
@@ -329,18 +324,13 @@ impl Default for ChildCancellation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ChildStalePolicyAction {
     NotifyParent,
+    #[default]
     MarkStale,
     Cancel,
-}
-
-impl Default for ChildStalePolicyAction {
-    fn default() -> Self {
-        Self::MarkStale
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -589,9 +579,11 @@ pub fn plan_child_workflow(
         return Err(ChildWorkflowError::RoleNotDelegable(request.role));
     }
 
-    let mut parent = WorkflowContract::default();
-    parent.id = Some(format!("parent-for-{}", request.id));
-    parent.objective = "Delegate child workflow".into();
+    let parent = WorkflowContract {
+        id: Some(format!("parent-for-{}", request.id)),
+        objective: "Delegate child workflow".into(),
+        ..WorkflowContract::default()
+    };
     let contract = create_child_workflow_contract(
         &parent,
         &role,

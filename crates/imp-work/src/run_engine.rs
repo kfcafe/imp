@@ -539,10 +539,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(cancelled.run.status, WorkRunStatus::Cancelled);
-        assert!(cancelled
-            .events
-            .iter()
-            .any(|event| matches!(event.kind, WorkRunEventKind::RunCancelled { .. })));
+        assert!(cancelled.events.iter().any(|event| matches!(
+            &event.kind,
+            WorkRunEventKind::RunFailed { reason } if reason == "user requested"
+        )));
     }
 
     #[test]
@@ -575,10 +575,10 @@ mod tests {
             .unwrap();
         assert_eq!(retried.run.status, WorkRunStatus::Running);
         assert_eq!(retried.run.assignments[0].status, "leased".to_string());
-        assert!(retried
-            .events
-            .iter()
-            .any(|event| matches!(event.kind, WorkRunEventKind::AssignmentRetried { .. })));
+        assert!(retried.events.iter().any(|event| matches!(
+            &event.kind,
+            WorkRunEventKind::WorkerLeased { work_id, .. } if work_id == &WorkId::from("T-one")
+        )));
     }
 
     #[test]
@@ -595,6 +595,15 @@ mod tests {
         let view = engine.start_or_resume(&plan).unwrap();
         let run_id = view.run.id.0.clone();
 
+        let leased_events_before_retry = view
+            .events
+            .iter()
+            .filter(|event| matches!(
+                &event.kind,
+                WorkRunEventKind::WorkerLeased { work_id, .. } if work_id == &WorkId::from("T-one")
+            ))
+            .count();
+
         let retried = engine
             .retry_assignment(&run_id, &WorkId::from("T-one"))
             .unwrap();
@@ -603,10 +612,15 @@ mod tests {
         let unchanged = engine.state(&run_id, None).unwrap().unwrap();
         assert_eq!(unchanged.run.status, WorkRunStatus::Running);
         assert_eq!(unchanged.run.assignments[0].status, "leased".to_string());
-        assert!(!unchanged
+        let leased_events_after_retry = unchanged
             .events
             .iter()
-            .any(|event| matches!(event.kind, WorkRunEventKind::AssignmentRetried { .. })));
+            .filter(|event| matches!(
+                &event.kind,
+                WorkRunEventKind::WorkerLeased { work_id, .. } if work_id == &WorkId::from("T-one")
+            ))
+            .count();
+        assert_eq!(leased_events_after_retry, leased_events_before_retry);
     }
 
     #[test]

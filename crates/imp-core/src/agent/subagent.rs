@@ -83,9 +83,10 @@ pub struct SubagentResourceLimits {
 }
 
 /// How the parent run should consume a bounded subagent outcome.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentMergePolicy {
+    #[default]
     Inform,
     Verify,
     Review,
@@ -93,12 +94,6 @@ pub enum SubagentMergePolicy {
     Synthesize,
     Escalate,
     Custom(String),
-}
-
-impl Default for SubagentMergePolicy {
-    fn default() -> Self {
-        Self::Inform
-    }
 }
 
 /// Input packet for a bounded subagent execution.

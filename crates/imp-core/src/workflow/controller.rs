@@ -466,19 +466,18 @@ impl WorkflowRunController {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum WorkflowBootstrapState {
+    #[default]
     Unspecified,
     Required,
-    Complete { mana_root_id: String },
-    Skipped { reason: String },
-}
-
-impl Default for WorkflowBootstrapState {
-    fn default() -> Self {
-        Self::Unspecified
-    }
+    Complete {
+        mana_root_id: String,
+    },
+    Skipped {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -490,9 +489,10 @@ pub enum WorkflowGraphShape {
     NeedsDecomposition,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum WorkflowPlanningState {
+    #[default]
     Unspecified,
     RootOnly,
     AwaitingDecomposition,
@@ -500,12 +500,6 @@ pub enum WorkflowPlanningState {
         child_unit_ids: Vec<String>,
         completed_child_unit_ids: Vec<String>,
     },
-}
-
-impl Default for WorkflowPlanningState {
-    fn default() -> Self {
-        Self::Unspecified
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

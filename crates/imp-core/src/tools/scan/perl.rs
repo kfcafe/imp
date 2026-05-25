@@ -147,8 +147,7 @@ fn package_before(source: &str, byte: usize) -> Option<String> {
         .filter_map(|line| line.trim().strip_prefix("package "))
         .filter_map(|rest| rest.split(';').next())
         .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .last()
+        .rfind(|name| !name.is_empty())
         .map(str::to_string)
 }
 

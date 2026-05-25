@@ -64,18 +64,13 @@ pub enum PrototypeOutcome {
     Inconclusive,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PrototypeRecordPolicy {
+    #[default]
     None,
     Memory,
     Prototype,
-}
-
-impl Default for PrototypeRecordPolicy {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

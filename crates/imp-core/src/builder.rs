@@ -502,22 +502,25 @@ fn apply_role_tool_policy(tools: &mut ToolRegistry, role: &Role) {
 /// This is the canonical list — update here when adding or removing tools.
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
-        ask::AskTool, bash::BashTool, edit::EditTool, git::GitTool, mana::ManaTool,
-        prototype::PrototypeTool, read::ReadTool, scan::ScanTool, web::WebTool, work::WorkTool,
-        write::WriteTool,
+        ask::AskTool, bash::BashTool, edit::EditTool, git::GitTool, prototype::PrototypeTool,
+        read::ReadTool, scan::ScanTool, web::WebTool, write::WriteTool,
     };
 
     tools.register(Arc::new(AskTool));
     tools.register(Arc::new(BashTool::canonical()));
     tools.register(Arc::new(EditTool));
     tools.register(Arc::new(GitTool));
-    tools.register(Arc::new(ManaTool::default()));
+    #[cfg(feature = "mana-integration")]
+    if crate::tools::mana::mana_executable_available() {
+        tools.register(Arc::new(crate::tools::mana::ManaTool::default()));
+    }
     tools.register(Arc::new(PrototypeTool));
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ScanTool));
     tools.register(Arc::new(WebTool));
-    tools.register(Arc::new(WorkTool));
+    #[cfg(feature = "work-integration")]
+    tools.register(Arc::new(crate::tools::work::WorkTool));
 }
 
 #[cfg(test)]

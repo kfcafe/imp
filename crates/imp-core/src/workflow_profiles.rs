@@ -2,18 +2,13 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkflowSuggest {
+    #[default]
     Ask,
     Auto,
     Never,
-}
-
-impl Default for WorkflowSuggest {
-    fn default() -> Self {
-        Self::Ask
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
