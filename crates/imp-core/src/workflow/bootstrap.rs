@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use mana_core::unit::UnitType;
 use serde::{Deserialize, Serialize};
 
 use super::{WorkflowGraphShape, WorkflowRunController};
@@ -181,6 +180,7 @@ pub fn validate_work_product_task_spec(spec: &WorkProductTaskSpec) -> Result<(),
     Ok(())
 }
 
+#[cfg(feature = "mana-api")]
 pub fn create_child_work_product_tasks(
     mana_dir: &Path,
     parent_id: &str,
@@ -210,7 +210,7 @@ pub fn create_child_work_product_tasks(
                 on_fail: None,
                 fail_first: false,
                 feature: false,
-                kind: Some(UnitType::Task),
+                kind: Some(mana_core::unit::UnitType::Task),
                 verify_timeout: None,
                 decisions: Vec::new(),
                 force: false,
@@ -234,6 +234,7 @@ pub fn record_created_work_products(
     }
 }
 
+#[cfg(feature = "mana-api")]
 pub fn create_native_mana_root(
     mana_dir: &Path,
     request: WorkflowBootstrapRequest,
@@ -261,7 +262,7 @@ pub fn create_native_mana_root(
             on_fail: None,
             fail_first: false,
             feature: true,
-            kind: Some(UnitType::Task),
+            kind: Some(mana_core::unit::UnitType::Task),
             verify_timeout: None,
             decisions: Vec::new(),
             force: false,

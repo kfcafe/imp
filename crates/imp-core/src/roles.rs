@@ -44,18 +44,13 @@ pub struct Role {
     pub child_workflow: ChildWorkflowEligibility,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum RoleToolPolicy {
+    #[default]
     All,
     Only(Vec<String>),
     AllExcept(Vec<String>),
-}
-
-impl Default for RoleToolPolicy {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -169,24 +164,13 @@ pub struct RoleOutputSchema {
     pub example: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ChildWorkflowEligibility {
     pub eligible: bool,
     pub can_coordinate_children: bool,
     pub max_children: Option<u32>,
     pub allowed_child_roles: Vec<String>,
-}
-
-impl Default for ChildWorkflowEligibility {
-    fn default() -> Self {
-        Self {
-            eligible: false,
-            can_coordinate_children: false,
-            max_children: None,
-            allowed_child_roles: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -418,18 +402,18 @@ fn output_schema(name: &str, sections: &[&str]) -> RoleOutputSchema {
             "Include these sections in the final role output: {}.",
             sections.join(", ")
         )),
-        example: Some(format!(
-            "{}",
+        example: Some(
             sections
                 .iter()
                 .map(|section| format!("{section}: ..."))
                 .collect::<Vec<_>>()
-                .join("\n")
-        )),
+                .join("\n"),
+        ),
         json_schema_ref: None,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn role(
     purpose: &str,
     readonly: bool,

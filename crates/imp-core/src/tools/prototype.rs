@@ -2,10 +2,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use async_trait::async_trait;
-use imp_work::{
-    HypothesisResult, PrototypeEvidence, PrototypeObservation, PrototypeOutcome,
-    PrototypeRecordPolicy, WorkStore,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -14,6 +10,75 @@ use tokio::process::Command;
 use super::{truncate_tail, Tool, ToolContext, ToolOutput, ToolUpdate, TruncationResult};
 use crate::error::{Error, Result};
 use crate::reference_monitor::{ToolActionKind, ToolMetadata};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum HypothesisResult {
+    Supported,
+    Refuted,
+    Inconclusive,
+    #[default]
+    NotAssessed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum PrototypeOutcome {
+    Promote,
+    Discard,
+    Iterate,
+    #[default]
+    Inconclusive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum PrototypeRecordPolicy {
+    #[default]
+    None,
+    Memory,
+    Prototype,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PrototypeEvidence {
+    claim: String,
+    proof: String,
+    artifact: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PrototypeObservation {
+    prototype_id: String,
+    question: String,
+    parent_work: Option<String>,
+    hypothesis: Option<String>,
+    hypothesis_result: HypothesisResult,
+    outcome: PrototypeOutcome,
+    summary: String,
+    evidence_required: Vec<String>,
+    evidence: Vec<PrototypeEvidence>,
+    learnings: Vec<String>,
+    followups: Vec<String>,
+    sandbox: PathBuf,
+    artifacts: Vec<PathBuf>,
+}
+
+struct WorkStore;
+
+impl WorkStore {
+    fn open(_root: &Path) -> Self {
+        Self
+    }
+
+    fn record_prototype_observation(
+        &self,
+        _policy: PrototypeRecordPolicy,
+        _observation: &PrototypeObservation,
+    ) -> std::result::Result<Option<PathBuf>, String> {
+        Ok(None)
+    }
+}
 
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const MAX_TIMEOUT_SECS: u64 = 1_800;
@@ -312,13 +377,12 @@ impl Tool for PrototypeTool {
                 HypothesisResult::NotAssessed
             }
         });
-        let recommended_action = requested_action.unwrap_or_else(|| {
-            if run.timed_out || run.exit_code != 0 {
+        let recommended_action =
+            requested_action.unwrap_or(if run.timed_out || run.exit_code != 0 {
                 PrototypeOutcome::Iterate
             } else {
                 PrototypeOutcome::Inconclusive
-            }
-        });
+            });
         let observation = PrototypeObservation {
             prototype_id: sandbox
                 .file_name()

@@ -122,12 +122,10 @@ fn callee(node: &Node, source: &str) -> Option<String> {
 
 fn first_child_kind<'a>(node: &Node<'a>, kind: &str) -> Option<Node<'a>> {
     let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if child.kind() == kind {
-            return Some(child);
-        }
-    }
-    None
+    let child = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == kind);
+    child
 }
 
 fn first_kind(node: &Node, source: &str, kind: &str) -> Option<String> {

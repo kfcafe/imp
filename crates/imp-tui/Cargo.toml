@@ -10,6 +10,10 @@ readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+mana-ui = ["dep:mana-core", "imp-core/mana-tool"]
+
 [dependencies]
 imp-core.workspace = true
 serde.workspace = true
@@ -26,7 +30,7 @@ async-trait.workspace = true
 syntect = "5"
 unicode-width = "0.2"
 imp-lua.workspace = true
-mana-core.workspace = true
+mana-core = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

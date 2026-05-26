@@ -603,10 +603,10 @@ fn assistant_message_text(message: &AssistantMessage) -> Option<String> {
 fn content_text(content: &[ContentBlock]) -> Option<String> {
     let text = content
         .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } | ContentBlock::Thinking { text } => Some(text.as_str()),
-            ContentBlock::ToolCall { name, .. } => Some(name.as_str()),
-            ContentBlock::Image { .. } => Some("[image]"),
+        .map(|block| match block {
+            ContentBlock::Text { text } | ContentBlock::Thinking { text } => text.as_str(),
+            ContentBlock::ToolCall { name, .. } => name.as_str(),
+            ContentBlock::Image { .. } => "[image]",
         })
         .collect::<Vec<_>>()
         .join("\n");

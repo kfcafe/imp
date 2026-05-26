@@ -1,3 +1,4 @@
+use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,6 +27,12 @@ const MAX_STORED_RUN_EVENTS: usize = 64;
 const MAX_PERSISTED_RUN_LOG_LINES: usize = 50;
 const FINISHED_RUN_TTL_MS: u128 = 60 * 60 * 1000;
 const INTERRUPTED_RUN_STALE_MS: u128 = 6 * 60 * 60 * 1000;
+
+pub fn mana_executable_available() -> bool {
+    env::var_os("PATH")
+        .map(|paths| env::split_paths(&paths).any(|dir| dir.join("mana").is_file()))
+        .unwrap_or(false)
+}
 
 fn find_mana_dir(cwd: &Path) -> std::result::Result<std::path::PathBuf, String> {
     mana_core::discovery::find_mana_dir(cwd).map_err(|e| e.to_string())

@@ -531,22 +531,12 @@ pub struct RuntimeWorkflowSummary {
     pub controller: Option<crate::workflow::WorkflowControllerSnapshot>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct RuntimeWorkspaceState {
     pub cwd: Option<PathBuf>,
     pub scope: WorkspaceScope,
     pub worktree: Option<RuntimeWorktreeState>,
-}
-
-impl Default for RuntimeWorkspaceState {
-    fn default() -> Self {
-        Self {
-            cwd: None,
-            scope: WorkspaceScope::default(),
-            worktree: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use mana_core::unit::{Status, Unit, UnitType};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,27 +103,6 @@ impl ManaUnitSnapshot {
     }
 }
 
-impl From<&Unit> for ManaUnitSnapshot {
-    fn from(unit: &Unit) -> Self {
-        Self {
-            id: unit.id.clone(),
-            title: unit.title.clone(),
-            kind: ManaReviewUnitKind::from_unit(unit),
-            status: unit.status.to_string(),
-            parent: unit.parent.clone(),
-            dependencies: unit.dependencies.clone(),
-            labels: unit.labels.clone(),
-            decisions: unit.decisions.clone(),
-            description: unit.description.clone(),
-            acceptance: unit.acceptance.clone(),
-            design: unit.design.clone(),
-            assignee: unit.assignee.clone(),
-            priority: unit.priority,
-            is_archived: unit.is_archived,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManaReviewUnitKind {
@@ -142,11 +120,11 @@ impl ManaReviewUnitKind {
         }
     }
 
-    pub fn from_unit(unit: &Unit) -> Self {
-        match unit.kind {
-            UnitType::Epic => Self::Epic,
-            UnitType::Task => Self::Job,
-            UnitType::Fact => Self::Fact,
+    pub fn from_unit_kind(kind: &str) -> Self {
+        match kind {
+            "epic" => Self::Epic,
+            "fact" => Self::Fact,
+            _ => Self::Job,
         }
     }
 }
@@ -1038,10 +1016,6 @@ fn classify_consequential_choice(
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
-}
-
-fn _status_string(status: Status) -> String {
-    status.to_string()
 }
 
 #[cfg(test)]

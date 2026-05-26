@@ -9,7 +9,6 @@ use imp_llm::Model;
 use crate::agent::{Agent, AgentHandle};
 use crate::config::{Config, LuaCapabilityPolicy};
 use crate::error::Result;
-use crate::mana_prompt_context;
 use crate::policy::RunPolicy;
 use crate::resources;
 use crate::roles::{Role, RoleToolPolicy};
@@ -19,6 +18,21 @@ use crate::workflow::{
     AutonomyMode, ImplicitWorkflowContractInput, VerificationGate, VerificationRequirement,
     WorkflowContract, WorktreeRunMetadata, WorktreeRunPlan,
 };
+
+#[derive(Clone)]
+pub struct PromptContext {
+    pub facts: Vec<Fact>,
+    pub project_memory_status: Option<String>,
+}
+
+impl PromptContext {
+    pub fn from_facts(facts: Vec<Fact>) -> Self {
+        Self {
+            facts,
+            project_memory_status: None,
+        }
+    }
+}
 
 fn load_scoped_memory_block(
     cwd: &std::path::Path,
@@ -85,7 +99,7 @@ pub struct AgentBuilder {
     /// Per-run tool/write policy layered on top of AgentMode.
     run_policy: RunPolicy,
     /// Preloaded mana prompt context; avoids duplicate mana reads for worker mode.
-    preloaded_prompt_context: Option<mana_prompt_context::SessionPromptContext>,
+    preloaded_prompt_context: Option<PromptContext>,
     /// Optional workflow contract override. If absent, build creates an implicit contract.
     pub verification_gates: Vec<VerificationGate>,
     workflow_contract: Option<WorkflowContract>,
@@ -209,10 +223,7 @@ impl AgentBuilder {
     }
 
     /// Use preloaded mana prompt context instead of loading it during build.
-    pub fn preloaded_prompt_context(
-        mut self,
-        context: mana_prompt_context::SessionPromptContext,
-    ) -> Self {
+    pub fn preloaded_prompt_context(mut self, context: PromptContext) -> Self {
         self.preloaded_prompt_context = Some(context);
         self
     }
@@ -351,7 +362,7 @@ impl AgentBuilder {
         agent.run_policy = self.run_policy;
         agent.verification_gates = self.verification_gates;
         if let Some(contract) = self.workflow_contract.clone() {
-            agent.workflow_contract = contract;
+            agent.set_workflow_contract(contract);
         }
         agent.worktree_run_metadata = self.worktree_run_metadata;
         agent.lua_tool_loader = self.lua_tool_loader.clone();
@@ -392,10 +403,14 @@ impl AgentBuilder {
             let soul = resources::discover_soul(&self.cwd, &user_config_dir);
             let skills = resources::discover_skills(&self.cwd, &user_config_dir);
             trace_phase("resources_discovery", resource_started);
-            agent.has_mana_skill = skills.iter().any(|skill| skill.name == "mana");
-            agent.has_mana_basics_skill = skills.iter().any(|skill| skill.name == "mana-basics");
-            agent.has_mana_delegation_skill =
-                skills.iter().any(|skill| skill.name == "mana-delegation");
+            agent
+                .set_workflow_mana_skill_available(skills.iter().any(|skill| skill.name == "mana"));
+            agent.set_workflow_mana_basics_skill_available(
+                skills.iter().any(|skill| skill.name == "mana-basics"),
+            );
+            agent.set_workflow_mana_delegation_skill_available(
+                skills.iter().any(|skill| skill.name == "mana-delegation"),
+            );
 
             let (memory_block, user_block) = if self.config.learning.enabled {
                 let memory_started = Instant::now();
@@ -421,26 +436,9 @@ impl AgentBuilder {
             let prompt_context = if self.facts.is_empty() {
                 self.preloaded_prompt_context
                     .clone()
-                    .unwrap_or_else(|| mana_prompt_context::load_session_prompt_context(&self.cwd))
+                    .unwrap_or_else(|| PromptContext::from_facts(Vec::new()))
             } else {
-                mana_prompt_context::SessionPromptContext {
-                    facts: self.facts.clone(),
-                    fact_provenance: self
-                        .facts
-                        .iter()
-                        .map(|fact| {
-                            crate::trust::TrustedContext::new(
-                                fact.text.clone(),
-                                crate::trust::Provenance::mana_record(
-                                    crate::trust::ManaRecordKind::Fact,
-                                    "builder-fact",
-                                ),
-                            )
-                        })
-                        .collect(),
-                    project_memory_status: None,
-                    project_memory_status_provenance: None,
-                }
+                PromptContext::from_facts(self.facts.clone())
             };
             trace_phase("mana_prompt_context", prompt_context_started);
 
@@ -498,22 +496,19 @@ fn apply_role_tool_policy(tools: &mut ToolRegistry, role: &Role) {
 /// This is the canonical list — update here when adding or removing tools.
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
-        ask::AskTool, bash::BashTool, edit::EditTool, git::GitTool, mana::ManaTool,
-        prototype::PrototypeTool, read::ReadTool, scan::ScanTool, web::WebTool, work::WorkTool,
-        write::WriteTool,
+        ask::AskTool, bash::BashTool, edit::EditTool, git::GitTool, prototype::PrototypeTool,
+        read::ReadTool, scan::ScanTool, web::WebTool, write::WriteTool,
     };
 
     tools.register(Arc::new(AskTool));
     tools.register(Arc::new(BashTool::canonical()));
     tools.register(Arc::new(EditTool));
     tools.register(Arc::new(GitTool));
-    tools.register(Arc::new(ManaTool::default()));
     tools.register(Arc::new(PrototypeTool));
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ScanTool));
     tools.register(Arc::new(WebTool));
-    tools.register(Arc::new(WorkTool));
 }
 
 #[cfg(test)]
@@ -959,17 +954,17 @@ mod tests {
             .system_prompt
             .contains("Make the smallest coherent code change"));
         assert!(agent
-            .workflow_contract
+            .workflow_contract()
             .closeout_criteria
             .criteria
             .iter()
             .any(|criterion| criterion.contains("diff-summary")));
         assert!(agent
-            .workflow_contract
+            .workflow_contract()
             .tool_permissions
             .allowed_tools
             .contains("edit"));
-        assert!(agent.workflow_contract.required_verification.is_empty());
+        assert!(agent.workflow_contract().required_verification.is_empty());
     }
 
     #[test]
@@ -995,9 +990,9 @@ mod tests {
         assert!(agent
             .system_prompt
             .contains("Run only declared or clearly relevant verification commands"));
-        assert_eq!(agent.workflow_contract.required_verification.len(), 1);
+        assert_eq!(agent.workflow_contract().required_verification.len(), 1);
         assert!(agent
-            .workflow_contract
+            .workflow_contract()
             .closeout_criteria
             .criteria
             .iter()
@@ -1019,7 +1014,7 @@ mod tests {
         assert!(agent.tools.get("edit").is_some());
         assert!(agent.tools.get("write").is_some());
         assert!(agent
-            .workflow_contract
+            .workflow_contract()
             .closeout_criteria
             .criteria
             .is_empty());

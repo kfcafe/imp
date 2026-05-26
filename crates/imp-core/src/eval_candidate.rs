@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const EVAL_CANDIDATE_SCHEMA_VERSION: u32 = 1;
 pub const EVAL_CANDIDATES_DIR: &str = ".imp/eval-candidates";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum EvalFailureMode {
     Blocked,
@@ -23,13 +23,8 @@ pub enum EvalFailureMode {
     NegativeFeedback,
     WorktreeApplyConflict,
     Manual,
+    #[default]
     Unknown,
-}
-
-impl Default for EvalFailureMode {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,19 +174,14 @@ pub struct EvalPolicyRef {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum EvalRedactionStatus {
+    #[default]
     Unreviewed,
     Redacted,
     ContainsSensitiveData,
     SafeToExport,
-}
-
-impl Default for EvalRedactionStatus {
-    fn default() -> Self {
-        Self::Unreviewed
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

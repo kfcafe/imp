@@ -201,8 +201,7 @@ fn identifier_from_signature(text: &str) -> Option<String> {
         .and_then(|prefix| {
             prefix
                 .split(|c: char| !c.is_alphanumeric() && c != '_')
-                .filter(|part| !part.is_empty())
-                .next_back()
+                .rfind(|part| !part.is_empty())
         })
         .map(str::to_string)
 }

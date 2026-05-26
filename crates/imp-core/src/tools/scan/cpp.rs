@@ -243,8 +243,7 @@ fn identifier_from_signature(text: &str) -> Option<String> {
         .and_then(|prefix| {
             prefix
                 .split(|c: char| !c.is_alphanumeric() && c != '_' && c != ':')
-                .filter(|part| !part.is_empty())
-                .next_back()
+                .rfind(|part| !part.is_empty())
         })
         .map(|name| name.rsplit("::").next().unwrap_or(name).to_string())
 }

@@ -4,6 +4,7 @@ pub mod code_intel;
 pub mod edit;
 pub mod git;
 pub mod lua;
+#[cfg(feature = "mana-tool")]
 pub mod mana;
 pub mod memory;
 pub mod multi_edit;
@@ -13,7 +14,6 @@ pub mod read;
 pub mod scan;
 pub mod shell;
 pub mod web;
-pub mod work;
 pub mod write;
 
 use std::collections::hash_map::DefaultHasher;
