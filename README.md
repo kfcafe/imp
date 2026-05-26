@@ -1,17 +1,17 @@
 # imp
 
-**A terminal-native coding agent with durable local work.**
+**A terminal-native coding agent with native workflows.**
 
-imp is an open-source coding agent for interactive development, one-shot automation, persistent sessions, secure local tools, and structured work that should survive beyond a chat transcript.
+imp is an open-source coding agent for interactive development, one-shot automation, persistent sessions, secure local tools, and native workflows that make serious work inspectable and repeatable.
 
-If you already use Claude Code, Codex, OpenCode, or Pi, imp is aimed at a different tradeoff: keep the agent in the terminal, keep the runtime inspectable, expose strong native tools directly to the model, and leave local records of work, checks, and evidence. Agents can use `bash`, but imp also gives them narrower tools for reading files, exact edits, git, structural code search, web/GitHub search, user questions, prototypes, and durable work. Those tools are easier to constrain, audit, and recover from than a shell-only workflow.
+If you already use Claude Code, Codex, OpenCode, or Pi, imp is aimed at a different tradeoff: keep the agent in the terminal, keep the runtime inspectable, expose strong native tools directly to the model, and leave local records of workflows, checks, and evidence. Agents can use `bash`, but imp also gives them narrower tools for reading files, exact edits, git, structural code search, web/GitHub search, user questions, and workflow-backed experiments. Those tools are easier to constrain, audit, and recover from than a shell-only workflow.
 
 Core capabilities:
 
 - terminal UI, CLI chat, and one-shot prompt mode
 - durable JSONL sessions with branching, compaction, replayable tool output, and usage metadata
 - native tools for files, edits, shell, git/worktrees, structural code search, web/GitHub search, memory, and user prompts
-- native imp-work for tasks, epics, memory, decisions, context packs, runs, checks, prototypes, and handoff
+- native workflow artifacts for planned work, checks, evidence, experiments, and closeout
 - verification gates, traces, evidence packets, and structured run outcomes
 - provider support for Anthropic, OpenAI/ChatGPT, Google, OpenAI-compatible APIs, and other hosted model providers
 - OS-backed secret storage
@@ -31,7 +31,7 @@ Use imp when you want:
 
 - a terminal-native agent instead of an editor- or SaaS-first workflow
 - model/provider flexibility, including BYOK and OpenAI-compatible providers
-- durable local sessions and work records instead of disposable chats
+- durable local sessions and workflow records instead of disposable chats
 - tool execution that can be constrained by mode, allow/deny lists, write paths, autonomy, and hooks
 - native tools that are more structured than asking the model to do everything through `bash`
 - verification commands and evidence artifacts for serious changes
@@ -42,15 +42,15 @@ Compared with common alternatives:
 | Tool | Typical shape | imp's different tradeoff |
 |---|---|---|
 | Claude Code | polished proprietary terminal agent | open-source, local work records, broader provider support, hackable runtime |
-| Codex CLI | OpenAI-first terminal agent | provider-flexible, durable imp-work, explicit evidence/policy surfaces |
-| OpenCode | open-source terminal agent | imp emphasizes native durable work, evidence, policy, and structured tool surfaces |
-| Pi | agent/runtime experimentation | imp is the Rust-native terminal product with native tools, sessions, and imp-work |
+| Codex CLI | OpenAI-first terminal agent | provider-flexible, native workflows, explicit evidence/policy surfaces |
+| OpenCode | open-source terminal agent | imp emphasizes native workflows, evidence, policy, and structured tool surfaces |
+| Pi | agent/runtime experimentation | imp is the Rust-native terminal product with native tools, sessions, and workflows |
 | Cursor-style editors | AI editor experience | imp stays terminal-first and editor-agnostic |
 | Factory/Devin-style platforms | hosted/team agent platform | imp is local-first and inspectable, with hosted sync/team features planned separately |
 
 ## What runs locally, and what leaves your machine?
 
-imp runs the agent runtime, tool execution, sessions, work records, hooks, and extensions locally. Model prompts and tool observations needed for a turn are sent to the configured model provider. Web search/read tools call the configured web provider or target URL. Local shell commands and file edits run on your machine.
+imp runs the agent runtime, tool execution, sessions, workflow records, hooks, and extensions locally. Model prompts and tool observations needed for a turn are sent to the configured model provider. Web search/read tools call the configured web provider or target URL. Local shell commands and file edits run on your machine.
 
 Secrets are stored through the OS credential store. `~/.imp/auth.json` stores metadata, not secret values. You can also use environment variables for provider keys.
 
@@ -61,8 +61,8 @@ Important local paths:
 | `~/.config/imp/config.toml` | user config |
 | `<project>/.imp/config.toml` | project config |
 | `~/.imp/auth.json` | auth metadata; secret values live in OS credential storage |
-| `~/.imp/work` | global project-scoped imp-work store |
-| `.imp/` | optional project-local config/extensions and future project assets |
+| `.imp/workflows` | project workflow artifacts and workflow experiments |
+| `.imp/` | optional project-local config/extensions, workflows, and future project assets |
 
 ## Quick start
 
@@ -155,38 +155,27 @@ imp exposes a small native tool surface to the agent. Read-only tools can run in
 | `scan` | tree-sitter structural code extraction/search |
 | `web` | web search, page read, GitHub search/read, YouTube metadata/transcripts |
 | `ask_user` | structured user questions, including multi-select prompts |
-| `work` | native imp-work tasks, memory, context, runs, verification, and handoff |
-| `prototype` | bounded disposable code experiments with structured evidence |
+| `prototype` | bounded disposable code experiments with structured evidence; moving toward workflow-backed prototype steps |
 | `memory` | persistent memory across sessions |
 | `session_search` | search local conversation history |
 
-The legacy `mana` tool and `imp mana` command still exist for migration and compatibility, but new workflow work is moving to native imp-work.
+The legacy `mana` integration is optional and compatibility-oriented. The old `work`/imp-work task system is no longer part of the default imp runtime surface. The 0.3 direction is native imp workflows.
 
-### imp-work: durable local work
+### Native workflows
 
-imp-work is imp's native durable work system. It is used for work that needs state, context, verification, or handoff beyond the current conversation.
+imp workflows are project artifacts under `.imp/workflows` that describe planned work, context, steps, checks, prototypes, evidence, and closeout rules. They are intended to replace normal imp use of standalone imp-work, mana orchestration, and one-off prototype records once workflow parity exists.
 
-imp-work includes:
+A workflow can express:
 
-- tasks, epics, subtasks, and dependencies
-- durable memory, decisions, and follow-ups
-- context packs for prepared worker/prototype runs
-- runs, attempts, leases, and path locks
-- verification checks and structured outcomes
-- prototype observations and promoted learnings
-- project stream history for continuity across follow-up work
+- objective and acceptance criteria
+- required context and artifacts
+- ordered or dependency-driven steps
+- command, artifact, aggregate, and manual checks
+- bounded prototype experiments with evidence and follow-ups
+- bounded subagent work once worker execution is wired in
+- results, blockers, decisions, and closeout status
 
-Normal imp-work storage is global and project-scoped under `~/.imp/work`, keyed by canonical project root. Project-local `.imp/work` stores are migration input only.
-
-From chat, you can ask naturally:
-
-```text
-create a task for the failing auth edge case
-show me the next ready task
-work on the next task and verify it
-record that we decided to keep provider config local-first
-run a prototype to check whether this parser approach works
-```
+Current workflow artifacts are still early and dogfooded in this repository. The active 0.3 work is to make the schema parser, check runner, prototype capability, bounded subagents, and README/help surfaces production-ready.
 
 ### Workflow evidence and verification
 
@@ -435,7 +424,7 @@ imp/
 |---|---|
 | `imp-cli` | command parsing, setup/login, chat/headless/RPC entrypoints |
 | `imp-tui` | terminal UI, editor, views, rendering, interaction state |
-| `imp-core` | agent loop, tools, sessions, context, hooks, imp-work, policy, evidence |
+| `imp-core` | agent loop, tools, sessions, context, hooks, workflows, policy, evidence |
 | `imp-llm` | providers, streaming parsers, model metadata, auth |
 | `imp-lua` | Lua extension loading, sandboxing, bridge APIs |
 
@@ -446,8 +435,8 @@ imp is active software, not a finished hosted product.
 Works today:
 
 - TUI, CLI chat, one-shot prompts, session resume, and compaction
-- native file/edit/bash/git/scan/web/work/prototype tools
-- native imp-work for durable tasks, memory, context, runs, checks, and outcomes
+- native file/edit/bash/git/scan/web/prototype tools
+- native workflow artifacts for durable planning, checks, experiments, and outcomes
 - provider auth and OS-backed secret storage
 - runtime modes, autonomy, tool constraints, hooks, and Lua extensions
 - local evidence artifacts and verification gates
@@ -460,7 +449,7 @@ Important limitations:
 - hosted sync/team collaboration is planned, not shipped
 - TypeScript/Pi extension compatibility is limited; Lua is the stable extension path
 - the Rust SDK is preview-level
-- legacy mana commands/tools remain for compatibility and migration while new durable work uses imp-work
+- legacy mana commands/tools are optional compatibility surfaces while new durable orchestration moves to native workflows
 
 ## Development
 
@@ -489,10 +478,10 @@ See `tools/README.md` for requirements and caveats.
 | Sessions, branching, compaction | active surface |
 | Native tools | active surface |
 | Provider auth and secure secrets | active surface |
-| Native imp-work | active surface |
+| Native workflows | active 0.3 direction |
 | Workflow evidence and verification gates | active surface |
 | Lua extensions | stable shipped extension path |
-| Legacy mana command/tool | compatibility and migration path |
+| Legacy mana command/tool | optional compatibility path |
 | TypeScript/Pi extension compatibility | limited compatibility layer |
 | Rust SDK | preview |
 | MCP, `.imp/agents`, ACP, hosted sync | planned / not shipped |
