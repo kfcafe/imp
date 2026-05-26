@@ -1,0 +1,1295 @@
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use async_trait::async_trait;
+use chrono::Utc;
+use serde::Serialize;
+use serde_json::json;
+
+use super::{Tool, ToolContext, ToolOutput};
+use crate::error::Result;
+use crate::workflow::{
+    load_workflow, next_runnable_steps, validate_workflow, CheckStatus, StepKind, StepStatus,
+    ValidateOptions, ValidationMode, WorkflowDocument, WorkflowWorker,
+};
+
+pub struct WorkflowTool;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowAction {
+    List,
+    Show,
+    Validate,
+    Run,
+    Update,
+}
+
+impl WorkflowAction {
+    fn parse(value: &str) -> std::result::Result<Self, String> {
+        match value {
+            "list" => Ok(Self::List),
+            "show" => Ok(Self::Show),
+            "validate" => Ok(Self::Validate),
+            "run" => Ok(Self::Run),
+            "update" => Ok(Self::Update),
+            other => Err(format!(
+                "unsupported workflow action `{other}`; expected list, show, validate, run, or update"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowValidationModeParam {
+    Draft,
+    Strict,
+}
+
+impl WorkflowValidationModeParam {
+    fn parse(value: Option<&str>) -> std::result::Result<Self, String> {
+        match value.unwrap_or("strict") {
+            "draft" => Ok(Self::Draft),
+            "strict" => Ok(Self::Strict),
+            other => Err(format!(
+                "unsupported workflow validation mode `{other}`; expected draft or strict"
+            )),
+        }
+    }
+
+    fn options(self, workflow_root: PathBuf) -> ValidateOptions {
+        match self {
+            Self::Draft => ValidateOptions {
+                mode: ValidationMode::Draft,
+                workflow_root,
+            },
+            Self::Strict => ValidateOptions {
+                mode: ValidationMode::Strict,
+                workflow_root,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowListItem {
+    id: String,
+    title: String,
+    status: String,
+    kind: String,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowValidationResult {
+    id: String,
+    ok: bool,
+    diagnostics: Vec<WorkflowDiagnosticView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowDiagnosticView {
+    path: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowRunResult {
+    id: String,
+    status: String,
+    next_action: WorkflowNextAction,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowWorkerAssignmentContract {
+    workflow_id: String,
+    step: String,
+    step_kind: String,
+    objective: String,
+    role: String,
+    worker: String,
+    result_path: String,
+    checks: Vec<String>,
+    depends_on: Vec<String>,
+    writable_scope: Vec<String>,
+    writes_code: bool,
+    worktree: Option<String>,
+    responsibilities: Vec<String>,
+    instructions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowWorkerAssignment {
+    worker: String,
+    role: String,
+    writes: Vec<String>,
+    writes_code: Option<bool>,
+    worktree: Option<String>,
+    responsibilities: Vec<String>,
+    checks: Vec<String>,
+    contract: WorkflowWorkerAssignmentContract,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WorkflowNextAction {
+    ValidationBlocked {
+        diagnostics: Vec<WorkflowDiagnosticView>,
+    },
+    RunStep {
+        step: String,
+        step_kind: String,
+        worker: Option<String>,
+        worker_assignment: Option<WorkflowWorkerAssignment>,
+        checks: Vec<String>,
+        workflow: Option<String>,
+        depends_on: Vec<String>,
+    },
+    NoRunnableSteps {
+        blocked_steps: Vec<WorkflowBlockedStep>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowBlockedStep {
+    step: String,
+    status: String,
+    reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowUpdateEvent {
+    timestamp: String,
+    action: String,
+    path: String,
+    value: serde_json::Value,
+    reason: String,
+}
+
+#[async_trait]
+impl Tool for WorkflowTool {
+    fn name(&self) -> &str {
+        "workflow"
+    }
+
+    fn label(&self) -> &str {
+        "Workflow"
+    }
+
+    fn description(&self) -> &str {
+        "Inspect, validate, run, and update imp-native workflow artifacts under .imp/workflows. Use list/show/validate/run/update to understand and advance workflow plans."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["action"],
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "show", "validate", "run", "update"],
+                    "description": "Workflow action to perform."
+                },
+                "id": {
+                    "type": "string",
+                    "description": "Workflow id for show/run/update/validate. Omit for list or to validate all workflows."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["strict", "draft"],
+                    "description": "Validation mode for validate/show. Defaults to strict."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Workflow object path for update, e.g. steps.verify.status, checks.tests_passed.status, spec.acceptance.done.status, or status."
+                },
+                "value": {
+                    "type": "string",
+                    "description": "Replacement status value for update."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Reason for update, recorded in events.jsonl."
+                }
+            }
+        })
+    }
+
+    fn is_readonly(&self) -> bool {
+        false
+    }
+
+    async fn execute(
+        &self,
+        _call_id: &str,
+        params: serde_json::Value,
+        ctx: ToolContext,
+    ) -> Result<ToolOutput> {
+        let action = params
+            .get("action")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| crate::error::Error::Tool("missing `action` parameter".into()))
+            .and_then(|value| WorkflowAction::parse(value).map_err(crate::error::Error::Tool))?;
+        let id = params
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let mode = WorkflowValidationModeParam::parse(params.get("mode").and_then(|v| v.as_str()))
+            .map_err(crate::error::Error::Tool)?;
+        let workflows_root = workflows_root(&ctx.cwd);
+
+        match action {
+            WorkflowAction::List => list_action(&workflows_root),
+            WorkflowAction::Show => show_action(&workflows_root, id, mode),
+            WorkflowAction::Validate => validate_action(&workflows_root, id, mode),
+            WorkflowAction::Run => run_action(&workflows_root, id, mode),
+            WorkflowAction::Update => update_action(&workflows_root, id, &params, &ctx),
+        }
+    }
+}
+
+fn workflows_root(cwd: &Path) -> PathBuf {
+    cwd.join(".imp").join("workflows")
+}
+
+fn list_action(workflows_root: &Path) -> Result<ToolOutput> {
+    let workflows = load_workflow_items(workflows_root)?;
+    if workflows.is_empty() {
+        return Ok(ToolOutput {
+            content: vec![imp_llm::ContentBlock::Text {
+                text: "No workflows found under .imp/workflows.".to_string(),
+            }],
+            details: json!({ "workflows": Vec::<WorkflowListItem>::new() }),
+            is_error: false,
+        });
+    }
+
+    let mut text = String::from("Workflows:\n");
+    for workflow in &workflows {
+        text.push_str(&format!(
+            "- {} [{}] {}\n",
+            workflow.id, workflow.status, workflow.title
+        ));
+    }
+
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({ "workflows": workflows }),
+        is_error: false,
+    })
+}
+
+fn show_action(
+    workflows_root: &Path,
+    id: Option<&str>,
+    mode: WorkflowValidationModeParam,
+) -> Result<ToolOutput> {
+    let (id, root, doc) = load_selected_workflow(workflows_root, id)?;
+    let diagnostics = validate_workflow(&doc, &mode.options(root));
+    let text = render_workflow(&id, &doc, &diagnostics);
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "id": id,
+            "diagnostics": diagnostics.iter().map(|diagnostic| WorkflowDiagnosticView {
+                path: diagnostic.path.clone(),
+                message: diagnostic.message.clone(),
+            }).collect::<Vec<_>>()
+        }),
+        is_error: false,
+    })
+}
+
+fn validate_action(
+    workflows_root: &Path,
+    id: Option<&str>,
+    mode: WorkflowValidationModeParam,
+) -> Result<ToolOutput> {
+    let results = if let Some(id) = id {
+        let (_, root, doc) = load_selected_workflow(workflows_root, Some(id))?;
+        vec![validate_loaded_workflow(&doc, &root, mode)]
+    } else {
+        let mut results = Vec::new();
+        for path in workflow_paths(workflows_root)? {
+            let root = path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| workflows_root.to_path_buf());
+            let doc = load_workflow(&path).map_err(|error| {
+                crate::error::Error::Tool(format!("failed to load {}: {error}", path.display()))
+            })?;
+            results.push(validate_loaded_workflow(&doc, &root, mode));
+        }
+        results
+    };
+
+    let ok_count = results.iter().filter(|result| result.ok).count();
+    let mut text = format!(
+        "Validated {} workflow(s): {} ok, {} with diagnostics.",
+        results.len(),
+        ok_count,
+        results.len().saturating_sub(ok_count)
+    );
+    for result in &results {
+        if result.ok {
+            text.push_str(&format!("\n- {}: ok", result.id));
+        } else {
+            text.push_str(&format!("\n- {}: diagnostics", result.id));
+            for diagnostic in &result.diagnostics {
+                text.push_str(&format!(
+                    "\n  - {}: {}",
+                    diagnostic.path, diagnostic.message
+                ));
+            }
+        }
+    }
+
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({ "results": results }),
+        is_error: false,
+    })
+}
+
+fn run_action(
+    workflows_root: &Path,
+    id: Option<&str>,
+    mode: WorkflowValidationModeParam,
+) -> Result<ToolOutput> {
+    let (id, root, doc) = load_selected_workflow(workflows_root, id)?;
+    let diagnostics = validate_workflow(&doc, &mode.options(root));
+    let diagnostic_views = diagnostics
+        .iter()
+        .map(|diagnostic| WorkflowDiagnosticView {
+            path: diagnostic.path.clone(),
+            message: diagnostic.message.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let next_action = if !diagnostics.is_empty() {
+        WorkflowNextAction::ValidationBlocked {
+            diagnostics: diagnostic_views.clone(),
+        }
+    } else if let Some(step_id) = next_runnable_steps(&doc).into_iter().next() {
+        let step = doc.steps.get(&step_id).expect("runnable step exists");
+        let worker_assignment = step.worker.as_ref().and_then(|worker_id| {
+            doc.workers.get(worker_id).map(|worker| {
+                worker_assignment(
+                    &id,
+                    &step_id,
+                    step,
+                    worker_id,
+                    worker,
+                    &step.checks,
+                    &doc,
+                )
+            })
+        });
+        WorkflowNextAction::RunStep {
+            step: step_id,
+            step_kind: format!("{:?}", step.kind).to_case(),
+            worker: step.worker.clone(),
+            worker_assignment,
+            checks: step.checks.clone(),
+            workflow: step.workflow.clone(),
+            depends_on: step.depends_on.clone(),
+        }
+    } else {
+        WorkflowNextAction::NoRunnableSteps {
+            blocked_steps: blocked_steps(&doc),
+        }
+    };
+
+    let result = WorkflowRunResult {
+        id: id.clone(),
+        status: format!("{:?}", doc.status).to_case(),
+        next_action,
+    };
+    let text = render_run_result(&result);
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({ "result": result }),
+        is_error: false,
+    })
+}
+
+fn render_run_result(result: &WorkflowRunResult) -> String {
+    match &result.next_action {
+        WorkflowNextAction::ValidationBlocked { diagnostics } => {
+            let mut text = format!(
+                "Workflow `{}` is blocked by validation diagnostics:",
+                result.id
+            );
+            for diagnostic in diagnostics {
+                text.push_str(&format!("\n- {}: {}", diagnostic.path, diagnostic.message));
+            }
+            text
+        }
+        WorkflowNextAction::RunStep {
+            step,
+            step_kind,
+            worker,
+            worker_assignment,
+            checks,
+            workflow,
+            depends_on,
+        } => {
+            let mut text = format!("Next workflow action: run step {step} [{step_kind}]");
+            if let Some(worker) = worker {
+                text.push_str(&format!("\nWorker: {worker}"));
+            }
+            if let Some(assignment) = worker_assignment {
+                text.push_str(&format!(
+                    "\nWorker assignment: {} ({})",
+                    assignment.worker, assignment.role
+                ));
+                if !assignment.writes.is_empty() {
+                    text.push_str(&format!("\nWrites: {}", assignment.writes.join(", ")));
+                }
+                if let Some(worktree) = assignment.worktree.as_ref() {
+                    text.push_str(&format!("\nWorktree: {worktree}"));
+                }
+            }
+            if let Some(workflow) = workflow {
+                text.push_str(&format!("\nWorkflow: {workflow}"));
+            }
+            if !depends_on.is_empty() {
+                text.push_str(&format!("\nDepends on: {}", depends_on.join(", ")));
+            }
+            if !checks.is_empty() {
+                text.push_str(&format!("\nChecks: {}", checks.join(", ")));
+            }
+            text
+        }
+        WorkflowNextAction::NoRunnableSteps { blocked_steps } => {
+            let mut text = String::from("No runnable workflow steps.");
+            if !blocked_steps.is_empty() {
+                text.push_str("\nBlocked/pending steps:");
+                for step in blocked_steps {
+                    text.push_str(&format!(
+                        "\n- {} [{}]: {}",
+                        step.step,
+                        step.status,
+                        step.reasons.join("; ")
+                    ));
+                }
+            }
+            text
+        }
+    }
+}
+
+fn blocked_steps(doc: &WorkflowDocument) -> Vec<WorkflowBlockedStep> {
+    doc.steps
+        .iter()
+        .filter(|(_, step)| matches!(step.status, StepStatus::Todo | StepStatus::Ready))
+        .map(|(step_id, step)| {
+            let mut reasons = Vec::new();
+            for dependency in &step.depends_on {
+                match doc.steps.get(dependency) {
+                    Some(dependency_step)
+                        if matches!(
+                            dependency_step.status,
+                            StepStatus::Done | StepStatus::DoneWithConcerns
+                        ) => {}
+                    Some(dependency_step) => reasons.push(format!(
+                        "dependency `{dependency}` is {}",
+                        format!("{:?}", dependency_step.status).to_case()
+                    )),
+                    None => reasons.push(format!("dependency `{dependency}` is missing")),
+                }
+            }
+            if let Some(worker) = &step.worker {
+                if !doc.workers.contains_key(worker) {
+                    reasons.push(format!("worker `{worker}` is missing"));
+                }
+            }
+            if reasons.is_empty() {
+                reasons.push("waiting for workflow engine support or checks".to_string());
+            }
+            WorkflowBlockedStep {
+                step: step_id.clone(),
+                status: format!("{:?}", step.status).to_case(),
+                reasons,
+            }
+        })
+        .collect()
+}
+
+fn worker_assignment(
+    workflow_id: &str,
+    step_id: &str,
+    step: &crate::workflow::WorkflowStep,
+    worker_id: &str,
+    worker: &WorkflowWorker,
+    checks: &[String],
+    doc: &WorkflowDocument,
+) -> WorkflowWorkerAssignment {
+    let step_kind = format!("{:?}", step.kind).to_case();
+    let writes_code = worker
+        .writes_code
+        .unwrap_or_else(|| worker.writes.iter().any(|scope| scope == "code" || scope == "tests"));
+    let role = workflow_worker_role(worker_id, worker);
+    let objective = workflow_worker_objective(step_id, &step_kind, doc);
+    let result_path = doc.results.path.display().to_string();
+    let instructions = workflow_worker_instructions(
+        workflow_id,
+        step_id,
+        &step_kind,
+        &role,
+        &result_path,
+        checks,
+        writes_code,
+    );
+    let contract = WorkflowWorkerAssignmentContract {
+        workflow_id: workflow_id.to_string(),
+        step: step_id.to_string(),
+        step_kind,
+        objective,
+        role: role.clone(),
+        worker: worker_id.to_string(),
+        result_path,
+        checks: checks.to_vec(),
+        depends_on: step.depends_on.clone(),
+        writable_scope: worker.writes.clone(),
+        writes_code,
+        worktree: worker.worktree.clone(),
+        responsibilities: worker.responsibilities.clone(),
+        instructions,
+    };
+    WorkflowWorkerAssignment {
+        worker: worker_id.to_string(),
+        role: worker.role.clone(),
+        writes: worker.writes.clone(),
+        writes_code: worker.writes_code,
+        worktree: worker.worktree.clone(),
+        responsibilities: worker.responsibilities.clone(),
+        checks: checks.to_vec(),
+        contract,
+    }
+}
+
+fn workflow_worker_role(worker_id: &str, worker: &WorkflowWorker) -> String {
+    match worker.role.as_str() {
+        "builder" => "coder".to_string(),
+        "review" => "reviewer".to_string(),
+        "verify" => "verifier".to_string(),
+        role if role.trim().is_empty() => worker_id.to_string(),
+        role => role.to_string(),
+    }
+}
+
+fn workflow_worker_objective(
+    step_id: &str,
+    step_kind: &str,
+    doc: &WorkflowDocument,
+) -> String {
+    format!(
+        "Complete workflow step `{step_id}` ({step_kind}) for `{}`: {}",
+        doc.id,
+        doc.spec.goal.trim()
+    )
+}
+
+fn workflow_worker_instructions(
+    workflow_id: &str,
+    step_id: &str,
+    step_kind: &str,
+    role: &str,
+    result_path: &str,
+    checks: &[String],
+    writes_code: bool,
+) -> Vec<String> {
+    let mut instructions = vec![
+        format!("You are the `{role}` worker for workflow `{workflow_id}`."),
+        format!("Work only on step `{step_id}` ({step_kind}) and do not broaden scope."),
+        format!("Record outcome, verification, concerns, and next steps in `{result_path}`."),
+    ];
+    if checks.is_empty() {
+        instructions.push("No explicit workflow checks are attached; state the verification you performed.".to_string());
+    } else {
+        instructions.push(format!(
+            "Satisfy or honestly block these workflow checks: {}.",
+            checks.join(", ")
+        ));
+    }
+    if writes_code {
+        instructions.push("Make focused code/test changes only within the declared writable scope and run the narrowest relevant verification.".to_string());
+    } else {
+        instructions.push("Do not modify production code unless the parent explicitly grants write scope.".to_string());
+    }
+    instructions
+}
+
+fn update_action(
+    workflows_root: &Path,
+    id: Option<&str>,
+    params: &serde_json::Value,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
+    let id = id.ok_or_else(|| crate::error::Error::Tool("update requires `id`".into()))?;
+    let update_path = params
+        .get("path")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| crate::error::Error::Tool("update requires `path`".into()))?;
+    let value = params
+        .get("value")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| crate::error::Error::Tool("update requires string `value`".into()))?;
+    let reason = params
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| crate::error::Error::Tool("update requires `reason`".into()))?;
+
+    let workflow_root = workflows_root.join(id);
+    let workflow_path = workflow_root.join("workflow.yaml");
+    let raw = fs::read_to_string(&workflow_path).map_err(|error| {
+        crate::error::Error::Tool(format!(
+            "failed to read {}: {error}",
+            workflow_path.display()
+        ))
+    })?;
+    let mut yaml: serde_yaml::Value = serde_yaml::from_str(&raw).map_err(|error| {
+        crate::error::Error::Tool(format!(
+            "failed to parse {}: {error}",
+            workflow_path.display()
+        ))
+    })?;
+
+    apply_status_update(&mut yaml, update_path, value)?;
+
+    let updated = serde_yaml::to_string(&yaml).map_err(|error| {
+        crate::error::Error::Tool(format!("failed to serialize workflow: {error}"))
+    })?;
+    let candidate: WorkflowDocument = serde_yaml::from_str(&updated).map_err(|error| {
+        crate::error::Error::Tool(format!(
+            "workflow update would produce invalid YAML/schema: {error}"
+        ))
+    })?;
+    let diagnostics =
+        validate_workflow(&candidate, &ValidateOptions::strict(workflow_root.clone()));
+    if !diagnostics.is_empty() {
+        let rendered = diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.path, diagnostic.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(crate::error::Error::Tool(format!(
+            "workflow update failed validation: {rendered}"
+        )));
+    }
+
+    let tmp_path = workflow_path.with_extension("yaml.tmp");
+    ctx.check_write_path(&workflow_path)
+        .map_err(|reason| crate::error::Error::Tool(format!("workflow update denied: {reason}")))?;
+    ctx.check_write_path(&tmp_path)
+        .map_err(|reason| crate::error::Error::Tool(format!("workflow update denied: {reason}")))?;
+    ctx.check_write_path(&workflow_root.join("events.jsonl"))
+        .map_err(|reason| crate::error::Error::Tool(format!("workflow update denied: {reason}")))?;
+    fs::write(&tmp_path, updated).map_err(|error| {
+        crate::error::Error::Tool(format!("failed to write {}: {error}", tmp_path.display()))
+    })?;
+    fs::rename(&tmp_path, &workflow_path).map_err(|error| {
+        crate::error::Error::Tool(format!(
+            "failed to replace {} with {}: {error}",
+            workflow_path.display(),
+            tmp_path.display()
+        ))
+    })?;
+
+    let event_path = workflow_root.join("events.jsonl");
+    let event = WorkflowUpdateEvent {
+        timestamp: Utc::now().to_rfc3339(),
+        action: "update".to_string(),
+        path: update_path.to_string(),
+        value: serde_json::Value::String(value.to_string()),
+        reason: reason.to_string(),
+    };
+    append_workflow_event(&event_path, &event)?;
+
+    let text = format!("Updated workflow `{id}`: {update_path} = {value}");
+    Ok(ToolOutput {
+        content: vec![imp_llm::ContentBlock::Text { text }],
+        details: json!({
+            "id": id,
+            "path": update_path,
+            "value": value,
+            "reason": reason
+        }),
+        is_error: false,
+    })
+}
+
+fn apply_status_update(yaml: &mut serde_yaml::Value, update_path: &str, value: &str) -> Result<()> {
+    let parts = update_path.split('.').collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["status"] => set_mapping_string(yaml, "status", value),
+        ["steps", id, "status"] => set_nested_mapping_string(yaml, &["steps", id], "status", value),
+        ["checks", id, "status"] => {
+            set_nested_mapping_string(yaml, &["checks", id], "status", value)
+        }
+        ["prototypes", id, "status"] => {
+            set_nested_mapping_string(yaml, &["prototypes", id], "status", value)
+        }
+        ["spec", "acceptance", id, "status"] => {
+            set_nested_mapping_string(yaml, &["spec", "acceptance", id], "status", value)
+        }
+        _ => Err(crate::error::Error::Tool(format!(
+            "unsupported workflow update path `{update_path}`"
+        ))),
+    }
+}
+
+fn set_nested_mapping_string(
+    yaml: &mut serde_yaml::Value,
+    path: &[&str],
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    let mut current = yaml;
+    for segment in path {
+        current = mapping_get_mut(current, segment).ok_or_else(|| {
+            crate::error::Error::Tool(format!("workflow path segment `{segment}` not found"))
+        })?;
+    }
+    set_mapping_string(current, key, value)
+}
+
+fn set_mapping_string(yaml: &mut serde_yaml::Value, key: &str, value: &str) -> Result<()> {
+    let mapping = yaml.as_mapping_mut().ok_or_else(|| {
+        crate::error::Error::Tool(format!("workflow path target for `{key}` is not a map"))
+    })?;
+    let key_value = serde_yaml::Value::String(key.to_string());
+    if !mapping.contains_key(&key_value) {
+        return Err(crate::error::Error::Tool(format!(
+            "workflow path key `{key}` not found"
+        )));
+    }
+    mapping.insert(key_value, serde_yaml::Value::String(value.to_string()));
+    Ok(())
+}
+
+fn mapping_get_mut<'a>(
+    yaml: &'a mut serde_yaml::Value,
+    key: &str,
+) -> Option<&'a mut serde_yaml::Value> {
+    yaml.as_mapping_mut()?
+        .get_mut(serde_yaml::Value::String(key.to_string()))
+}
+
+fn append_workflow_event(path: &Path, event: &WorkflowUpdateEvent) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    serde_json::to_writer(&mut file, event).map_err(|error| {
+        crate::error::Error::Tool(format!("failed to serialize event: {error}"))
+    })?;
+    writeln!(file)?;
+    Ok(())
+}
+
+fn load_workflow_items(workflows_root: &Path) -> Result<Vec<WorkflowListItem>> {
+    let mut items = Vec::new();
+    for path in workflow_paths(workflows_root)? {
+        let doc = load_workflow(&path).map_err(|error| {
+            crate::error::Error::Tool(format!("failed to load {}: {error}", path.display()))
+        })?;
+        items.push(WorkflowListItem {
+            id: doc.id,
+            title: doc.title,
+            status: format!("{:?}", doc.status).to_case(),
+            kind: doc.kind,
+            path,
+        });
+    }
+    items.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(items)
+}
+
+fn workflow_paths(workflows_root: &Path) -> Result<Vec<PathBuf>> {
+    if !workflows_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(workflows_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path().join("workflow.yaml");
+        if path.exists() {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn load_selected_workflow(
+    workflows_root: &Path,
+    id: Option<&str>,
+) -> Result<(String, PathBuf, WorkflowDocument)> {
+    let path = if let Some(id) = id {
+        workflows_root.join(id).join("workflow.yaml")
+    } else {
+        let paths = workflow_paths(workflows_root)?;
+        match paths.as_slice() {
+            [path] => path.clone(),
+            [] => {
+                return Err(crate::error::Error::Tool(
+                    "no workflows found under .imp/workflows".into(),
+                ));
+            }
+            _ => {
+                return Err(crate::error::Error::Tool(
+                    "multiple workflows found; provide `id`".into(),
+                ));
+            }
+        }
+    };
+
+    let root = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workflows_root.to_path_buf());
+    let doc = load_workflow(&path).map_err(|error| {
+        crate::error::Error::Tool(format!("failed to load {}: {error}", path.display()))
+    })?;
+    let id = doc.id.clone();
+    Ok((id, root, doc))
+}
+
+fn validate_loaded_workflow(
+    doc: &WorkflowDocument,
+    root: &Path,
+    mode: WorkflowValidationModeParam,
+) -> WorkflowValidationResult {
+    let diagnostics = validate_workflow(doc, &mode.options(root.to_path_buf()))
+        .into_iter()
+        .map(|diagnostic| WorkflowDiagnosticView {
+            path: diagnostic.path,
+            message: diagnostic.message,
+        })
+        .collect::<Vec<_>>();
+    WorkflowValidationResult {
+        id: doc.id.clone(),
+        ok: diagnostics.is_empty(),
+        diagnostics,
+    }
+}
+
+fn render_workflow(
+    id: &str,
+    doc: &WorkflowDocument,
+    diagnostics: &[crate::workflow::WorkflowDiagnostic],
+) -> String {
+    let acceptance_done = doc
+        .spec
+        .acceptance
+        .values()
+        .filter(|criterion| matches!(criterion.status, crate::workflow::AcceptanceStatus::Done))
+        .count();
+    let mut text = format!(
+        "Workflow: {} [{}]\nTitle: {}\nGoal: {}\nAcceptance: {}/{} done\nResults: {}\n",
+        id,
+        format!("{:?}", doc.status).to_case(),
+        doc.title,
+        doc.spec.goal.trim(),
+        acceptance_done,
+        doc.spec.acceptance.len(),
+        doc.results.path.display()
+    );
+
+    if let Some(parent) = &doc.parent {
+        text.push_str(&format!("Parent: {}#{}\n", parent.workflow, parent.step));
+    }
+
+    let child_workflows = doc
+        .steps
+        .iter()
+        .filter_map(|(id, step)| match (&step.kind, &step.workflow) {
+            (StepKind::Workflow, Some(workflow)) => Some(format!("{id}->{workflow}")),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !child_workflows.is_empty() {
+        text.push_str(&format!(
+            "Child workflows: {}\n",
+            child_workflows.join(", ")
+        ));
+    }
+
+    text.push_str("Steps:\n");
+    for (step_id, step) in &doc.steps {
+        text.push_str(&format!(
+            "- {} [{}] {}\n",
+            step_id,
+            format!("{:?}", step.status).to_case(),
+            format!("{:?}", step.kind).to_case()
+        ));
+    }
+
+    let pending_checks = doc
+        .checks
+        .iter()
+        .filter(|(_, check)| !matches!(check.status, CheckStatus::Passed))
+        .collect::<Vec<_>>();
+    if !pending_checks.is_empty() {
+        text.push_str("Checks needing attention:\n");
+        for (check_id, check) in pending_checks {
+            text.push_str(&format!(
+                "- {} [{}] {}\n",
+                check_id,
+                format!("{:?}", check.status).to_case(),
+                format!("{:?}", check.kind).to_case()
+            ));
+        }
+    }
+
+    if !diagnostics.is_empty() {
+        text.push_str("Diagnostics:\n");
+        for diagnostic in diagnostics {
+            text.push_str(&format!("- {}: {}\n", diagnostic.path, diagnostic.message));
+        }
+    }
+
+    text
+}
+
+trait CaseExt {
+    fn to_case(&self) -> String;
+}
+
+impl CaseExt for str {
+    fn to_case(&self) -> String {
+        let mut out = String::new();
+        for (index, ch) in self.chars().enumerate() {
+            if ch.is_uppercase() && index > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    #[test]
+    fn workflow_tool_list_discovers_workflows() {
+        let output = list_action(&repo_root().join(".imp/workflows")).expect("list succeeds");
+        let text = output.text_content().expect("text output");
+        assert!(text.contains("prototype-imp-workflow-engine"));
+        assert!(text.contains("prototype-workflow-tool"));
+    }
+
+    #[test]
+    fn workflow_tool_show_renders_status() {
+        let output = show_action(
+            &repo_root().join(".imp/workflows"),
+            Some("update-imp-after-workflow-engine"),
+            WorkflowValidationModeParam::Strict,
+        )
+        .expect("show succeeds");
+        let text = output.text_content().expect("text output");
+        assert!(text.contains("Workflow: update-imp-after-workflow-engine"));
+        assert!(text.contains("Acceptance:"));
+        assert!(text.contains("Steps:"));
+        assert!(text.contains("Checks needing attention:"));
+    }
+
+    #[test]
+    fn workflow_tool_validate_all_passes_for_dogfood_workflows() {
+        let output = validate_action(
+            &repo_root().join(".imp/workflows"),
+            None,
+            WorkflowValidationModeParam::Strict,
+        )
+        .expect("validate succeeds");
+        assert!(!output.is_error);
+        let text = output.text_content().expect("text output");
+        assert!(text.contains("Validated"));
+        assert!(text.contains("0 with diagnostics"), "{text}");
+    }
+
+    #[test]
+    fn workflow_run_returns_next_runnable_step() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let workflows_root = temp.path().join(".imp/workflows");
+        copy_workflow_fixture("implement-workflow-run-engine", &workflows_root);
+        set_step_status(
+            &workflows_root,
+            "implement-workflow-run-engine",
+            "execute",
+            "todo",
+        );
+
+        let output = run_action(
+            &workflows_root,
+            Some("implement-workflow-run-engine"),
+            WorkflowValidationModeParam::Strict,
+        )
+        .expect("run succeeds");
+        let text = output.text_content().expect("text output");
+        assert!(
+            text.contains("Next workflow action: run step execute [build]"),
+            "{text}"
+        );
+        assert!(text.contains("Worker: builder"), "{text}");
+        assert!(
+            text.contains("Worker assignment: builder (builder)"),
+            "{text}"
+        );
+        assert!(text.contains("Writes: code, tests"), "{text}");
+        assert!(text.contains("Worktree: workflow"), "{text}");
+
+        let assignment = output.details["result"]["next_action"]["worker_assignment"]
+            .as_object()
+            .expect("worker assignment details");
+        let contract = assignment["contract"]
+            .as_object()
+            .expect("worker assignment contract");
+        assert_eq!(contract["workflow_id"], "implement-workflow-run-engine");
+        assert_eq!(contract["step"], "execute");
+        assert_eq!(contract["step_kind"], "build");
+        assert_eq!(contract["role"], "coder");
+        assert_eq!(contract["worker"], "builder");
+        assert_eq!(
+            contract["result_path"],
+            ".imp/workflows/implement-workflow-run-engine/results.md"
+        );
+        assert_eq!(contract["writes_code"], true);
+        assert_eq!(contract["worktree"], "workflow");
+        assert!(contract["objective"]
+            .as_str()
+            .expect("objective")
+            .contains("Complete workflow step `execute`"));
+        let instructions = contract["instructions"]
+            .as_array()
+            .expect("instructions");
+        assert!(instructions.iter().any(|instruction| instruction
+            .as_str()
+            .is_some_and(|text| text.contains("do not broaden scope"))));
+        assert!(instructions.iter().any(|instruction| instruction
+            .as_str()
+            .is_some_and(|text| text.contains("implementation_ready"))));
+    }
+
+    #[test]
+    fn workflow_run_reports_no_runnable_steps_when_dependencies_block() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let workflows_root = temp.path().join(".imp/workflows");
+        copy_workflow_fixture("implement-workflow-run-engine", &workflows_root);
+        set_step_status(
+            &workflows_root,
+            "implement-workflow-run-engine",
+            "verify",
+            "todo",
+        );
+
+        let output = run_action(
+            &workflows_root,
+            Some("implement-workflow-run-engine"),
+            WorkflowValidationModeParam::Strict,
+        )
+        .expect("run succeeds");
+        let text = output.text_content().expect("text output");
+        assert!(
+            text.contains("Next workflow action: run step verify [verify]"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn workflow_run_reports_validation_diagnostics() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let workflows_root = temp.path().join(".imp/workflows");
+        copy_workflow_fixture("implement-workflow-run-engine", &workflows_root);
+        let workflow_path = workflows_root
+            .join("implement-workflow-run-engine")
+            .join("workflow.yaml");
+        let raw = std::fs::read_to_string(&workflow_path)
+            .expect("fixture copied")
+            .replace(
+                "checks:\n      - implementation_ready",
+                "checks:\n      - missing_check",
+            );
+        std::fs::write(&workflow_path, raw).expect("write broken fixture");
+
+        let output = run_action(
+            &workflows_root,
+            Some("implement-workflow-run-engine"),
+            WorkflowValidationModeParam::Strict,
+        )
+        .expect("run returns diagnostics instead of error");
+        let text = output.text_content().expect("text output");
+        assert!(text.contains("blocked by validation diagnostics"), "{text}");
+        assert!(text.contains("unknown check `missing_check`"), "{text}");
+    }
+
+    #[test]
+    fn workflow_update_status_updates_yaml_and_appends_event() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let workflows_root = temp.path().join(".imp/workflows");
+        copy_workflow_fixture("implement-workflow-update-events", &workflows_root);
+
+        let ctx = test_ctx(temp.path());
+        let output = update_action(
+            &workflows_root,
+            Some("implement-workflow-update-events"),
+            &json!({
+                "path": "steps.execute.status",
+                "value": "done",
+                "reason": "unit test completed execute step"
+            }),
+            &ctx,
+        )
+        .expect("update succeeds");
+        assert!(output
+            .text_content()
+            .expect("text output")
+            .contains("Updated workflow"));
+
+        let workflow_path = workflows_root
+            .join("implement-workflow-update-events")
+            .join("workflow.yaml");
+        let doc = load_workflow(&workflow_path).expect("updated workflow should load");
+        assert!(matches!(
+            doc.steps.get("execute").expect("step exists").status,
+            crate::workflow::StepStatus::Done
+        ));
+
+        let events = std::fs::read_to_string(
+            workflows_root
+                .join("implement-workflow-update-events")
+                .join("events.jsonl"),
+        )
+        .expect("events should be written");
+        assert!(events.contains("steps.execute.status"));
+        assert!(events.contains("unit test completed execute step"));
+    }
+
+    #[test]
+    fn workflow_update_rejects_invalid_status_without_writing() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let workflows_root = temp.path().join(".imp/workflows");
+        copy_workflow_fixture("implement-workflow-update-events", &workflows_root);
+        let workflow_path = workflows_root
+            .join("implement-workflow-update-events")
+            .join("workflow.yaml");
+        let before = std::fs::read_to_string(&workflow_path).expect("fixture copied");
+
+        let ctx = test_ctx(temp.path());
+        let error = match update_action(
+            &workflows_root,
+            Some("implement-workflow-update-events"),
+            &json!({
+                "path": "steps.execute.status",
+                "value": "not_a_status",
+                "reason": "unit test invalid status"
+            }),
+            &ctx,
+        ) {
+            Ok(_) => panic!("invalid status should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("invalid YAML/schema"));
+        let after = std::fs::read_to_string(&workflow_path).expect("fixture remains");
+        assert_eq!(before, after);
+        assert!(!workflows_root
+            .join("implement-workflow-update-events")
+            .join("events.jsonl")
+            .exists());
+    }
+
+    fn set_step_status(workflows_root: &Path, workflow_id: &str, step_id: &str, status: &str) {
+        let workflow_path = workflows_root.join(workflow_id).join("workflow.yaml");
+        let raw = std::fs::read_to_string(&workflow_path).expect("fixture copied");
+        let marker = format!("  {step_id}:\n");
+        let start = raw.find(&marker).expect("step marker exists");
+        let rest = &raw[start..];
+        let status_marker = "    status: ";
+        let status_start =
+            start + rest.find(status_marker).expect("step status exists") + status_marker.len();
+        let status_end = raw[status_start..]
+            .find('\n')
+            .map(|offset| status_start + offset)
+            .expect("status line ends");
+        let mut updated = raw;
+        updated.replace_range(status_start..status_end, status);
+        std::fs::write(&workflow_path, updated).expect("write fixture");
+    }
+
+    fn test_ctx(dir: &Path) -> ToolContext {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
+        ToolContext {
+            cwd: dir.to_path_buf(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            command_tx: cmd_tx,
+            ui: Arc::new(crate::ui::NullInterface),
+            file_cache: Arc::new(crate::tools::FileCache::new()),
+            checkpoint_state: Arc::new(crate::tools::CheckpointState::new()),
+            file_tracker: Arc::new(std::sync::Mutex::new(crate::tools::FileTracker::new())),
+            anchor_store: Arc::new(crate::tools::AnchorStore::new()),
+            lua_tool_loader: None,
+            mode: crate::config::AgentMode::Full,
+            read_max_lines: 500,
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                crate::mana_review::TurnManaReviewAccumulator::default(),
+            )),
+            config: Arc::new(crate::config::Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
+        }
+    }
+
+    fn copy_workflow_fixture(id: &str, workflows_root: &Path) {
+        let source = repo_root()
+            .join(".imp/workflows")
+            .join(id)
+            .join("workflow.yaml");
+        let destination_dir = workflows_root.join(id);
+        std::fs::create_dir_all(&destination_dir).expect("create fixture workflow dir");
+        std::fs::copy(source, destination_dir.join("workflow.yaml"))
+            .expect("copy fixture workflow");
+
+        if id == "implement-workflow-update-events" || id == "implement-workflow-run-engine" {
+            copy_workflow_fixture("prototype-imp-workflow-engine", workflows_root);
+            for relative_path in ["artifacts/plan.md", "results.md"] {
+                let path = destination_dir.join(relative_path);
+                std::fs::create_dir_all(path.parent().expect("fixture artifact parent"))
+                    .expect("create fixture artifact dir");
+                std::fs::write(path, "fixture artifact").expect("write fixture artifact");
+            }
+
+            let project_root = workflows_root
+                .parent()
+                .and_then(Path::parent)
+                .expect("workflow root should be under .imp/workflows");
+            let source_artifact = project_root.join("crates/imp-core/src/tools/workflow.rs");
+            std::fs::create_dir_all(source_artifact.parent().expect("source artifact parent"))
+                .expect("create source artifact dir");
+            std::fs::write(source_artifact, "fixture source artifact")
+                .expect("write source artifact");
+        }
+    }
+}

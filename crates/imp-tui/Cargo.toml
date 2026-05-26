@@ -19,6 +19,7 @@ imp-core.workspace = true
 serde.workspace = true
 imp-llm.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 futures.workspace = true

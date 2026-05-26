@@ -497,7 +497,7 @@ fn apply_role_tool_policy(tools: &mut ToolRegistry, role: &Role) {
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
         ask::AskTool, bash::BashTool, edit::EditTool, git::GitTool, prototype::PrototypeTool,
-        read::ReadTool, scan::ScanTool, web::WebTool, write::WriteTool,
+        read::ReadTool, scan::ScanTool, web::WebTool, workflow::WorkflowTool, write::WriteTool,
     };
 
     tools.register(Arc::new(AskTool));
@@ -509,6 +509,7 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ScanTool));
     tools.register(Arc::new(WebTool));
+    tools.register(Arc::new(WorkflowTool));
 }
 
 #[cfg(test)]
@@ -819,6 +820,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mana-api")]
     fn builder_injects_mana_facts_into_system_prompt_when_available() {
         let temp = tempfile::TempDir::new().unwrap();
         let mana_dir = temp.path().join(".mana");
@@ -868,6 +870,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mana-api")]
     fn builder_injects_project_memory_status_into_system_prompt_when_available() {
         let temp = tempfile::TempDir::new().unwrap();
         let mana_dir = temp.path().join(".mana");

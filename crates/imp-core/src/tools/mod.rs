@@ -14,6 +14,7 @@ pub mod read;
 pub mod scan;
 pub mod shell;
 pub mod web;
+pub mod workflow;
 pub mod write;
 
 use std::collections::hash_map::DefaultHasher;

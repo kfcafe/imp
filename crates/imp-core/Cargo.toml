@@ -17,6 +17,7 @@ mana = { version = "0.3.2", package = "mana-cli", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
