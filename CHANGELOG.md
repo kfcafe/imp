@@ -6,7 +6,14 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## [Unreleased]
 
-Use this section for changes that have landed on nightly after the 0.2.6 release.
+Use this section for changes that have landed on nightly after the 0.2.7 release.
+
+## [0.2.7] - 2026-05-26
+
+### Changed
+
+- Made the TUI session tree denser, newest-first, and more readable on smaller terminals, with inline position counts and preview shown only when there is ample space.
+- Bumped the workspace release version to `0.2.7`.
 
 ## [0.2.6] - 2026-05-26
 
