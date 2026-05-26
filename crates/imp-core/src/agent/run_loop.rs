@@ -281,6 +281,30 @@ impl Agent {
                 usage = crate::context::context_usage(&self.messages, &self.model);
             }
 
+            if usage.used >= usage.limit && usage.limit > 0 {
+                let message = format!(
+                    "Context full: estimated {} tokens exceeds the {} token window for {}. Run /compact or start a new chat to continue.",
+                    usage.used, usage.limit, self.model.meta.id
+                );
+                self.emit(AgentEvent::Error {
+                    error: message.clone(),
+                })
+                .await;
+                let cost = total_usage.cost(&self.model.meta.pricing);
+                self.emit(AgentEvent::AgentEnd {
+                    usage: total_usage,
+                    cost,
+                    status: RunFinalStatus::Failed {
+                        message: message.clone(),
+                    },
+                })
+                .await;
+                return Err(crate::error::Error::Llm(imp_llm::Error::ContextTooLong {
+                    used: usage.used,
+                    limit: usage.limit,
+                }));
+            }
+
             // Context management is observation-mask only. Full conversation
             // compaction has been removed because the rewrite-based behavior
             // was too error-prone to keep in the runtime.

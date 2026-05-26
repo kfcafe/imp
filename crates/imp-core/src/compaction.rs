@@ -312,8 +312,9 @@ pub struct CompactionResult {
 /// 3. Persists a `SessionEntry::Compaction` that partitions the branch.
 ///
 /// The `generate_summary` closure receives the serialized summarization
-/// prompt and returns the LLM-generated summary text. This keeps the
-/// compaction module independent of specific LLM wiring.
+/// prompt and returns the LLM-generated summary text. Returning `Ok(None)`
+/// uses the deterministic fallback summary; returning `Err` surfaces the
+/// compaction failure to the caller.
 ///
 /// Returns `None` if there is not enough history to compact.
 pub fn execute_manual_compaction<F>(
@@ -322,7 +323,7 @@ pub fn execute_manual_compaction<F>(
     generate_summary: F,
 ) -> Result<Option<CompactionResult>>
 where
-    F: FnOnce(&str) -> Option<String>,
+    F: FnOnce(&str) -> Result<Option<String>>,
 {
     let raw_messages = session.get_active_messages();
     let tokens_before = raw_messages
@@ -341,8 +342,8 @@ where
     // Build the summarization prompt from the shrunk older prefix.
     let prompt = build_summary_prompt(&prepared.summary_input);
 
-    // Call the provided summarizer. If it returns None, use a fallback.
-    let summary_body = generate_summary(&prompt).unwrap_or_else(|| {
+    // Call the provided summarizer. If it returns Ok(None), use a fallback.
+    let summary_body = generate_summary(&prompt)?.unwrap_or_else(|| {
         // Deterministic fallback: concatenate user messages from the prefix.
         prepared
             .summary_input
@@ -418,9 +419,10 @@ where
 
 /// Execute manual compaction with overflow retry.
 ///
-/// If the `generate_summary` closure returns `None` (indicating the summarizer
-/// could not handle the input), this function increases `keep_recent_groups` by
-/// 2 each retry, shrinking the summarization target, up to `max_retries` times.
+/// If the `generate_summary` closure returns `Ok(None)` (indicating the
+/// summarizer should be skipped or could not handle the input), this function
+/// increases `keep_recent_groups` by 2 each retry, shrinking the summarization
+/// target, up to `max_retries` times. Provider errors are returned immediately.
 pub fn execute_compaction_with_retry<F>(
     session: &mut SessionManager,
     mut keep_recent_groups: usize,
@@ -428,12 +430,12 @@ pub fn execute_compaction_with_retry<F>(
     mut generate_summary: F,
 ) -> Result<Option<CompactionResult>>
 where
-    F: FnMut(&str) -> Option<String>,
+    F: FnMut(&str) -> Result<Option<String>>,
 {
     for attempt in 0..=max_retries {
         let result = execute_manual_compaction(session, keep_recent_groups, &mut generate_summary)?;
         match result {
-            Some(r) => return Ok(Some(r)),
+            Some(result) => return Ok(Some(result)),
             None if attempt < max_retries => {
                 keep_recent_groups += 2;
             }
@@ -676,7 +678,7 @@ mod tests {
         assert_eq!(raw_before, 6);
 
         let result = execute_manual_compaction(&mut mgr, 2, |_prompt| {
-            Some("## Goal\nTest compaction".into())
+            Ok(Some("## Goal\nTest compaction".into()))
         })
         .unwrap();
 
@@ -715,7 +717,8 @@ mod tests {
         mgr.append(make_session_entry("a1", make_assistant_text("only answer")))
             .unwrap();
 
-        let result = execute_manual_compaction(&mut mgr, 4, |_| Some("summary".into())).unwrap();
+        let result =
+            execute_manual_compaction(&mut mgr, 4, |_| Ok(Some("summary".into()))).unwrap();
         assert!(result.is_none());
     }
 
@@ -734,11 +737,40 @@ mod tests {
             .unwrap();
         }
 
-        let result = execute_manual_compaction(&mut mgr, 2, |_prompt| None).unwrap();
+        let result = execute_manual_compaction(&mut mgr, 2, |_prompt| Ok(None)).unwrap();
 
         assert!(result.is_some());
         let result = result.unwrap();
         // The fallback concatenates user messages from the summarized prefix.
         assert!(result.summary.contains("prompt 0"));
+    }
+
+    #[test]
+    fn compact_executor_surfaces_summarizer_errors() {
+        let mut mgr = SessionManager::in_memory();
+        for i in 0..6 {
+            let uid = format!("u{i}");
+            let aid = format!("a{i}");
+            mgr.append(make_session_entry(&uid, make_user(&format!("prompt {i}"))))
+                .unwrap();
+            mgr.append(make_session_entry(
+                &aid,
+                make_assistant_text(&format!("answer {i}")),
+            ))
+            .unwrap();
+        }
+
+        let result = execute_manual_compaction(&mut mgr, 2, |_prompt| {
+            Err(crate::error::Error::Llm(imp_llm::Error::Provider(
+                "summarizer failed".into(),
+            )))
+        });
+
+        assert!(matches!(
+            result,
+            Err(crate::error::Error::Llm(imp_llm::Error::Provider(message)))
+                if message == "summarizer failed"
+        ));
+        assert!(mgr.latest_compaction().is_none());
     }
 }

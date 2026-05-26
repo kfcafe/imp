@@ -4610,6 +4610,44 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn agent_reports_context_full_before_provider_request() {
+        let provider = Arc::new(MockProvider::new(vec![text_response(
+            "should not be called",
+            1,
+            1,
+        )]));
+        let model = test_model_with_context_window(provider, 1);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        let events_task = tokio::spawn(collect_events(handle));
+
+        let result = agent
+            .run("this message is definitely too large".to_string())
+            .await;
+        drop(agent);
+
+        assert!(matches!(
+            result,
+            Err(crate::error::Error::Llm(
+                imp_llm::Error::ContextTooLong { .. }
+            ))
+        ));
+
+        let events = events_task.await.unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Error { error }
+                if error.contains("Context full") && error.contains("Run /compact")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::AgentEnd {
+                status: RunFinalStatus::Failed { message },
+                ..
+            } if message.contains("Context full")
+        )));
+    }
+
     // ── Usage/cost accumulation ────────────────────────────────────
 
     #[tokio::test]

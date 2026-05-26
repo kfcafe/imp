@@ -234,6 +234,7 @@ struct StatusSnapshot {
     git_lines: Option<Vec<String>>,
     sandbox_status: Option<Result<String, String>>,
     stale_improve_metadata_message: Option<String>,
+    workflow_summary: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1794,7 +1795,44 @@ fn build_status_snapshot(cwd: &Path, sandbox: Option<&ImproveSandbox>) -> Status
         git_lines: concise_git_status(cwd),
         sandbox_status: sandbox.map(|sandbox| run_git(&sandbox.worktree, &["status", "--short"])),
         stale_improve_metadata_message: stale_improve_metadata_message_for_cwd(cwd),
+        workflow_summary: workflow_status_summary(cwd),
     }
+}
+
+fn workflow_status_summary(cwd: &Path) -> Option<String> {
+    let workflows_root = cwd.join(".imp/workflows");
+    let entries = std::fs::read_dir(&workflows_root).ok()?;
+    let mut workflows = Vec::new();
+    for entry in entries.flatten() {
+        let workflow_path = entry.path().join("workflow.yaml");
+        if !workflow_path.exists() {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&workflow_path).ok()?;
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&raw).ok()?;
+        let id = yaml
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let title = yaml
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let status = yaml
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        workflows.push((id.to_string(), status.to_string(), title.to_string()));
+    }
+    if workflows.is_empty() {
+        return None;
+    }
+    workflows.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut lines = vec![format!("workflows: {}", workflows.len())];
+    for (id, status, title) in workflows.into_iter().take(5) {
+        lines.push(format!("  - {id} [{status}] {title}"));
+    }
+    Some(lines.join("\n"))
 }
 
 fn stale_improve_metadata_message_for_cwd(cwd: &Path) -> Option<String> {
@@ -1959,6 +1997,9 @@ fn render_status_text(
             "mana run: {} {} ({}/{}, failed {})",
             run.run_id, run.status, run.total_closed, run.total_units, run.total_failed
         ));
+    }
+    if let Some(workflow_summary) = snapshot.workflow_summary.as_ref() {
+        lines.extend(workflow_summary.lines().map(str::to_string));
     }
     if workflow_mode == WorkflowMode::Improve {
         let budget = improve_auto_turn_budget.max(1);
@@ -2261,6 +2302,244 @@ fn include_current_model_option(
     }
 
     (models, canonical_id)
+}
+
+fn render_tui_workflow_list(workflows_root: &Path) -> Result<String, String> {
+    let mut workflows = Vec::new();
+    for (_, workflow) in load_tui_workflows(workflows_root)? {
+        let id = workflow
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let status = workflow
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let title = workflow
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        workflows.push(format!("- {id} [{status}] {title}"));
+    }
+    if workflows.is_empty() {
+        Ok("No workflows found under .imp/workflows.".to_string())
+    } else {
+        workflows.sort();
+        Ok(format!("Workflows:\n{}", workflows.join("\n")))
+    }
+}
+
+fn render_tui_workflow_show(workflow: &serde_yaml::Value) -> Result<String, String> {
+    let id = yaml_str(workflow, "id");
+    let status = yaml_str(workflow, "status");
+    let title = yaml_str(workflow, "title");
+    let goal = workflow
+        .get("spec")
+        .and_then(|spec| spec.get("goal"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim();
+    let acceptance = workflow
+        .get("spec")
+        .and_then(|spec| spec.get("acceptance"))
+        .and_then(|value| value.as_mapping());
+    let acceptance_total = acceptance.map(|map| map.len()).unwrap_or(0);
+    let acceptance_done = acceptance
+        .map(|map| {
+            map.values()
+                .filter(|item| item.get("status").and_then(|value| value.as_str()) == Some("done"))
+                .count()
+        })
+        .unwrap_or(0);
+    let mut text = format!(
+        "Workflow: {id} [{status}]\nTitle: {title}\nGoal: {goal}\nAcceptance: {acceptance_done}/{acceptance_total} done"
+    );
+    if let Some(steps) = workflow.get("steps").and_then(|value| value.as_mapping()) {
+        text.push_str("\nSteps:");
+        for (key, step) in steps {
+            let step_id = key.as_str().unwrap_or("unknown");
+            let step_status = step
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let step_kind = step
+                .get("kind")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            text.push_str(&format!("\n- {step_id} [{step_status}] {step_kind}"));
+        }
+    }
+    Ok(text)
+}
+
+fn render_tui_workflow_validate(workflows_root: &Path, id: Option<&str>) -> Result<String, String> {
+    let paths = if let Some(id) = id {
+        vec![workflows_root.join(id).join("workflow.yaml")]
+    } else {
+        load_tui_workflows(workflows_root)?
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>()
+    };
+    if paths.is_empty() {
+        return Ok("No workflows found under .imp/workflows.".to_string());
+    }
+
+    let mut ok_count = 0usize;
+    let mut lines = Vec::new();
+    for path in paths {
+        let workflow = imp_core::workflow::load_workflow(&path)
+            .map_err(|err| format!("failed to load {}: {err}", path.display()))?;
+        let root = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| workflows_root.to_path_buf());
+        let diagnostics = imp_core::workflow::validate_workflow(
+            &workflow,
+            &imp_core::workflow::ValidateOptions::strict(root),
+        );
+        if diagnostics.is_empty() {
+            ok_count += 1;
+            lines.push(format!("- {}: ok", workflow.id));
+        } else {
+            lines.push(format!("- {}: diagnostics", workflow.id));
+            for diagnostic in diagnostics {
+                lines.push(format!("  - {}: {}", diagnostic.path, diagnostic.message));
+            }
+        }
+    }
+
+    Ok(format!(
+        "Validated {} workflow(s): {} ok, {} with diagnostics.\n{}",
+        lines.iter().filter(|line| line.starts_with("- ")).count(),
+        ok_count,
+        lines
+            .iter()
+            .filter(|line| line.ends_with(": diagnostics"))
+            .count(),
+        lines.join("\n")
+    ))
+}
+
+fn render_tui_workflow_run(workflow: &serde_yaml::Value) -> Result<String, String> {
+    let id = yaml_str(workflow, "id");
+    let Some(steps) = workflow.get("steps").and_then(|value| value.as_mapping()) else {
+        return Ok(format!("Workflow `{id}` has no steps."));
+    };
+    for (key, step) in steps {
+        let step_id = key.as_str().unwrap_or("unknown");
+        let status = step
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        if status != "todo" && status != "ready" {
+            continue;
+        }
+        if !step_dependencies_done(workflow, step) {
+            continue;
+        }
+        let kind = step
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let mut text = format!("Next workflow action: run step {step_id} [{kind}]");
+        if let Some(worker) = step.get("worker").and_then(|value| value.as_str()) {
+            text.push_str(&format!("\nWorker: {worker}"));
+        }
+        if let Some(child) = step.get("workflow").and_then(|value| value.as_str()) {
+            text.push_str(&format!("\nWorkflow: {child}"));
+        }
+        return Ok(text);
+    }
+    Ok(format!("No runnable workflow steps for `{id}`."))
+}
+
+fn step_dependencies_done(workflow: &serde_yaml::Value, step: &serde_yaml::Value) -> bool {
+    let Some(deps) = step.get("depends_on").and_then(|value| value.as_sequence()) else {
+        return true;
+    };
+    let Some(steps) = workflow.get("steps").and_then(|value| value.as_mapping()) else {
+        return false;
+    };
+    deps.iter().all(|dep| {
+        let Some(dep_id) = dep.as_str() else {
+            return false;
+        };
+        let key = serde_yaml::Value::String(dep_id.to_string());
+        let Some(dep_step) = steps.get(&key) else {
+            return false;
+        };
+        matches!(
+            dep_step.get("status").and_then(|value| value.as_str()),
+            Some("done") | Some("done_with_concerns")
+        )
+    })
+}
+
+fn load_tui_workflow(
+    workflows_root: &Path,
+    id: Option<&str>,
+) -> Result<(PathBuf, serde_yaml::Value), String> {
+    let workflows = load_tui_workflows(workflows_root)?;
+    if let Some(id) = id {
+        workflows
+            .into_iter()
+            .find(|(_, workflow)| workflow.get("id").and_then(|value| value.as_str()) == Some(id))
+            .ok_or_else(|| format!("workflow `{id}` not found"))
+    } else {
+        let active = workflows
+            .iter()
+            .filter(|(_, workflow)| {
+                workflow.get("status").and_then(|value| value.as_str()) == Some("active")
+            })
+            .count();
+        if active == 1 {
+            workflows
+                .into_iter()
+                .find(|(_, workflow)| {
+                    workflow.get("status").and_then(|value| value.as_str()) == Some("active")
+                })
+                .ok_or_else(|| "active workflow not found".to_string())
+        } else if workflows.len() == 1 {
+            workflows
+                .into_iter()
+                .next()
+                .ok_or_else(|| "workflow not found".to_string())
+        } else if workflows.is_empty() {
+            Err("no workflows found under .imp/workflows".to_string())
+        } else {
+            Err("multiple workflows found; pass a workflow id".to_string())
+        }
+    }
+}
+
+fn load_tui_workflows(workflows_root: &Path) -> Result<Vec<(PathBuf, serde_yaml::Value)>, String> {
+    if !workflows_root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut workflows = Vec::new();
+    let entries = std::fs::read_dir(workflows_root).map_err(|err| err.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path().join("workflow.yaml");
+        if !path.exists() {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        let workflow = serde_yaml::from_str(&raw)
+            .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
+        workflows.push((path, workflow));
+    }
+    workflows.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(workflows)
+}
+
+fn yaml_str<'a>(workflow: &'a serde_yaml::Value, key: &str) -> &'a str {
+    workflow
+        .get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
 }
 
 impl App {
@@ -6535,6 +6814,76 @@ impl App {
         }
     }
 
+    fn workflow_plan_command(&mut self, goal: &str) {
+        let goal = goal.trim();
+        if goal.is_empty() {
+            self.push_system_msg("Usage: /plan <goal>");
+            return;
+        }
+        let prompt = format!(
+            "Plan this as an imp-native workflow. Use the `workflow` tool and `.imp/workflows` schema as the source of truth. Goal: {goal}"
+        );
+        self.push_system_msg("Planning with native workflow tool. The agent should create or update a workflow artifact before implementation.");
+        self.enqueue_visible_agent_turn_with_prompt(format!("/plan {goal}"), prompt);
+    }
+
+    fn workflow_run_command(&mut self, id: &str) {
+        let mut params = serde_json::json!({ "action": "run" });
+        let id = id.trim();
+        if !id.is_empty() {
+            params["id"] = serde_json::Value::String(id.to_string());
+        }
+        match self.execute_workflow_tool(params) {
+            Ok(text) => self.push_system_msg(&text),
+            Err(err) => self.push_error_msg(&format!("Workflow run failed: {err}")),
+        }
+    }
+
+    fn workflow_inspect_command(&mut self, args: &str) {
+        let mut parts = args.split_whitespace();
+        let action = parts.next().unwrap_or("show");
+        let id = parts.next();
+        let action = match action {
+            "list" | "show" | "validate" | "run" | "update" => action,
+            other => {
+                self.push_system_msg(&format!(
+                    "Usage: /workflow [list|show|validate|run|update] [id] (unknown action `{other}`)"
+                ));
+                return;
+            }
+        };
+        let mut params = serde_json::json!({ "action": action });
+        if let Some(id) = id {
+            params["id"] = serde_json::Value::String(id.to_string());
+        }
+        match self.execute_workflow_tool(params) {
+            Ok(text) => self.push_system_msg(&text),
+            Err(err) => self.push_error_msg(&format!("Workflow command failed: {err}")),
+        }
+    }
+
+    fn execute_workflow_tool(&self, params: serde_json::Value) -> Result<String, String> {
+        let action = params
+            .get("action")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "workflow command missing action".to_string())?;
+        let id = params.get("id").and_then(|value| value.as_str());
+        let workflows_root = self.cwd.join(".imp/workflows");
+        match action {
+            "list" => render_tui_workflow_list(&workflows_root),
+            "show" => {
+                let (_, workflow) = load_tui_workflow(&workflows_root, id)?;
+                render_tui_workflow_show(&workflow)
+            }
+            "validate" => render_tui_workflow_validate(&workflows_root, id),
+            "run" => {
+                let (_, workflow) = load_tui_workflow(&workflows_root, id)?;
+                render_tui_workflow_run(&workflow)
+            }
+            other => Err(format!("unsupported workflow action `{other}`")),
+        }
+    }
+
     fn workflow_registry(&mut self) -> Option<imp_core::workflow_profiles::WorkflowRegistry> {
         match self.config.workflow_registry() {
             Ok(registry) => Some(registry),
@@ -6550,7 +6899,7 @@ impl App {
         let Some(name) = parts.next().filter(|name| !name.is_empty()) else {
             return false;
         };
-        if matches!(name, "workflow" | "workflows") {
+        if matches!(name, "workflow" | "workflows" | "plan" | "status" | "run") {
             return false;
         }
         let Some(registry) = self.workflow_registry() else {
@@ -6612,17 +6961,6 @@ impl App {
             AskState::new(title, String::new(), options, false),
             AskReply::WorkflowSuggestion { profile, prompt },
         );
-    }
-
-    fn show_workflow_profiles(&mut self) {
-        let Some(registry) = self.workflow_registry() else {
-            return;
-        };
-        let mut lines = vec!["Workflows".to_string()];
-        for profile in registry.iter() {
-            lines.push(format!("/{} — {}", profile.name, profile.description));
-        }
-        self.push_system_msg(&lines.join("\n"));
     }
 
     fn show_workflow_profile(&mut self, name: &str) {
@@ -6746,6 +7084,7 @@ impl App {
             "improve-help" => self.push_system_msg(
                 "Improve uses a new branch checked out in a separate worktree before making code changes. It never commits or merges without explicit approval. Use /improve safe for research-only evaluation and mana follow-ups.",
             ),
+            "plan" => self.workflow_plan_command(args),
             "status" => self.show_status_command(),
             "eval" => self.eval_candidate_command(args),
             "autonomy" => self.autonomy_command(args),
@@ -6753,12 +7092,7 @@ impl App {
             "loop" => self.start_loop_command(args),
             "queue" => self.queue_command(args),
             "scope" | "mana-scope" => self.set_active_mana_scope(args),
-            "run" => {
-                #[cfg(feature = "mana-ui")]
-                self.set_active_mana_run(args);
-                #[cfg(not(feature = "mana-ui"))]
-                self.push_system_msg("Mana run UI is not available in this standalone build.");
-            },
+            "run" => self.workflow_run_command(args),
             "stop" => self.stop_active_work(),
             "settings" => {
                 self.open_settings();
@@ -6915,13 +7249,8 @@ impl App {
                 let all_models = self.model_registry.list().to_vec();
                 self.mode = UiMode::Welcome(WelcomeState::new(&all_models));
             }
-            "workflow" => {
-                let arg = cmd.strip_prefix("workflow").unwrap_or_default().trim();
-                self.show_workflow_profile(arg);
-            }
-            "workflows" => {
-                self.show_workflow_profiles();
-            }
+            "workflow" => self.workflow_inspect_command(args),
+            "workflows" => self.workflow_inspect_command("list"),
             "copy" => {
                 if self.copy_selection() {
                     return;
@@ -8970,6 +9299,12 @@ impl App {
                     let system_prompt = system_prompt.clone();
                     let prompt = prompt.to_string();
                     let retry_policy = retry_policy.clone();
+                    let prompt_tokens = imp_core::context::estimate_tokens(&prompt);
+                    let prompt_limit =
+                        ((model_meta.context_window as f64) * 0.6).floor().max(1.0) as u32;
+                    if prompt_tokens > prompt_limit {
+                        return Ok(None);
+                    }
 
                     futures::executor::block_on(async move {
                         let mut summary = String::new();
@@ -9040,7 +9375,8 @@ impl App {
                             Ok(final_text)
                         }
                     })
-                    .ok()
+                    .map(Some)
+                    .map_err(|error| ImpCoreError::Llm(imp_llm::Error::Provider(error)))
                 },
             )
             .map_err(|e| e.to_string())?
@@ -9085,7 +9421,7 @@ impl App {
     fn finish_manual_compaction(&mut self, summary: String) {
         let result =
             execute_manual_compaction(&mut self.session, DEFAULT_KEEP_RECENT_GROUPS, |_| {
-                Some(summary.clone())
+                Ok(Some(summary.clone()))
             });
 
         match result {
