@@ -3,6 +3,7 @@ pub mod chat;
 pub mod command_palette;
 pub mod editor;
 pub mod login_picker;
+#[cfg(feature = "mana-ui")]
 pub mod mana_navigator;
 pub mod model_selector;
 pub mod personality;

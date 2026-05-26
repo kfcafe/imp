@@ -1,6 +1,6 @@
 //! Mana/work-graph compatibility support for imp workflow integration.
 
-#[cfg(feature = "mana-integration")]
+#[cfg(feature = "mana-api")]
 use std::path::{Path, PathBuf};
 
 use crate::agent::{
@@ -21,7 +21,7 @@ use super::super::{
     bash_result_is_successful_check,
 };
 
-#[cfg(feature = "mana-integration")]
+#[cfg(feature = "mana-api")]
 fn find_mana_dir(cwd: &Path) -> Option<PathBuf> {
     let mut current = if cwd.is_file() { cwd.parent()? } else { cwd };
     loop {
@@ -792,7 +792,7 @@ impl Agent {
             &shape,
         );
 
-        #[cfg(feature = "mana-integration")]
+        #[cfg(feature = "mana-api")]
         {
             let Some(mana_dir) = find_mana_dir(&self.cwd) else {
                 self.workflow_layer.controller_mut().skip_bootstrap(format!(
@@ -820,9 +820,9 @@ impl Agent {
             }
         }
 
-        #[cfg(not(feature = "mana-integration"))]
+        #[cfg(not(feature = "mana-api"))]
         self.workflow_layer.controller_mut().skip_bootstrap(
-            "mana bootstrap unavailable: imp-core built without mana-integration".to_string(),
+            "mana bootstrap unavailable: imp-core built without mana-api".to_string(),
         );
     }
 

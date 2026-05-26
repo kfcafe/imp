@@ -129,7 +129,7 @@ pub fn enrich_mana_result_details(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mana-tool"))]
 mod tests {
     use super::*;
     use crate::tools::{mana::ManaTool, Tool};

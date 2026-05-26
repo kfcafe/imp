@@ -15,7 +15,41 @@ use imp_core::eval_candidate::{
 };
 use imp_core::format_error_for_display;
 use imp_core::ui::WidgetContent;
-use imp_core::{mana_run_summary, stop_mana_run, ManaRunSummary, ManaUnitRef, TurnManaReview};
+#[cfg(feature = "mana-ui")]
+use imp_core::{mana_run_summary, stop_mana_run, ManaRunSummary};
+use imp_core::{ManaUnitRef, TurnManaReview};
+#[cfg(not(feature = "mana-ui"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManaRunSummary {
+    run_id: String,
+    scope: String,
+    status: String,
+    total_units: u32,
+    total_closed: u32,
+    total_failed: u32,
+    total_awaiting_verify: u32,
+    latest: Option<String>,
+    logs: Vec<String>,
+    agents: Vec<ManaRunAgentSummary>,
+}
+#[cfg(not(feature = "mana-ui"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManaRunAgentSummary {
+    unit_id: String,
+    status: String,
+    action: String,
+    title: String,
+}
+#[cfg(not(feature = "mana-ui"))]
+#[allow(dead_code)]
+fn mana_run_summary(_id: &str) -> Result<Option<ManaRunSummary>, String> {
+    Ok(None)
+}
+#[cfg(not(feature = "mana-ui"))]
+fn stop_mana_run(_id: &str) -> Result<Option<ManaRunSummary>, String> {
+    Ok(None)
+}
+#[cfg(feature = "mana-ui")]
 use mana_core::api;
 
 use imp_lua::LuaRuntime;
@@ -78,6 +112,7 @@ use crate::views::command_palette::{
 };
 use crate::views::editor::{EditorState, EditorView, WorkflowMode};
 use crate::views::login_picker::{login_providers, LoginPickerState, LoginPickerView};
+#[cfg(feature = "mana-ui")]
 use crate::views::mana_navigator::{ManaNavigatorState, ManaNavigatorView};
 use crate::views::model_selector::{ModelSelection, ModelSelectorState, ModelSelectorView};
 use crate::views::personality::{PersonalityScope, PersonalityState, PersonalityView};
@@ -130,6 +165,7 @@ pub enum UiMode {
     ModelSelector(ModelSelectorState),
     CommandPalette(CommandPaletteState),
     LoginPicker(LoginPickerState),
+    #[cfg(feature = "mana-ui")]
     ManaNavigator(ManaNavigatorState),
     SecretsPicker(SecretsPickerState),
     TreeView(TreeViewState),
@@ -338,7 +374,9 @@ enum RuntimeSignal {
     UserMessagePersistFailed(String),
     AgentStartCompleted(AgentStartResult),
     AgentStartFailed(String),
+    #[cfg(feature = "mana-ui")]
     ManaNavigatorLoaded(ManaNavigatorState),
+    #[cfg(feature = "mana-ui")]
     ManaNavigatorLoadFailed {
         mana_dir: Option<PathBuf>,
         message: String,
@@ -450,6 +488,7 @@ struct StartupSkillHit {
     rect: Rect,
 }
 
+#[cfg(feature = "mana-ui")]
 fn mana_run_summary_cache_key(run: &ManaRunSummary) -> String {
     format!(
         "{}|{}|{}|{}|{}|{}|{}|{}|{}",
@@ -465,6 +504,24 @@ fn mana_run_summary_cache_key(run: &ManaRunSummary) -> String {
     )
 }
 
+#[cfg(not(feature = "mana-ui"))]
+fn mana_run_detail_render_data(run: &ManaRunSummary, theme: &Theme) -> SidebarDetailRenderData {
+    let lines = vec![Line::from(vec![
+        Span::styled("╭─", theme.muted_style()),
+        Span::styled(
+            " mana run ",
+            theme.accent_style().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("─╮", theme.muted_style()),
+    ])];
+    let plain_lines = vec![
+        format!("run: {}", run.run_id),
+        "Mana run details are unavailable in this standalone build.".to_string(),
+    ];
+    SidebarDetailRenderData { lines, plain_lines }
+}
+
+#[cfg(feature = "mana-ui")]
 fn mana_run_detail_render_data(run: &ManaRunSummary, theme: &Theme) -> SidebarDetailRenderData {
     let mut lines = vec![Line::from(vec![
         Span::styled("╭─", theme.muted_style()),
@@ -983,6 +1040,7 @@ pub struct App {
     session_list_task: Option<tokio::task::JoinHandle<()>>,
     session_open_task: Option<tokio::task::JoinHandle<()>>,
     user_message_persist_task: Option<tokio::task::JoinHandle<()>>,
+    #[cfg(feature = "mana-ui")]
     mana_navigator_task: Option<tokio::task::JoinHandle<()>>,
     status_command_task: Option<tokio::task::JoinHandle<()>>,
     improve_merge_task: Option<tokio::task::JoinHandle<()>>,
@@ -1078,7 +1136,9 @@ fn runtime_signal_kind(signal: &RuntimeSignal) -> &'static str {
         RuntimeSignal::UserMessagePersistFailed(_) => "user_message_persist_failed",
         RuntimeSignal::AgentStartCompleted(_) => "agent_start_completed",
         RuntimeSignal::AgentStartFailed(_) => "agent_start_failed",
+        #[cfg(feature = "mana-ui")]
         RuntimeSignal::ManaNavigatorLoaded(_) => "mana_navigator_loaded",
+        #[cfg(feature = "mana-ui")]
         RuntimeSignal::ManaNavigatorLoadFailed { .. } => "mana_navigator_load_failed",
         RuntimeSignal::StatusCommandFinished(_) => "status_command_finished",
         RuntimeSignal::StatusCommandFailed(_) => "status_command_failed",
@@ -1872,7 +1932,7 @@ fn render_status_text(
     workflow_mode: WorkflowMode,
     agent_status: &str,
     active_mana_scope: Option<&ManaUnitRef>,
-    active_mana_run: Option<&ManaRunSummary>,
+    _active_mana_run: Option<&ManaRunSummary>,
     improve_auto_turns: u32,
     improve_auto_turn_budget: u32,
     improve_safe_mode: bool,
@@ -1893,7 +1953,8 @@ fn render_status_text(
     if let Some(scope) = active_mana_scope {
         lines.push(format!("scope: {} — {}", scope.id, scope.title.trim()));
     }
-    if let Some(run) = active_mana_run {
+    #[cfg(feature = "mana-ui")]
+    if let Some(run) = _active_mana_run {
         lines.push(format!(
             "mana run: {} {} ({}/{}, failed {})",
             run.run_id, run.status, run.total_closed, run.total_units, run.total_failed
@@ -2277,6 +2338,7 @@ impl App {
             session_list_task: None,
             session_open_task: None,
             user_message_persist_task: None,
+            #[cfg(feature = "mana-ui")]
             mana_navigator_task: None,
             status_command_task: None,
             improve_merge_task: None,
@@ -2807,7 +2869,9 @@ impl App {
             RuntimeSignal::UserMessagePersistFailed(error) => self.push_error_msg(&error),
             RuntimeSignal::AgentStartCompleted(result) => self.finish_agent_start(result),
             RuntimeSignal::AgentStartFailed(error) => self.fail_agent_start(error),
+            #[cfg(feature = "mana-ui")]
             RuntimeSignal::ManaNavigatorLoaded(state) => self.finish_mana_navigator_load(state),
+            #[cfg(feature = "mana-ui")]
             RuntimeSignal::ManaNavigatorLoadFailed { mana_dir, message } => {
                 self.fail_mana_navigator_load(mana_dir, message);
             }
@@ -3175,14 +3239,23 @@ impl App {
         width: u16,
         selected_tc: Option<&DisplayToolCall>,
         thinking: Option<&str>,
-        run: Option<&ManaRunSummary>,
+        _run: Option<&ManaRunSummary>,
     ) -> SidebarDetailCacheKey {
         SidebarDetailCacheKey {
             width,
             messages_epoch: self.chat_render_epoch,
             selected_tool_id_hash: stable_hash(&selected_tc.map(|tc| &tc.id)),
             thinking_hash: stable_hash(&thinking),
-            run_hash: stable_hash(&run.map(mana_run_summary_cache_key)),
+            run_hash: {
+                #[cfg(feature = "mana-ui")]
+                {
+                    stable_hash(&_run.map(mana_run_summary_cache_key))
+                }
+                #[cfg(not(feature = "mana-ui"))]
+                {
+                    0
+                }
+            },
             word_wrap: self.config.ui.word_wrap,
             tool_output_lines: self.config.ui.tool_output_lines,
             animation_level: self.config.ui.animations,
@@ -3646,7 +3719,16 @@ impl App {
             ) {
                 let selected_tc_owned = self.selected_tool_call();
                 let run = if selected_tc_owned.is_none() {
-                    self.active_mana_run.clone()
+                    {
+                        #[cfg(feature = "mana-ui")]
+                        {
+                            self.active_mana_run.clone()
+                        }
+                        #[cfg(not(feature = "mana-ui"))]
+                        {
+                            None
+                        }
+                    }
                 } else {
                     None
                 };
@@ -3791,6 +3873,7 @@ impl App {
                 let view = SecretsPickerView::new(state, &self.theme);
                 frame.render_widget(view, overlay_area);
             }
+            #[cfg(feature = "mana-ui")]
             UiMode::ManaNavigator(state) => {
                 let mana_area = centered_rect(88, 86, area);
                 let view = ManaNavigatorView::new(state, &self.theme);
@@ -4006,6 +4089,7 @@ impl App {
             | UiMode::CommandPalette(_)
             | UiMode::LoginPicker(_)
             | UiMode::SecretsPicker(_) => self.handle_overlay_key(key),
+            #[cfg(feature = "mana-ui")]
             UiMode::ManaNavigator(_) => self.handle_mana_navigator_key(key),
             UiMode::Personality(_) => self.handle_personality_key(key),
             UiMode::TreeView(_) => self.handle_tree_key(key),
@@ -4352,6 +4436,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "mana-ui")]
     fn handle_mana_navigator_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Tab => {
@@ -4953,6 +5038,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "mana-ui")]
     fn handle_mana_navigator_mouse(&mut self, mouse: &crossterm::event::MouseEvent) -> bool {
         let UiMode::ManaNavigator(ref mut state) = self.mode else {
             return false;
@@ -5019,6 +5105,7 @@ impl App {
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         self.needs_redraw = true;
 
+        #[cfg(feature = "mana-ui")]
         if self.handle_mana_navigator_mouse(&mouse) {
             return;
         }
@@ -5507,7 +5594,10 @@ impl App {
         let workflow_mode = self.workflow_mode;
         let agent_status = self.agent_status_label().to_string();
         let active_mana_scope = self.active_mana_scope.clone();
+        #[cfg(feature = "mana-ui")]
         let active_mana_run = self.active_mana_run.clone();
+        #[cfg(not(feature = "mana-ui"))]
+        let active_mana_run = None;
         let improve_auto_turns = self.improve_auto_turns;
         let improve_auto_turn_budget = self.config.ui.improve_auto_turn_budget;
         let improve_safe_mode = self.improve_safe_mode;
@@ -5698,6 +5788,7 @@ impl App {
                 scope.id
             );
         }
+        #[cfg(feature = "mana-ui")]
         if let Some(run) = self.active_mana_run.as_ref() {
             return format!(
                 "Continue supervising active mana run {} until it is complete, blocked, or no runnable work remains.",
@@ -6227,6 +6318,7 @@ impl App {
         })
     }
 
+    #[cfg(feature = "mana-ui")]
     fn set_active_mana_run(&mut self, id: &str) {
         let id = id.trim();
         if id.is_empty() {
@@ -6247,6 +6339,7 @@ impl App {
         self.refresh_active_mana_run(id);
     }
 
+    #[cfg(feature = "mana-ui")]
     fn refresh_active_mana_run(&mut self, id: &str) {
         match mana_run_summary(id) {
             Ok(Some(summary)) => {
@@ -6265,6 +6358,13 @@ impl App {
         }
     }
 
+    #[cfg(not(feature = "mana-ui"))]
+    fn set_active_mana_scope(&mut self, id: &str) {
+        let _ = id;
+        self.push_system_msg("Mana scope UI is not available in this standalone build.");
+    }
+
+    #[cfg(feature = "mana-ui")]
     fn set_active_mana_scope(&mut self, id: &str) {
         let id = id.trim();
         if id.is_empty() {
@@ -6279,6 +6379,7 @@ impl App {
             return;
         }
 
+        #[cfg(feature = "mana-ui")]
         match self.resolve_mana_scope(id) {
             Ok(scope) => {
                 let label = if scope.title.trim().is_empty() {
@@ -6298,6 +6399,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "mana-ui")]
     fn resolve_mana_scope(&self, id: &str) -> std::result::Result<ManaUnitRef, String> {
         let mana_dir = api::find_mana_dir(&self.cwd).map_err(|err| err.to_string())?;
         let unit = api::get_unit(&mana_dir, id).map_err(|err| err.to_string())?;
@@ -6584,7 +6686,10 @@ impl App {
                 self.open_tree_view();
             }
             "mana" => {
+                #[cfg(feature = "mana-ui")]
                 self.open_mana_navigator(if args.is_empty() { None } else { Some(args) });
+                #[cfg(not(feature = "mana-ui"))]
+                self.push_system_msg("Mana UI is not available in this standalone build.");
             }
             "new" => {
                 self.messages.clear();
@@ -6648,7 +6753,12 @@ impl App {
             "loop" => self.start_loop_command(args),
             "queue" => self.queue_command(args),
             "scope" | "mana-scope" => self.set_active_mana_scope(args),
-            "run" => self.set_active_mana_run(args),
+            "run" => {
+                #[cfg(feature = "mana-ui")]
+                self.set_active_mana_run(args);
+                #[cfg(not(feature = "mana-ui"))]
+                self.push_system_msg("Mana run UI is not available in this standalone build.");
+            },
             "stop" => self.stop_active_work(),
             "settings" => {
                 self.open_settings();
@@ -8608,6 +8718,7 @@ impl App {
         self.mode = UiMode::ModelSelector(ModelSelectorState::new(models, current_model));
     }
 
+    #[cfg(feature = "mana-ui")]
     fn open_mana_navigator(&mut self, initial_id: Option<&str>) {
         self.mode = UiMode::ManaNavigator(ManaNavigatorState::loading(&self.cwd));
         if self.mana_navigator_task.is_some() {
@@ -8635,6 +8746,7 @@ impl App {
         }));
     }
 
+    #[cfg(feature = "mana-ui")]
     fn finish_mana_navigator_load(&mut self, state: ManaNavigatorState) {
         self.mana_navigator_task = None;
         if matches!(self.mode, UiMode::ManaNavigator(_)) {
@@ -8642,6 +8754,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "mana-ui")]
     fn fail_mana_navigator_load(&mut self, mana_dir: Option<PathBuf>, message: String) {
         self.mana_navigator_task = None;
         if matches!(self.mode, UiMode::ManaNavigator(_)) {

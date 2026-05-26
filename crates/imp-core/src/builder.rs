@@ -504,10 +504,6 @@ pub fn register_native_tools(tools: &mut ToolRegistry) {
     tools.register(Arc::new(BashTool::canonical()));
     tools.register(Arc::new(EditTool));
     tools.register(Arc::new(GitTool));
-    #[cfg(feature = "mana-integration")]
-    if crate::tools::mana::mana_executable_available() {
-        tools.register(Arc::new(crate::tools::mana::ManaTool::default()));
-    }
     tools.register(Arc::new(PrototypeTool));
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));

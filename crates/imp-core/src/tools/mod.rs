@@ -4,7 +4,7 @@ pub mod code_intel;
 pub mod edit;
 pub mod git;
 pub mod lua;
-#[cfg(feature = "mana-integration")]
+#[cfg(feature = "mana-tool")]
 pub mod mana;
 pub mod memory;
 pub mod multi_edit;

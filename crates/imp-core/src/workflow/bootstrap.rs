@@ -180,7 +180,7 @@ pub fn validate_work_product_task_spec(spec: &WorkProductTaskSpec) -> Result<(),
     Ok(())
 }
 
-#[cfg(feature = "mana-integration")]
+#[cfg(feature = "mana-api")]
 pub fn create_child_work_product_tasks(
     mana_dir: &Path,
     parent_id: &str,
@@ -234,7 +234,7 @@ pub fn record_created_work_products(
     }
 }
 
-#[cfg(feature = "mana-integration")]
+#[cfg(feature = "mana-api")]
 pub fn create_native_mana_root(
     mana_dir: &Path,
     request: WorkflowBootstrapRequest,

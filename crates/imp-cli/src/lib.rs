@@ -48,6 +48,7 @@ pub struct StartupTiming {
     pub since_previous_ms: u64,
 }
 
+#[cfg(feature = "mana-ui")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeadlessOutputMode {
     Json,
@@ -345,6 +346,7 @@ struct Cli {
     command: Option<Commands>,
 }
 
+#[cfg(feature = "mana-ui")]
 #[derive(Args, Debug, Clone)]
 struct HeadlessManaArgs {
     /// Mana unit ID to run
@@ -357,6 +359,7 @@ struct HeadlessManaArgs {
     defer_verify: bool,
 }
 
+#[cfg(feature = "mana-ui")]
 #[derive(Args, Debug, Clone)]
 struct ManaNamespaceArgs {
     /// Mana operator verb or unit ID
@@ -403,6 +406,7 @@ enum Commands {
     /// Edit configuration
     Config,
     /// Enter the mana-aware operator namespace. Use `imp mana <unit-id>` to run one unit.
+    #[cfg(feature = "mana-ui")]
     Mana(ManaNamespaceArgs),
     /// Local statistics from persisted imp sessions
     Stats {
@@ -1164,6 +1168,7 @@ pub async fn run() {
                 println!("{}", config_path.display());
                 return;
             }
+            #[cfg(feature = "mana-ui")]
             Commands::Mana(ManaNamespaceArgs {
                 target,
                 args,
@@ -2289,6 +2294,7 @@ async fn resolve_provider_api_key(
     }
 }
 
+#[cfg(feature = "mana-ui")]
 fn worker_status_counts_as_success(status: imp_core::mana_worker::WorkerStatus) -> bool {
     matches!(
         status,
@@ -2297,6 +2303,7 @@ fn worker_status_counts_as_success(status: imp_core::mana_worker::WorkerStatus) 
     )
 }
 
+#[cfg(feature = "mana-ui")]
 async fn run_headless_mode(
     cli: &Cli,
     unit_id: &str,
@@ -2464,6 +2471,7 @@ fn format_timing_event(timing: &TimingEvent) -> String {
     )
 }
 
+#[cfg(feature = "mana-ui")]
 async fn run_reserved_mana_namespace_command(
     target: &str,
     args: &[String],
@@ -2489,6 +2497,7 @@ fn cli_verification_gates(commands: &[String]) -> Vec<VerificationGate> {
         .collect()
 }
 
+#[cfg(feature = "mana-ui")]
 fn determine_headless_output_mode(cli_mode: &str, stdout_is_terminal: bool) -> HeadlessOutputMode {
     match cli_mode {
         "json" | "rpc" => HeadlessOutputMode::Json,
@@ -2497,6 +2506,7 @@ fn determine_headless_output_mode(cli_mode: &str, stdout_is_terminal: bool) -> H
     }
 }
 
+#[cfg(feature = "mana-ui")]
 fn print_headless_human_event(
     event: &AgentEvent,
     show_tools: bool,
@@ -2582,9 +2592,11 @@ fn print_headless_human_event(
     Ok(())
 }
 
+#[cfg(feature = "mana-ui")]
 fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>> {
     print_json_event_with_runtime(event, None)
 }
+#[cfg(feature = "mana-ui")]
 fn print_json_event_with_runtime(
     event: &AgentEvent,
     runtime: Option<&mut RuntimeStateAccumulator>,
@@ -2625,6 +2637,7 @@ fn print_json_event_with_runtime(
     Ok(())
 }
 
+#[cfg(feature = "mana-ui")]
 fn legacy_json_event_value(event: &AgentEvent) -> Result<Value, Box<dyn std::error::Error>> {
     let value = match event {
         AgentEvent::AgentStart { model, timestamp } => {
@@ -2729,6 +2742,7 @@ fn legacy_json_event_value(event: &AgentEvent) -> Result<Value, Box<dyn std::err
     Ok(value)
 }
 
+#[cfg(feature = "mana-ui")]
 fn stream_event_to_json(event: &StreamEvent) -> serde_json::Value {
     match event {
         StreamEvent::MessageStart { model } => {
@@ -5507,6 +5521,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mana-ui")]
     fn worker_status_counts_as_success_for_completed_and_awaiting_verify_only() {
         assert!(worker_status_counts_as_success(
             imp_core::mana_worker::WorkerStatus::Completed

@@ -836,7 +836,10 @@ mod tests {
     #[test]
     fn openai_compat_system_prompt_becomes_system_message() {
         let model = test_model();
-        let context = Context { messages: vec![], ..Default::default() };
+        let context = Context {
+            messages: vec![],
+            ..Default::default()
+        };
         let options = RequestOptions {
             system_prompt: "You are a helpful assistant.".into(),
             ..Default::default()

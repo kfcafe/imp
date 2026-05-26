@@ -2243,6 +2243,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mana-tool")]
     #[tokio::test]
     async fn emits_turn_assessment_event_for_continue_recommendation() {
         let provider = Arc::new(MockProvider::new(vec![
@@ -3075,6 +3076,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mana-tool")]
     #[tokio::test]
     async fn agent_queues_confidence_continue_follow_up_after_visible_mana_turn() {
         let provider = Arc::new(MockProvider::new(vec![
@@ -3143,6 +3145,7 @@ mod tests {
         assert!(user_texts[1].contains("Confidence is high"));
     }
 
+    #[cfg(feature = "mana-tool")]
     #[tokio::test]
     async fn agent_does_not_queue_confidence_continue_when_policy_disabled() {
         let provider = Arc::new(MockProvider::new(vec![
@@ -3210,6 +3213,7 @@ mod tests {
         assert_eq!(user_texts, vec!["Do the next thing".to_string()]);
     }
 
+    #[cfg(feature = "mana-tool")]
     #[tokio::test]
     async fn agent_does_not_queue_externalization_follow_up_after_mana_tool_turn() {
         let provider = Arc::new(MockProvider::new(vec![
@@ -3895,6 +3899,7 @@ mod tests {
 
     // ── Test 4: Cancel command mid-run ─────────────────────────────
 
+    #[cfg(feature = "mana-tool")]
     #[tokio::test]
     async fn execution_stops_after_failed_verify_tool_result_without_blocked_text() {
         let provider = Arc::new(MockProvider::new(vec![
@@ -3932,6 +3937,7 @@ mod tests {
         assert_eq!(user_texts, vec!["Verify the unit".to_string()]);
     }
 
+    #[cfg(feature = "mana-tool")]
     #[tokio::test]
     async fn execution_stops_after_mana_close_tool_result_without_done_text() {
         let provider = Arc::new(MockProvider::new(vec![

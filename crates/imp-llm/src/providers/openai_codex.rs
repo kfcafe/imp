@@ -152,7 +152,10 @@ impl Provider for OpenAiCodexProvider {
         let headers = build_headers(
             &account_id,
             api_key,
-            context.session_id.as_deref().or(context.thread_id.as_deref()),
+            context
+                .session_id
+                .as_deref()
+                .or(context.thread_id.as_deref()),
         );
         stream_response_json(
             self.client.clone(),

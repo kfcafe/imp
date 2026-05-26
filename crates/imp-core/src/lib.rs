@@ -18,14 +18,14 @@ pub mod hooks;
 pub mod imp_session;
 pub mod import;
 pub mod learning;
-#[cfg(feature = "mana-integration")]
+#[cfg(feature = "mana-api")]
 pub mod mana_next;
-#[cfg(feature = "mana-integration")]
+#[cfg(feature = "mana-api")]
 pub mod mana_prompt_context;
 pub mod mana_review;
-#[cfg(feature = "mana-integration")]
+#[cfg(feature = "mana-api")]
 pub mod mana_run_state;
-#[cfg(feature = "mana-integration")]
+#[cfg(feature = "mana-api")]
 pub mod mana_worker;
 pub mod memory;
 pub mod personality;
@@ -57,7 +57,7 @@ pub use imp_llm::{
     TransportCapabilities,
 };
 pub use mana_review::{ManaReviewState, ManaReviewUnitKind, ManaUnitRef, TurnManaReview};
-#[cfg(feature = "mana-integration")]
+#[cfg(feature = "mana-api")]
 pub use mana_run_state::{mana_run_summary, stop_mana_run, ManaRunSummary};
 pub use sdk::*;
 
