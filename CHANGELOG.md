@@ -6,7 +6,37 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## [Unreleased]
 
-Use this section for changes that have landed on `main` after the 0.2.5 release.
+Use this section for changes that have landed on nightly after the 0.2.6 release.
+
+## [0.2.6] - 2026-05-26
+
+### Added
+
+- Added bounded subagent runtime primitives in `imp-core`, including subagent DTOs, lifecycle/status/activity-summary/outcome structures, and an initial no-op coordinator for future bounded worker orchestration.
+- Added design documentation for bounded subagent orchestration and the imp runtime boundary around clean worker contexts, activity summaries, cancellation, evidence, and host-owned durable state.
+- Added Codex/OpenAI-compatible prompt cache identity wiring so supported providers can receive stable cache hints.
+
+### Changed
+
+- Made `imp` standalone by default again: the default `imp-cli` dependency tree no longer pulls in `imp-work`, `mana-core`, or `mana-cli`.
+- Moved mana-facing CLI/TUI/tool integration behind optional `mana-ui` / `mana-tool` feature gates while keeping default chat/run usage independent from mana.
+- Split `imp-core` workflow integration away from the core agent loop into explicit runtime layers, separating recipe/runtime support from mana compatibility code.
+- Reworked mana-related runtime hooks so mana API support and the heavier mana tool/CLI integration are separate optional feature surfaces.
+- Updated the TUI to compile in a standalone default configuration, with mana navigator/run UI available only when the optional mana UI feature is enabled.
+- Bumped the workspace release version to `0.2.6`.
+
+### Removed
+
+- Removed active `imp-work` workspace membership and default `imp-core` / `imp-cli` dependencies on `imp-work`.
+- Removed the native `work` tool from the default imp runtime surface; durable work orchestration is no longer part of the default standalone imp build.
+- Removed the legacy native `imp run` / WorkRun planning path from the default CLI surface.
+
+### Fixed
+
+- Fixed feature gating so `imp-core --features mana-api` builds without pulling in the heavier mana tool integration.
+- Fixed default dependency hygiene so `cargo tree -p imp-cli` has no `imp-work`, `mana-core`, or `mana-cli` entries unless optional mana integration is enabled.
+- Fixed standalone TUI/CLI build paths that previously assumed mana run state or mana navigator types were always available.
+- Fixed TUI tool icon label spacing.
 
 ## [0.2.5] - 2026-05-22
 
