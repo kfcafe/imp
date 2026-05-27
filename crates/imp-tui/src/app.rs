@@ -4348,10 +4348,7 @@ impl App {
         }
 
         // Reset ctrl+c counter on non-ctrl+c keypress
-        if !(key.code == KeyCode::Char('c')
-            && (key.modifiers.contains(KeyModifiers::CONTROL)
-                || key.modifiers.contains(KeyModifiers::SUPER)))
-        {
+        if !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
             self.ctrl_c_count = 0;
         }
 
@@ -5130,8 +5127,7 @@ impl App {
 
     fn is_copy_shortcut(&self, key: KeyEvent) -> bool {
         key.code == KeyCode::Char('c')
-            && (key.modifiers.contains(KeyModifiers::CONTROL)
-                || key.modifiers.contains(KeyModifiers::SUPER))
+            && key.modifiers.contains(KeyModifiers::SUPER)
             && self.selection.is_some()
     }
 
@@ -7051,7 +7047,7 @@ impl App {
   Shift+Enter   New line\n\
   Alt+Enter     Queue follow-up while streaming\n\
   Ctrl+C        Clear / Abort / Quit\n\
-  Ctrl+C/Cmd+C  Copy selection\n\
+  Cmd+C         Copy selection\n\
   Ctrl+V/Cmd+V  Paste clipboard\n\
   Ctrl+L        Model selector\n\
   Ctrl+P        Next chosen model\n\
@@ -10632,6 +10628,7 @@ mod session_lifecycle {
         assert!(msgs[0].is_user());
     }
 
+    #[cfg(feature = "mana-ui")]
     #[tokio::test]
     async fn tui_integration_slash_mana_opens_navigator() {
         let mut app = make_app();
@@ -12261,7 +12258,7 @@ mod session_lifecycle {
     }
 
     #[test]
-    fn shift_down_extends_selection_and_copy_shortcut_copies_it() {
+    fn shift_down_extends_selection_and_cmd_c_copies_it() {
         let mut app = make_app();
         app.selection = Some(SelectionState::new(
             SelectablePane::Chat,
@@ -12281,6 +12278,13 @@ mod session_lifecycle {
         assert_eq!(selection.focus.line, 1);
 
         app.handle_normal_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(!app
+            .messages
+            .last()
+            .is_some_and(|message| message.content.contains("Copied selection")));
+
+        app.handle_normal_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER))
             .unwrap();
         assert!(app
             .messages
