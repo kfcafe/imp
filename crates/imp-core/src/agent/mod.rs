@@ -612,7 +612,7 @@ fn should_queue_confidence_continue_follow_up(
 }
 
 fn confidence_continue_follow_up_text() -> &'static str {
-    "Confidence is high and the imp-work delta is already visible. Continue to the next small, well-bounded step now using native work-backed workflow, unless a consequential decision or blocker appears. Do not re-summarize the same visible work change in chat unless new context needs to be called out."
+    "Confidence is high and the workflow delta is already visible. Continue to the next small, well-bounded step now using the native workflow-backed process, unless a consequential decision or blocker appears. Do not re-summarize the same visible workflow change in chat unless new context needs to be called out."
 }
 
 fn failed_bash_recovery_follow_up_text() -> &'static str {
@@ -620,7 +620,7 @@ fn failed_bash_recovery_follow_up_text() -> &'static str {
 }
 
 fn execution_debt_follow_up_text() -> &'static str {
-    "You have recorded or planned work, but the requested outcome is not satisfied yet. Continue working until the user's requested outcome is satisfied, or until concrete evidence shows it cannot be completed. Do not stop merely because you recorded a plan, updated mana, or completed one intermediate step."
+    "You have recorded or planned work, but the requested outcome is not satisfied yet. Continue working until the user's requested outcome is satisfied, or until concrete evidence shows it cannot be completed. Do not stop merely because you recorded a plan, updated a workflow, or completed one intermediate step."
 }
 
 fn tool_results_include_successful_edit(tool_results: &[imp_llm::ToolResultMessage]) -> bool {
@@ -688,10 +688,6 @@ fn tool_results_indicate_execution_blocker(
             && result.details.get("passed").and_then(|v| v.as_bool()) == Some(false)
         {
             return Some(StopReason::ExecutionBlocked);
-        }
-
-        if result.tool_name == "ask_user" && !result.is_error {
-            return Some(StopReason::UserBlocker);
         }
 
         if result.tool_name == "bash" || result.tool_name == "shell" {
@@ -929,7 +925,7 @@ fn mana_bash_equivalent_hint(command: &str) -> Option<&'static str> {
     match action {
         "status" | "list" | "ls" | "show" | "read" | "create" | "close" | "update" | "run"
         | "run_state" | "evaluate" | "agents" | "logs" | "next" | "claim" | "release" | "tree" => {
-            Some("Mana is retired from the default workflow. Use native imp-work actions instead, starting with `work(action=\"guide\")`, `work(action=\"next\")`, or `work(action=\"migrate\")` as appropriate.")
+            Some("Mana is retired from the default workflow. Use native workflow actions instead, starting with `workflow(action=\"list\")`, `workflow(action=\"show\")`, or `workflow(action=\"run\")` as appropriate.")
         }
         _ => None,
     }
@@ -955,7 +951,54 @@ mod tests {
     use imp_llm::ToolResultMessage;
     use tokio::sync::{Mutex, Notify};
 
-    /// A mock provider that returns pre-programmed responses.
+    #[derive(Default)]
+    struct AnsweringUi {
+        answer: String,
+    }
+
+    #[async_trait]
+    impl crate::ui::UserInterface for AnsweringUi {
+        fn has_ui(&self) -> bool {
+            true
+        }
+
+        async fn notify(&self, _: &str, _: crate::ui::NotifyLevel) {}
+
+        async fn confirm(&self, _: &str, _: &str) -> Option<bool> {
+            None
+        }
+
+        async fn select_with_context(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[crate::ui::SelectOption],
+        ) -> Option<usize> {
+            None
+        }
+
+        async fn multi_select_with_context(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[crate::ui::SelectOption],
+        ) -> Option<Vec<usize>> {
+            None
+        }
+
+        async fn input_with_context(&self, _: &str, _: &str, _: &str) -> Option<String> {
+            Some(self.answer.clone())
+        }
+
+        async fn set_status(&self, _: &str, _: Option<&str>) {}
+
+        async fn set_widget(&self, _: &str, _: Option<crate::ui::WidgetContent>) {}
+
+        async fn custom(&self, _: crate::ui::ComponentSpec) -> Option<serde_json::Value> {
+            None
+        }
+    }
+
     /// Each call to `stream()` pops the next response from the queue.
     struct MockProvider {
         responses: Mutex<Vec<Vec<imp_llm::Result<StreamEvent>>>>,
@@ -1335,7 +1378,7 @@ mod tests {
         }
 
         fn description(&self) -> &str {
-            "Mock native work tool"
+            "Mock durable workflow tool"
         }
 
         fn parameters(&self) -> serde_json::Value {
@@ -2767,8 +2810,49 @@ mod tests {
             .contains(autonomy::ObligationKind::EditedFilesVerification));
     }
 
+    #[tokio::test]
+    async fn ask_user_answer_is_sent_back_to_model() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_ask",
+                "ask_user",
+                serde_json::json!({"question": "Which color?"}),
+                100,
+                20,
+            ),
+            text_response("You chose blue.", 120, 15),
+        ]));
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(crate::tools::ask::AskTool));
+        agent.ui = Arc::new(AnsweringUi {
+            answer: "blue".to_string(),
+        });
+
+        agent.run("Ask me a color".to_string()).await.unwrap();
+
+        assert!(agent.messages.iter().any(|message| {
+            matches!(
+                message,
+                Message::ToolResult(result)
+                    if result.tool_name == "ask_user"
+                        && result
+                            .content
+                            .iter()
+                            .any(|block| matches!(block, ContentBlock::Text { text } if text == "blue"))
+            )
+        }));
+        assert!(agent.messages.iter().any(|message| {
+            matches!(
+                message,
+                Message::Assistant(assistant)
+                    if assistant_message_text(assistant).contains("You chose blue.")
+            )
+        }));
+    }
+
     #[test]
-    fn tool_results_indicate_execution_blocker_detects_ask_tool_as_user_blocker() {
+    fn tool_results_indicate_execution_blocker_does_not_stop_on_ask_tool_answer() {
         let result = imp_llm::ToolResultMessage {
             tool_call_id: "call_ask".to_string(),
             tool_name: "ask_user".to_string(),
@@ -2782,7 +2866,7 @@ mod tests {
 
         assert_eq!(
             tool_results_indicate_execution_blocker(&[result], AgentMode::Full),
-            Some(StopReason::UserBlocker)
+            None
         );
     }
 
@@ -3070,9 +3154,9 @@ mod tests {
         assert!(
             user_texts.iter().any(|text| {
                 text.contains("You have recorded or planned work")
-                    || text.contains("Mana graph state changed")
+                    || text.contains("Workflow state changed")
             }),
-            "expected execution-debt follow-up after native work planning, got {user_texts:?}"
+            "expected execution-debt follow-up after workflow planning, got {user_texts:?}"
         );
     }
 
@@ -4168,7 +4252,7 @@ mod tests {
                 100,
                 20,
             ),
-            text_response("Recovered after native-mana hint", 120, 25),
+            text_response("Recovered after native-workflow hint", 120, 25),
         ]));
 
         let model = test_model(provider);
@@ -4176,7 +4260,7 @@ mod tests {
         agent.tools.register(Arc::new(crate::tools::bash::BashTool));
 
         let events_task = tokio::spawn(collect_events(handle));
-        agent.run("Check mana state".to_string()).await.unwrap();
+        agent.run("Check workflow state".to_string()).await.unwrap_err();
         drop(agent);
 
         let events = events_task.await.unwrap();
@@ -4194,7 +4278,10 @@ mod tests {
                 _ => None,
             })
             .unwrap_or("");
-        assert!(text.contains("Use the native mana tool"));
+        assert!(
+            text.contains("native workflow") || text.contains("Mana is retired"),
+            "unexpected bash block text: {text}"
+        );
     }
 
     #[tokio::test]
