@@ -1,0 +1,17 @@
+# imp technical docs
+
+This directory contains technical reference pages for imp. README.md is the entrypoint; these pages cover details that are too specific for the README.
+
+## Core references
+
+- [Workflows](workflows.md) — workflow artifacts, schema, lifecycle, events, prototyping, verification, closeout, and API direction.
+- [RPC protocol](rpc.md) — `--mode rpc`, stdin commands, stdout events, `--runtime-json`, and host integration notes.
+- [Native tools](tools.md) — built-in tools, mutability, policy interaction, execution behavior, and display notes.
+- [Runtime policy](policy.md) — modes, autonomy, tool allow/deny rules, write-path rules, hooks, and verify gates.
+- [Sessions and evidence](sessions.md) — JSONL session records, branches, compaction, traces, evidence packets, and recovery.
+- [Lua extensions](extensions-lua.md) — shipped Lua extension runtime, load paths, custom tools, slash commands, hooks, and capabilities.
+- [Architecture](architecture.md) — crate responsibilities, runtime flow, provider layer, workflow core, UI/CLI/RPC surfaces, and extension runtime.
+
+## Existing design notes
+
+The repository also contains older design, rebuild, and proposal notes under `docs/design/`, `docs/rebuild/`, and `docs/proposals/`. Those files are useful for historical context, but the core references above should be treated as the current technical overview unless a lower-level source file says otherwise.
