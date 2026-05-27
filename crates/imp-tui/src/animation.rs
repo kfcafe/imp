@@ -86,9 +86,10 @@ pub fn responding_frame(tick: u64) -> &'static str {
     spinner_frame(tick)
 }
 
-/// Main working/thinking spinner used for concrete tool execution.
+/// Main working spinner used for concrete tool execution.
 pub fn tool_frame(tick: u64) -> &'static str {
-    spinner_frame(tick)
+    const FRAMES: &[&str] = &["◜", "◝", "◞", "◟"];
+    FRAMES[(tick / 3) as usize % FRAMES.len()]
 }
 
 /// Static glyph for running states when animated motion is disabled.
