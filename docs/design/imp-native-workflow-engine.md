@@ -124,7 +124,7 @@ Use an event-sourced split:
 - `state.json` is an optional derived cache, never the source of truth.
 - `results.md` is the human-facing proof/summary artifact generated from workflow state, events, traces, and selected artifacts.
 
-Runtime rule: append to `events.jsonl` first, then atomically refresh derived `state.json` and checkpoint fields in `workflow.yaml`. If interrupted, recover by replaying `events.jsonl` against `workflow.yaml`.
+Runtime rule for the current native tool: validate the prospective `workflow.yaml`, open/preflight `events.jsonl`, atomically replace `workflow.yaml`, then append the update event. This prevents common unaudited mutations where the event log cannot be opened, but it is not a full two-file transaction if the process crashes after YAML replacement and before the event write completes. A future journaled update path should make crash recovery stronger.
 
 ## Compact schema shape
 

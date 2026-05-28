@@ -1,6 +1,6 @@
 # Workflows
 
-imp workflows are local project artifacts for planned, multi-step work. They keep the plan, execution state, checks, prototype evidence, events, and closeout notes in files under the project.
+imp workflows are local project artifacts for planned, multi-step work. They keep the plan, execution state, checks, prototype results, events, and closeout notes in files under the project.
 
 Primary implementation areas:
 
@@ -57,7 +57,7 @@ blocked
 needs_context
 ```
 
-Invalid status updates are rejected before `workflow.yaml` is written.
+Invalid status updates are rejected before `workflow.yaml` is written. Oversized workflow YAML is rejected before parsing. Successful updates validate the prospective workflow, open/preflight `events.jsonl`, replace `workflow.yaml`, then append the event; this is safer than mutating state without an event sink, but it is not a full crash-proof two-file transaction.
 
 ## Tool actions
 
