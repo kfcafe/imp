@@ -81,7 +81,7 @@ fn render_actions(area: Rect, buf: &mut Buffer, theme: &Theme, actions: &[Startu
 
     let block = Block::default()
         .title(Line::from(Span::styled(
-            " common actions ",
+            " welcome to imp. ",
             theme.header_style(),
         )))
         .borders(Borders::ALL)
@@ -139,14 +139,10 @@ fn render_sections(area: Rect, buf: &mut Buffer, theme: &Theme, sections: &[Star
     let visible_sections = &sections[..visible_count];
 
     if area.width >= 96 {
+        let constraints = vec![Constraint::Ratio(1, visible_sections.len() as u32); visible_sections.len()];
         let columns = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-            ])
+            .constraints(constraints)
             .split(area);
         for (section, rect) in visible_sections.iter().zip(columns.iter().copied()) {
             render_section(rect, buf, theme, section);
@@ -270,7 +266,10 @@ fn render_section_line(line: &str, theme: &Theme) -> Line<'static> {
         if let Some((label, value)) = rest.split_once(':') {
             return Line::from(vec![
                 Span::styled("• ", theme.accent_style()),
-                Span::styled(format!("{label}:"), theme.muted_style()),
+                Span::styled(
+                    format!("{label}:"),
+                    workflow_or_meta_label_style(label, theme),
+                ),
                 Span::raw(value.to_string()),
             ]);
         }
@@ -284,9 +283,20 @@ fn render_section_line(line: &str, theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(line.to_string(), theme.muted_style()))
 }
 
+fn workflow_or_meta_label_style(label: &str, theme: &Theme) -> Style {
+    if label.starts_with('/') {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        theme.muted_style()
+    }
+}
+
 fn parse_tool_icon_line(line: &str) -> Option<(&str, &str)> {
     let (icon, label) = line.split_once(' ')?;
-    if matches!(icon, "▣" | "$" | "◧" | "✎" | "◇" | "◆" | "⌕" | "◎" | "⚗") {
+    if matches!(
+        icon,
+        "?" | "▣" | "$" | "◧" | "✎" | "◇" | "◆" | "⌕" | "◎" | "⚗" | "⚑"
+    ) {
         Some((icon, label))
     } else {
         None
@@ -317,7 +327,7 @@ pub fn visible_section_count(width: u16, height: u16, total: usize) -> usize {
     } else if width < 110 || height < 22 {
         total.min(3)
     } else {
-        total.min(4)
+        total
     }
 }
 
@@ -411,6 +421,14 @@ mod tests {
         assert_eq!(line.spans.len(), 2);
         assert_eq!(line.spans[0].content.as_ref(), "◧ ");
         assert_eq!(line.spans[1].content.as_ref(), "Read");
+        assert_eq!(line.spans[1].style.fg, None);
+    }
+
+    #[test]
+    fn render_section_line_styles_workflow_slash_command_white() {
+        let line = render_section_line("• /plan: Create or update workflow", &Theme::default());
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[1].content.as_ref(), "/plan:");
         assert_eq!(line.spans[1].style.fg, None);
     }
 

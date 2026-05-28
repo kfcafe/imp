@@ -5,6 +5,7 @@ pub mod highlight;
 pub mod interactive;
 pub mod keybindings;
 pub mod markdown;
+mod repo_stats;
 pub mod selection;
 pub mod terminal;
 pub mod theme;
