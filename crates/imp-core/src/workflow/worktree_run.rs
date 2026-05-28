@@ -1,9 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+
+const WORKTREE_GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
 use crate::error::{Error, Result};
 use crate::workflow::WorkspaceScope;
@@ -636,17 +639,17 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(args)
         .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|err| {
-            WorktreeRunError::Io(format!("failed to run git in {}: {err}", cwd.display()))
-        })
+        .kill_on_drop(true);
+    run_git_command(command, cwd).await
 }
 
 async fn run_git_owned(cwd: &Path, args: Vec<String>) -> WorktreeRunResult<std::process::Output> {
@@ -662,16 +665,19 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let mut child = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(args)
         .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| {
-            WorktreeRunError::Io(format!("failed to run git in {}: {err}", cwd.display()))
-        })?;
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(|err| {
+        WorktreeRunError::Io(format!("failed to run git in {}: {err}", cwd.display()))
+    })?;
 
     if let Some(mut child_stdin) = child.stdin.take() {
         child_stdin.write_all(stdin).await.map_err(|err| {
@@ -682,12 +688,35 @@ where
         })?;
     }
 
-    child.wait_with_output().await.map_err(|err| {
-        WorktreeRunError::Io(format!(
-            "failed to wait for git in {}: {err}",
+    match tokio::time::timeout(WORKTREE_GIT_COMMAND_TIMEOUT, child.wait_with_output()).await {
+        Ok(result) => result.map_err(|err| {
+            WorktreeRunError::Io(format!(
+                "failed to wait for git in {}: {err}",
+                cwd.display()
+            ))
+        }),
+        Err(_) => Err(WorktreeRunError::Io(format!(
+            "git command timed out after {}s in {}",
+            WORKTREE_GIT_COMMAND_TIMEOUT.as_secs(),
             cwd.display()
-        ))
-    })
+        ))),
+    }
+}
+
+async fn run_git_command(
+    mut command: Command,
+    cwd: &Path,
+) -> WorktreeRunResult<std::process::Output> {
+    match tokio::time::timeout(WORKTREE_GIT_COMMAND_TIMEOUT, command.output()).await {
+        Ok(result) => result.map_err(|err| {
+            WorktreeRunError::Io(format!("failed to run git in {}: {err}", cwd.display()))
+        }),
+        Err(_) => Err(WorktreeRunError::Io(format!(
+            "git command timed out after {}s in {}",
+            WORKTREE_GIT_COMMAND_TIMEOUT.as_secs(),
+            cwd.display()
+        ))),
+    }
 }
 
 fn stdout_trimmed(output: &std::process::Output) -> String {

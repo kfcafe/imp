@@ -67,16 +67,27 @@ impl VerificationGateRunner {
             .await
             .map_err(Error::Io)?;
 
-        let mut child = Command::new("/bin/sh")
+        let mut child_command = Command::new("/bin/sh");
+        child_command
             .arg("-lc")
             .arg(&command.command)
             .current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(Error::Io)?;
+            .kill_on_drop(true);
+
+        // Put verification commands in their own process group so timeout
+        // cleanup can terminate grandchildren spawned by the shell too.
+        #[cfg(unix)]
+        unsafe {
+            child_command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+
+        let mut child = child_command.spawn().map_err(Error::Io)?;
 
         let mut stdout = child.stdout.take().expect("stdout piped");
         let mut stderr = child.stderr.take().expect("stderr piped");
@@ -92,6 +103,13 @@ impl VerificationGateRunner {
         let status = match tokio::time::timeout(timeout, child.wait()).await {
             Ok(wait) => wait.map_err(Error::Io)?,
             Err(_) => {
+                #[cfg(unix)]
+                if let Some(pid) = child.id() {
+                    // Negative PID targets the process group created by setsid.
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                    }
+                }
                 let _ = child.kill().await;
                 let stdout_bytes = join_output(stdout_task).await;
                 let stderr_bytes = join_output(stderr_task).await;
@@ -164,12 +182,8 @@ impl VerificationGateRunner {
         let stderr_path = gate_dir.join("stderr.log");
         let status_path = gate_dir.join("status.json");
 
-        tokio::fs::write(&stdout_path, stdout_capture.content.as_bytes())
-            .await
-            .map_err(Error::Io)?;
-        tokio::fs::write(&stderr_path, stderr_capture.content.as_bytes())
-            .await
-            .map_err(Error::Io)?;
+        write_private_file(&stdout_path, stdout_capture.content.as_bytes()).await?;
+        write_private_file(&stderr_path, stderr_capture.content.as_bytes()).await?;
 
         let summary = blocked_summary.unwrap_or_else(|| match exit_code {
             Some(0) => "verification command passed".to_string(),
@@ -195,12 +209,11 @@ impl VerificationGateRunner {
             "stdout_truncated": stdout_capture.truncated,
             "stderr_truncated": stderr_capture.truncated,
         });
-        tokio::fs::write(
+        write_private_file(
             &status_path,
-            serde_json::to_vec_pretty(&status_json).map_err(Error::Json)?,
+            &serde_json::to_vec_pretty(&status_json).map_err(Error::Json)?,
         )
-        .await
-        .map_err(Error::Io)?;
+        .await?;
 
         gate.artifacts = vec![
             artifact_ref(
@@ -219,6 +232,19 @@ impl VerificationGateRunner {
         ];
         Ok(result)
     }
+}
+
+async fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+    tokio::fs::write(path, contents).await.map_err(Error::Io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::Permissions::from_mode(0o600);
+        tokio::fs::set_permissions(path, permissions)
+            .await
+            .map_err(Error::Io)?;
+    }
+    Ok(())
 }
 
 fn artifact_ref(
@@ -357,6 +383,29 @@ mod tests {
         assert_eq!(result.exit_code, None);
         assert!(result.summary.unwrap().contains("timed out"));
         assert!(temp.path().join("artifacts/timeout/status.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_gate_runner_writes_private_artifacts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let artifact_dir = temp.path().join("artifacts");
+        let runner = VerificationGateRunner::new(temp.path(), &artifact_dir);
+        let mut gate = VerificationGate::command("private-artifacts", "echo secret-ish");
+
+        let result = runner.run(&mut gate).await.unwrap();
+        assert_eq!(result.exit_code, Some(0));
+
+        for artifact in &gate.artifacts {
+            let mode = std::fs::metadata(&artifact.path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{}", artifact.path.display());
+        }
     }
 
     #[tokio::test]
