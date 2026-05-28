@@ -8,7 +8,7 @@ use crate::agent::{ContinueReason, RunFinalStatus, StopReason};
 ///
 /// This is intentionally policy-shaped rather than model-shaped: the model may
 /// propose work, but the runtime owns whether a workflow is still obligated to
-/// inspect, supervise, verify, or close out before reporting DONE.
+/// inspect, supervise, verify, or close out before presenting the work as complete.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkflowRunController {
     pub workflow_id: Option<String>,
@@ -566,11 +566,11 @@ pub enum WorkflowControllerDecision {
 }
 
 pub fn workflow_bootstrap_prompt() -> String {
-    "Durable workflow bootstrap is required before reporting done. Create or bind the root mana work item for this goal, attach acceptance/verification, and continue from the graph; do not answer final DONE until the controller has a mana root or bootstrap is explicitly skipped by runtime policy.".to_string()
+    "Durable workflow bootstrap is required before presenting the work as complete. Create or bind the root mana work item for this goal, attach acceptance/verification, and continue from the graph; do not close out until the controller has a mana root or bootstrap is explicitly skipped by runtime policy.".to_string()
 }
 
 pub fn workflow_supervision_prompt() -> String {
-    "Orchestration has started, so continue supervising it instead of reporting done. Inspect mana run_state/logs for active child runs, coordinate ready work, retry or escalate failed units, and only stop when workflow closeout is verified, a concrete blocker exists, or no runnable work remains.".to_string()
+    "Orchestration has started, so continue supervising it instead of presenting the work as complete. Inspect mana run_state/logs for active child runs, coordinate ready work, retry or escalate failed units, and only stop when workflow closeout is verified, a concrete blocker exists, or no runnable work remains.".to_string()
 }
 
 pub fn workflow_decomposition_prompt() -> String {
@@ -578,20 +578,38 @@ pub fn workflow_decomposition_prompt() -> String {
 }
 
 pub fn workflow_graph_closeout_prompt() -> String {
-    "Mana graph state changed, so do not report done yet. Inspect the relevant mana units/tree/next state, verify acceptance and blockers, run required checks, then close or update units before final DONE.".to_string()
+    "Mana graph state changed, so do not present the work as complete yet. Inspect the relevant mana units/tree/next state, verify acceptance and blockers, run required checks, then close or update units before final closeout.".to_string()
 }
 
 pub fn workflow_direct_closeout_prompt() -> String {
-    "Direct work changed, so do not report done yet. Inspect the diff, run the narrowest relevant verification, and produce closeout evidence before final DONE.".to_string()
+    "Direct work changed, so do not present the work as complete yet. Inspect the diff, run the narrowest relevant verification, and produce closeout evidence before final closeout.".to_string()
 }
 
 pub fn workflow_closeout_prompt() -> String {
-    "Workflow execution is not ready for closeout. Review remaining mana units, child runs, required verification, unresolved decisions, and evidence before reporting DONE.".to_string()
+    "Workflow execution is not ready for closeout. Review remaining mana units, child runs, required verification, unresolved decisions, and evidence before presenting the work as complete.".to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_closeout_prompts_do_not_request_literal_status_headings() {
+        let prompts = [
+            workflow_bootstrap_prompt(),
+            workflow_supervision_prompt(),
+            workflow_decomposition_prompt(),
+            workflow_graph_closeout_prompt(),
+            workflow_direct_closeout_prompt(),
+            workflow_closeout_prompt(),
+        ];
+
+        for prompt in prompts {
+            assert!(!prompt.contains("final DONE"), "prompt was {prompt:?}");
+            assert!(!prompt.contains("reporting DONE"), "prompt was {prompt:?}");
+            assert!(!prompt.contains("report done"), "prompt was {prompt:?}");
+        }
+    }
 
     #[test]
     fn decomposition_requires_real_child_units_before_done() {
