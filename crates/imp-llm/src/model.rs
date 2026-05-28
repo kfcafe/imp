@@ -785,7 +785,7 @@ pub fn builtin_openai_codex_models() -> Vec<ModelMeta> {
         id: "gpt-5.5".into(),
         provider: "openai-codex".into(),
         name: "GPT-5.5".into(),
-        context_window: 400_000,
+        context_window: 1_000_000,
         max_output_tokens: 128_000,
         pricing: ModelPricing::default(),
         capabilities: Capabilities {
@@ -1011,7 +1011,7 @@ fn synthesize_openai_model_meta(model_id: &str) -> ModelMeta {
             id: model_id.into(),
             provider: "openai".into(),
             name: model_id.into(),
-            context_window: 400_000,
+            context_window: 1_000_000,
             max_output_tokens: 128_000,
             pricing: ModelPricing::default(),
             capabilities: Capabilities {

@@ -8170,9 +8170,12 @@ impl App {
                             session_id: None,
                             thread_id: None,
                         };
+                        let compaction_max_tokens = requested_max_tokens
+                            .map(|tokens| tokens.min(4096))
+                            .or(Some(2048));
                         let options = RequestOptions {
                             thinking_level,
-                            max_tokens: requested_max_tokens.or(Some(2048)),
+                            max_tokens: compaction_max_tokens,
                             temperature: Some(0.2),
                             system_prompt,
                             tools: Vec::new(),
@@ -8192,27 +8195,42 @@ impl App {
                             retry_policy,
                         );
 
-                        while let Some(item) = stream.next().await {
-                            match item {
-                                Ok(StreamEvent::TextDelta { text }) => summary.push_str(&text),
-                                Ok(StreamEvent::MessageEnd { message }) => {
-                                    let body = message
-                                        .content
-                                        .iter()
-                                        .filter_map(|block| match block {
-                                            imp_llm::ContentBlock::Text { text } => {
-                                                Some(text.as_str())
+                        let stream_result =
+                            tokio::time::timeout(std::time::Duration::from_secs(180), async {
+                                while let Some(item) = stream.next().await {
+                                    match item {
+                                        Ok(StreamEvent::TextDelta { text }) => {
+                                            summary.push_str(&text)
+                                        }
+                                        Ok(StreamEvent::MessageEnd { message }) => {
+                                            let body = message
+                                                .content
+                                                .iter()
+                                                .filter_map(|block| match block {
+                                                    imp_llm::ContentBlock::Text { text } => {
+                                                        Some(text.as_str())
+                                                    }
+                                                    _ => None,
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join("");
+                                            if !body.is_empty() {
+                                                message_end_text = Some(body);
                                             }
-                                            _ => None,
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("");
-                                    if !body.is_empty() {
-                                        message_end_text = Some(body);
+                                        }
+                                        Ok(_) => {}
+                                        Err(error) => return Err(error.to_string()),
                                     }
                                 }
-                                Ok(_) => {}
-                                Err(error) => return Err(error.to_string()),
+                                Ok::<(), String>(())
+                            })
+                            .await;
+
+                        match stream_result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => return Err(error),
+                            Err(_) => {
+                                return Err("Compaction timed out after 180 seconds".to_string())
                             }
                         }
 
