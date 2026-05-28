@@ -6,7 +6,27 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## [Unreleased]
 
-Use this section for changes that have landed on nightly after the 0.2.8 release.
+Use this section for changes that have landed on nightly after the 0.2.9 release.
+
+## [0.2.9] - 2026-05-28
+
+### Added
+
+- Added executable workflow runner support for command-backed checks, step status advancement, and reconciliation dogfood workflows.
+- Added repo intelligence counts to scan output and TUI startup/homepage surfaces.
+- Added dependency audit notes for current RustSec findings and blocked upgrade paths.
+
+### Changed
+
+- Prefer native workflow policy, prompt, and tool surfaces over legacy mana/prototype guidance.
+- Bound helper command execution for guardrails, hooks, git, shell tools, Lua/TypeScript extension bridges, and compaction requests.
+- Improved workflow tool output cards and related TUI rendering polish.
+
+### Fixed
+
+- Reconciled workflow status after command checks so stale workflow states are easier to detect and clean up.
+- Redacted secrets from persisted diagnostics, traces, provider/search errors, web-read URLs, and truncated command output files.
+- Tightened write-path checks around symlink escapes and preserved private permissions on session and trace files.
 
 ## [0.2.8] - 2026-05-27
 
@@ -233,8 +253,18 @@ Initial crates.io release of the imp crate family.
 - Standardized published crates on MIT license metadata.
 - Added crates.io metadata and versioned internal dependencies for published crates.
 
-[Unreleased]: https://github.com/kfcafe/imp/compare/v0.1.3...HEAD
-[0.1.3]: https://github.com/kfcafe/imp/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/kfcafe/imp/compare/v0.2.9...HEAD
+[0.2.9]: https://github.com/kfcafe/imp/compare/v0.2.8...v0.2.9
+[0.2.8]: https://github.com/kfcafe/imp/compare/v0.2.7...v0.2.8
+[0.2.7]: https://github.com/kfcafe/imp/compare/v0.2.6...v0.2.7
+[0.2.6]: https://github.com/kfcafe/imp/compare/v0.2.5...v0.2.6
+[0.2.5]: https://github.com/kfcafe/imp/compare/v0.2.4...v0.2.5
+[0.2.4]: https://github.com/kfcafe/imp/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/kfcafe/imp/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/kfcafe/imp/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/kfcafe/imp/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/kfcafe/imp/compare/v0.1.3...v0.2.0
+[0.1.3]: https://github.com/kfcafe/imp/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/kfcafe/imp/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/kfcafe/imp/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kfcafe/imp/releases/tag/v0.1.0
