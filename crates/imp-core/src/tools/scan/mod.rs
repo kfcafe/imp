@@ -334,7 +334,7 @@ fn files_from_params_or_directory(
 
 // ── extraction dispatch ─────────────────────────────────────────────
 
-fn extract_files(files: &[PathBuf], cwd: &Path) -> ScanResult {
+pub fn extract_files(files: &[PathBuf], cwd: &Path) -> ScanResult {
     let mut result = ScanResult::default();
 
     for file in files {
@@ -442,7 +442,7 @@ fn language_for_extension(ext: &str) -> Option<tree_sitter::Language> {
 
 // ── file collection ─────────────────────────────────────────────────
 
-fn collect_source_files(root: &Path) -> Result<Vec<PathBuf>> {
+pub fn collect_source_files(root: &Path) -> Result<Vec<PathBuf>> {
     if root.is_file() {
         return Ok(if is_supported(root) {
             vec![root.to_path_buf()]
@@ -474,7 +474,7 @@ fn collect_source_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn is_supported(path: &Path) -> bool {
+pub fn is_supported(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
         Some(

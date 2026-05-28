@@ -31,6 +31,7 @@ pub mod memory;
 pub mod personality;
 pub mod policy;
 pub mod reference_monitor;
+pub mod repo_intelligence;
 pub mod resources;
 pub mod retry;
 pub mod roles;
