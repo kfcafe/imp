@@ -10,8 +10,9 @@ use serde_json::json;
 use super::{Tool, ToolContext, ToolOutput};
 use crate::error::Result;
 use crate::workflow::{
-    load_workflow, load_workflow_raw, next_runnable_steps, validate_workflow, CheckStatus,
-    StepKind, StepStatus, ValidateOptions, ValidationMode, WorkflowDocument, WorkflowWorker,
+    load_workflow, load_workflow_raw, next_runnable_steps, validate_workflow, CheckKind,
+    CheckStatus, StepKind, StepStatus, ValidateOptions, ValidationMode, WorkflowDocument,
+    WorkflowWorker,
 };
 
 pub struct WorkflowTool;
@@ -143,6 +144,10 @@ struct WorkflowWorkerAssignment {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum WorkflowNextAction {
+    RanCommandChecks {
+        step: String,
+        checks: Vec<WorkflowCommandCheckRun>,
+    },
     ValidationBlocked {
         diagnostics: Vec<WorkflowDiagnosticView>,
     },
@@ -261,7 +266,7 @@ impl Tool for WorkflowTool {
             WorkflowAction::List => list_action(&workflows_root),
             WorkflowAction::Show => show_action(&workflows_root, id, mode),
             WorkflowAction::Validate => validate_action(&workflows_root, id, mode),
-            WorkflowAction::Run => run_action(&workflows_root, id, mode),
+            WorkflowAction::Run => run_action(&workflows_root, id, mode, &ctx).await,
             WorkflowAction::Update => update_action(&workflows_root, id, &params, &ctx),
         }
     }
@@ -370,13 +375,14 @@ fn validate_action(
     })
 }
 
-fn run_action(
+async fn run_action(
     workflows_root: &Path,
     id: Option<&str>,
     mode: WorkflowValidationModeParam,
+    ctx: &ToolContext,
 ) -> Result<ToolOutput> {
     let (id, root, doc) = load_selected_workflow(workflows_root, id)?;
-    let diagnostics = validate_workflow(&doc, &mode.options(root));
+    let diagnostics = validate_workflow(&doc, &mode.options(root.clone()));
     let diagnostic_views = diagnostics
         .iter()
         .map(|diagnostic| WorkflowDiagnosticView {
@@ -390,20 +396,36 @@ fn run_action(
             diagnostics: diagnostic_views.clone(),
         }
     } else if let Some(step_id) = next_runnable_steps(&doc).into_iter().next() {
-        let step = doc.steps.get(&step_id).expect("runnable step exists");
-        let worker_assignment = step.worker.as_ref().and_then(|worker_id| {
-            doc.workers.get(worker_id).map(|worker| {
-                worker_assignment(&id, &step_id, step, worker_id, worker, &step.checks, &doc)
-            })
-        });
-        WorkflowNextAction::RunStep {
-            step: step_id,
-            step_kind: format!("{:?}", step.kind).to_case(),
-            worker: step.worker.clone(),
-            worker_assignment: Box::new(worker_assignment),
-            checks: step.checks.clone(),
-            workflow: step.workflow.clone(),
-            depends_on: step.depends_on.clone(),
+        match run_command_checks(workflows_root, &root, &doc, &step_id, ctx).await? {
+            Some(summary) => WorkflowNextAction::RanCommandChecks {
+                step: step_id,
+                checks: summary.checks,
+            },
+            None => {
+                let step = doc.steps.get(&step_id).expect("runnable step exists");
+                let worker_assignment = step.worker.as_ref().and_then(|worker_id| {
+                    doc.workers.get(worker_id).map(|worker| {
+                        worker_assignment(
+                            &id,
+                            &step_id,
+                            step,
+                            worker_id,
+                            worker,
+                            &step.checks,
+                            &doc,
+                        )
+                    })
+                });
+                WorkflowNextAction::RunStep {
+                    step: step_id,
+                    step_kind: format!("{:?}", step.kind).to_case(),
+                    worker: step.worker.clone(),
+                    worker_assignment: Box::new(worker_assignment),
+                    checks: step.checks.clone(),
+                    workflow: step.workflow.clone(),
+                    depends_on: step.depends_on.clone(),
+                }
+            }
         }
     } else {
         WorkflowNextAction::NoRunnableSteps {
@@ -424,8 +446,142 @@ fn run_action(
     })
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowCommandCheckRun {
+    check: String,
+    command: String,
+    status: String,
+    exit_code: Option<i32>,
+}
+
+struct CommandCheckRunSummary {
+    checks: Vec<WorkflowCommandCheckRun>,
+}
+
+async fn run_command_checks(
+    workflows_root: &Path,
+    workflow_root: &Path,
+    doc: &WorkflowDocument,
+    step_id: &str,
+    ctx: &ToolContext,
+) -> Result<Option<CommandCheckRunSummary>> {
+    let Some(step) = doc.steps.get(step_id) else {
+        return Ok(None);
+    };
+    let runnable = step
+        .checks
+        .iter()
+        .filter_map(|check_id| doc.checks.get(check_id).map(|check| (check_id, check)))
+        .filter(|(_, check)| matches!(check.kind, CheckKind::Command))
+        .filter(|(_, check)| matches!(check.status, CheckStatus::Pending))
+        .filter_map(|(check_id, check)| check.command.as_ref().map(|command| (check_id, command)))
+        .collect::<Vec<_>>();
+    if runnable.is_empty() {
+        return Ok(None);
+    }
+
+    let workflow_path = workflow_root.join("workflow.yaml");
+    let event_path = workflow_root.join("events.jsonl");
+    ctx.check_write_path(&workflow_path)
+        .map_err(|reason| crate::error::Error::Tool(format!("workflow run denied: {reason}")))?;
+    ctx.check_write_path(&event_path)
+        .map_err(|reason| crate::error::Error::Tool(format!("workflow run denied: {reason}")))?;
+
+    let raw = fs::read_to_string(&workflow_path).map_err(|error| {
+        crate::error::Error::Tool(format!(
+            "failed to read {}: {error}",
+            workflow_path.display()
+        ))
+    })?;
+    let mut yaml: serde_yaml::Value = serde_yaml::from_str(&raw).map_err(|error| {
+        crate::error::Error::Tool(format!(
+            "failed to parse {}: {error}",
+            workflow_path.display()
+        ))
+    })?;
+
+    let mut event_file = open_workflow_event_file(&event_path)?;
+    let mut executed = Vec::new();
+    let cwd = workflows_root.parent().unwrap_or(workflows_root);
+    for (check_id, command) in runnable {
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(cwd)
+            .output()
+            .await
+            .map_err(|error| {
+                crate::error::Error::Tool(format!("failed to run check `{check_id}`: {error}"))
+            })?;
+        let status = if output.status.success() {
+            "passed"
+        } else {
+            "failed"
+        };
+        set_nested_mapping_string(&mut yaml, &["checks", check_id], "status", status)?;
+        append_workflow_event(
+            &mut event_file,
+            &WorkflowUpdateEvent {
+                timestamp: Utc::now().to_rfc3339(),
+                action: "run".to_string(),
+                path: format!("checks.{check_id}.status"),
+                value: serde_json::Value::String(status.to_string()),
+                reason: format!(
+                    "command `{}` exited with {}",
+                    command,
+                    output
+                        .status
+                        .code()
+                        .map_or_else(|| "signal".to_string(), |code| code.to_string())
+                ),
+            },
+        )?;
+        executed.push(WorkflowCommandCheckRun {
+            check: check_id.clone(),
+            command: command.clone(),
+            status: status.to_string(),
+            exit_code: output.status.code(),
+        });
+    }
+
+    let updated = serde_yaml::to_string(&yaml).map_err(|error| {
+        crate::error::Error::Tool(format!("failed to render workflow yaml: {error}"))
+    })?;
+    let tmp_path = workflow_path.with_extension("yaml.tmp");
+    fs::write(&tmp_path, updated).map_err(|error| {
+        crate::error::Error::Tool(format!("failed to write {}: {error}", tmp_path.display()))
+    })?;
+    fs::rename(&tmp_path, &workflow_path).map_err(|error| {
+        crate::error::Error::Tool(format!(
+            "failed to replace {}: {error}",
+            workflow_path.display()
+        ))
+    })?;
+
+    Ok(Some(CommandCheckRunSummary { checks: executed }))
+}
+
 fn render_run_result(result: &WorkflowRunResult) -> String {
     match &result.next_action {
+        WorkflowNextAction::RanCommandChecks { step, checks } => {
+            let mut lines = vec![format!(
+                "Workflow `{}` ran {} command check(s) for step `{step}`.",
+                result.id,
+                checks.len()
+            )];
+            for check in checks {
+                lines.push(format!(
+                    "- {}: {} (exit {})",
+                    check.check,
+                    check.status,
+                    check
+                        .exit_code
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "signal".to_string())
+                ));
+            }
+            lines.join("\n")
+        }
         WorkflowNextAction::ValidationBlocked { diagnostics } => {
             let mut text = format!(
                 "Workflow `{}` is blocked by validation diagnostics:",
@@ -1069,8 +1225,8 @@ mod tests {
         assert!(text.contains("0 with diagnostics"), "{text}");
     }
 
-    #[test]
-    fn workflow_run_returns_next_runnable_step() {
+    #[tokio::test]
+    async fn workflow_run_returns_next_runnable_step() {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let workflows_root = temp.path().join(".imp/workflows");
         copy_workflow_fixture("implement-workflow-run-engine", &workflows_root);
@@ -1081,11 +1237,14 @@ mod tests {
             "todo",
         );
 
+        let ctx = test_ctx(temp.path());
         let output = run_action(
             &workflows_root,
             Some("implement-workflow-run-engine"),
             WorkflowValidationModeParam::Strict,
+            &ctx,
         )
+        .await
         .expect("run succeeds");
         let text = output.text_content().expect("text output");
         assert!(
@@ -1134,8 +1293,84 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn workflow_run_reports_no_runnable_steps_when_dependencies_block() {
+    #[tokio::test]
+    async fn workflow_run_executes_pending_command_checks() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let workflows_root = temp.path().join(".imp/workflows");
+        let workflow_root = workflows_root.join("command-check-workflow");
+        std::fs::create_dir_all(&workflow_root).expect("create workflow root");
+        std::fs::write(
+            workflow_root.join("workflow.yaml"),
+            r#"schema: imp.workflow/v1
+id: command-check-workflow
+title: Command check workflow
+status: active
+kind: implementation
+settings:
+  worktree: none
+  strictness: medium
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: Run command checks.
+  acceptance:
+    command_check_passes:
+      text: Command check passes.
+      status: todo
+      checks:
+        - command_check
+steps:
+  verify:
+    kind: verify
+    status: ready
+    checks:
+      - command_check
+checks:
+  command_check:
+    kind: command
+    status: pending
+    command: true
+results:
+  path: .imp/workflows/command-check-workflow/results.md
+workers: {}
+closeout:
+  done:
+    requires:
+      - command_check
+"#,
+        )
+        .expect("write workflow");
+
+        let ctx = test_ctx(temp.path());
+        let output = run_action(
+            &workflows_root,
+            Some("command-check-workflow"),
+            WorkflowValidationModeParam::Strict,
+            &ctx,
+        )
+        .await
+        .expect("run succeeds");
+        let text = output.text_content().expect("text output");
+        assert!(text.contains("ran 1 command check"), "{text}");
+        assert!(text.contains("command_check: passed"), "{text}");
+
+        let doc = load_workflow(&workflow_root.join("workflow.yaml"))
+            .expect("updated workflow should load");
+        assert!(matches!(
+            doc.checks
+                .get("command_check")
+                .expect("check exists")
+                .status,
+            CheckStatus::Passed
+        ));
+        let events = std::fs::read_to_string(workflow_root.join("events.jsonl"))
+            .expect("events should be written");
+        assert!(events.contains("checks.command_check.status"), "{events}");
+    }
+
+    #[tokio::test]
+    async fn workflow_run_reports_no_runnable_steps_when_dependencies_block() {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let workflows_root = temp.path().join(".imp/workflows");
         copy_workflow_fixture("implement-workflow-run-engine", &workflows_root);
@@ -1146,11 +1381,14 @@ mod tests {
             "todo",
         );
 
+        let ctx = test_ctx(temp.path());
         let output = run_action(
             &workflows_root,
             Some("implement-workflow-run-engine"),
             WorkflowValidationModeParam::Strict,
+            &ctx,
         )
+        .await
         .expect("run succeeds");
         let text = output.text_content().expect("text output");
         assert!(
@@ -1159,8 +1397,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn workflow_run_reports_validation_diagnostics() {
+    #[tokio::test]
+    async fn workflow_run_reports_validation_diagnostics() {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let workflows_root = temp.path().join(".imp/workflows");
         copy_workflow_fixture("implement-workflow-run-engine", &workflows_root);
@@ -1175,11 +1413,14 @@ mod tests {
             );
         std::fs::write(&workflow_path, raw).expect("write broken fixture");
 
+        let ctx = test_ctx(temp.path());
         let output = run_action(
             &workflows_root,
             Some("implement-workflow-run-engine"),
             WorkflowValidationModeParam::Strict,
+            &ctx,
         )
+        .await
         .expect("run returns diagnostics instead of error");
         let text = output.text_content().expect("text output");
         assert!(text.contains("blocked by validation diagnostics"), "{text}");
@@ -1294,8 +1535,8 @@ mod tests {
             .exists());
     }
 
-    #[test]
-    fn workflow_rejects_absolute_or_parent_directory_ids() {
+    #[tokio::test]
+    async fn workflow_rejects_absolute_or_parent_directory_ids() {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let workflows_root = temp.path().join(".imp/workflows");
         copy_workflow_fixture("implement-workflow-update-events", &workflows_root);
@@ -1315,7 +1556,10 @@ mod tests {
             &workflows_root,
             Some("/tmp/implement-workflow-update-events"),
             WorkflowValidationModeParam::Strict,
-        ) {
+            &ctx,
+        )
+        .await
+        {
             Ok(_) => panic!("absolute id should fail"),
             Err(error) => error,
         };
