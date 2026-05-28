@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use crossterm::cursor::Show;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -43,7 +44,8 @@ fn restore_terminal<W: Write>(writer: &mut W) -> io::Result<()> {
         Show,
         LeaveAlternateScreen,
         DisableMouseCapture,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        PopKeyboardEnhancementFlags
     )?;
     #[cfg(not(unix))]
     crossterm::execute!(writer, Show, LeaveAlternateScreen, DisableMouseCapture)?;
@@ -75,7 +77,11 @@ impl TerminalSession {
             stdout,
             EnterAlternateScreen,
             EnableMouseCapture,
-            EnableBracketedPaste
+            EnableBracketedPaste,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+            )
         )?;
         #[cfg(not(unix))]
         crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
