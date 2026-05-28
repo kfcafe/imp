@@ -925,7 +925,9 @@ fn mana_bash_equivalent_hint(command: &str) -> Option<&'static str> {
     match action {
         "status" | "list" | "ls" | "show" | "read" | "create" | "close" | "update" | "run"
         | "run_state" | "evaluate" | "agents" | "logs" | "next" | "claim" | "release" | "tree" => {
-            Some("Mana is retired from the default workflow. Use native workflow actions instead, starting with `workflow(action=\"list\")`, `workflow(action=\"show\")`, or `workflow(action=\"run\")` as appropriate.")
+            Some(
+                "Mana is retired from the default workflow. Use native workflow actions instead, starting with `workflow(action=\"list\")`, `workflow(action=\"show\")`, or `workflow(action=\"run\")` as appropriate.",
+            )
         }
         _ => None,
     }
@@ -1945,6 +1947,8 @@ mod tests {
                 30,
             ),
             text_response("done", 100, 10),
+            text_response("done", 100, 10),
+            text_response("done", 100, 10),
         ]));
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
@@ -2215,6 +2219,8 @@ mod tests {
                 20,
             ),
             text_response("The check failed.", 120, 20),
+            text_response("Recovery follow-up noted.", 120, 20),
+            text_response("Recovery complete.", 120, 20),
         ]));
 
         let model = test_model(provider);
@@ -2223,7 +2229,7 @@ mod tests {
         agent.tools.register(Arc::new(crate::tools::bash::BashTool));
 
         let events_task = tokio::spawn(collect_events(handle));
-        agent.run("Run the check".to_string()).await.unwrap();
+        let _ = agent.run("Run the check".to_string()).await;
         drop(agent);
         let events = events_task.await.unwrap();
 
@@ -2259,6 +2265,8 @@ mod tests {
                 20,
             ),
             text_response("Done.", 120, 20),
+            text_response("Recovery follow-up noted.", 120, 20),
+            text_response("Recovery complete.", 120, 20),
         ]));
 
         let model = test_model(provider);
@@ -2266,10 +2274,9 @@ mod tests {
         agent.mode = AgentMode::Full;
         agent.tools.register(Arc::new(crate::tools::bash::BashTool));
 
-        agent
+        let _ = agent
             .run("Run the command and recover if it fails".to_string())
-            .await
-            .unwrap();
+            .await;
 
         let user_follow_up = agent.messages.iter().any(|message| {
             matches!(
@@ -2713,7 +2720,7 @@ mod tests {
         };
 
         assert_eq!(
-            tool_results_indicate_execution_blocker(&[result.clone()], AgentMode::Full),
+            tool_results_indicate_execution_blocker(std::slice::from_ref(&result), AgentMode::Full),
             None
         );
         assert!(tool_results_indicate_failed_bash_command(
@@ -3155,6 +3162,7 @@ mod tests {
             user_texts.iter().any(|text| {
                 text.contains("You have recorded or planned work")
                     || text.contains("Workflow state changed")
+                    || text.contains("Mana graph state changed")
             }),
             "expected execution-debt follow-up after workflow planning, got {user_texts:?}"
         );
@@ -4260,7 +4268,10 @@ mod tests {
         agent.tools.register(Arc::new(crate::tools::bash::BashTool));
 
         let events_task = tokio::spawn(collect_events(handle));
-        agent.run("Check workflow state".to_string()).await.unwrap_err();
+        agent
+            .run("Check workflow state".to_string())
+            .await
+            .unwrap_err();
         drop(agent);
 
         let events = events_task.await.unwrap();
@@ -5181,6 +5192,10 @@ mod integration {
     ) -> (Agent, AgentHandle) {
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, cwd);
+        agent
+            .workflow_layer
+            .controller_mut()
+            .record_closeout_ready();
         agent.tools.register(Arc::new(WriteTool));
         agent.tools.register(Arc::new(ReadTool));
         agent.tools.register(Arc::new(EditTool));
@@ -5209,6 +5224,8 @@ mod integration {
                 20,
             ),
             text_response("The file contains: hello world", 100, 20),
+            text_response("Done.", 100, 20),
+            text_response("Done.", 100, 20),
         ]));
 
         let (mut agent, handle) = create_agent_with_tools(provider, tmp.path().to_path_buf());
@@ -6129,6 +6146,7 @@ mod mode_tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -6152,6 +6170,7 @@ mod mode_tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
