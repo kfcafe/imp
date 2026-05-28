@@ -146,6 +146,7 @@ struct WorkflowWorkerAssignment {
 enum WorkflowNextAction {
     RanCommandChecks {
         step: String,
+        step_status: String,
         checks: Vec<WorkflowCommandCheckRun>,
     },
     ValidationBlocked {
@@ -399,6 +400,7 @@ async fn run_action(
         match run_command_checks(workflows_root, &root, &doc, &step_id, ctx).await? {
             Some(summary) => WorkflowNextAction::RanCommandChecks {
                 step: step_id,
+                step_status: summary.step_status,
                 checks: summary.checks,
             },
             None => {
@@ -456,6 +458,7 @@ struct WorkflowCommandCheckRun {
 
 struct CommandCheckRunSummary {
     checks: Vec<WorkflowCommandCheckRun>,
+    step_status: String,
 }
 
 async fn run_command_checks(
@@ -502,6 +505,7 @@ async fn run_command_checks(
 
     let mut event_file = open_workflow_event_file(&event_path)?;
     let mut executed = Vec::new();
+    let mut failed_check = false;
     let cwd = workflows_root.parent().unwrap_or(workflows_root);
     for (check_id, command) in runnable {
         let output = tokio::process::Command::new("sh")
@@ -516,6 +520,7 @@ async fn run_command_checks(
         let status = if output.status.success() {
             "passed"
         } else {
+            failed_check = true;
             "failed"
         };
         set_nested_mapping_string(&mut yaml, &["checks", check_id], "status", status)?;
@@ -544,6 +549,19 @@ async fn run_command_checks(
         });
     }
 
+    let step_status = if failed_check { "failed" } else { "done" };
+    set_nested_mapping_string(&mut yaml, &["steps", step_id], "status", step_status)?;
+    append_workflow_event(
+        &mut event_file,
+        &WorkflowUpdateEvent {
+            timestamp: Utc::now().to_rfc3339(),
+            action: "run".to_string(),
+            path: format!("steps.{step_id}.status"),
+            value: serde_json::Value::String(step_status.to_string()),
+            reason: format!("command checks completed with step status `{step_status}`"),
+        },
+    )?;
+
     let updated = serde_yaml::to_string(&yaml).map_err(|error| {
         crate::error::Error::Tool(format!("failed to render workflow yaml: {error}"))
     })?;
@@ -558,14 +576,21 @@ async fn run_command_checks(
         ))
     })?;
 
-    Ok(Some(CommandCheckRunSummary { checks: executed }))
+    Ok(Some(CommandCheckRunSummary {
+        checks: executed,
+        step_status: step_status.to_string(),
+    }))
 }
 
 fn render_run_result(result: &WorkflowRunResult) -> String {
     match &result.next_action {
-        WorkflowNextAction::RanCommandChecks { step, checks } => {
+        WorkflowNextAction::RanCommandChecks {
+            step,
+            step_status,
+            checks,
+        } => {
             let mut lines = vec![format!(
-                "Workflow `{}` ran {} command check(s) for step `{step}`.",
+                "Workflow `{}` ran {} command check(s) for step `{step}`; step is `{step_status}`.",
                 result.id,
                 checks.len()
             )];
@@ -1296,51 +1321,7 @@ mod tests {
     #[tokio::test]
     async fn workflow_run_executes_pending_command_checks() {
         let temp = tempfile::TempDir::new().expect("tempdir");
-        let workflows_root = temp.path().join(".imp/workflows");
-        let workflow_root = workflows_root.join("command-check-workflow");
-        std::fs::create_dir_all(&workflow_root).expect("create workflow root");
-        std::fs::write(
-            workflow_root.join("workflow.yaml"),
-            r#"schema: imp.workflow/v1
-id: command-check-workflow
-title: Command check workflow
-status: active
-kind: implementation
-settings:
-  worktree: none
-  strictness: medium
-  durable: true
-  disposable: false
-  commit_traces: false
-spec:
-  goal: Run command checks.
-  acceptance:
-    command_check_passes:
-      text: Command check passes.
-      status: todo
-      checks:
-        - command_check
-steps:
-  verify:
-    kind: verify
-    status: ready
-    checks:
-      - command_check
-checks:
-  command_check:
-    kind: command
-    status: pending
-    command: true
-results:
-  path: .imp/workflows/command-check-workflow/results.md
-workers: {}
-closeout:
-  done:
-    requires:
-      - command_check
-"#,
-        )
-        .expect("write workflow");
+        let (workflows_root, workflow_root) = write_command_check_workflow(temp.path(), true);
 
         let ctx = test_ctx(temp.path());
         let output = run_action(
@@ -1367,6 +1348,39 @@ closeout:
         let events = std::fs::read_to_string(workflow_root.join("events.jsonl"))
             .expect("events should be written");
         assert!(events.contains("checks.command_check.status"), "{events}");
+    }
+
+    #[tokio::test]
+    async fn workflow_run_marks_step_failed_when_command_check_fails() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let (workflows_root, workflow_root) = write_command_check_workflow(temp.path(), false);
+
+        let ctx = test_ctx(temp.path());
+        let output = run_action(
+            &workflows_root,
+            Some("command-check-workflow"),
+            WorkflowValidationModeParam::Strict,
+            &ctx,
+        )
+        .await
+        .expect("run succeeds");
+        let text = output.text_content().expect("text output");
+        assert!(text.contains("command_check: failed"), "{text}");
+        assert!(text.contains("step is `failed`"), "{text}");
+
+        let doc = load_workflow(&workflow_root.join("workflow.yaml"))
+            .expect("updated workflow should load");
+        assert!(matches!(
+            doc.checks
+                .get("command_check")
+                .expect("check exists")
+                .status,
+            CheckStatus::Failed
+        ));
+        assert!(matches!(
+            doc.steps.get("verify").expect("step exists").status,
+            StepStatus::Failed
+        ));
     }
 
     #[tokio::test]
@@ -1664,6 +1678,58 @@ closeout:
             run_policy: Default::default(),
             supporting_provenance: Vec::new(),
         }
+    }
+
+    fn write_command_check_workflow(root: &Path, command_succeeds: bool) -> (PathBuf, PathBuf) {
+        let workflows_root = root.join(".imp/workflows");
+        let workflow_root = workflows_root.join("command-check-workflow");
+        std::fs::create_dir_all(&workflow_root).expect("create workflow root");
+        let command = if command_succeeds { "true" } else { "false" };
+        std::fs::write(
+            workflow_root.join("workflow.yaml"),
+            format!(
+                r#"schema: imp.workflow/v1
+id: command-check-workflow
+title: Command check workflow
+status: active
+kind: implementation
+settings:
+  worktree: none
+  strictness: medium
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: Run command checks.
+  acceptance:
+    command_check_passes:
+      text: Command check passes.
+      status: todo
+      checks:
+        - command_check
+steps:
+  verify:
+    kind: verify
+    status: ready
+    checks:
+      - command_check
+checks:
+  command_check:
+    kind: command
+    status: pending
+    command: {command}
+results:
+  path: .imp/workflows/command-check-workflow/results.md
+workers: {{}}
+closeout:
+  done:
+    requires:
+      - command_check
+"#
+            ),
+        )
+        .expect("write workflow");
+        (workflows_root, workflow_root)
     }
 
     fn copy_workflow_fixture(id: &str, workflows_root: &Path) {
