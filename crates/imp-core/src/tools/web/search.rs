@@ -90,10 +90,7 @@ async fn tavily_search(
     if !status.is_success() {
         return Err(SearchError::Api(format!(
             "Tavily {status}: {}",
-            data.get("detail")
-                .or(data.get("error"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error")
+            redacted_search_error_detail(&data, &["detail", "error"])
         )));
     }
 
@@ -154,9 +151,7 @@ async fn exa_search(
     if !status.is_success() {
         return Err(SearchError::Api(format!(
             "Exa {status}: {}",
-            data.get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error")
+            redacted_search_error_detail(&data, &["error"])
         )));
     }
 
@@ -218,10 +213,7 @@ async fn linkup_search(
     if !status.is_success() {
         return Err(SearchError::Api(format!(
             "Linkup {status}: {}",
-            data.get("error")
-                .or(data.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error")
+            redacted_search_error_detail(&data, &["error", "message"])
         )));
     }
 
@@ -282,10 +274,7 @@ async fn perplexity_search(
     if !status.is_success() {
         return Err(SearchError::Api(format!(
             "Perplexity {status}: {}",
-            data.get("error")
-                .or(data.get("detail"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error")
+            redacted_search_error_detail(&data, &["error", "detail"])
         )));
     }
 
@@ -315,6 +304,18 @@ async fn perplexity_search(
 }
 
 // ── helpers ─────────────────────────────────────────────────────────
+
+fn redacted_search_error_detail(data: &Value, keys: &[&str]) -> String {
+    for key in keys {
+        if let Some(value) = data.get(*key) {
+            return match value.as_str() {
+                Some(message) => imp_llm::auth::redact_provider_error_body(message),
+                None => imp_llm::auth::redact_provider_error_body(&value.to_string()),
+            };
+        }
+    }
+    "unknown error".to_string()
+}
 
 fn truncate(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
@@ -356,6 +357,23 @@ impl std::error::Error for SearchError {}
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn redacted_search_error_detail_removes_token_like_fields() {
+        let data = json!({
+            "error": {
+                "message": "bad key",
+                "api_key": "search-secret",
+                "nested": {"token": "nested-token"}
+            }
+        });
+
+        let message = redacted_search_error_detail(&data, &["error"]);
+        assert!(!message.contains("search-secret"));
+        assert!(!message.contains("nested-token"));
+        assert!(message.contains("bad key"));
+        assert!(message.contains("[REDACTED]"));
+    }
 
     #[test]
     fn resolve_api_key_uses_explicit_env_value() {
