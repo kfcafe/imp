@@ -85,14 +85,14 @@ pub fn resolve_normal(key: KeyEvent) -> Option<Action> {
 
         // Sidebar / tool navigation
         KeyCode::Tab => Some(Action::SidebarToggle),
+        KeyCode::Char(']') if ctrl => Some(Action::ToolFocusNext),
+        KeyCode::Char('[') if ctrl => Some(Action::ToolFocusPrev),
 
         // Cursor movement
         KeyCode::Left if ctrl => Some(Action::WordLeft),
         KeyCode::Right if ctrl => Some(Action::WordRight),
         KeyCode::Left => Some(Action::CursorLeft),
         KeyCode::Right => Some(Action::CursorRight),
-        KeyCode::Up if ctrl => Some(Action::ToolFocusPrev),
-        KeyCode::Down if ctrl => Some(Action::ToolFocusNext),
         KeyCode::Up => Some(Action::CursorUp),
         KeyCode::Down => Some(Action::CursorDown),
         KeyCode::Home => Some(Action::CursorHome),
@@ -171,6 +171,30 @@ mod tests {
         assert_eq!(
             resolve_normal(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty())),
             Some(Action::SidebarToggle)
+        );
+    }
+
+    #[test]
+    fn ctrl_brackets_cycle_tool_focus() {
+        assert_eq!(
+            resolve_normal(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL)),
+            Some(Action::ToolFocusNext)
+        );
+        assert_eq!(
+            resolve_normal(KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL)),
+            Some(Action::ToolFocusPrev)
+        );
+    }
+
+    #[test]
+    fn ctrl_arrows_do_not_cycle_tool_focus() {
+        assert_eq!(
+            resolve_normal(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL)),
+            Some(Action::CursorUp)
+        );
+        assert_eq!(
+            resolve_normal(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL)),
+            Some(Action::CursorDown)
         );
     }
 
