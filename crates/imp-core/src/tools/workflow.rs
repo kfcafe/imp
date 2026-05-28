@@ -1,4 +1,4 @@
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -148,6 +148,7 @@ enum WorkflowNextAction {
         step: String,
         step_status: String,
         checks: Vec<WorkflowCommandCheckRun>,
+        reconciled: Vec<String>,
     },
     ValidationBlocked {
         diagnostics: Vec<WorkflowDiagnosticView>,
@@ -402,6 +403,7 @@ async fn run_action(
                 step: step_id,
                 step_status: summary.step_status,
                 checks: summary.checks,
+                reconciled: summary.reconciled,
             },
             None => {
                 let step = doc.steps.get(&step_id).expect("runnable step exists");
@@ -459,6 +461,7 @@ struct WorkflowCommandCheckRun {
 struct CommandCheckRunSummary {
     checks: Vec<WorkflowCommandCheckRun>,
     step_status: String,
+    reconciled: Vec<String>,
 }
 
 async fn run_command_checks(
@@ -562,6 +565,8 @@ async fn run_command_checks(
         },
     )?;
 
+    let reconciled = reconcile_workflow_statuses(&mut yaml, doc, &mut event_file)?;
+
     let updated = serde_yaml::to_string(&yaml).map_err(|error| {
         crate::error::Error::Tool(format!("failed to render workflow yaml: {error}"))
     })?;
@@ -579,7 +584,86 @@ async fn run_command_checks(
     Ok(Some(CommandCheckRunSummary {
         checks: executed,
         step_status: step_status.to_string(),
+        reconciled,
     }))
+}
+
+fn reconcile_workflow_statuses(
+    yaml: &mut serde_yaml::Value,
+    doc: &WorkflowDocument,
+    event_file: &mut File,
+) -> Result<Vec<String>> {
+    let mut reconciled = Vec::new();
+    let check_passed = |check_id: &str, yaml: &serde_yaml::Value| -> bool {
+        yaml.get("checks")
+            .and_then(|checks| checks.get(check_id))
+            .and_then(|check| check.get("status"))
+            .and_then(|status| status.as_str())
+            == Some("passed")
+    };
+
+    for (acceptance_id, criterion) in &doc.spec.acceptance {
+        if !criterion.checks.is_empty()
+            && criterion
+                .checks
+                .iter()
+                .all(|check| check_passed(check, yaml))
+        {
+            let path = format!("spec.acceptance.{acceptance_id}.status");
+            set_nested_mapping_string(
+                yaml,
+                &["spec", "acceptance", acceptance_id],
+                "status",
+                "done",
+            )?;
+            append_workflow_event(
+                event_file,
+                &WorkflowUpdateEvent {
+                    timestamp: Utc::now().to_rfc3339(),
+                    action: "reconcile".to_string(),
+                    path: path.clone(),
+                    value: serde_json::Value::String("done".to_string()),
+                    reason: "all acceptance checks passed".to_string(),
+                },
+            )?;
+            reconciled.push(path);
+        }
+    }
+
+    let closeout_ready = doc
+        .closeout
+        .done
+        .requires
+        .iter()
+        .all(|check| check_passed(check, yaml));
+    let all_steps_terminal = yaml
+        .get("steps")
+        .and_then(|steps| steps.as_mapping())
+        .map(|steps| {
+            steps.values().all(|step| {
+                matches!(
+                    step.get("status").and_then(|status| status.as_str()),
+                    Some("done" | "done_with_concerns" | "failed" | "blocked" | "skipped")
+                )
+            })
+        })
+        .unwrap_or(false);
+    if closeout_ready && all_steps_terminal {
+        set_mapping_string(yaml, "status", "done")?;
+        append_workflow_event(
+            event_file,
+            &WorkflowUpdateEvent {
+                timestamp: Utc::now().to_rfc3339(),
+                action: "reconcile".to_string(),
+                path: "status".to_string(),
+                value: serde_json::Value::String("done".to_string()),
+                reason: "closeout requirements passed and all steps are terminal".to_string(),
+            },
+        )?;
+        reconciled.push("status".to_string());
+    }
+
+    Ok(reconciled)
 }
 
 fn render_run_result(result: &WorkflowRunResult) -> String {
@@ -588,6 +672,7 @@ fn render_run_result(result: &WorkflowRunResult) -> String {
             step,
             step_status,
             checks,
+            reconciled,
         } => {
             let mut lines = vec![format!(
                 "Workflow `{}` ran {} command check(s) for step `{step}`; step is `{step_status}`.",
@@ -604,6 +689,9 @@ fn render_run_result(result: &WorkflowRunResult) -> String {
                         .map(|code| code.to_string())
                         .unwrap_or_else(|| "signal".to_string())
                 ));
+            }
+            if !reconciled.is_empty() {
+                lines.push(format!("Reconciled: {}", reconciled.join(", ")));
             }
             lines.join("\n")
         }
@@ -1339,15 +1427,26 @@ mod tests {
         let doc = load_workflow(&workflow_root.join("workflow.yaml"))
             .expect("updated workflow should load");
         assert!(matches!(
-            doc.checks
-                .get("command_check")
-                .expect("check exists")
+            doc.steps.get("verify").expect("step exists").status,
+            StepStatus::Done
+        ));
+        assert!(matches!(doc.status, crate::workflow::WorkflowStatus::Done));
+        assert!(matches!(
+            doc.spec
+                .acceptance
+                .get("command_check_passes")
+                .expect("acceptance exists")
                 .status,
-            CheckStatus::Passed
+            crate::workflow::AcceptanceStatus::Done
         ));
         let events = std::fs::read_to_string(workflow_root.join("events.jsonl"))
             .expect("events should be written");
         assert!(events.contains("checks.command_check.status"), "{events}");
+        assert!(
+            events.contains("spec.acceptance.command_check_passes.status"),
+            "{events}"
+        );
+        assert!(events.contains("\"path\":\"status\""), "{events}");
     }
 
     #[tokio::test]
