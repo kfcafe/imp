@@ -498,7 +498,8 @@ fn stream_response(
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body =
+                crate::auth::redact_provider_error_body(&resp.text().await.unwrap_or_default());
             let _ = tx.unbounded_send(Err(Error::Provider(format!("HTTP {status}: {body}"))));
             return;
         }

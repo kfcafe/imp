@@ -953,7 +953,9 @@ fn stream_response(
                     if status.as_u16() == 529 {
                         consecutive_529 += 1;
                         if consecutive_529 >= MAX_CONSECUTIVE_529 {
-                            let body = r.text().await.unwrap_or_default();
+                            let body = crate::auth::redact_provider_error_body(
+                                &r.text().await.unwrap_or_default(),
+                            );
                             let _ = tx.unbounded_send(Err(Error::Provider(format!(
                                 "API overloaded after {} consecutive 529 errors: {body}",
                                 MAX_CONSECUTIVE_529
@@ -967,7 +969,9 @@ fn stream_response(
                     // 401: retry once (token may have expired)
                     if status.as_u16() == 401 {
                         if had_401 {
-                            let body = r.text().await.unwrap_or_default();
+                            let body = crate::auth::redact_provider_error_body(
+                                &r.text().await.unwrap_or_default(),
+                            );
                             let _ = tx.unbounded_send(Err(Error::Provider(format!(
                                 "HTTP 401 (authentication failed): {body}"
                             ))));
@@ -988,7 +992,9 @@ fn stream_response(
                         continue;
                     }
                     // Non-retryable or exhausted retries
-                    let body = r.text().await.unwrap_or_default();
+                    let body = crate::auth::redact_provider_error_body(
+                        &r.text().await.unwrap_or_default(),
+                    );
                     let _ =
                         tx.unbounded_send(Err(Error::Provider(format!("HTTP {status}: {body}"))));
                     return;

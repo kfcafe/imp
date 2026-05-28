@@ -330,9 +330,7 @@ async fn github_get(
     if !status.is_success() {
         return Err(GitHubError::Api(format!(
             "GitHub {status}: {}",
-            data.get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error")
+            redacted_github_error_message(&data)
         )));
     }
     Ok(data)
@@ -477,6 +475,13 @@ fn code_result_from_json(code: &Value) -> SearchResult {
     }
 }
 
+fn redacted_github_error_message(data: &Value) -> String {
+    match data.get("message").and_then(Value::as_str) {
+        Some(message) => imp_llm::auth::redact_provider_error_body(message),
+        None => imp_llm::auth::redact_provider_error_body(&data.to_string()),
+    }
+}
+
 fn resolve_github_token() -> Option<String> {
     std::env::var("GITHUB_TOKEN")
         .ok()
@@ -522,6 +527,16 @@ impl std::error::Error for GitHubError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacted_github_error_message_removes_token_like_fields() {
+        let data = json!({
+            "message": "bad credentials access_token=github-secret"
+        });
+        let message = redacted_github_error_message(&data);
+        assert!(!message.contains("github-secret"));
+        assert!(message.contains("[REDACTED]"));
+    }
 
     #[test]
     fn detects_only_github_urls() {

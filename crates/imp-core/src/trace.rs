@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const TRACE_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_MAX_STRING_CHARS: usize = 16 * 1024;
 
+const SECRET_REDACTION: &str = "[REDACTED]";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct TraceCorrelation {
@@ -120,7 +122,8 @@ impl TraceWriter {
             .create(true)
             .truncate(true)
             .write(true)
-            .open(path)?;
+            .open(path.as_ref())?;
+        set_private_permissions(path.as_ref())?;
         Ok(Self {
             writer: BufWriter::new(file),
             next_sequence: 0,
@@ -132,7 +135,11 @@ impl TraceWriter {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path.as_ref())?;
+        set_private_permissions(path.as_ref())?;
         Ok(Self {
             writer: BufWriter::new(file),
             next_sequence: 0,
@@ -143,6 +150,7 @@ impl TraceWriter {
     pub fn write_event(&mut self, mut event: TraceEvent) -> std::io::Result<u64> {
         event.sequence = self.next_sequence;
         self.next_sequence += 1;
+        redact_secret_fields(&mut event);
         truncate_event_strings(&mut event, self.options.max_string_chars);
         serde_json::to_writer(&mut self.writer, &event)?;
         self.writer.write_all(b"\n")?;
@@ -152,6 +160,66 @@ impl TraceWriter {
     pub fn flush(&mut self) -> std::io::Result<()> {
         self.writer.flush()
     }
+}
+
+fn set_private_permissions(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn redact_secret_fields(event: &mut TraceEvent) {
+    redact_value_secret_fields(&mut event.payload, "payload", &mut event.redaction);
+}
+
+fn redact_value_secret_fields(value: &mut Value, path: &str, redaction: &mut TraceRedaction) {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map.iter_mut() {
+                let child_path = format!("{path}.{key}");
+                if is_secret_key(key) {
+                    if !value.is_null() {
+                        *value = Value::String(SECRET_REDACTION.to_string());
+                        redaction.contains_redactions = true;
+                        redaction.truncated_fields.push(child_path);
+                    }
+                } else {
+                    redact_value_secret_fields(value, &child_path, redaction);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                redact_value_secret_fields(item, &format!("{path}[{index}]"), redaction);
+            }
+        }
+        Value::String(_) | Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn is_secret_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "apikey"
+            | "authorization"
+            | "bearer"
+            | "clientsecret"
+            | "password"
+            | "secret"
+            | "secretkey"
+            | "secretskey"
+            | "token"
+    ) || normalized.ends_with("token")
+        || normalized.ends_with("secret")
+        || normalized.ends_with("apikey")
 }
 
 fn truncate_event_strings(event: &mut TraceEvent, max_chars: usize) {
@@ -197,6 +265,23 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[cfg(unix)]
+    #[test]
+    fn trace_jsonl_is_private_on_disk() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("trace.jsonl");
+        let mut writer = TraceWriter::create(&path).unwrap();
+        writer
+            .write_event(TraceEvent::new("run-1", "test", json!({})))
+            .unwrap();
+        writer.flush().unwrap();
+
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
     #[test]
     fn trace_jsonl_writes_ordered_roundtrippable_events() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -225,6 +310,37 @@ mod tests {
         assert_eq!(events[1].sequence, 1);
         assert_eq!(events[0].schema_version, TRACE_SCHEMA_VERSION);
         assert_eq!(events[0].kind, "agent.start");
+    }
+
+    #[test]
+    fn trace_jsonl_redacts_secret_keyed_payload_fields() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("trace.jsonl");
+        let mut writer = TraceWriter::create(&path).unwrap();
+        writer
+            .write_event(TraceEvent::new(
+                "run-1",
+                "tool.output",
+                json!({
+                    "api_key": "sk-test-secret",
+                    "nested": {"Authorization": "Bearer token-value"},
+                    "items": [{"secret_key": "hidden"}],
+                    "safe": "visible"
+                }),
+            ))
+            .unwrap();
+        writer.flush().unwrap();
+
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert!(!contents.contains("sk-test-secret"));
+        assert!(!contents.contains("token-value"));
+        assert!(!contents.contains("hidden"));
+        let event: TraceEvent = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert!(event.redaction.contains_redactions);
+        assert_eq!(event.payload["api_key"], SECRET_REDACTION);
+        assert_eq!(event.payload["nested"]["Authorization"], SECRET_REDACTION);
+        assert_eq!(event.payload["items"][0]["secret_key"], SECRET_REDACTION);
+        assert_eq!(event.payload["safe"], "visible");
     }
 
     #[test]

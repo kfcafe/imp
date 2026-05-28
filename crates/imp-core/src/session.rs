@@ -180,6 +180,15 @@ pub struct SessionManager {
     session_summary: Option<String>,
 }
 
+fn set_private_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 impl SessionManager {
     /// Create a new session. Writes the header to disk immediately.
     pub fn new(cwd: &Path, session_dir: &Path) -> Result<Self> {
@@ -415,6 +424,7 @@ impl SessionManager {
                 .create(true)
                 .append(true)
                 .open(path)?;
+            set_private_permissions(path)?;
             let line = serde_json::to_string(&entry)?;
             writeln!(file, "{line}")?;
         }
@@ -2044,6 +2054,55 @@ mod tests {
             },
             other => panic!("unexpected active message: {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_jsonl_is_private_on_disk() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut mgr = SessionManager::new(Path::new("/tmp"), tmp.path()).unwrap();
+        mgr.append_tool_result_message(ToolResultMessage {
+            tool_call_id: "call-private".into(),
+            tool_name: "bash".into(),
+            content: vec![ContentBlock::Text {
+                text: "private prompt".into(),
+            }],
+            is_error: false,
+            details: serde_json::Value::Null,
+            timestamp: 0,
+        })
+        .unwrap();
+
+        let mode = std::fs::metadata(mgr.path().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn append_tool_result_message_persists_redacted_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut mgr = SessionManager::new(Path::new("/tmp"), tmp.path()).unwrap();
+        mgr.append_tool_result_message(ToolResultMessage {
+            tool_call_id: "call-redacted".into(),
+            tool_name: "bash".into(),
+            content: vec![ContentBlock::Text {
+                text: "[REDACTED:test-service]".into(),
+            }],
+            is_error: false,
+            details: serde_json::Value::Null,
+            timestamp: 0,
+        })
+        .unwrap();
+
+        let path = mgr.path().unwrap();
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert!(contents.contains("[REDACTED:test-service]"));
+        assert!(!contents.contains("native-secret-value"));
     }
 
     #[test]

@@ -637,6 +637,93 @@ impl AuthStore {
     }
 }
 
+pub fn redact_provider_error_body(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Ok(mut value) = serde_json::from_str::<Value>(trimmed) {
+        redact_secret_json_fields(&mut value);
+        return serde_json::to_string(&value)
+            .unwrap_or_else(|_| "[redacted unparsable error body]".into());
+    }
+    redact_secret_like_pairs(trimmed)
+}
+
+fn redact_secret_json_fields(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map.iter_mut() {
+                if is_secret_field_name(key) {
+                    if !value.is_null() {
+                        *value = Value::String("[REDACTED]".into());
+                    }
+                } else {
+                    redact_secret_json_fields(value);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_secret_json_fields(value);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn is_secret_field_name(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "access_token"
+            | "accesstoken"
+            | "api_key"
+            | "apikey"
+            | "authorization"
+            | "id_token"
+            | "idtoken"
+            | "refresh_token"
+            | "refreshtoken"
+            | "secret"
+            | "token"
+    ) || normalized.ends_with("token")
+        || normalized.ends_with("secret")
+        || normalized.ends_with("apikey")
+}
+
+fn redact_secret_like_pairs(body: &str) -> String {
+    body.split_whitespace()
+        .map(|part| {
+            let lowered = part.to_ascii_lowercase();
+            if [
+                "access_token",
+                "refresh_token",
+                "id_token",
+                "api_key",
+                "token",
+                "secret",
+            ]
+            .iter()
+            .any(|key| lowered.starts_with(key) || lowered.contains(&format!("{key}=")))
+            {
+                "[REDACTED]".to_string()
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub(crate) fn redact_oauth_error_body(body: &str) -> String {
+    redact_provider_error_body(body)
+}
+
 fn resolve_env_secret(provider: &str, field: &str) -> Option<String> {
     if field == "api_key" {
         let registry = crate::model::ProviderRegistry::with_builtins();
@@ -795,6 +882,24 @@ mod tests {
             .to_string(),
         );
         format!("{header}.{payload}.signature")
+    }
+
+    #[test]
+    fn redact_oauth_error_body_removes_secret_fields() {
+        let body = r#"{
+            "error": "invalid_grant",
+            "access_token": "access-secret",
+            "nested": {"refresh_token": "refresh-secret"},
+            "items": [{"id_token": "id-secret"}],
+            "error_description": "safe detail"
+        }"#;
+
+        let redacted = redact_oauth_error_body(body);
+        assert!(!redacted.contains("access-secret"));
+        assert!(!redacted.contains("refresh-secret"));
+        assert!(!redacted.contains("id-secret"));
+        assert!(redacted.contains("safe detail"));
+        assert!(redacted.contains("[REDACTED]"));
     }
 
     #[test]

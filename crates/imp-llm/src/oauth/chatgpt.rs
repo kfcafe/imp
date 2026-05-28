@@ -115,7 +115,8 @@ impl ChatGptOAuth {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body =
+                crate::auth::redact_oauth_error_body(&response.text().await.unwrap_or_default());
             return Err(Error::Auth(format!(
                 "Token exchange failed ({status}): {body}"
             )));
@@ -140,7 +141,8 @@ impl ChatGptOAuth {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body =
+                crate::auth::redact_oauth_error_body(&response.text().await.unwrap_or_default());
             return Err(Error::Auth(format!(
                 "Token refresh failed ({status}): {body}"
             )));
