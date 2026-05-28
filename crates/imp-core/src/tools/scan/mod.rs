@@ -586,6 +586,7 @@ fn execute_search(
         format!("Query: {query}"),
         format!("Mode: {mode}"),
         format!("Files analyzed: {}", files.len()),
+        repo_index_line(&index),
     ];
     if hits.is_empty() {
         lines.push("No matching symbols found.".to_string());
@@ -614,6 +615,7 @@ fn execute_search(
             "query": query,
             "mode": mode,
             "files_analyzed": files.len(),
+            "repo_intelligence": repo_index_details(&index),
             "results": hits.iter().map(|hit| json!({
                 "file": hit.file,
                 "symbol": hit.symbol,
@@ -679,6 +681,10 @@ fn execute_tests(
 
 fn build_symbol_index(files: &[PathBuf], cwd: &Path) -> Vec<IndexedSymbol> {
     let result = extract_files(files, cwd);
+    symbol_index_from_scan_result(&result)
+}
+
+fn symbol_index_from_scan_result(result: &ScanResult) -> Vec<IndexedSymbol> {
     let mut symbols = Vec::new();
     for t in result.types.values() {
         symbols.push(IndexedSymbol {
@@ -704,6 +710,21 @@ fn build_symbol_index(files: &[PathBuf], cwd: &Path) -> Vec<IndexedSymbol> {
         });
     }
     symbols
+}
+
+fn repo_index_line(index: &[IndexedSymbol]) -> String {
+    format!(
+        "Repo intelligence: {} symbols, {} tests",
+        index.len(),
+        index.iter().filter(|symbol| symbol.is_test).count()
+    )
+}
+
+fn repo_index_details(index: &[IndexedSymbol]) -> serde_json::Value {
+    json!({
+        "symbols": index.len(),
+        "tests": index.iter().filter(|symbol| symbol.is_test).count(),
+    })
 }
 
 fn search_index(
@@ -949,6 +970,7 @@ fn execute_related(mut files: Vec<PathBuf>, cwd: &Path, target: &str) -> ToolOut
         format!("Action: related"),
         format!("Target: {target}"),
         format!("Files analyzed: {}", files.len()),
+        repo_index_line(&index),
     ];
     if let Some(symbol) = definition {
         lines.push(format!(
@@ -989,6 +1011,7 @@ fn execute_related(mut files: Vec<PathBuf>, cwd: &Path, target: &str) -> ToolOut
             "action": "related",
             "target": target,
             "files_analyzed": files.len(),
+            "repo_intelligence": repo_index_details(&index),
             "definition": definition.map(|symbol| json!({
                 "file": symbol.file,
                 "symbol": symbol.name,
@@ -1109,6 +1132,7 @@ fn execute_impact(
         format!("Target: {target}"),
         "Accuracy: lexical/structural impact analysis, not a complete LSP call graph.".to_string(),
         format!("Files analyzed: {}", files.len()),
+        repo_index_line(&index),
         format!("References found: {}", references.len()),
     ];
     if !affected_files.is_empty() {
@@ -1145,6 +1169,7 @@ fn execute_impact(
             "target": target,
             "accuracy": "lexical_structural_not_lsp_complete",
             "files_analyzed": files.len(),
+            "repo_intelligence": repo_index_details(&index),
             "public_status": public_status,
             "affected_files": affected_files.into_iter().collect::<Vec<_>>(),
             "references": references.iter().map(|hit| json!({
@@ -2067,6 +2092,35 @@ pub fn hello() void {}",
 
         assert!(references.iter().any(|hit| hit.kind == "definition"));
         assert!(references.iter().any(|hit| hit.kind == "call"));
+    }
+
+    #[test]
+    fn scan_repo_intelligence_counts_reuse_symbol_index_shape() {
+        let index = vec![
+            IndexedSymbol {
+                file: "src/lib.rs".to_string(),
+                name: "Widget".to_string(),
+                kind: "struct".to_string(),
+                line: 1,
+                text: "Widget".to_string(),
+                is_test: false,
+            },
+            IndexedSymbol {
+                file: "src/lib.rs".to_string(),
+                name: "widget_builds".to_string(),
+                kind: "function".to_string(),
+                line: 5,
+                text: "fn widget_builds()".to_string(),
+                is_test: true,
+            },
+        ];
+
+        assert_eq!(
+            repo_index_line(&index),
+            "Repo intelligence: 2 symbols, 1 tests"
+        );
+        assert_eq!(repo_index_details(&index)["symbols"], 2);
+        assert_eq!(repo_index_details(&index)["tests"], 1);
     }
 
     #[test]

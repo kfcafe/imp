@@ -347,24 +347,27 @@ fn load_tool_records_from_dir(
         let session_path = path.display().to_string();
         let project = project_from_session(&session, &path);
         for entry in session.entries() {
-            if let SessionEntry::Message { id, message, .. } = entry {
-                if let Message::ToolResult(result) = message {
-                    let diff = summarize_tool_diff(&result.details);
-                    records.push(ToolStatsRecord {
-                        session_id: session_id.clone(),
-                        session_path: session_path.clone(),
-                        project: project.clone(),
-                        entry_id: id.clone(),
-                        timestamp: result.timestamp,
-                        tool_call_id: result.tool_call_id.clone(),
-                        tool_name: result.tool_name.clone(),
-                        is_error: result.is_error,
-                        files_created: diff.files_created,
-                        lines_added: diff.lines_added,
-                        lines_removed: diff.lines_removed,
-                        lines_read: diff.lines_read,
-                    });
-                }
+            if let SessionEntry::Message {
+                id,
+                message: Message::ToolResult(result),
+                ..
+            } = entry
+            {
+                let diff = summarize_tool_diff(&result.details);
+                records.push(ToolStatsRecord {
+                    session_id: session_id.clone(),
+                    session_path: session_path.clone(),
+                    project: project.clone(),
+                    entry_id: id.clone(),
+                    timestamp: result.timestamp,
+                    tool_call_id: result.tool_call_id.clone(),
+                    tool_name: result.tool_name.clone(),
+                    is_error: result.is_error,
+                    files_created: diff.files_created,
+                    lines_added: diff.lines_added,
+                    lines_removed: diff.lines_removed,
+                    lines_read: diff.lines_read,
+                });
             }
         }
     }

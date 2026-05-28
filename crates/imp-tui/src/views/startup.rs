@@ -139,7 +139,8 @@ fn render_sections(area: Rect, buf: &mut Buffer, theme: &Theme, sections: &[Star
     let visible_sections = &sections[..visible_count];
 
     if area.width >= 96 {
-        let constraints = vec![Constraint::Ratio(1, visible_sections.len() as u32); visible_sections.len()];
+        let constraints =
+            vec![Constraint::Ratio(1, visible_sections.len() as u32); visible_sections.len()];
         let columns = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(constraints)

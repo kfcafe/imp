@@ -7,16 +7,15 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-
 use imp_core::eval_candidate::{
     redact_eval_candidate, EvalActualBehavior, EvalCandidate, EvalExpectedBehavior,
     EvalFailureMode, EvalPrivacy, EvalRedactionStatus, EvalVerifier,
 };
 use imp_core::format_error_for_display;
 use imp_core::ui::WidgetContent;
+use imp_core::ManaUnitRef;
 #[cfg(feature = "mana-ui")]
 use imp_core::{mana_run_summary, stop_mana_run, ManaRunSummary};
-use imp_core::ManaUnitRef;
 #[cfg(not(feature = "mana-ui"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ManaRunSummary {
@@ -62,9 +61,7 @@ use imp_core::compaction::{
     COMPACTION_SUMMARY_PREFIX, DEFAULT_KEEP_RECENT_GROUPS,
 };
 use imp_core::config::Config;
-use imp_core::runtime::{
-    RuntimeStateAccumulator, RuntimeStateSnapshot,
-};
+use imp_core::runtime::{RuntimeStateAccumulator, RuntimeStateSnapshot};
 use imp_core::session::{SessionEntry, SessionInfo, SessionManager};
 use imp_core::tools::ToolRegistry;
 use imp_core::trust::{Provenance, RiskLabel, TrustLabel};
@@ -572,12 +569,13 @@ fn mana_run_detail_render_data(run: &ManaRunSummary, theme: &Theme) -> SidebarDe
     SidebarDetailRenderData { lines, plain_lines }
 }
 
-
 fn workflow_sort_key(workflow: &WorkflowProfile) -> std::time::SystemTime {
     let root = PathBuf::from(".imp").join("workflows").join(&workflow.name);
     std::fs::metadata(root.join("events.jsonl"))
         .and_then(|metadata| metadata.modified())
-        .or_else(|_| std::fs::metadata(root.join("workflow.yaml")).and_then(|metadata| metadata.modified()))
+        .or_else(|_| {
+            std::fs::metadata(root.join("workflow.yaml")).and_then(|metadata| metadata.modified())
+        })
         .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
 }
 
@@ -601,7 +599,9 @@ fn repo_stats_scan_root(cwd: &Path) -> RepoStatsScanRoot {
     }
 
     match find_git_root(cwd) {
-        Some(root) if is_home_directory(&root) => RepoStatsScanRoot::Skip(RepoStatsState::HomeDirectory),
+        Some(root) if is_home_directory(&root) => {
+            RepoStatsScanRoot::Skip(RepoStatsState::HomeDirectory)
+        }
         Some(root) => RepoStatsScanRoot::Scan(root),
         None => RepoStatsScanRoot::Skip(RepoStatsState::NoRepo),
     }
@@ -640,12 +640,28 @@ fn strip_status_suffix(summary: &str) -> String {
 fn repo_stats_label(state: Option<&RepoStatsState>) -> String {
     match state {
         Some(RepoStatsState::Scanning) | None => "scanning…".to_string(),
-        Some(RepoStatsState::Ready(stats)) => format!(
-            "{} · {} loc · {} files",
-            stats.primary_language,
-            format_compact_count(stats.code_lines),
-            format_compact_count(stats.files)
-        ),
+        Some(RepoStatsState::Ready(stats)) => {
+            let index_counts = match (stats.symbols, stats.tests) {
+                (Some(symbols), Some(tests)) if tests > 0 => {
+                    format!(
+                        " · {} symbols · {} tests",
+                        format_compact_count(symbols as u64),
+                        format_compact_count(tests as u64)
+                    )
+                }
+                (Some(symbols), _) => {
+                    format!(" · {} symbols", format_compact_count(symbols as u64))
+                }
+                _ => String::new(),
+            };
+            format!(
+                "{} · {} loc · {} files{}",
+                stats.primary_language,
+                format_compact_count(stats.code_lines),
+                format_compact_count(stats.files),
+                index_counts
+            )
+        }
         Some(RepoStatsState::HomeDirectory) => "home directory".to_string(),
         Some(RepoStatsState::NoRepo) => "none".to_string(),
         Some(RepoStatsState::Empty) => "no source files".to_string(),
@@ -690,7 +706,11 @@ fn rule_file_lines(files: &[PathBuf]) -> Vec<String> {
     }
     let mut lines = Vec::new();
     for (index, path) in files.iter().take(3).enumerate() {
-        let prefix = if index == 0 { "• rules: " } else { "         " };
+        let prefix = if index == 0 {
+            "• rules: "
+        } else {
+            "         "
+        };
         lines.push(format!("{prefix}{}", display_rule_path(path)));
     }
     if files.len() > 3 {
@@ -2082,14 +2102,20 @@ impl App {
             tokio::spawn(async move {
                 match repo_stats_scan_root(&repo_stats_cwd) {
                     RepoStatsScanRoot::Scan(root) => {
-                        let result = tokio::task::spawn_blocking(move || crate::repo_stats::scan_repo(&root))
-                            .await
-                            .map_err(|error| format!("repo stats task failed: {error}"))
-                            .and_then(|result| result.map_err(|error| error.to_string()));
-                        let _ = repo_stats_tx.send(RuntimeSignal::RepoStatsLoaded(result)).await;
+                        let result = tokio::task::spawn_blocking(move || {
+                            crate::repo_stats::scan_repo(&root)
+                        })
+                        .await
+                        .map_err(|error| format!("repo stats task failed: {error}"))
+                        .and_then(|result| result.map_err(|error| error.to_string()));
+                        let _ = repo_stats_tx
+                            .send(RuntimeSignal::RepoStatsLoaded(result))
+                            .await;
                     }
                     RepoStatsScanRoot::Skip(state) => {
-                        let _ = repo_stats_tx.send(RuntimeSignal::RepoStatsSkipped(state)).await;
+                        let _ = repo_stats_tx
+                            .send(RuntimeSignal::RepoStatsSkipped(state))
+                            .await;
                     }
                 }
             });
@@ -3241,7 +3267,10 @@ impl App {
             format!("• session: {session_name}"),
             format!("• provider: {provider_id}"),
             format!("• web: {web_summary}"),
-            format!("• repo: {}", repo_stats_label(self.startup_surface_metadata.repo_stats.as_ref())),
+            format!(
+                "• repo: {}",
+                repo_stats_label(self.startup_surface_metadata.repo_stats.as_ref())
+            ),
         ];
         session_lines.extend(rule_file_lines(&self.startup_surface_metadata.rule_files));
 

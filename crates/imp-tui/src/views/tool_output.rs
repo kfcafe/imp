@@ -46,6 +46,7 @@ pub fn styled_sidebar_tool_output_lines(
         "bash" | "shell" => styled_shell_sidebar_output(tc, theme),
         "git" => styled_git_sidebar_output(tc, theme),
         "scan" => styled_scan_sidebar_output(tc, theme),
+        "workflow" => styled_workflow_sidebar_output(tc, theme),
         "mana" => tool_card_output(
             "Mana",
             tc.details.get("action").and_then(Value::as_str),
@@ -253,6 +254,65 @@ fn append_card_meta(
 ) {
     if let Some(value) = value.filter(|value| !value.is_empty()) {
         lines.push(card_meta_line(label, value, theme));
+    }
+}
+
+fn styled_workflow_sidebar_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
+    let action = tc.details.get("action").and_then(Value::as_str);
+    let mut body = Vec::new();
+
+    append_card_meta(
+        &mut body,
+        "workflow",
+        tc.details.get("id").and_then(Value::as_str),
+        theme,
+    );
+    append_card_meta(
+        &mut body,
+        "path",
+        tc.details.get("path").and_then(Value::as_str),
+        theme,
+    );
+    if let Some(value) = tc.details.get("value").and_then(workflow_value_string) {
+        body.push(card_meta_line("value", &value, theme));
+    }
+    append_card_meta(
+        &mut body,
+        "reason",
+        tc.details.get("reason").and_then(Value::as_str),
+        theme,
+    );
+
+    if !body.is_empty() {
+        body.push(Line::raw(""));
+    }
+    body.extend(styled_plain_output_with(tc, theme, workflow_line_style));
+
+    tool_card_output("Workflow", action, "⚑", body, theme)
+}
+
+fn workflow_value_string(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(value) => Some(value.clone()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Array(_) | Value::Object(_) => serde_json::to_string(value).ok(),
+    }
+}
+
+fn workflow_line_style(line: &str, theme: &Theme, is_error: bool) -> Style {
+    if is_error || line.contains("diagnostics") && !line.contains("0 with diagnostics") {
+        theme.error_style()
+    } else if line.contains(": ok")
+        || line.starts_with("Updated workflow")
+        || line.starts_with("Validated") && line.contains("0 with diagnostics")
+    {
+        theme.success_style()
+    } else if line.starts_with("Next workflow action") || line.starts_with("Checks:") {
+        theme.accent_style()
+    } else {
+        plain_line_style(line, theme, is_error)
     }
 }
 
@@ -1441,6 +1501,38 @@ mod tests {
         assert!(web_plain
             .iter()
             .any(|line| line.contains("url: https://example.com")));
+    }
+
+    #[test]
+    fn workflow_sidebar_card_shows_metadata_and_output() {
+        let mut tc = make_tc(
+            "workflow",
+            Some("Updated workflow `benchmark-workflow-e2e`: steps.context.status = done"),
+        );
+        tc.details = json!({
+            "action": "update",
+            "id": "benchmark-workflow-e2e",
+            "path": "steps.context.status",
+            "value": "done",
+            "reason": "Loaded project instructions"
+        });
+
+        let plain = plain_lines(styled_sidebar_tool_output_lines(
+            &tc,
+            &Highlighter::new(),
+            &Theme::default(),
+            false,
+        ));
+
+        assert_eq!(plain[0], "⚑Workflow · update");
+        assert!(plain
+            .iter()
+            .any(|line| line.contains("workflow: benchmark-workflow-e2e")));
+        assert!(plain
+            .iter()
+            .any(|line| line.contains("path: steps.context.status")));
+        assert!(plain.iter().any(|line| line.contains("value: done")));
+        assert!(plain.iter().any(|line| line.contains("Updated workflow")));
     }
 
     #[test]

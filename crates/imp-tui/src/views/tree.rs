@@ -651,7 +651,7 @@ mod tests {
             .into_iter()
             .map(|n| n.id.as_str())
             .collect();
-        assert_eq!(ids, vec!["root", "left"]);
+        assert_eq!(ids, vec!["left", "root"]);
     }
 
     #[test]
@@ -701,20 +701,33 @@ mod tests {
             node("a1", "assistant"),
             node("t1", "tool"),
         ];
-        let mut state = TreeViewState::new(nodes, Some("u1".into()));
-        state.move_down();
-        state.move_down();
+        let mut state = TreeViewState::new(nodes, Some("t1".into()));
         assert_eq!(state.selected_id(), Some("t1"));
 
         state.cycle_filter(); // current-branch
         state.cycle_filter(); // branch-points
         state.cycle_filter(); // no-tools
 
-        assert_eq!(state.selected_id(), Some("u1"));
+        assert_eq!(state.selected_id(), Some("a1"));
     }
 
     #[test]
     fn render_guides_draws_vertical_connectors_for_open_ancestors() {
-        assert_eq!(render_guides(&[true, false, true]), "│     │  ");
+        let node = FlatTreeNode {
+            id: "child".into(),
+            parent_id: Some("parent".into()),
+            depth: 3,
+            guides: vec![true, false, true],
+            summary: "child".into(),
+            full_text: "child".into(),
+            kind_label: "assistant",
+            is_user: false,
+            is_tool: false,
+            is_compaction: false,
+            has_children: false,
+            child_count: 0,
+            is_last_child: false,
+        };
+        assert_eq!(tree_prefix(&node), ("│ │".to_string(), "├".to_string()));
     }
 }

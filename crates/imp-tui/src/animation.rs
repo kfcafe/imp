@@ -145,7 +145,7 @@ pub fn activity_label(
         }
         AnimationState::ExecutingTools { active_tools } => {
             let glyph = if animated {
-                tool_frame(tick)
+                spinner_frame(tick)
             } else {
                 static_working_glyph()
             };

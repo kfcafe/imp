@@ -1083,10 +1083,8 @@ mod tests {
     #[test]
     fn make_args_summary_preserves_full_multiline_bash_command() {
         let command = "cat <<\'EOF\' > /tmp/example\nhello world\nEOF";
-        let summary = DisplayToolCall::make_args_summary(
-            "bash",
-            &serde_json::json!({"command": command}),
-        );
+        let summary =
+            DisplayToolCall::make_args_summary("bash", &serde_json::json!({"command": command}));
         assert_eq!(summary, command);
     }
 

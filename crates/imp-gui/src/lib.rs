@@ -44,7 +44,7 @@ impl GuiRuntimeViewModel {
         let evidence_paths = snapshot
             .evidence_refs
             .iter()
-            .map(|artifact| artifact_display_label(artifact))
+            .map(artifact_display_label)
             .collect();
         let active_tools = snapshot
             .active_tools
