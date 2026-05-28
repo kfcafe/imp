@@ -89,7 +89,7 @@ impl StartupTimer {
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
-use imp_core::config::{Config, ToolOutputDisplay};
+use imp_core::config::{AgentMode, Config, ToolOutputDisplay};
 use imp_core::format_error_for_display;
 use imp_core::tools::web::types::SearchProvider;
 use imp_core::tools::{
@@ -849,6 +849,96 @@ fn run_install_local(
     }
 
     Ok(())
+}
+
+async fn run_workflow_command(command: &WorkflowCommand) -> imp_core::Result<()> {
+    let (action, id, mode, path, value, reason) = match command {
+        WorkflowCommand::List => ("list", None, None, None, None, None),
+        WorkflowCommand::Show(args) => ("show", args.id.as_deref(), None, None, None, None),
+        WorkflowCommand::Validate(args) => (
+            "validate",
+            args.id.as_deref(),
+            Some(args.mode.as_str()),
+            None,
+            None,
+            None,
+        ),
+        WorkflowCommand::Run(args) => ("run", args.id.as_deref(), None, None, None, None),
+        WorkflowCommand::Update(args) => (
+            "update",
+            Some(args.id.as_str()),
+            None,
+            Some(args.path.as_str()),
+            Some(args.value.as_str()),
+            Some(args.reason.as_str()),
+        ),
+    };
+
+    let mut params = serde_json::Map::from_iter([("action".to_string(), json!(action))]);
+    if let Some(id) = id {
+        params.insert("id".to_string(), json!(id));
+    }
+    if let Some(mode) = mode {
+        params.insert("mode".to_string(), json!(mode));
+    }
+    if let Some(path) = path {
+        params.insert("path".to_string(), json!(path));
+    }
+    if let Some(value) = value {
+        params.insert("value".to_string(), json!(value));
+    }
+    if let Some(reason) = reason {
+        params.insert("reason".to_string(), json!(reason));
+    }
+
+    let output = run_workflow_tool(Value::Object(params), AgentMode::Full).await?;
+    print_tool_output(&output);
+    if output.is_error {
+        return Err(imp_core::error::Error::Tool(
+            "workflow command failed".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn run_workflow_tool(params: Value, mode: AgentMode) -> imp_core::Result<ToolOutput> {
+    let (tx, _rx) = mpsc::channel(16);
+    let (command_tx, _command_rx) = mpsc::channel(16);
+    let cwd = std::env::current_dir()?;
+    let tool = imp_core::tools::workflow::WorkflowTool;
+    tool.execute(
+        "cli-workflow",
+        params,
+        ToolContext {
+            cwd,
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            command_tx,
+            ui: std::sync::Arc::new(imp_core::ui::NullInterface),
+            file_cache: std::sync::Arc::new(FileCache::new()),
+            checkpoint_state: std::sync::Arc::new(CheckpointState::new()),
+            file_tracker: std::sync::Arc::new(std::sync::Mutex::new(FileTracker::new())),
+            anchor_store: std::sync::Arc::new(AnchorStore::new()),
+            lua_tool_loader: None,
+            mode,
+            read_max_lines: 500,
+            turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(
+                imp_core::mana_review::TurnManaReviewAccumulator::default(),
+            )),
+            config: std::sync::Arc::new(Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
+        },
+    )
+    .await
+}
+
+fn print_tool_output(output: &ToolOutput) {
+    for block in &output.content {
+        if let imp_llm::ContentBlock::Text { text } = block {
+            println!("{text}");
+        }
+    }
 }
 
 fn run_evidence_command(command: Option<&EvidenceCommand>) -> imp_core::Result<()> {
@@ -4295,6 +4385,60 @@ mod tests {
             }
             other => panic!("expected mana namespace subcommand, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_parses_workflow_commands() {
+        let cli = Cli::try_parse_from([
+            "imp",
+            "workflow",
+            "validate",
+            "audit-and-repair-workflows",
+            "--mode",
+            "draft",
+        ])
+        .expect("parse workflow validate");
+        match cli.command {
+            Some(Commands::Workflow {
+                command: WorkflowCommand::Validate(args),
+            }) => {
+                assert_eq!(args.id.as_deref(), Some("audit-and-repair-workflows"));
+                assert!(matches!(args.mode, WorkflowValidationModeArg::Draft));
+            }
+            other => panic!("expected workflow validate command, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "imp",
+            "workflow",
+            "update",
+            "audit-and-repair-workflows",
+            "status",
+            "done",
+            "--reason",
+            "verified",
+        ])
+        .expect("parse workflow update");
+        match cli.command {
+            Some(Commands::Workflow {
+                command: WorkflowCommand::Update(args),
+            }) => {
+                assert_eq!(args.id, "audit-and-repair-workflows");
+                assert_eq!(args.path, "status");
+                assert_eq!(args.value, "done");
+                assert_eq!(args.reason, "verified");
+            }
+            other => panic!("expected workflow update command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_workflow_rejects_invalid_validation_mode() {
+        let err = match Cli::try_parse_from(["imp", "workflow", "validate", "--mode", "loose"]) {
+            Ok(_) => panic!("invalid workflow validation mode should fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
     }
 
     #[test]
