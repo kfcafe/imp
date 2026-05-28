@@ -9,6 +9,8 @@ for c in $commits; do
     'django/contrib/admin/widgets.py 7a0ccf42de' \
     'django/contrib/postgres/forms/array.py ae0c0c462b' \
     'django/forms/forms.py ce64f6286e'; do
+    # Deliberately split the static two-field specs into path/blob words.
+    # shellcheck disable=SC2086
     set -- $spec
     path=$1; blob=$2
     actual=$(git rev-parse "$c:$path" 2>/dev/null | cut -c1-10 || true)

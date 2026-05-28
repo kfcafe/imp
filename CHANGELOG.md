@@ -6,7 +6,23 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## [Unreleased]
 
-Use this section for changes that have landed on nightly after the 0.2.7 release.
+Use this section for changes that have landed on nightly after the 0.2.8 release.
+
+## [0.2.8] - 2026-05-27
+
+### Added
+
+- Added the native `workflow` tool for creating and running structured agent workflows from imp.
+- Added workflow boundary documentation and technical reference pages for architecture, sessions, tools, policy, RPC, Lua extensions, and workflows.
+
+### Changed
+
+- Made TUI selection copy use `Cmd+C`, leaving `Ctrl+C` reserved for clear, abort, and quit behavior.
+
+### Fixed
+
+- Fixed compaction fail-fast behavior and reuse-bench context initialization.
+- Bumped the workspace release version to `0.2.8`.
 
 ## [0.2.7] - 2026-05-26
 

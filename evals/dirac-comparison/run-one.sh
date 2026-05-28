@@ -76,7 +76,6 @@ print("" if value is None else value)
 PY
 }
 
-ID="$(json_field id)"
 REPO="$(json_field repo)"
 COMMIT="$(json_field commit)"
 PROMPT="$(json_field prompt)"
