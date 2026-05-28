@@ -71,7 +71,7 @@ run
 update
 ```
 
-`validate` parses and checks workflow structure. `run` returns the next actionable step. `update` mutates an allowed path and appends an event.
+`validate` parses and checks workflow structure. `run` selects the next runnable step. If that step has pending command checks, `run` executes those checks in the project root, updates each check to `passed` or `failed`, updates the step to `done` or `failed`, appends events, and returns a run summary. If the runnable step has no executable checks yet, `run` returns the next actionable step for the agent to perform. `update` mutates an allowed path and appends an event.
 
 ## Lifecycle
 
@@ -83,16 +83,16 @@ A typical agent loop is:
 
 1. inspect workflow context
 2. run `workflow validate`
-3. run `workflow run` to select the next step
-4. do the work
-5. update step/check statuses with reasons
+3. run `workflow run` to select or execute the next step
+4. do any non-executable work requested by the run output
+5. update step/check statuses with reasons when work was manual
 6. verify command/artifact evidence
 7. write `results.md`
 8. close the workflow with a terminal status
 
 ## Events
 
-Each successful update appends a JSON line to `events.jsonl`. Events include the action, path, value, reason, and timestamp. This makes workflow progress inspectable outside the chat transcript.
+Each successful update appends a JSON line to `events.jsonl`. Executable `run` actions also append events for check and step status changes. Events include the action, path, value, reason, and timestamp. This makes workflow progress inspectable outside the chat transcript.
 
 ## Prototyping
 
@@ -109,7 +109,7 @@ Prototype artifacts should be disposable unless explicitly promoted into product
 
 ## Verification and closeout
 
-Checks can represent commands, artifacts, context review, aggregate gates, or manual review. Closeout should not rely only on a narrative claim; it should point to completed checks and a results artifact.
+Checks can represent commands, artifacts, context review, aggregate gates, or manual review. Command checks with `status: pending` and a `command` attached to the next runnable step are executable through `workflow run`; imp records the check result and step outcome in `workflow.yaml` and `events.jsonl`. Closeout should not rely only on a narrative claim; it should point to completed checks and a results artifact.
 
 Terminal outcomes used by imp work include:
 
