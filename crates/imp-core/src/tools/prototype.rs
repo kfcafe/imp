@@ -630,13 +630,24 @@ async fn run_sandbox_command(
         });
     }
 
-    let mut child = Command::new("bash")
+    let mut command = Command::new("bash");
+    command
         .arg("-c")
         .arg(command)
         .current_dir(sandbox)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
+    let mut child = command
         .spawn()
         .map_err(|error| Error::Tool(format!("failed to spawn prototype command: {error}")))?;
 
@@ -661,6 +672,7 @@ async fn run_sandbox_command(
             biased;
             _ = tokio::time::sleep_until(deadline) => {
                 timed_out = true;
+                kill_process_group(&child).await;
                 let _ = child.kill().await;
                 break;
             }
@@ -689,6 +701,16 @@ async fn run_sandbox_command(
         exit_code,
         timed_out,
     })
+}
+
+async fn kill_process_group(child: &tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // Negative PID targets the process group created by setsid.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
 }
 
 async fn append_line(

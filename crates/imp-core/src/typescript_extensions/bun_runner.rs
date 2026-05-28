@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use imp_llm::ContentBlock;
@@ -138,6 +138,15 @@ fn run_manifest_command(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
     let mut child = command.spawn().map_err(|err| {
         Error::Tool(format!(
             "failed to start TypeScript extension '{}': {err}",
@@ -175,13 +184,25 @@ fn run_manifest_command(
             return Ok(output.stdout);
         }
         if started.elapsed() >= timeout {
+            kill_process_group(&child);
             let _ = child.kill();
+            let _ = child.wait();
             return Err(Error::Tool(format!(
                 "TypeScript extension '{}' timed out after {}ms",
                 manifest.id, timeout_ms
             )));
         }
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn kill_process_group(child: &Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id().try_into().ok() {
+        // Negative PID targets the process group created by setsid.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
     }
 }
 
@@ -261,14 +282,26 @@ pub(super) fn run_bun_bridge(
     let bridge = std::env::temp_dir().join("imp-ts-extension-bridge.ts");
     std::fs::write(&bridge, BUN_BRIDGE).map_err(Error::from)?;
 
-    let output = Command::new("bun")
+    let mut command = Command::new("bun");
+    command
         .arg(&bridge)
         .arg(action)
         .arg(&extension.entrypoint)
         .arg(serde_json::to_string(&payload)?)
         .current_dir(&extension.root)
-        .output()
-        .map_err(Error::from)?;
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
+    let output = run_bun_bridge_command(command)?;
 
     if !output.status.success() {
         return Err(Error::Tool(format!(
@@ -279,6 +312,26 @@ pub(super) fn run_bun_bridge(
     }
 
     serde_json::from_slice(&output.stdout).map_err(Error::from)
+}
+
+fn run_bun_bridge_command(mut command: Command) -> Result<std::process::Output> {
+    let mut child = command.spawn().map_err(Error::from)?;
+    let started = Instant::now();
+    loop {
+        if let Some(_status) = child.try_wait().map_err(Error::from)? {
+            return child.wait_with_output().map_err(Error::from);
+        }
+        if started.elapsed() >= BUN_BRIDGE_TIMEOUT {
+            kill_process_group(&child);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Tool(format!(
+                "TypeScript extension bridge timed out after {}s",
+                BUN_BRIDGE_TIMEOUT.as_secs()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 pub(super) fn ensure_bun_available() -> Result<()> {

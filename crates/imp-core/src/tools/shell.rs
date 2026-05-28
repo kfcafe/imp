@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -137,6 +138,16 @@ impl Tool for ShellTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        // Create a new process group so timeout cleanup can terminate
+        // grandchildren spawned by TOML-defined shell tools too.
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -181,6 +192,7 @@ impl Tool for ShellTool {
         let (status, timed_out) = tokio::select! {
             status = child.wait() => (status?, false),
             _ = tokio::time::sleep(timeout) => {
+                kill_process_group(&child).await;
                 let _ = child.kill().await;
                 let status = child.wait().await?;
                 (status, true)
@@ -243,6 +255,16 @@ impl Tool for ShellTool {
             }),
             is_error: timed_out || !status.success(),
         })
+    }
+}
+
+async fn kill_process_group(child: &tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // Negative PID targets the process group created by setsid.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
     }
 }
 

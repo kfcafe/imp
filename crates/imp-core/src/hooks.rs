@@ -1,10 +1,15 @@
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use glob::Pattern;
 use imp_llm::{AssistantMessage, ContentBlock, Message, ToolResultMessage};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+
+const HOOK_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Reports outcomes from background non-blocking hook execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -317,12 +322,7 @@ fn run_non_blocking_shell_hook(
         let command_for_run = command.clone();
         let command_for_report = command;
         let join_result = tokio::spawn(async move {
-            Command::new("sh")
-                .arg("-c")
-                .arg(&command_for_run)
-                .stdin(std::process::Stdio::null())
-                .output()
-                .await
+            run_hook_shell_command(&command_for_run, HOOK_COMMAND_TIMEOUT).await
         })
         .await;
 
@@ -330,6 +330,66 @@ fn run_non_blocking_shell_hook(
             report_non_blocking_hook_outcome(join_result, event_name, command_for_report, reporter);
         }
     });
+}
+
+async fn run_hook_shell_command(
+    command_text: &str,
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(command_text)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
+    let mut child = command.spawn()?;
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(status_result) => {
+            let status = status_result?;
+            let mut stdout_bytes = Vec::new();
+            let mut stderr_bytes = Vec::new();
+            if let Some(mut stream) = stdout.take() {
+                stream.read_to_end(&mut stdout_bytes).await?;
+            }
+            if let Some(mut stream) = stderr.take() {
+                stream.read_to_end(&mut stderr_bytes).await?;
+            }
+            Ok(std::process::Output {
+                status,
+                stdout: stdout_bytes,
+                stderr: stderr_bytes,
+            })
+        }
+        Err(_) => {
+            kill_process_group(&child).await;
+            let _ = child.kill().await;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("hook command timed out after {}s", timeout.as_secs()),
+            ))
+        }
+    }
+}
+
+async fn kill_process_group(child: &tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
 }
 
 fn resolve_hook_def(def: HookDef) -> Option<HookDefinition> {
@@ -507,13 +567,7 @@ async fn execute_hook(hook: &HookDefinition, event: &HookEvent<'_>) -> HookResul
     match &hook.action {
         HookAction::Shell { command } => {
             let cmd = interpolate_command(command, event);
-            match Command::new("sh")
-                .arg("-c")
-                .arg(&cmd)
-                .stdin(std::process::Stdio::null())
-                .output()
-                .await
-            {
+            match run_hook_shell_command(&cmd, HOOK_COMMAND_TIMEOUT).await {
                 Ok(output) => {
                     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                     let stderr = String::from_utf8_lossy(&output.stderr).to_string();

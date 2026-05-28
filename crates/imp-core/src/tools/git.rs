@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -12,6 +13,7 @@ use crate::error::Result;
 const DEFAULT_LOG_LIMIT: u32 = 10;
 const DISPLAY_MAX_LINES: usize = 400;
 const DISPLAY_MAX_BYTES: usize = 32 * 1024;
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct GitTool;
 
@@ -1283,10 +1285,13 @@ where
     command
         .args(args)
         .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    command.output().await
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    run_git_command(command).await
 }
 
 async fn run_git_owned(cwd: &Path, args: Vec<String>) -> std::io::Result<std::process::Output> {
@@ -1306,15 +1311,31 @@ where
     command
         .args(args)
         .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     if let Some((index, work_tree)) = temp_index {
         command
             .env("GIT_INDEX_FILE", index)
             .env("GIT_WORK_TREE", work_tree);
     }
-    command.output().await
+    run_git_command(command).await
+}
+
+async fn run_git_command(mut command: Command) -> std::io::Result<std::process::Output> {
+    match tokio::time::timeout(GIT_COMMAND_TIMEOUT, command.output()).await {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "git command timed out after {}s",
+                GIT_COMMAND_TIMEOUT.as_secs()
+            ),
+        )),
+    }
 }
 
 async fn run_git_owned_with_env(
