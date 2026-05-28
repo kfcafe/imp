@@ -63,7 +63,6 @@ use imp_core::compaction::{
     COMPACTION_SUMMARY_PREFIX, DEFAULT_KEEP_RECENT_GROUPS,
 };
 use imp_core::config::Config;
-use imp_core::personality::default_soul_markdown;
 use imp_core::runtime::{
     RuntimeChildWorkflowSummary, RuntimeStateAccumulator, RuntimeStateSnapshot,
 };
@@ -115,7 +114,6 @@ use crate::views::login_picker::{login_providers, LoginPickerState, LoginPickerV
 #[cfg(feature = "mana-ui")]
 use crate::views::mana_navigator::{ManaNavigatorState, ManaNavigatorView};
 use crate::views::model_selector::{ModelSelection, ModelSelectorState, ModelSelectorView};
-use crate::views::personality::{PersonalityScope, PersonalityState, PersonalityView};
 use crate::views::secrets_picker::{secret_providers, SecretsPickerState, SecretsPickerView};
 use crate::views::session_picker::{SessionPickerState, SessionPickerView};
 use crate::views::settings::{SettingsState, SettingsView};
@@ -170,7 +168,6 @@ pub enum UiMode {
     SecretsPicker(SecretsPickerState),
     TreeView(TreeViewState),
     Settings(SettingsState),
-    Personality(PersonalityState),
     SessionPicker(SessionPickerState),
     Welcome(WelcomeState),
 }
@@ -4418,11 +4415,6 @@ impl App {
                 let view = SettingsView::new(state, &self.theme);
                 frame.render_widget(view, overlay_area);
             }
-            UiMode::Personality(state) => {
-                let overlay_area = centered_rect(80, 80, area);
-                let view = PersonalityView::new(state, &self.theme);
-                frame.render_widget(view, overlay_area);
-            }
             UiMode::SessionPicker(state) => {
                 let overlay_area = centered_rect(75, 70, area);
                 let view = SessionPickerView::new(state, &self.theme);
@@ -4617,7 +4609,6 @@ impl App {
             | UiMode::SecretsPicker(_) => self.handle_overlay_key(key),
             #[cfg(feature = "mana-ui")]
             UiMode::ManaNavigator(_) => self.handle_mana_navigator_key(key),
-            UiMode::Personality(_) => self.handle_personality_key(key),
             UiMode::TreeView(_) => self.handle_tree_key(key),
             UiMode::Settings(_) => self.handle_settings_key(key),
             UiMode::SessionPicker(_) => self.handle_session_picker_key(key),
@@ -7427,7 +7418,6 @@ impl App {
             }
             "autonomy" => self.autonomy_command(args),
             "memory" | "mem" => self.handle_memory_command(cmd),
-            "personality" | "soul" => self.open_personality(),
             "checkpoints" => self.checkpoints_command(),
             "restore" | "restore-checkpoint" => self.restore_checkpoint_command(args),
             "eval" => self.eval_candidate_command(args),
@@ -8046,23 +8036,6 @@ impl App {
         self.mode = UiMode::Settings(state);
     }
 
-    fn open_personality(&mut self) {
-        let user_config_dir = Config::user_config_dir();
-        let global_path = user_config_dir.join("soul.md");
-        let project_soul = imp_core::resources::discover_project_soul(&self.cwd);
-        let project_path = project_soul
-            .as_ref()
-            .map(|soul| soul.path.clone())
-            .unwrap_or_else(|| imp_core::resources::suggested_project_soul_path(&self.cwd));
-        let scope = if project_soul.is_some() {
-            PersonalityScope::Project
-        } else {
-            PersonalityScope::Global
-        };
-        let state = PersonalityState::from_paths(global_path, project_path, scope);
-        self.mode = UiMode::Personality(state);
-    }
-
     fn start_session_list_load(&mut self) {
         self.mode = UiMode::SessionPicker(SessionPickerState::loading(Some(&self.cwd)));
         if self.session_list_task.is_some() {
@@ -8665,128 +8638,6 @@ impl App {
         }
     }
 
-    fn handle_personality_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    if state.pending_overwrite.is_some() {
-                        state.cancel_overwrite();
-                    } else {
-                        self.mode = UiMode::Normal;
-                    }
-                }
-            }
-            KeyCode::Tab => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    state.switch_tab();
-                }
-            }
-            KeyCode::Up => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    match state.tab {
-                        crate::views::personality::PersonalityTab::Builder => state.move_up(),
-                        crate::views::personality::PersonalityTab::Source => {
-                            state.editor.move_up();
-                        }
-                    }
-                }
-            }
-            KeyCode::Down => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    match state.tab {
-                        crate::views::personality::PersonalityTab::Builder => state.move_down(),
-                        crate::views::personality::PersonalityTab::Source => {
-                            state.editor.move_down();
-                        }
-                    }
-                }
-            }
-            KeyCode::Left => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    match state.tab {
-                        crate::views::personality::PersonalityTab::Builder => {
-                            state.cycle_backward()
-                        }
-                        crate::views::personality::PersonalityTab::Source => state.move_left(),
-                    }
-                }
-            }
-            KeyCode::Right => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    match state.tab {
-                        crate::views::personality::PersonalityTab::Builder => state.cycle_forward(),
-                        crate::views::personality::PersonalityTab::Source => state.move_right(),
-                    }
-                }
-            }
-            KeyCode::Enter => {
-                let should_save = matches!(&self.mode, UiMode::Personality(s) if s.pending_overwrite.is_none() && matches!(s.tab, crate::views::personality::PersonalityTab::Builder) && matches!(s.current_field(), crate::views::personality::PersonalityField::Save));
-                if should_save {
-                    self.save_personality();
-                } else if let UiMode::Personality(ref mut state) = self.mode {
-                    if state.pending_overwrite.is_some() {
-                        state.confirm_overwrite();
-                    } else {
-                        match state.tab {
-                            crate::views::personality::PersonalityTab::Builder => {
-                                state.cycle_forward()
-                            }
-                            crate::views::personality::PersonalityTab::Source => {
-                                state.insert_newline()
-                            }
-                        }
-                    }
-                }
-            }
-            KeyCode::Backspace => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    if state.pending_overwrite.is_none()
-                        && matches!(state.tab, crate::views::personality::PersonalityTab::Source)
-                    {
-                        state.pop_char();
-                    }
-                }
-            }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    if state.pending_overwrite.is_some() {
-                        state.confirm_overwrite();
-                    } else if matches!(state.tab, crate::views::personality::PersonalityTab::Source)
-                    {
-                        if let KeyCode::Char(c) = key.code {
-                            state.insert_char(c);
-                        }
-                    }
-                }
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    if state.pending_overwrite.is_some() {
-                        state.cancel_overwrite();
-                    } else if matches!(state.tab, crate::views::personality::PersonalityTab::Source)
-                    {
-                        if let KeyCode::Char(c) = key.code {
-                            state.insert_char(c);
-                        }
-                    }
-                }
-            }
-            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.save_personality();
-            }
-            KeyCode::Char(c) => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    if state.pending_overwrite.is_none()
-                        && matches!(state.tab, crate::views::personality::PersonalityTab::Source)
-                    {
-                        state.insert_char(c);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn handle_welcome_key(&mut self, key: KeyEvent) {
         let step = match &self.mode {
             UiMode::Welcome(s) => s.current_step(),
@@ -9075,37 +8926,6 @@ impl App {
         // Advance to Done screen
         if let UiMode::Welcome(ref mut state) = self.mode {
             state.advance();
-        }
-    }
-
-    fn save_personality(&mut self) {
-        let state = match &self.mode {
-            UiMode::Personality(state) => state.clone(),
-            _ => return,
-        };
-
-        let path = state.current_path().clone();
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                self.push_error_msg(&format!("Failed to create soul directory: {e}"));
-                return;
-            }
-        }
-
-        let content = if state.editor.is_empty() {
-            default_soul_markdown()
-        } else {
-            state.editor.content().to_string()
-        };
-
-        match std::fs::write(&path, content) {
-            Ok(()) => {
-                if let UiMode::Personality(ref mut current) = self.mode {
-                    current.save_success();
-                }
-                self.push_system_msg(&format!("Soul saved to {}", path.display()));
-            }
-            Err(e) => self.push_error_msg(&format!("Failed to save soul: {e}")),
         }
     }
 
@@ -11441,40 +11261,6 @@ mod session_lifecycle {
         assert_eq!(system.content, "transient note");
     }
     #[test]
-    fn tui_integration_slash_personality_opens_overlay() {
-        let mut app = make_app();
-        app.execute_command("personality");
-        assert!(matches!(app.mode, UiMode::Personality(_)));
-    }
-
-    #[test]
-    fn tui_personality_prefers_ancestor_project_soul_when_opening() {
-        let tmp = TempDir::new().unwrap();
-        let project = tmp.path().join("project");
-        let nested = project.join("src").join("deep");
-        let session_dir = tmp.path().join("sessions");
-        std::fs::create_dir_all(project.join(".imp")).unwrap();
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(
-            project.join(".imp").join("soul.md"),
-            "# Soul\n\nproject soul\n",
-        )
-        .unwrap();
-
-        let session = SessionManager::new(&nested, &session_dir).unwrap();
-        let mut app = make_app_with_session(session, nested.clone());
-        app.execute_command("personality");
-
-        match &app.mode {
-            UiMode::Personality(state) => {
-                assert_eq!(state.current_path(), &project.join(".imp").join("soul.md"));
-                assert!(matches!(state.scope, PersonalityScope::Project));
-            }
-            _ => panic!("expected personality mode"),
-        }
-    }
-
-    #[test]
     fn tui_integration_slash_memory_shows_stores() {
         let mut app = make_app();
 
@@ -11639,19 +11425,6 @@ mod session_lifecycle {
         let content = &app.messages.last().unwrap().content;
         assert!(content.contains("Unknown memory subcommand"));
         assert!(content.contains("frobnicate"));
-    }
-
-    #[test]
-    fn personality_state_default_sentence_is_visible() {
-        let tmp = TempDir::new().unwrap();
-        let state = crate::views::personality::PersonalityState::new(
-            tmp.path().to_path_buf(),
-            crate::views::personality::PersonalityScope::Global,
-        );
-        assert_eq!(
-            state.sentence(),
-            "You are imp, a practical, concise, coding agent."
-        );
     }
 
     #[test]

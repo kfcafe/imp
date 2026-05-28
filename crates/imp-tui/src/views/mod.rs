@@ -6,7 +6,6 @@ pub mod login_picker;
 #[cfg(feature = "mana-ui")]
 pub mod mana_navigator;
 pub mod model_selector;
-pub mod personality;
 pub mod secrets_picker;
 pub mod session_picker;
 pub mod settings;
