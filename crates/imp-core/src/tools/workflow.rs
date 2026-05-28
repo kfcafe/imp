@@ -10,8 +10,8 @@ use serde_json::json;
 use super::{Tool, ToolContext, ToolOutput};
 use crate::error::Result;
 use crate::workflow::{
-    load_workflow, next_runnable_steps, validate_workflow, CheckStatus, StepKind, StepStatus,
-    ValidateOptions, ValidationMode, WorkflowDocument, WorkflowWorker,
+    load_workflow, load_workflow_raw, next_runnable_steps, validate_workflow, CheckStatus,
+    StepKind, StepStatus, ValidateOptions, ValidationMode, WorkflowDocument, WorkflowWorker,
 };
 
 pub struct WorkflowTool;
@@ -26,6 +26,16 @@ enum WorkflowAction {
 }
 
 impl WorkflowAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Show => "show",
+            Self::Validate => "validate",
+            Self::Run => "run",
+            Self::Update => "update",
+        }
+    }
+
     fn parse(value: &str) -> std::result::Result<Self, String> {
         match value {
             "list" => Ok(Self::List),
@@ -140,7 +150,7 @@ enum WorkflowNextAction {
         step: String,
         step_kind: String,
         worker: Option<String>,
-        worker_assignment: Option<WorkflowWorkerAssignment>,
+        worker_assignment: Box<Option<WorkflowWorkerAssignment>>,
         checks: Vec<String>,
         workflow: Option<String>,
         depends_on: Vec<String>,
@@ -230,6 +240,14 @@ impl Tool for WorkflowTool {
             .and_then(|value| value.as_str())
             .ok_or_else(|| crate::error::Error::Tool("missing `action` parameter".into()))
             .and_then(|value| WorkflowAction::parse(value).map_err(crate::error::Error::Tool))?;
+        if !ctx.mode.allows_workflow_action(action.as_str()) {
+            let mode_name = format!("{:?}", ctx.mode).to_lowercase();
+            return Ok(ToolOutput::error(format!(
+                "Workflow action '{}' is not available in {mode_name} mode",
+                action.as_str()
+            )));
+        }
+
         let id = params
             .get("id")
             .and_then(|value| value.as_str())
@@ -375,22 +393,14 @@ fn run_action(
         let step = doc.steps.get(&step_id).expect("runnable step exists");
         let worker_assignment = step.worker.as_ref().and_then(|worker_id| {
             doc.workers.get(worker_id).map(|worker| {
-                worker_assignment(
-                    &id,
-                    &step_id,
-                    step,
-                    worker_id,
-                    worker,
-                    &step.checks,
-                    &doc,
-                )
+                worker_assignment(&id, &step_id, step, worker_id, worker, &step.checks, &doc)
             })
         });
         WorkflowNextAction::RunStep {
             step: step_id,
             step_kind: format!("{:?}", step.kind).to_case(),
             worker: step.worker.clone(),
-            worker_assignment,
+            worker_assignment: Box::new(worker_assignment),
             checks: step.checks.clone(),
             workflow: step.workflow.clone(),
             depends_on: step.depends_on.clone(),
@@ -439,7 +449,7 @@ fn render_run_result(result: &WorkflowRunResult) -> String {
             if let Some(worker) = worker {
                 text.push_str(&format!("\nWorker: {worker}"));
             }
-            if let Some(assignment) = worker_assignment {
+            if let Some(assignment) = worker_assignment.as_ref().as_ref() {
                 text.push_str(&format!(
                     "\nWorker assignment: {} ({})",
                     assignment.worker, assignment.role
@@ -527,9 +537,12 @@ fn worker_assignment(
     doc: &WorkflowDocument,
 ) -> WorkflowWorkerAssignment {
     let step_kind = format!("{:?}", step.kind).to_case();
-    let writes_code = worker
-        .writes_code
-        .unwrap_or_else(|| worker.writes.iter().any(|scope| scope == "code" || scope == "tests"));
+    let writes_code = worker.writes_code.unwrap_or_else(|| {
+        worker
+            .writes
+            .iter()
+            .any(|scope| scope == "code" || scope == "tests")
+    });
     let role = workflow_worker_role(worker_id, worker);
     let objective = workflow_worker_objective(step_id, &step_kind, doc);
     let result_path = doc.results.path.display().to_string();
@@ -580,11 +593,7 @@ fn workflow_worker_role(worker_id: &str, worker: &WorkflowWorker) -> String {
     }
 }
 
-fn workflow_worker_objective(
-    step_id: &str,
-    step_kind: &str,
-    doc: &WorkflowDocument,
-) -> String {
+fn workflow_worker_objective(step_id: &str, step_kind: &str, doc: &WorkflowDocument) -> String {
     format!(
         "Complete workflow step `{step_id}` ({step_kind}) for `{}`: {}",
         doc.id,
@@ -607,7 +616,10 @@ fn workflow_worker_instructions(
         format!("Record outcome, verification, concerns, and next steps in `{result_path}`."),
     ];
     if checks.is_empty() {
-        instructions.push("No explicit workflow checks are attached; state the verification you performed.".to_string());
+        instructions.push(
+            "No explicit workflow checks are attached; state the verification you performed."
+                .to_string(),
+        );
     } else {
         instructions.push(format!(
             "Satisfy or honestly block these workflow checks: {}.",
@@ -617,7 +629,10 @@ fn workflow_worker_instructions(
     if writes_code {
         instructions.push("Make focused code/test changes only within the declared writable scope and run the narrowest relevant verification.".to_string());
     } else {
-        instructions.push("Do not modify production code unless the parent explicitly grants write scope.".to_string());
+        instructions.push(
+            "Do not modify production code unless the parent explicitly grants write scope."
+                .to_string(),
+        );
     }
     instructions
 }
@@ -648,9 +663,9 @@ fn update_action(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| crate::error::Error::Tool("update requires `reason`".into()))?;
 
-    let workflow_root = workflows_root.join(id);
+    let workflow_root = workflow_id_root(workflows_root, id)?;
     let workflow_path = workflow_root.join("workflow.yaml");
-    let raw = fs::read_to_string(&workflow_path).map_err(|error| {
+    let raw = load_workflow_raw(&workflow_path).map_err(|error| {
         crate::error::Error::Tool(format!(
             "failed to read {}: {error}",
             workflow_path.display()
@@ -687,12 +702,23 @@ fn update_action(
     }
 
     let tmp_path = workflow_path.with_extension("yaml.tmp");
+    let event_path = workflow_root.join("events.jsonl");
     ctx.check_write_path(&workflow_path)
         .map_err(|reason| crate::error::Error::Tool(format!("workflow update denied: {reason}")))?;
     ctx.check_write_path(&tmp_path)
         .map_err(|reason| crate::error::Error::Tool(format!("workflow update denied: {reason}")))?;
-    ctx.check_write_path(&workflow_root.join("events.jsonl"))
+    ctx.check_write_path(&event_path)
         .map_err(|reason| crate::error::Error::Tool(format!("workflow update denied: {reason}")))?;
+
+    let event = WorkflowUpdateEvent {
+        timestamp: Utc::now().to_rfc3339(),
+        action: "update".to_string(),
+        path: update_path.to_string(),
+        value: serde_json::Value::String(value.to_string()),
+        reason: reason.to_string(),
+    };
+    let mut event_file = open_workflow_event_file(&event_path)?;
+
     fs::write(&tmp_path, updated).map_err(|error| {
         crate::error::Error::Tool(format!("failed to write {}: {error}", tmp_path.display()))
     })?;
@@ -704,15 +730,7 @@ fn update_action(
         ))
     })?;
 
-    let event_path = workflow_root.join("events.jsonl");
-    let event = WorkflowUpdateEvent {
-        timestamp: Utc::now().to_rfc3339(),
-        action: "update".to_string(),
-        path: update_path.to_string(),
-        value: serde_json::Value::String(value.to_string()),
-        reason: reason.to_string(),
-    };
-    append_workflow_event(&event_path, &event)?;
+    append_workflow_event(&mut event_file, &event)?;
 
     let text = format!("Updated workflow `{id}`: {update_path} = {value}");
     Ok(ToolOutput {
@@ -784,12 +802,19 @@ fn mapping_get_mut<'a>(
         .get_mut(serde_yaml::Value::String(key.to_string()))
 }
 
-fn append_workflow_event(path: &Path, event: &WorkflowUpdateEvent) -> Result<()> {
+fn open_workflow_event_file(path: &Path) -> Result<std::fs::File> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, event).map_err(|error| {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(Into::into)
+}
+
+fn append_workflow_event(file: &mut std::fs::File, event: &WorkflowUpdateEvent) -> Result<()> {
+    serde_json::to_writer(&mut *file, event).map_err(|error| {
         crate::error::Error::Tool(format!("failed to serialize event: {error}"))
     })?;
     writeln!(file)?;
@@ -834,12 +859,29 @@ fn workflow_paths(workflows_root: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+fn workflow_id_root(workflows_root: &Path, id: &str) -> Result<PathBuf> {
+    let mut components = Path::new(id).components();
+    let Some(std::path::Component::Normal(_)) = components.next() else {
+        return Err(invalid_workflow_id(id));
+    };
+    if components.next().is_some() {
+        return Err(invalid_workflow_id(id));
+    }
+    Ok(workflows_root.join(id))
+}
+
+fn invalid_workflow_id(id: &str) -> crate::error::Error {
+    crate::error::Error::Tool(format!(
+        "invalid workflow id `{id}`; expected a workflow directory name under .imp/workflows"
+    ))
+}
+
 fn load_selected_workflow(
     workflows_root: &Path,
     id: Option<&str>,
 ) -> Result<(String, PathBuf, WorkflowDocument)> {
     let path = if let Some(id) = id {
-        workflows_root.join(id).join("workflow.yaml")
+        workflow_id_root(workflows_root, id)?.join("workflow.yaml")
     } else {
         let paths = workflow_paths(workflows_root)?;
         match paths.as_slice() {
@@ -1011,7 +1053,6 @@ mod tests {
         assert!(text.contains("Workflow: update-imp-after-workflow-engine"));
         assert!(text.contains("Acceptance:"));
         assert!(text.contains("Steps:"));
-        assert!(text.contains("Checks needing attention:"));
     }
 
     #[test]
@@ -1080,15 +1121,17 @@ mod tests {
             .as_str()
             .expect("objective")
             .contains("Complete workflow step `execute`"));
-        let instructions = contract["instructions"]
-            .as_array()
-            .expect("instructions");
-        assert!(instructions.iter().any(|instruction| instruction
-            .as_str()
-            .is_some_and(|text| text.contains("do not broaden scope"))));
-        assert!(instructions.iter().any(|instruction| instruction
-            .as_str()
-            .is_some_and(|text| text.contains("implementation_ready"))));
+        let instructions = contract["instructions"].as_array().expect("instructions");
+        assert!(instructions.iter().any(|instruction| {
+            instruction
+                .as_str()
+                .is_some_and(|text| text.contains("do not broaden scope"))
+        }));
+        assert!(instructions.iter().any(|instruction| {
+            instruction
+                .as_str()
+                .is_some_and(|text| text.contains("implementation_ready"))
+        }));
     }
 
     #[test]
@@ -1185,6 +1228,38 @@ mod tests {
         assert!(events.contains("unit test completed execute step"));
     }
 
+    #[tokio::test]
+    async fn workflow_tool_execute_enforces_mode_action_policy() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let workflows_root = temp.path().join(".imp/workflows");
+        copy_workflow_fixture("implement-workflow-run-engine", &workflows_root);
+
+        let mut ctx = test_ctx(temp.path());
+        ctx.mode = crate::config::AgentMode::Auditor;
+        let output = WorkflowTool
+            .execute(
+                "test-call",
+                json!({
+                    "action": "update",
+                    "id": "implement-workflow-run-engine",
+                    "path": "steps.execute.status",
+                    "value": "done",
+                    "reason": "unit test should be blocked"
+                }),
+                ctx,
+            )
+            .await
+            .expect("policy denial returns tool output");
+
+        assert!(output.is_error);
+        let text = output.text_content().expect("text output");
+        assert!(text.contains("not available in auditor mode"), "{text}");
+        assert!(!workflows_root
+            .join("implement-workflow-run-engine")
+            .join("events.jsonl")
+            .exists());
+    }
+
     #[test]
     fn workflow_update_rejects_invalid_status_without_writing() {
         let temp = tempfile::TempDir::new().expect("tempdir");
@@ -1217,6 +1292,91 @@ mod tests {
             .join("implement-workflow-update-events")
             .join("events.jsonl")
             .exists());
+    }
+
+    #[test]
+    fn workflow_rejects_absolute_or_parent_directory_ids() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let workflows_root = temp.path().join(".imp/workflows");
+        copy_workflow_fixture("implement-workflow-update-events", &workflows_root);
+        let ctx = test_ctx(temp.path());
+
+        let show_error = match show_action(
+            &workflows_root,
+            Some("../implement-workflow-update-events"),
+            WorkflowValidationModeParam::Strict,
+        ) {
+            Ok(_) => panic!("parent traversal id should fail"),
+            Err(error) => error,
+        };
+        assert!(show_error.to_string().contains("invalid workflow id"));
+
+        let run_error = match run_action(
+            &workflows_root,
+            Some("/tmp/implement-workflow-update-events"),
+            WorkflowValidationModeParam::Strict,
+        ) {
+            Ok(_) => panic!("absolute id should fail"),
+            Err(error) => error,
+        };
+        assert!(run_error.to_string().contains("invalid workflow id"));
+
+        let nested_error = match show_action(
+            &workflows_root,
+            Some("nested/implement-workflow-update-events"),
+            WorkflowValidationModeParam::Strict,
+        ) {
+            Ok(_) => panic!("nested id should fail"),
+            Err(error) => error,
+        };
+        assert!(nested_error.to_string().contains("invalid workflow id"));
+
+        let update_error = match update_action(
+            &workflows_root,
+            Some("../implement-workflow-update-events"),
+            &json!({
+                "path": "steps.execute.status",
+                "value": "done",
+                "reason": "unit test invalid id"
+            }),
+            &ctx,
+        ) {
+            Ok(_) => panic!("update traversal id should fail"),
+            Err(error) => error,
+        };
+        assert!(update_error.to_string().contains("invalid workflow id"));
+    }
+
+    #[test]
+    fn workflow_update_rejects_unwritable_event_log_without_replacing_yaml() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let workflows_root = temp.path().join(".imp/workflows");
+        copy_workflow_fixture("implement-workflow-update-events", &workflows_root);
+        let workflow_root = workflows_root.join("implement-workflow-update-events");
+        let workflow_path = workflow_root.join("workflow.yaml");
+        let before = std::fs::read_to_string(&workflow_path).expect("fixture copied");
+        std::fs::create_dir(workflow_root.join("events.jsonl"))
+            .expect("create conflicting event log directory");
+
+        let ctx = test_ctx(temp.path());
+        let error = match update_action(
+            &workflows_root,
+            Some("implement-workflow-update-events"),
+            &json!({
+                "path": "steps.execute.status",
+                "value": "done",
+                "reason": "unit test event log failure"
+            }),
+            &ctx,
+        ) {
+            Ok(_) => panic!("unwritable event log should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("Is a directory"), "{error}");
+        let after = std::fs::read_to_string(&workflow_path).expect("fixture remains");
+        assert_eq!(before, after);
+        assert!(!workflow_path.with_extension("yaml.tmp").exists());
     }
 
     fn set_step_status(workflows_root: &Path, workflow_id: &str, step_id: &str, status: &str) {

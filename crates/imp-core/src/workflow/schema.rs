@@ -289,9 +289,12 @@ impl WorkflowDiagnostic {
     }
 }
 
+const MAX_WORKFLOW_YAML_BYTES: u64 = 1_048_576;
+
 #[derive(Debug)]
 pub enum WorkflowLoadError {
     Io(std::io::Error),
+    TooLarge { size: u64, limit: u64 },
     Yaml(serde_yaml::Error),
 }
 
@@ -299,6 +302,10 @@ impl fmt::Display for WorkflowLoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WorkflowLoadError::Io(error) => write!(f, "failed to read workflow: {error}"),
+            WorkflowLoadError::TooLarge { size, limit } => write!(
+                f,
+                "failed to read workflow: workflow.yaml is {size} bytes, above the {limit} byte limit"
+            ),
             WorkflowLoadError::Yaml(error) => write!(f, "failed to parse workflow YAML: {error}"),
         }
     }
@@ -318,8 +325,20 @@ impl From<serde_yaml::Error> for WorkflowLoadError {
     }
 }
 
+pub fn load_workflow_raw(path: &Path) -> Result<String, WorkflowLoadError> {
+    let metadata = fs::metadata(path)?;
+    let size = metadata.len();
+    if size > MAX_WORKFLOW_YAML_BYTES {
+        return Err(WorkflowLoadError::TooLarge {
+            size,
+            limit: MAX_WORKFLOW_YAML_BYTES,
+        });
+    }
+    Ok(fs::read_to_string(path)?)
+}
+
 pub fn load_workflow(path: &Path) -> Result<WorkflowDocument, WorkflowLoadError> {
-    let raw = fs::read_to_string(path)?;
+    let raw = load_workflow_raw(path)?;
     Ok(serde_yaml::from_str(&raw)?)
 }
 
@@ -451,6 +470,13 @@ fn validate_step_references(
         if matches!(step.kind, StepKind::Workflow) {
             match &step.workflow {
                 Some(workflow) => {
+                    if !is_workflow_directory_name(workflow) {
+                        diagnostics.push(WorkflowDiagnostic::new(
+                            format!("steps.{step_id}.workflow"),
+                            format!("workflow `{workflow}` must be a workflow directory name"),
+                        ));
+                        continue;
+                    }
                     if options.mode == ValidationMode::Strict {
                         let child_path = options
                             .workflow_root
@@ -544,6 +570,17 @@ fn validate_parent_link(
     let Some(parent) = &doc.parent else {
         return;
     };
+
+    if !is_workflow_directory_name(&parent.workflow) {
+        diagnostics.push(WorkflowDiagnostic::new(
+            "parent.workflow",
+            format!(
+                "parent workflow `{}` must be a workflow directory name",
+                parent.workflow
+            ),
+        ));
+        return;
+    }
 
     let Some(workflows_dir) = options.workflow_root.parent() else {
         return;
@@ -709,6 +746,12 @@ fn is_builtin_closeout_predicate(value: &str) -> bool {
     matches!(value, "no_unapproved_goal_or_acceptance_changes")
 }
 
+fn is_workflow_directory_name(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -871,6 +914,59 @@ closeout:
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("does not call workflow")),
+            "{diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn workflow_schema_load_rejects_oversized_workflow_yaml() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let path = temp.path().join("workflow.yaml");
+        std::fs::write(&path, vec![b'a'; (MAX_WORKFLOW_YAML_BYTES + 1) as usize])
+            .expect("write oversized workflow");
+
+        let error = load_workflow(&path).expect_err("oversized workflow should fail before parse");
+        let message = error.to_string();
+        assert!(message.contains("above the"), "{message}");
+        assert!(message.contains("byte limit"), "{message}");
+    }
+
+    #[test]
+    fn workflow_schema_rejects_path_like_workflow_references() {
+        let mut doc = load_fixture("define-workflow-schema");
+        doc.steps
+            .get_mut("prototype_rust_parser")
+            .expect("workflow step exists")
+            .workflow = Some("../prototype-rust-workflow-schema-parser".to_owned());
+
+        let diagnostics = validate_workflow(
+            &doc,
+            &ValidateOptions::strict(workflow_root("define-workflow-schema")),
+        );
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.path == "steps.prototype_rust_parser.workflow"
+                    && diagnostic
+                        .message
+                        .contains("must be a workflow directory name")
+            }),
+            "{diagnostics:#?}"
+        );
+
+        let mut doc = load_fixture("prototype-rust-workflow-schema-parser");
+        doc.parent.as_mut().expect("parent exists").workflow = "/tmp/parent".to_owned();
+
+        let diagnostics = validate_workflow(
+            &doc,
+            &ValidateOptions::strict(workflow_root("prototype-rust-workflow-schema-parser")),
+        );
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.path == "parent.workflow"
+                    && diagnostic
+                        .message
+                        .contains("must be a workflow directory name")
+            }),
             "{diagnostics:#?}"
         );
     }
