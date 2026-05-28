@@ -272,21 +272,95 @@ fn build_summary_prompt(messages: &[Message]) -> String {
     }
 
     format!(
-        "Create a structured handoff summary for a later assistant that will \
-         continue this conversation after earlier turns are compacted.\n\n\
+        "Create a compact, high-signal handoff summary for a later assistant that will \
+         continue this conversation after earlier turns are compacted. Treat this as \
+         an operational state transfer, not a narrative transcript.\n\n\
          TURNS TO SUMMARIZE:\n{serialized}\n\
-         Use this structure:\n\n\
-         ## Goal\n[What the user is trying to accomplish]\n\n\
-         ## Completed Work\n[Work already done — include file paths, commands run, results]\n\n\
-         ## Current State\n[State of the codebase/task right now]\n\n\
-         ## Key Decisions\n[Important technical decisions and why]\n\n\
-         ## Relevant Files\n[Files read, modified, or created — with brief note on each]\n\n\
-         ## Errors / Warnings\n[Errors encountered and how they were resolved]\n\n\
-         ## Next Step\n[What needs to happen next]\n\n\
-         Be specific — include file paths, command outputs, error messages, and \
-         concrete values. Do not include any preamble or prefix. Write only the \
-         summary body."
+         Required output shape:\n\n\
+         ## Goal\n[What the user is trying to accomplish; include explicit user preferences]\n\n\
+         ## Current State\n[Where the task stands now; include branch/session status if known]\n\n\
+         ## Completed Work\n[Concrete work already done; include file paths, commands run, and results]\n\n\
+         ## Key Decisions\n[Important technical/product decisions and why]\n\n\
+         ## Relevant Files And Artifacts\n[Files read/modified/created, artifact paths for truncated outputs, links, IDs]\n\n\
+         ## Open Questions / Risks\n[Only unresolved issues that matter for continuing correctly]\n\n\
+         ## Next Step\n[The single most useful next action]\n\n\
+         Rules:\n\
+         - Preserve facts needed to resume work without rereading the full transcript.\n\
+         - Prefer stable nouns: file paths, symbols, commands, errors, IDs, URLs, model names, settings.\n\
+         - Preserve explicit user instructions and corrections verbatim when short.\n\
+         - Preserve references to truncated-output artifact files; do not summarize them away.\n\
+         - Omit chatter, repeated attempts, and obsolete plans unless they explain current state.\n\
+         - Be concise but complete. Target 800-1600 words unless the history is tiny.\n\
+         - Do not include any preamble or prefix. Write only the summary body."
     )
+}
+
+fn build_fallback_summary(messages: &[Message]) -> String {
+    const MAX_ITEMS: usize = 24;
+    const MAX_ITEM_CHARS: usize = 500;
+
+    let mut items = Vec::new();
+    for msg in messages {
+        if items.len() >= MAX_ITEMS {
+            break;
+        }
+
+        let item = match msg {
+            Message::User(user) => user.content.iter().find_map(|b| match b {
+                ContentBlock::Text { text } => Some(format!(
+                    "- User requested: {}",
+                    truncate_for_display(text.trim(), MAX_ITEM_CHARS)
+                )),
+                _ => None,
+            }),
+            Message::Assistant(assistant) => {
+                let mut parts = Vec::new();
+                for block in &assistant.content {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            if !text.trim().is_empty() {
+                                parts.push(truncate_for_display(text.trim(), MAX_ITEM_CHARS));
+                            }
+                        }
+                        ContentBlock::ToolCall {
+                            name, arguments, ..
+                        } => {
+                            let args = serde_json::to_string(arguments).unwrap_or_default();
+                            parts.push(format!(
+                                "called {name}({})",
+                                truncate_for_display(&args, 160)
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                (!parts.is_empty()).then(|| format!("- Assistant: {}", parts.join("; ")))
+            }
+            Message::ToolResult(result) => {
+                Some(format!("- Tool result from {} recorded.", result.tool_name))
+            }
+        };
+
+        if let Some(item) = item {
+            items.push(item);
+        }
+    }
+
+    if messages.len() > items.len() {
+        items.push(format!(
+            "- Additional older context omitted during deterministic compaction: {} message(s).",
+            messages.len().saturating_sub(items.len())
+        ));
+    }
+
+    if items.is_empty() {
+        "## Goal\nContinue the conversation.\n\n## Current State\nEarlier context was compacted deterministically because the summarizer was unavailable or the summary prompt was too large.\n\n## Next Step\nContinue from the preserved recent messages.".to_string()
+    } else {
+        format!(
+            "## Goal\nContinue the conversation using this compacted older context plus the preserved recent messages.\n\n## Completed Work / Relevant Context\n{}\n\n## Current State\nEarlier context was compacted deterministically because the summarizer was unavailable or the summary prompt was too large.\n\n## Next Step\nContinue from the preserved recent messages.",
+            items.join("\n")
+        )
+    }
 }
 
 // ── Compaction executor ───────────────────────────────────────────────────
@@ -342,22 +416,9 @@ where
     // Build the summarization prompt from the shrunk older prefix.
     let prompt = build_summary_prompt(&prepared.summary_input);
 
-    // Call the provided summarizer. If it returns Ok(None), use a fallback.
-    let summary_body = generate_summary(&prompt)?.unwrap_or_else(|| {
-        // Deterministic fallback: concatenate user messages from the prefix.
-        prepared
-            .summary_input
-            .iter()
-            .filter_map(|m| match m {
-                Message::User(user) => user.content.iter().find_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.clone()),
-                    _ => None,
-                }),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    });
+    // Call the provided summarizer. If it returns Ok(None), use a bounded deterministic fallback.
+    let summary_body = generate_summary(&prompt)?
+        .unwrap_or_else(|| build_fallback_summary(&prepared.summary_input));
 
     let summary_text = format!("{COMPACTION_SUMMARY_PREFIX}{summary_body}");
 
@@ -741,7 +802,8 @@ mod tests {
 
         assert!(result.is_some());
         let result = result.unwrap();
-        // The fallback concatenates user messages from the summarized prefix.
+        // The bounded fallback summarizes older context when the LLM summarizer is skipped.
+        assert!(result.summary.contains("deterministically"));
         assert!(result.summary.contains("prompt 0"));
     }
 

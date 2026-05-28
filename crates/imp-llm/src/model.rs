@@ -1171,6 +1171,7 @@ mod tests {
             .expect("gpt5.5 alias should synthesize");
         assert_eq!(model.id, "gpt-5.5");
         assert_eq!(model.provider, "openai");
+        assert_eq!(model.context_window, 1_000_000);
     }
 
     #[test]
@@ -1326,7 +1327,11 @@ mod tests {
         let models = builtin_openai_codex_models();
         assert_eq!(models.len(), 7);
         assert!(models.iter().all(|model| model.provider == "openai-codex"));
-        assert!(models.iter().any(|model| model.id == "gpt-5.5"));
+        let gpt_5_5 = models
+            .iter()
+            .find(|model| model.id == "gpt-5.5")
+            .expect("OpenAI Codex model list should include GPT-5.5");
+        assert_eq!(gpt_5_5.context_window, 1_000_000);
     }
 
     #[test]
