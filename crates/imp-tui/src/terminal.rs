@@ -73,7 +73,7 @@ impl TerminalSession {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         #[cfg(unix)]
-        crossterm::execute!(
+        if let Err(err) = crossterm::execute!(
             stdout,
             EnterAlternateScreen,
             EnableMouseCapture,
@@ -82,11 +82,24 @@ impl TerminalSession {
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                     | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
             )
-        )?;
+        ) {
+            let _ = disable_raw_mode();
+            return Err(err);
+        }
         #[cfg(not(unix))]
-        crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        if let Err(err) = crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+            let _ = disable_raw_mode();
+            return Err(err);
+        }
         let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
+        let terminal = match Terminal::new(backend) {
+            Ok(terminal) => terminal,
+            Err(err) => {
+                let mut stdout = io::stdout();
+                let _ = restore_terminal(&mut stdout);
+                return Err(err);
+            }
+        };
         Ok(Self {
             terminal,
             last_title: None,
