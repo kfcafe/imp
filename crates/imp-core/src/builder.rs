@@ -385,6 +385,12 @@ impl AgentBuilder {
             };
             trace_phase("mana_prompt_context", prompt_context_started);
 
+            let repo_context_started = Instant::now();
+            let repo_context = crate::repo_intelligence::summarize_repo_context(&self.cwd)
+                .ok()
+                .flatten();
+            trace_phase("repo_intelligence_context", repo_context_started);
+
             let assemble_started = Instant::now();
             let prompt = system_prompt::assemble(&system_prompt::AssembleParams {
                 tools: &agent.tools,
@@ -400,6 +406,7 @@ impl AgentBuilder {
                 memory: None,
                 user_profile: None,
                 cwd: Some(&self.cwd),
+                repo_context: repo_context.as_ref(),
                 learning_enabled: false,
                 guardrail_profile: agent.guardrail_profile,
             })

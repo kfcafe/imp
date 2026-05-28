@@ -77,6 +77,7 @@ pub struct AssembleParams<'a> {
     pub memory: Option<&'a str>,
     pub user_profile: Option<&'a str>,
     pub cwd: Option<&'a std::path::Path>,
+    pub repo_context: Option<&'a crate::repo_intelligence::RepoContextSummary>,
     /// Whether to include learning instructions in the system prompt.
     pub learning_enabled: bool,
     /// Resolved guardrail profile (None = guardrails disabled).
@@ -119,6 +120,11 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
 
     // Layer 1.5: Environment context
     parts.push(environment_layer(p.cwd));
+
+    // Layer 1.75: Repo intelligence context
+    if let Some(repo_context) = p.repo_context {
+        parts.push(repo_context.render_prompt_layer());
+    }
 
     // Layer 2: Project context from AGENTS.md
     if !p.agents_md.is_empty() {
