@@ -232,19 +232,18 @@ impl ReferenceMonitor {
             ToolPolicyDecision::Allow {
                 reasons: vec![PolicyReason::new(
                     PolicySource::ManaLoop,
-                    "mana_policy_allowed",
-                    "Mana action allowed by active mode",
+                    "compat_mana_policy_allowed",
+                    "Legacy mana action allowed by active compatibility policy",
                 )],
             }
         } else {
             ToolPolicyDecision::Deny {
                 reason: PolicyReason::new(
                     PolicySource::ManaLoop,
-                    "mana_policy_blocked",
-                    decision
-                        .reason
-                        .clone()
-                        .unwrap_or_else(|| "Mana action blocked by active mode".into()),
+                    "compat_mana_policy_blocked",
+                    decision.reason.clone().unwrap_or_else(|| {
+                        "Legacy mana action blocked by active compatibility policy".into()
+                    }),
                 ),
             }
         };
@@ -261,7 +260,8 @@ impl ReferenceMonitor {
             "policy_blocked",
             hint.to_string(),
         );
-        reason.suggestion = Some("Use the native mana tool instead of shelling out to mana".into());
+        reason.suggestion =
+            Some("Use the native workflow tool instead of shelling out to legacy mana".into());
         self.record(
             context,
             ToolPolicyDecision::Deny { reason },
@@ -1425,7 +1425,7 @@ mod reference_monitor_types_tests {
         );
 
         assert_policy_record(
-            monitor.bash_equivalent_record(&context, "use mana tool"),
+            monitor.bash_equivalent_record(&context, "use workflow tool"),
             PolicySource::BashEquivalent,
             "policy_blocked",
         );
@@ -1461,7 +1461,7 @@ mod reference_monitor_types_tests {
     }
 
     #[test]
-    fn policy_trace_records_cover_mana_policy_outcomes() {
+    fn policy_trace_records_cover_legacy_mana_policy_outcomes() {
         let monitor = ReferenceMonitor;
         let mut context = ToolPolicyContext::new("mana", ToolActionKind::Mana);
         context.mode = AgentMode::Reviewer;
@@ -1470,7 +1470,7 @@ mod reference_monitor_types_tests {
             &serde_json::json!({ "action": "close" }),
         );
         let record = monitor.mana_policy_record(&context, &decision);
-        assert_policy_record(record, PolicySource::ManaLoop, "mana_policy_blocked");
+        assert_policy_record(record, PolicySource::ManaLoop, "compat_mana_policy_blocked");
     }
 
     fn assert_policy_record(record: PolicyTraceRecord, source: PolicySource, code: &str) {

@@ -21,7 +21,6 @@ Primary implementation areas:
 | `scan` | tree-sitter code search/extraction |
 | `web` | web/GitHub search and page reads |
 | `ask_user` | structured user prompts |
-| `prototype` | disposable experiments with evidence |
 | `workflow` | workflow list/show/validate/run/update |
 | `memory` | persistent agent memory |
 

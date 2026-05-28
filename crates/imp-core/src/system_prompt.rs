@@ -228,23 +228,25 @@ fn identity_layer(
     if defs.iter().any(|def| def.name == "git") {
         s.push_str("- Use `git` for local repo/worktree operations; use `bash` for uncovered git commands.\n");
     }
-    if defs.iter().any(|def| def.name == "work") {
-        s.push_str("- Prefer native `work` actions for durable imp-work; use `work(action=\"guide\")` when workflow guidance is needed.\n");
+    if defs.iter().any(|def| def.name == "workflow") {
+        s.push_str("- Use `workflow` for durable project plans, schema-checked status updates, validation, and orchestrated workflow steps.\n");
     }
     s.push_str("- Use `read` before explaining or editing specific files; use `edit`/`write` for file changes.\n");
 
     s.push_str("\nOperating rules:\n");
     s.push_str("- Re-check the user's intent each turn; distinguish discussion, planning, implementation, review, and orchestration.\n");
+    s.push_str("- Ask a focused clarification before continuing when the user asks to continue a plan, workflow, or previous thread but the next artifact/action is ambiguous.\n");
+    s.push_str("- Treat workflow/run statuses such as done, done_with_concerns, blocked, and needs_context as internal closeout semantics, not mandatory response headings. Use natural conversational replies unless the user explicitly asks for a status report or a workflow/task is actually being closed out.\n");
     s.push_str("- Ground repository claims in files or tool output inspected in this session; inspect named files, symbols, commands, and errors before acting on them.\n");
     s.push_str("- For analysis-only requests, stay read-only. For implementation, make small reversible changes and verify with the narrowest useful check.\n");
     s.push_str("- Treat failed commands, compiler errors, and missing evidence as blockers to resolve or report; never claim unverified success.\n");
     s.push_str("- Ask one focused question when uncertainty changes scope, risk, architecture, destructive action, or user-visible behavior; otherwise proceed on low-risk local assumptions.\n");
     s.push_str("- Keep replies concise and evidence-oriented: what changed or was found, how it was verified, and what remains.\n");
-    s.push_str("- Use native imp-work when durable work structure, verification, dependencies, retries, decisions, handoff, or recovery matter; make tasks detailed enough for another agent to execute cold.\n");
-    s.push_str("- For durable project work, use epics/tasks/notes/decisions deliberately, keep artifacts tied to an adopted goal, and avoid noisy writes for small one-pass work.\n");
+    s.push_str("- Use native workflows when durable work structure, verification, dependencies, retries, decisions, handoff, or recovery matter; make tasks detailed enough for another agent to execute cold.\n");
+    s.push_str("- For durable project work, use workflow steps/checks/acceptance/decisions deliberately, keep artifacts tied to an adopted goal, and avoid noisy writes for small one-pass work.\n");
     s.push_str("- Record progress after failures or material planning changes before relying on chat memory.\n");
-    s.push_str("- When working from an imp-work task, treat its scope, dependencies, acceptance criteria, and verify command as the execution contract; do not broaden into unrelated cleanup.\n");
-    s.push_str("- Stop only on verified completion, a real blocker, or a user-facing decision point; imp-work writes are checkpoints, not proof of completion.\n");
+    s.push_str("- When working from a workflow task, treat its scope, dependencies, acceptance criteria, and verify command as the execution contract; do not broaden into unrelated cleanup.\n");
+    s.push_str("- Stop only on verified completion, a real blocker, or a user-facing decision point; workflow updates are checkpoints, not proof of completion.\n");
 
     // Append role instructions after identity layer
     if let Some(role) = role {
@@ -588,7 +590,7 @@ fn task_layer(task: &TaskContext) -> String {
 
 fn headless_execution_layer(task: &TaskContext) -> String {
     let mut s = String::from("## Headless execution contract\n");
-    s.push_str("- You are executing an explicit imp-work task, not exploring broadly.\n");
+    s.push_str("- You are executing an explicit workflow task, not exploring broadly.\n");
     s.push_str("- Treat the task title, description, notes, acceptance criteria, and verify gate as the source of truth for scope and success.\n");
     s.push_str("- Execute the assigned outcome before expanding into adjacent cleanup, refactors, or unrelated improvements.\n");
     s.push_str("- Use explicit file references and prefilled context first before searching more broadly.\n");
@@ -596,7 +598,7 @@ fn headless_execution_layer(task: &TaskContext) -> String {
         "- If the task includes prior failed attempts, do not retry the same plan unchanged.\n",
     );
     s.push_str("- If dependency state or prerequisite decisions are unresolved, treat that as a blocker rather than improvising around it.\n");
-    s.push_str("- Keep progress updates concise and useful. Record meaningful discoveries, blockers, and revised plans with native imp-work updates.\n");
+    s.push_str("- Keep progress updates concise and useful. Record meaningful discoveries, blockers, and revised plans with native workflow updates.\n");
     if task.verify.is_some() {
         s.push_str("- If the verify command fails, either fix the issue or report the exact blocker. Do not claim completion anyway.\n");
     }
@@ -754,6 +756,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         })
@@ -775,25 +778,42 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_includes_conversation_time_imp_work_planning_doctrine() {
+    fn system_prompt_includes_clarification_and_natural_closeout_guidance() {
+        let reg = make_registry();
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
+        assert!(result.text.contains(
+            "Ask a focused clarification before continuing when the user asks to continue a plan"
+        ));
+        assert!(result
+            .text
+            .contains("internal closeout semantics, not mandatory response headings"));
+        assert!(result
+            .text
+            .contains("Use natural conversational replies unless the user explicitly asks"));
+    }
+
+    #[test]
+    fn system_prompt_includes_conversation_time_workflow_planning_doctrine() {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(result.text.contains("For durable project work"));
         assert!(result.text.contains("tied to an adopted goal"));
-        assert!(result.text.contains("epics/tasks/notes/decisions"));
+        assert!(result
+            .text
+            .contains("workflow steps/checks/acceptance/decisions"));
         assert!(result.text.contains(
             "Record progress after failures or material planning changes before relying on chat memory"
         ));
         assert!(result
             .text
-            .contains("imp-work writes are checkpoints, not proof of completion"));
+            .contains("workflow updates are checkpoints, not proof of completion"));
         assert_eq!(
             result
                 .text
-                .matches("imp-work writes are checkpoints, not proof of completion")
+                .matches("workflow updates are checkpoints, not proof of completion")
                 .count(),
             1,
-            "imp-work checkpoint guidance should appear once"
+            "workflow checkpoint guidance should appear once"
         );
         assert!(!result.text.contains("explanation-only answers"));
         assert!(!result.text.contains("Imp-work doctrine:"));
@@ -819,36 +839,36 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_work_guidance_prefers_native_tool_when_available() {
+    fn system_prompt_workflow_guidance_prefers_native_tool_when_available() {
         let mut reg = make_registry();
         reg.register(Arc::new(FakeTool {
-            name: "work",
-            description: "Manage imp-work natively",
+            name: "workflow",
+            description: "Manage imp-native workflows",
             readonly: false,
         }));
 
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(result
             .text
-            .contains("Prefer native `work` actions for durable imp-work"));
+            .contains("Use `workflow` for durable project plans"));
         assert!(result
             .text
-            .contains("Use native imp-work when durable work"));
+            .contains("Use native workflows when durable work"));
         assert!(!result.text.contains("Use mana when durable work"));
     }
 
     #[test]
-    fn system_prompt_work_guidance_omitted_without_work_tool() {
+    fn system_prompt_workflow_guidance_omitted_without_workflow_tool() {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(!result
             .text
-            .contains("Prefer native `work` actions for durable imp-work"));
+            .contains("Use `workflow` for durable project plans"));
     }
 
     #[test]
     fn system_prompt_no_legacy_mana_guidance_or_delegation_in_prompt() {
-        // Extended imp-work guidance lives in native `work guide` affordances.
+        // Extended workflow guidance lives in native workflow affordances.
         // Verify large legacy prompt blocks no longer appear regardless of tool availability.
         let mut reg = make_registry();
         reg.register(Arc::new(FakeTool {
@@ -940,6 +960,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1042,6 +1063,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1072,6 +1094,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1109,6 +1132,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1139,6 +1163,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1168,6 +1193,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1233,6 +1259,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1258,6 +1285,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1287,6 +1315,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1678,6 +1707,7 @@ mod tests {
             memory: Some(mem),
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1704,6 +1734,7 @@ mod tests {
             memory: None,
             user_profile: Some(user),
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1728,6 +1759,7 @@ mod tests {
             memory: Some(""),
             user_profile: Some(""),
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1774,6 +1806,7 @@ mod tests {
             memory: Some(mem),
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });

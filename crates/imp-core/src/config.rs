@@ -20,26 +20,34 @@ pub enum AgentMode {
     /// Default. Full access to all tools. No filtering.
     #[default]
     Full,
-    /// Unit executor. Read + write + bash. No mana create/run.
+    /// Unit executor. Read + write + bash. No workflow create/run.
     Worker,
-    /// Plans and executes via mana. Cannot touch files directly.
+    /// Plans and executes via native workflows. Cannot touch files directly.
     Orchestrator,
-    /// Decomposes work. Can read and create imp-work tasks. Cannot run them.
+    /// Decomposes work. Can read and update workflow plans. Cannot run them.
     Planner,
-    /// Read-only inspector. No mutations, no mana.
+    /// Read-only inspector. No mutations, no workflows.
     Reviewer,
-    /// Batch inspector. Reads code and mana state, produces reports.
+    /// Batch inspector. Reads code and workflow state, produces reports.
     Auditor,
 }
 
 const WORKER_TOOLS: &[&str] = &[
-    "read", "scan", "web", "write", "edit", "bash", "git", "mana", "ask_user",
+    "read", "scan", "web", "write", "edit", "bash", "git", "workflow", "ask_user",
 ];
-const ORCHESTRATOR_TOOLS: &[&str] = &["read", "scan", "web", "mana", "git", "ask_user"];
-const PLANNER_TOOLS: &[&str] = &["read", "scan", "web", "git", "mana", "ask_user"];
+const ORCHESTRATOR_TOOLS: &[&str] = &["read", "scan", "web", "workflow", "git", "ask_user"];
+const PLANNER_TOOLS: &[&str] = &["read", "scan", "web", "git", "workflow", "ask_user"];
 const REVIEWER_TOOLS: &[&str] = &["read", "scan", "web", "git", "ask_user"];
-const AUDITOR_TOOLS: &[&str] = &["read", "scan", "web", "git", "mana"];
+const AUDITOR_TOOLS: &[&str] = &["read", "scan", "web", "git", "workflow"];
 
+const WORKER_WORKFLOW_ACTIONS: &[&str] = &["show", "update", "list", "validate"];
+const ORCHESTRATOR_WORKFLOW_ACTIONS: &[&str] = &["list", "show", "validate", "run", "update"];
+const PLANNER_WORKFLOW_ACTIONS: &[&str] = &["list", "show", "validate", "update"];
+const AUDITOR_WORKFLOW_ACTIONS: &[&str] = &["list", "show", "validate"];
+
+// Legacy mana action lists are retained for compatibility with older code paths
+// that still route through the mana tool. New native orchestration should use
+// the workflow tool/action policy above.
 const WORKER_MANA_ACTIONS: &[&str] = &[
     "show",
     "update",
@@ -126,6 +134,26 @@ impl AgentMode {
         }
     }
 
+    /// Workflow tool sub-actions this mode permits. An empty slice means "allow all" (Full).
+    pub fn allowed_workflow_actions(&self) -> &'static [&'static str] {
+        match self {
+            AgentMode::Full | AgentMode::Reviewer => &[],
+            AgentMode::Worker => WORKER_WORKFLOW_ACTIONS,
+            AgentMode::Orchestrator => ORCHESTRATOR_WORKFLOW_ACTIONS,
+            AgentMode::Planner => PLANNER_WORKFLOW_ACTIONS,
+            AgentMode::Auditor => AUDITOR_WORKFLOW_ACTIONS,
+        }
+    }
+
+    /// Returns true if the mode allows the named workflow action.
+    pub fn allows_workflow_action(&self, action: &str) -> bool {
+        match self {
+            AgentMode::Full => true,
+            AgentMode::Reviewer => false,
+            _ => self.allowed_workflow_actions().contains(&action),
+        }
+    }
+
     /// Mana sub-actions this mode permits. An empty slice means "allow all" (Full).
     pub fn allowed_mana_actions(&self) -> &'static [&'static str] {
         match self {
@@ -169,43 +197,43 @@ impl AgentMode {
             AgentMode::Worker => Some(
                 "You are a worker agent. Your job is to implement the assigned unit as specified and stay within its scope. \
                 You may read files, write files, and run shell commands. Inspect the relevant files before making claims or changes, \
-                use fast scoped checks for local feedback while implementing, and record meaningful progress or failure context with native imp-work updates. \
+                use fast scoped checks for local feedback while implementing, and record meaningful progress or failure context with native workflow updates. \
                 Do not declare success if commands or checks fail; report the exact blocker and the next useful action. \
-                Treat imp-work tasks as execution contracts: use their scope, dependencies, acceptance criteria, and verify gate before broadening the work. \
+                Treat workflow tasks as execution contracts: use their scope, dependencies, acceptance criteria, and verify gate before broadening the work. \
                 You may not create, run, or close unrelated work items — final verification and closure belong to the orchestrator workflow.",
             ),
             AgentMode::Orchestrator => Some(
-                "You are an orchestrator agent. Use native imp-work as your primary execution substrate for non-trivial work. \
-                Inspect imp-work state before making claims about work status, avoid duplicating or fragmenting existing tasks, and enrich existing tasks when that is cleaner than creating new ones. \
-                Write detailed tasks, split larger efforts into child tasks with dependencies, dispatch workers through imp-work, and own the final verification, retry, and closure workflow. \
-                Use the full imp-work vocabulary when it helps: acceptance criteria, labels, dependencies, paths, requires, produces, decisions, and feature boundaries. \
+                "You are an orchestrator agent. Use native workflows as your primary execution substrate for non-trivial work. \
+                Inspect workflow state before making claims about work status, avoid duplicating or fragmenting existing tasks, and enrich existing workflows when that is cleaner than creating new ones. \
+                Write detailed workflow steps, split larger efforts into child workflows with dependencies, dispatch workers through workflow run actions, and own the final verification, retry, and closure workflow. \
+                Use the full workflow vocabulary when it helps: acceptance criteria, labels, dependencies, paths, decisions, checks, evidence, and artifacts. \
                 Encode unresolved questions as decisions instead of burying ambiguity in prose. \
-                When the conversation itself is producing durable plans, architecture, migrations, or implementation structure, externalize that structure into imp-work during the conversation rather than waiting until the end. \
-                Prefer native imp-work actions, including guide/scope/migrate and append-style updates, over shell or direct file edits for maintaining the work graph. \
-                You may not read or write files directly — create and dispatch imp-work tasks for all file work. \
-                Update tasks with concrete failure context and do not retry unchanged failed plans. \
+                When the conversation itself is producing durable plans, architecture, migrations, or implementation structure, externalize that structure into workflows during the conversation rather than waiting until the end. \
+                Prefer native workflow actions and schema-checked updates over shell or direct file edits for maintaining the work graph. \
+                You may not read or write files directly — create and dispatch workflow tasks for all file work. \
+                Update workflows with concrete failure context and do not retry unchanged failed plans. \
                 You are responsible for task structure, completeness, and verify quality.",
             ),
             AgentMode::Planner => Some(
-                "You are a planner agent. Your job is to decompose work into imp-work tasks. \
+                "You are a planner agent. Your job is to decompose work into workflow tasks. \
                 Read enough code and context to ground the plan, cite concrete files or constraints when they matter, \
                 and make dependencies, sequencing, acceptance criteria, and verify commands explicit. \
                 Write worker-ready task descriptions that include current state, concrete steps, file paths with intent, embedded context, scope boundaries, and what not to do. \
                 Record unresolved questions as decisions when autonomous execution would otherwise require guessing. \
-                Externalize durable planning structure into imp-work during the conversation, not only after the plan is complete. \
-                Prefer append-style imp-work updates to keep the graph current as ideas sharpen. \
-                You may read files and create units, but you may not run them — \
+                Externalize durable planning structure into workflows during the conversation, not only after the plan is complete. \
+                Prefer schema-checked workflow updates to keep the graph current as ideas sharpen. \
+                You may read files and update workflow plans, but you may not run them — \
                 a human or orchestrator will approve execution.",
             ),
             AgentMode::Reviewer => Some(
                 "You are a reviewer agent. Your job is to read code and report findings. \
                 Ground findings in inspected code, cite exact files or symbols when useful, and distinguish confirmed issues from possible concerns. \
-                You may not write files, run commands, or use mana.",
+                You may not write files, run commands, or use workflow tooling.",
             ),
             AgentMode::Auditor => Some(
-                "You are an auditor agent. Your job is to inspect code and mana state \
-                and produce structured reports. Ground conclusions in inspected evidence, cite the relevant files or mana objects, \
-                and clearly separate facts, risks, and open questions. You may read files and mana status, \
+                "You are an auditor agent. Your job is to inspect code and workflow state \
+                and produce structured reports. Ground conclusions in inspected evidence, cite the relevant files or workflow objects, \
+                and clearly separate facts, risks, and open questions. You may read files and workflow status, \
                 but you may not modify anything.",
             ),
         }
@@ -1665,7 +1693,8 @@ model = "sonnet"
         assert!(mode.allows_tool("web"));
         assert!(mode.allows_tool("git"));
         assert!(!mode.allows_tool("recall"));
-        assert!(mode.allows_tool("mana"));
+        assert!(mode.allows_tool("workflow"));
+        assert!(!mode.allows_tool("mana"));
         assert!(mode.allows_tool("ask_user"));
     }
 
@@ -1700,7 +1729,8 @@ model = "sonnet"
         assert!(mode.allows_mana_action("status"));
         assert!(mode.allows_mana_action("list"));
         assert!(mode.allows_mana_action("show"));
-        assert!(mode.allows_tool("git"));
+        assert!(mode.allows_tool("workflow"));
+        assert!(!mode.allows_tool("mana"));
     }
 
     #[test]
@@ -1710,6 +1740,29 @@ model = "sonnet"
         assert!(!mode.allows_mana_action("run"));
         assert!(mode.allows_mana_action("update"));
         assert!(mode.allows_tool("git"));
+    }
+
+    #[test]
+    fn agent_mode_workflow_action_policy_matches_native_workflow_tool() {
+        let worker = AgentMode::Worker;
+        assert!(worker.allows_workflow_action("show"));
+        assert!(worker.allows_workflow_action("update"));
+        assert!(!worker.allows_workflow_action("run"));
+
+        let orchestrator = AgentMode::Orchestrator;
+        assert!(orchestrator.allows_workflow_action("run"));
+        assert!(orchestrator.allows_workflow_action("update"));
+
+        let planner = AgentMode::Planner;
+        assert!(planner.allows_workflow_action("update"));
+        assert!(!planner.allows_workflow_action("run"));
+
+        let reviewer = AgentMode::Reviewer;
+        assert!(!reviewer.allows_workflow_action("show"));
+
+        let auditor = AgentMode::Auditor;
+        assert!(auditor.allows_workflow_action("show"));
+        assert!(!auditor.allows_workflow_action("update"));
     }
 
     #[test]
@@ -1738,7 +1791,7 @@ model = "sonnet"
         assert!(!mode.allows_mana_action("show"));
         assert!(!mode.allows_mana_action("create"));
         assert!(!mode.allows_mana_action("run"));
-        // Reviewer also has no mana tool access
+        // Reviewer also has no workflow tool access
         assert!(!mode.allows_tool("mana"));
         assert!(mode.allows_tool("git"));
     }

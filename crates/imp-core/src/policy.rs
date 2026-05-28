@@ -126,16 +126,53 @@ fn normalize_tool_name(name: impl AsRef<str>) -> String {
 }
 
 fn normalize_relative_path(cwd: &Path, path: &Path) -> Result<PathBuf, ()> {
-    let root = normalize_path(cwd);
-    let candidate = if path.is_absolute() {
-        normalize_path(path)
+    let root = physical_or_normalized(cwd);
+    let candidate_path = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        normalize_path(&cwd.join(path))
+        cwd.join(path)
     };
+    let candidate = physical_or_normalized(&candidate_path);
     candidate
         .strip_prefix(&root)
         .map(Path::to_path_buf)
         .map_err(|_| ())
+}
+
+fn physical_or_normalized(path: &Path) -> PathBuf {
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            if let Ok(target) = std::fs::read_link(path) {
+                let resolved_target = if target.is_absolute() {
+                    target
+                } else {
+                    path.parent().unwrap_or_else(|| Path::new("")).join(target)
+                };
+                return physical_or_normalized(&resolved_target);
+            }
+        }
+    }
+
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+
+    let mut missing_components = Vec::new();
+    let mut ancestor = path;
+    while let Some(parent) = ancestor.parent() {
+        if let Some(name) = ancestor.file_name() {
+            missing_components.push(name.to_os_string());
+        }
+        if let Ok(mut canonical_parent) = std::fs::canonicalize(parent) {
+            for component in missing_components.iter().rev() {
+                canonical_parent.push(component);
+            }
+            return canonical_parent;
+        }
+        ancestor = parent;
+    }
+
+    normalize_path(path)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -170,7 +207,45 @@ fn path_matches_pattern(path: &str, pattern: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunPolicy, ToolPolicyDecision};
+    use std::path::PathBuf;
+
+    use super::{RunPolicy, ToolPolicyDecision, WritePolicyDecision};
+
+    #[test]
+    fn write_allowlist_blocks_symlink_escape_from_worker_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let link = root.path().join("allowed.md");
+        create_symlink(outside.path().join("secret.md"), &link);
+
+        let policy = RunPolicy::new().allow_write("allowed.md");
+        assert!(matches!(
+            policy.check_write_path(root.path(), &link),
+            WritePolicyDecision::Denied(reason) if reason.contains("outside the worker root")
+        ));
+    }
+
+    #[test]
+    fn write_allowlist_allows_missing_nested_file_under_existing_root() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("docs").join("note.md");
+
+        let policy = RunPolicy::new().allow_write("docs/*.md");
+        assert_eq!(
+            policy.check_write_path(root.path(), &path),
+            WritePolicyDecision::Allowed
+        );
+    }
+
+    #[cfg(unix)]
+    fn create_symlink(target: PathBuf, link: &std::path::Path) {
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn create_symlink(target: PathBuf, link: &std::path::Path) {
+        std::os::windows::fs::symlink_file(target, link).unwrap();
+    }
 
     #[test]
     fn empty_policy_allows_tools() {

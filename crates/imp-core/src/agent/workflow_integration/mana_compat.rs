@@ -514,11 +514,13 @@ fn mana_skill_follow_up_hint(
         AgentMode::Full | AgentMode::Orchestrator | AgentMode::Planner
             if orchestration_signal || work_signal =>
         {
-            Some("Before you continue: use native imp-work `guide` when you need extra help with task design, decomposition, retries, or worker handoff.")
+            Some(
+                "Before you continue: use native imp-work `guide` when you need extra help with task design, decomposition, retries, or worker handoff.",
+            )
         }
-        AgentMode::Worker | AgentMode::Auditor if work_signal => {
-            Some("Before you continue: use the native work tool and stay within this mode's allowed imp-work workflow. Use the `guide` action if you need help.")
-        }
+        AgentMode::Worker | AgentMode::Auditor if work_signal => Some(
+            "Before you continue: use the native work tool and stay within this mode's allowed imp-work workflow. Use the `guide` action if you need help.",
+        ),
         _ => None,
     }
 }
@@ -582,7 +584,6 @@ impl Agent {
     }
 
     #[cfg(test)]
-
     pub(in crate::agent) fn should_queue_workflow_externalization_for_test(
         &self,
         message: &AssistantMessage,
@@ -637,7 +638,6 @@ impl Agent {
     }
 
     #[cfg(test)]
-
     pub(in crate::agent) fn workflow_execution_debt_for_test(
         &self,
         tool_results: &[imp_llm::ToolResultMessage],
@@ -646,7 +646,6 @@ impl Agent {
     }
 
     #[cfg(test)]
-
     pub(in crate::agent) fn workflow_execution_evidence_for_test(
         &self,
         tool_results: &[imp_llm::ToolResultMessage],
@@ -655,7 +654,6 @@ impl Agent {
     }
 
     #[cfg(test)]
-
     pub(in crate::agent) fn workflow_orchestration_run_id_for_test(
         &self,
         tool_results: &[imp_llm::ToolResultMessage],
@@ -664,7 +662,6 @@ impl Agent {
     }
 
     #[cfg(test)]
-
     pub(in crate::agent) fn workflow_orchestration_started_for_test(
         &self,
         tool_results: &[imp_llm::ToolResultMessage],
@@ -673,7 +670,6 @@ impl Agent {
     }
 
     #[cfg(test)]
-
     pub(in crate::agent) fn workflow_durable_progress_for_test(
         &self,
         tool_results: &[imp_llm::ToolResultMessage],
@@ -682,7 +678,6 @@ impl Agent {
     }
 
     #[cfg(test)]
-
     pub(in crate::agent) fn workflow_review_stop_reason_for_test(
         &self,
         mana_review: &TurnManaReview,

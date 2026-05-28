@@ -8,7 +8,6 @@ pub mod lua;
 pub mod mana;
 pub mod memory;
 pub mod multi_edit;
-pub mod prototype;
 pub mod query;
 pub mod read;
 pub mod scan;
