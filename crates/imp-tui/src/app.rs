@@ -189,6 +189,7 @@ impl QueuedMessage {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum AskReply {
     Select(tokio::sync::oneshot::Sender<Option<usize>>),
     MultiSelect(tokio::sync::oneshot::Sender<Option<Vec<usize>>>),
@@ -388,6 +389,8 @@ enum RuntimeSignal {
     ImproveMergeCommandFailed(String),
     CleanCommandFinished(CleanCommandResult),
     CleanCommandFailed(String),
+    RepoStatsLoaded(Result<Option<crate::repo_stats::RepoStats>, String>),
+    RepoStatsSkipped(RepoStatsState),
     UiRequest(crate::tui_interface::UiRequest),
 }
 
@@ -473,9 +476,21 @@ struct SidebarDetailCache {
 struct StartupSurfaceMetadata {
     skills: Vec<imp_core::resources::Skill>,
     workflows: Vec<WorkflowProfile>,
+    recent_sessions: Vec<SessionInfo>,
+    repo_stats: Option<RepoStatsState>,
+    rule_files: Vec<PathBuf>,
     provider_id: String,
-    provider_auth_ready: bool,
     web_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RepoStatsState {
+    Scanning,
+    Ready(crate::repo_stats::RepoStats),
+    HomeDirectory,
+    NoRepo,
+    Empty,
+    Failed,
 }
 
 #[derive(Debug, Clone)]
@@ -594,6 +609,207 @@ fn mana_run_detail_render_data(run: &ManaRunSummary, theme: &Theme) -> SidebarDe
     SidebarDetailRenderData { lines, plain_lines }
 }
 
+
+fn workflow_sort_key(workflow: &WorkflowProfile) -> std::time::SystemTime {
+    let root = PathBuf::from(".imp").join("workflows").join(&workflow.name);
+    std::fs::metadata(root.join("events.jsonl"))
+        .and_then(|metadata| metadata.modified())
+        .or_else(|_| std::fs::metadata(root.join("workflow.yaml")).and_then(|metadata| metadata.modified()))
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+}
+
+fn workflow_age(workflow: &WorkflowProfile) -> String {
+    let modified = workflow_sort_key(workflow);
+    let updated_at = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    format_age(updated_at)
+}
+
+enum RepoStatsScanRoot {
+    Scan(PathBuf),
+    Skip(RepoStatsState),
+}
+
+fn repo_stats_scan_root(cwd: &Path) -> RepoStatsScanRoot {
+    if is_home_directory(cwd) {
+        return RepoStatsScanRoot::Skip(RepoStatsState::HomeDirectory);
+    }
+
+    match find_git_root(cwd) {
+        Some(root) if is_home_directory(&root) => RepoStatsScanRoot::Skip(RepoStatsState::HomeDirectory),
+        Some(root) => RepoStatsScanRoot::Scan(root),
+        None => RepoStatsScanRoot::Skip(RepoStatsState::NoRepo),
+    }
+}
+
+fn is_home_directory(path: &Path) -> bool {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return false;
+    };
+    canonicalize_for_compare(path) == canonicalize_for_compare(&home)
+}
+
+fn find_git_root(cwd: &Path) -> Option<PathBuf> {
+    let mut dir = Some(cwd);
+    while let Some(path) = dir {
+        if path.join(".git").exists() {
+            return Some(path.to_path_buf());
+        }
+        dir = path.parent();
+    }
+    None
+}
+
+fn canonicalize_for_compare(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn strip_status_suffix(summary: &str) -> String {
+    summary
+        .strip_suffix(" (ready)")
+        .or_else(|| summary.strip_suffix(" (needs key)"))
+        .unwrap_or(summary)
+        .to_string()
+}
+
+fn repo_stats_label(state: Option<&RepoStatsState>) -> String {
+    match state {
+        Some(RepoStatsState::Scanning) | None => "scanning…".to_string(),
+        Some(RepoStatsState::Ready(stats)) => format!(
+            "{} · {} loc · {} files",
+            stats.primary_language,
+            format_compact_count(stats.code_lines),
+            format_compact_count(stats.files)
+        ),
+        Some(RepoStatsState::HomeDirectory) => "home directory".to_string(),
+        Some(RepoStatsState::NoRepo) => "none".to_string(),
+        Some(RepoStatsState::Empty) => "no source files".to_string(),
+        Some(RepoStatsState::Failed) => "unavailable".to_string(),
+    }
+}
+
+fn format_compact_count(count: u64) -> String {
+    if count >= 1_000_000 {
+        trim_trailing_decimal(format!("{:.1}", count as f64 / 1_000_000.0)) + "m"
+    } else if count >= 1_000 {
+        trim_trailing_decimal(format!("{:.1}", count as f64 / 1_000.0)) + "k"
+    } else {
+        count.to_string()
+    }
+}
+
+fn trim_trailing_decimal(value: String) -> String {
+    value.strip_suffix(".0").unwrap_or(&value).to_string()
+}
+
+fn discover_rule_files(cwd: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let global = PathBuf::from(home).join(".imp/AGENTS.md");
+        if global.exists() {
+            files.push(global);
+        }
+    }
+    for ancestor in cwd.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        let local = ancestor.join("AGENTS.md");
+        if local.exists() {
+            files.push(local);
+        }
+    }
+    files
+}
+
+fn rule_file_lines(files: &[PathBuf]) -> Vec<String> {
+    if files.is_empty() {
+        return vec!["• rules: none".to_string()];
+    }
+    let mut lines = Vec::new();
+    for (index, path) in files.iter().take(3).enumerate() {
+        let prefix = if index == 0 { "• rules: " } else { "         " };
+        lines.push(format!("{prefix}{}", display_rule_path(path)));
+    }
+    if files.len() > 3 {
+        lines.push(format!("         … +{} more", files.len() - 3));
+    }
+    lines
+}
+
+fn display_rule_path(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(home) = home.as_deref() {
+        if let Ok(rest) = path.strip_prefix(home) {
+            return format!("~/{}", rest.display());
+        }
+    }
+    path.display().to_string()
+}
+
+fn load_recent_sessions(cwd: &Path, limit: usize) -> Vec<SessionInfo> {
+    let session_dir = imp_core::storage::global_sessions_dir();
+    SessionManager::list(&session_dir)
+        .map(|sessions| {
+            let cwd_string = cwd.display().to_string();
+            sessions
+                .into_iter()
+                .filter(|session| session.cwd == cwd_string)
+                .take(limit)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn recent_session_lines(sessions: &[SessionInfo]) -> Vec<String> {
+    if sessions.is_empty() {
+        return vec!["• none yet".to_string()];
+    }
+    sessions
+        .iter()
+        .take(5)
+        .map(|session| {
+            let title = session
+                .name
+                .as_deref()
+                .or(session.summary.as_deref())
+                .or(session.first_message.as_deref())
+                .unwrap_or("unnamed session");
+            format!(
+                "• {} · {}",
+                truncate_text(title, 30),
+                format_age(session.updated_at)
+            )
+        })
+        .collect()
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+fn format_age(updated_at: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(updated_at);
+    let seconds = now.saturating_sub(updated_at);
+    if seconds < 60 {
+        "now".to_string()
+    } else if seconds < 3_600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h ago", seconds / 3_600)
+    } else {
+        format!("{}d ago", seconds / 86_400)
+    }
+}
+
 fn startup_skill_detail_render_data(
     skill: &imp_core::resources::Skill,
     theme: &Theme,
@@ -671,8 +887,8 @@ fn startup_skill_hits_in_sections(area: Rect, sections: &[StartupSection]) -> Ve
     let visible_sections = &sections[..visible_count];
 
     if area.width >= 96 {
-        let column_width = area.width / 4;
-        let remainder = area.width % 4;
+        let column_width = area.width / visible_sections.len() as u16;
+        let remainder = area.width % visible_sections.len() as u16;
         return visible_sections
             .iter()
             .enumerate()
@@ -1147,6 +1363,8 @@ fn runtime_signal_kind(signal: &RuntimeSignal) -> &'static str {
         RuntimeSignal::ImproveMergeCommandFailed(_) => "improve_merge_command_failed",
         RuntimeSignal::CleanCommandFinished(_) => "clean_command_finished",
         RuntimeSignal::CleanCommandFailed(_) => "clean_command_failed",
+        RuntimeSignal::RepoStatsLoaded(_) => "repo_stats_loaded",
+        RuntimeSignal::RepoStatsSkipped(_) => "repo_stats_skipped",
         RuntimeSignal::UiRequest(_) => "ui_request",
     }
 }
@@ -2559,6 +2777,24 @@ impl App {
         let (runtime_signal_tx, runtime_signal_rx) = tokio::sync::mpsc::channel(256);
         let startup_surface_metadata =
             Self::load_startup_surface_metadata(&cwd, &config, &model_registry, &model_name);
+        let repo_stats_tx = runtime_signal_tx.clone();
+        let repo_stats_cwd = cwd.clone();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                match repo_stats_scan_root(&repo_stats_cwd) {
+                    RepoStatsScanRoot::Scan(root) => {
+                        let result = tokio::task::spawn_blocking(move || crate::repo_stats::scan_repo(&root))
+                            .await
+                            .map_err(|error| format!("repo stats task failed: {error}"))
+                            .and_then(|result| result.map_err(|error| error.to_string()));
+                        let _ = repo_stats_tx.send(RuntimeSignal::RepoStatsLoaded(result)).await;
+                    }
+                    RepoStatsScanRoot::Skip(state) => {
+                        let _ = repo_stats_tx.send(RuntimeSignal::RepoStatsSkipped(state)).await;
+                    }
+                }
+            });
+        }
 
         Self {
             running: true,
@@ -3181,6 +3417,18 @@ impl App {
                 self.clean_task = None;
                 self.push_error_msg(&error);
             }
+            RuntimeSignal::RepoStatsLoaded(result) => {
+                self.startup_surface_metadata.repo_stats = Some(match result {
+                    Ok(Some(stats)) => RepoStatsState::Ready(stats),
+                    Ok(None) => RepoStatsState::Empty,
+                    Err(_) => RepoStatsState::Failed,
+                });
+                self.needs_redraw = true;
+            }
+            RuntimeSignal::RepoStatsSkipped(state) => {
+                self.startup_surface_metadata.repo_stats = Some(state);
+                self.needs_redraw = true;
+            }
             RuntimeSignal::UiRequest(req) => self.handle_ui_request(req),
         }
         self.needs_redraw = true;
@@ -3675,7 +3923,6 @@ impl App {
             .as_ref()
             .map(|meta| meta.provider.clone())
             .unwrap_or_else(|| "unknown".to_string());
-        let provider_auth_ready = auth_store.has_credentials(&provider_id);
         let web_summary = config
             .web
             .search_provider
@@ -3696,8 +3943,10 @@ impl App {
                 .map(|registry| registry.iter().cloned().collect())
                 .unwrap_or_default(),
             provider_id,
-            provider_auth_ready,
             web_summary,
+            recent_sessions: load_recent_sessions(cwd, 5),
+            repo_stats: Some(RepoStatsState::Scanning),
+            rule_files: discover_rule_files(cwd),
         }
     }
 
@@ -3712,12 +3961,7 @@ impl App {
             .to_string();
 
         let provider_id = self.startup_surface_metadata.provider_id.as_str();
-        let provider_auth = if self.startup_surface_metadata.provider_auth_ready {
-            "ready"
-        } else {
-            "needs auth"
-        };
-        let web_summary = self.startup_surface_metadata.web_summary.clone();
+        let web_summary = strip_status_suffix(&self.startup_surface_metadata.web_summary);
         let mode = format!("{:?}", self.config.mode).to_lowercase();
         let session_name = self
             .session
@@ -3726,14 +3970,14 @@ impl App {
             .or_else(|| self.session.title(48))
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| "new chat".to_string());
-        let session_lines = vec![
+        let mut session_lines = vec![
             format!("• project: {repo_label}"),
             format!("• session: {session_name}"),
-            format!("• model: {}", self.model_name),
-            format!("• provider: {provider_id} ({provider_auth})"),
-            format!("• thinking: {:?}", self.thinking_level),
+            format!("• provider: {provider_id}"),
             format!("• web: {web_summary}"),
+            format!("• repo: {}", repo_stats_label(self.startup_surface_metadata.repo_stats.as_ref())),
         ];
+        session_lines.extend(rule_file_lines(&self.startup_surface_metadata.rule_files));
 
         let visible_prompt_tools = {
             let mut registry = imp_core::tools::ToolRegistry::new();
@@ -3749,9 +3993,9 @@ impl App {
 
         let actions = vec![
             StartupAction {
-                trigger: "type".to_string(),
-                label: "start".to_string(),
-                description: "question, goal, sketch, or task".to_string(),
+                trigger: "input".to_string(),
+                label: String::new(),
+                description: "prompt, request, bug, or goal".to_string(),
             },
             StartupAction {
                 trigger: "/resume".to_string(),
@@ -3761,12 +4005,12 @@ impl App {
             StartupAction {
                 trigger: "/settings".to_string(),
                 label: "runtime".to_string(),
-                description: format!("{mode}; thinking {:?}", self.thinking_level),
+                description: format!("model, provider, runtime, thinking ({mode})"),
             },
             StartupAction {
                 trigger: "Ctrl+L".to_string(),
                 label: "model".to_string(),
-                description: self.model_name.to_string(),
+                description: "switch model".to_string(),
             },
         ];
 
@@ -3787,10 +4031,12 @@ impl App {
         let workflow_lines = if self.startup_surface_metadata.workflows.is_empty() {
             vec!["• none configured".to_string()]
         } else {
-            self.startup_surface_metadata
-                .workflows
+            let mut workflows = self.startup_surface_metadata.workflows.clone();
+            workflows.sort_by_key(|workflow| std::cmp::Reverse(workflow_sort_key(workflow)));
+            workflows
                 .iter()
-                .map(|workflow| format!("• /{}: {}", workflow.name, workflow.description))
+                .take(5)
+                .map(|workflow| format!("• {} · {}", workflow.name, workflow_age(workflow)))
                 .collect::<Vec<_>>()
         };
 
@@ -3804,12 +4050,16 @@ impl App {
                 lines: tool_lines,
             },
             StartupSection {
-                title: "skills".to_string(),
+                title: format!("skills · {} installed", skills.len()),
                 lines: skill_lines,
             },
             StartupSection {
                 title: "workflows".to_string(),
                 lines: workflow_lines,
+            },
+            StartupSection {
+                title: "recent sessions".to_string(),
+                lines: recent_session_lines(&self.startup_surface_metadata.recent_sessions),
             },
         ];
 
@@ -4069,7 +4319,7 @@ impl App {
                 .map(|render| render.plain_lines.as_slice())
                 .unwrap_or(&[]);
             self.sidebar_detail_surface = Some(build_detail_text_surface_from_plain_lines(
-                &detail_plain_lines,
+                detail_plain_lines,
                 sub.1,
                 self.sidebar.detail_scroll,
             ));
@@ -4979,9 +5229,7 @@ impl App {
         // derived from rendered text for selection support, but styling/format
         // changes can make text parsing miss valid tool headers. The render data is
         // the authoritative source of which visual chat lines belong to tool calls.
-        let Some(render) = self.chat_render_cache.as_ref().map(|cache| &cache.render) else {
-            return None;
-        };
+        let render = self.chat_render_cache.as_ref().map(|cache| &cache.render)?;
         let total_lines = render.lines.len();
         let window =
             visible_line_window(total_lines, chat_area.height as usize, self.scroll_offset);
@@ -6494,16 +6742,20 @@ impl App {
                     if canonical_typed == "improve safe" || canonical_typed.starts_with("skill:") {
                         canonical_typed.to_string()
                     } else {
-                        commands
+                        let mut typed_parts = canonical_typed.splitn(2, char::is_whitespace);
+                        let typed_command = typed_parts.next().unwrap_or_default();
+                        let typed_args = typed_parts.next().unwrap_or_default().trim();
+                        let resolved_command = commands
                             .iter()
-                            .find(|c| c.name == canonical_typed)
-                            .or_else(|| {
-                                commands
-                                    .iter()
-                                    .find(|c| c.name.starts_with(canonical_typed))
-                            })
-                            .map(|c| c.name.clone())
-                            .unwrap_or_else(|| canonical_typed.to_string())
+                            .find(|c| c.name == typed_command)
+                            .or_else(|| commands.iter().find(|c| c.name.starts_with(typed_command)))
+                            .map(|c| c.name.as_str())
+                            .unwrap_or(typed_command);
+                        if typed_args.is_empty() {
+                            resolved_command.to_string()
+                        } else {
+                            format!("{resolved_command} {typed_args}")
+                        }
                     };
                 self.execute_command(&cmd);
                 self.editor.push_history();
@@ -6547,6 +6799,24 @@ impl App {
         self.agent_turn_started_at = Some(Instant::now());
         self.first_agent_event_seen = false;
         self.start_agent_for_prompt_in_background(text, agent_cwd);
+    }
+
+    fn checkpoints_command(&mut self) {
+        let records = self.session.checkpoint_records();
+        if records.is_empty() {
+            self.push_system_msg("No checkpoints recorded for this session.");
+            return;
+        }
+        let mut lines = vec!["Recorded checkpoints:".to_string()];
+        for record in records {
+            let label = record
+                .label
+                .as_deref()
+                .filter(|label| !label.trim().is_empty())
+                .unwrap_or("unlabeled");
+            lines.push(format!("- {} — {}", record.checkpoint_id, label));
+        }
+        self.push_system_msg(&lines.join("\n"));
     }
 
     fn restore_checkpoint_command(&mut self, needle: &str) {
@@ -6594,6 +6864,7 @@ impl App {
     }
 
     #[cfg(feature = "mana-ui")]
+    #[allow(dead_code)]
     fn set_active_mana_run(&mut self, id: &str) {
         let id = id.trim();
         if id.is_empty() {
@@ -6615,6 +6886,7 @@ impl App {
     }
 
     #[cfg(feature = "mana-ui")]
+    #[allow(dead_code)]
     fn refresh_active_mana_run(&mut self, id: &str) {
         match mana_run_summary(id) {
             Ok(Some(summary)) => {
@@ -6895,7 +7167,7 @@ impl App {
         let Some(name) = parts.next().filter(|name| !name.is_empty()) else {
             return false;
         };
-        if matches!(name, "workflow" | "workflows" | "plan" | "status" | "run") {
+        if matches!(name, "workflow" | "workflows") {
             return false;
         }
         let Some(registry) = self.workflow_registry() else {
@@ -6959,6 +7231,22 @@ impl App {
         );
     }
 
+    fn show_workflows(&mut self) {
+        let Some(registry) = self.workflow_registry() else {
+            return;
+        };
+        let profiles = registry.iter().collect::<Vec<_>>();
+        if profiles.is_empty() {
+            self.push_system_msg("No workflows configured.");
+            return;
+        }
+        let mut lines = vec!["Workflows:".to_string()];
+        for profile in profiles {
+            lines.push(format!("/{} — {}", profile.name, profile.description));
+        }
+        self.push_system_msg(&lines.join("\n"));
+    }
+
     fn show_workflow_profile(&mut self, name: &str) {
         let name = name.trim();
         if name.is_empty() {
@@ -7019,12 +7307,6 @@ impl App {
             "tree" => {
                 self.open_tree_view();
             }
-            "mana" => {
-                #[cfg(feature = "mana-ui")]
-                self.open_mana_navigator(if args.is_empty() { None } else { Some(args) });
-                #[cfg(not(feature = "mana-ui"))]
-                self.push_system_msg("Mana UI is not available in this standalone build.");
-            }
             "new" => {
                 self.messages.clear();
                 self.invalidate_chat_render_cache();
@@ -7063,44 +7345,18 @@ impl App {
   :cd <path>    Change working directory\n\
   :pwd          Show working directory\n\
   : <cmd>       Run shell command\n\
-  Esc           Cancel current turn; when idle, clear pending prompt/queue/loop
-  /stop         Stop active work and clear pending prompt/queue/loop
-  /queue clear  Clear queued follow-up prompts
+  Esc           Cancel current turn; when idle, clear pending prompt/loop
+  /stop         Stop active work and clear pending prompt/loop
   PageUp/Down   Scroll",
                 );
             }
-            "improve" => match args {
-                "merge" | "adopt" | "approve" => {
-                    self.improve_merge_command(args)
-                }
-                arg => self.set_improve_mode(arg.eq_ignore_ascii_case("safe")),
-            },
-            "improve-safe" => self.set_improve_mode(true),
-            "improve-merge" => self.improve_merge_command("merge"),
-            "improve-help" => self.push_system_msg(
-                "Improve uses a new branch checked out in a separate worktree before making code changes. It never commits or merges without explicit approval. Use /improve safe for research-only evaluation and mana follow-ups.",
-            ),
-            "plan" => self.workflow_plan_command(args),
-            "status" => self.show_status_command(),
-            "eval" => self.eval_candidate_command(args),
-            "autonomy" => self.autonomy_command(args),
-            "clean" => self.clean_command(args),
             "loop" => self.start_loop_command(args),
-            "queue" => self.queue_command(args),
-            "scope" | "mana-scope" => self.set_active_mana_scope(args),
-            "run" => self.workflow_run_command(args),
             "stop" => self.stop_active_work(),
             "settings" => {
                 self.open_settings();
             }
-            "personality" => {
-                self.open_personality();
-            }
             "resume" => {
                 self.start_session_list_load();
-            }
-            "session" => {
-                self.push_system_msg("/session is defunct. Use /resume to browse/search sessions.");
             }
             "name" => {
                 let new_name = cmd.strip_prefix("name").unwrap_or("").trim();
@@ -7109,19 +7365,6 @@ impl App {
                 } else {
                     self.session.set_name(new_name);
                     self.push_system_msg(&format!("Session renamed to: {new_name}"));
-                }
-            }
-            "export" => {
-                let dest = cmd.strip_prefix("export").unwrap_or("").trim();
-                let path = if dest.is_empty() {
-                    let name = self.session.name().unwrap_or("conversation");
-                    std::path::PathBuf::from(format!("{name}.md"))
-                } else {
-                    std::path::PathBuf::from(dest)
-                };
-                match self.export_conversation(&path) {
-                    Ok(_) => self.push_system_msg(&format!("Exported to {}", path.display())),
-                    Err(e) => self.push_system_msg(&format!("Export failed: {e}")),
                 }
             }
             "reload" => {
@@ -7138,93 +7381,30 @@ impl App {
                     Err(e) => self.push_system_msg(&format!("Reload failed: {e}")),
                 }
             }
-            "fork" => {
-                let leaf = self.session.leaf_id().unwrap_or_default().to_string();
-                let path = imp_core::storage::global_sessions_dir()
-                    .join(format!("{}.jsonl", uuid::Uuid::new_v4()));
-                match self.session.fork(&leaf, &path) {
-                    Ok(forked) => {
-                        self.session = forked;
-                        self.push_system_msg("Forked. You're on a new branch.");
-                    }
-                    Err(e) => self.push_system_msg(&format!("Fork failed: {e}")),
-                }
-            }
-            "memory" | "mem" => {
-                self.handle_memory_command(cmd);
-            }
-            "checkpoints" => {
-                let checkpoints = self.session.checkpoint_records();
-                if checkpoints.is_empty() {
-                    self.push_system_msg("No checkpoints recorded in this session.");
-                } else {
-                    let mut lines = vec![format!("{} checkpoint(s):", checkpoints.len())];
-                    for checkpoint in checkpoints {
-                        let label = checkpoint
-                            .label
-                            .as_deref()
-                            .map(|label| format!(" — {label}"))
-                            .unwrap_or_default();
-                        lines.push(format!(
-                            "- {}{} ({} file{})",
-                            checkpoint.checkpoint_id,
-                            label,
-                            checkpoint.files.len(),
-                            if checkpoint.files.len() == 1 { "" } else { "s" }
-                        ));
-                    }
-                    self.push_system_msg(&lines.join("\n"));
-                }
-            }
-            "restore-checkpoint" => {
-                let needle = cmd.strip_prefix("restore-checkpoint").unwrap_or("").trim();
-                if needle.is_empty() {
-                    self.push_system_msg("Usage: /restore-checkpoint <checkpoint id or label>");
-                } else {
-                    self.restore_checkpoint_command(needle);
-                }
-            }
             "help" => {
                 self.push_system_msg(concat!(
                     "Commands:\n",
                     "  /new        — start fresh session\n",
-                    "  /model      — switch model\n",
-                    "  /mana [id]  — browse mana work graph\n",
-                    "  /scope <id> — set active mana scope\n",
-
-                    "  /improve    — improve in a sandbox branch/worktree\n",
-                    "  /improve safe — research-only Improve mode\n",
-                    "  /improve merge — show Improve merge plan\n",
-                    "  /improve merge --confirm — merge active Improve branch\n",
-                    "  /status    — show active work status\n",
-                    "  /autonomy <mode> — set autonomy mode\n",
-                    "  /loop [msg] — repeat a prompt until stopped/budgeted; no msg or `continue` continues current mana work\n",
-                    "  /clean     — clean active sandbox/artifacts safely\n",
-                    "  /queue      — show or clear queued follow-up prompts\n",
-                    "  /stop       — stop active imp work and clear pending/queued loop work\n",
-                    "  /compact    — compress context\n",
                     "  /resume     — resume/search sessions\n",
-                    "  /session    — legacy alias (defunct)\n",
-                    "  /fork       — branch conversation\n",
-                    "  /name <n>   — rename session\n",
-                    "  /export [f] — export to markdown\n",
-                    "  /copy       — copy selection or last response\n",
-                    "  /memory     — view/edit agent memory\n",
-                    "  /checkpoints — list recorded file checkpoints\n",
-                    "  /restore-checkpoint <id> — inspect restore target for a checkpoint\n",
-                    "  /reload     — reload config\n",
-                    "  /settings   — edit settings\n",
-                    "  /personality — customize imp personality\n",
-                    "  /login [provider]   — OAuth login (Anthropic/OpenAI/Kimi Code)\n",
+                    "  /model      — switch model\n",
+                    "  /compact    — compress context\n",
+                    "  /quit       — exit\n",
+                    "  /loop [msg] — continue or auto-loop current intent\n",
+                    "  /stop       — stop active work/loop\n",
+                    "  /reload     — reload config and Lua extensions\n",
+                    "  /setup      — run setup wizard\n",
                     "  /secrets [provider] — save/list API keys & service secrets\n",
+                    "  /login [provider]   — OAuth login (Anthropic/OpenAI/Kimi Code)\n",
+                    "  /name <n>   — rename session\n",
+                    "  /tree       — session tree\n",
+                    "  /settings   — edit settings\n",
                     "  /help       — this message\n",
                     "  :cd <path>  — change working directory\n",
                     "  :pwd        — show working directory\n",
                     "  : <cmd>     — run shell command\n",
                     "  ! <cmd>     — run shell command\n",
                     "  !! <cmd>    — run shell command without adding output to agent context\n",
-                    "\nTools: web.read supports web pages and public YouTube URLs (metadata + captions when available).\n",
-                    "  /quit       — exit",
+                    "\nTools: web.read supports web pages and public YouTube URLs (metadata + captions when available).",
                 ));
             }
             "login" => {
@@ -7245,32 +7425,25 @@ impl App {
                 let all_models = self.model_registry.list().to_vec();
                 self.mode = UiMode::Welcome(WelcomeState::new(&all_models));
             }
-            "workflow" => self.workflow_inspect_command(args),
-            "workflows" => self.workflow_inspect_command("list"),
-            "copy" => {
-                if self.copy_selection() {
-                    return;
-                }
-                // Copy last assistant message to clipboard
-                if let Some(last) = self.messages.iter().rev().find(|m| {
-                    matches!(
-                        m.role,
-                        MessageRole::Assistant | MessageRole::Warning | MessageRole::Error
-                    )
-                }) {
-                    let text = last.content.clone();
-                    self.copy_to_clipboard(&text);
-                    self.messages.push(DisplayMessage {
-                        role: MessageRole::System,
-                        content: "Copied to clipboard.".into(),
-                        thinking: None,
-                        tool_calls: Vec::new(),
-                        assistant_blocks: Vec::new(),
-                        is_streaming: false,
-                        timestamp: imp_llm::now(),
-                    });
+            "autonomy" => self.autonomy_command(args),
+            "memory" | "mem" => self.handle_memory_command(cmd),
+            "personality" | "soul" => self.open_personality(),
+            "checkpoints" => self.checkpoints_command(),
+            "restore" | "restore-checkpoint" => self.restore_checkpoint_command(args),
+            "eval" => self.eval_candidate_command(args),
+            "plan" => self.workflow_plan_command(args),
+            "run" => self.workflow_run_command(args),
+            "workflow" => {
+                let first = args.split_whitespace().next().unwrap_or_default();
+                if matches!(first, "list" | "show" | "validate" | "run" | "update") {
+                    self.workflow_inspect_command(args);
+                } else if args.trim().is_empty() {
+                    self.show_workflows();
+                } else {
+                    self.show_workflow_profile(args.trim());
                 }
             }
+            "workflows" => self.show_workflows(),
             _ => {
                 // Try Lua extension commands before reporting unknown
                 if !self.try_lua_command(cmd) && !self.try_skill_command(cmd) {
@@ -10637,9 +10810,9 @@ mod session_lifecycle {
     }
 
     #[test]
-    fn command_palette_includes_mana_command() {
+    fn command_palette_omits_mana_command() {
         let commands = builtin_commands();
-        assert!(commands.iter().any(|cmd| cmd.name == "mana"));
+        assert!(!commands.iter().any(|cmd| cmd.name == "mana"));
     }
 
     // ── 3. Slash commands ───────────────────────────────────────
@@ -10947,10 +11120,10 @@ mod session_lifecycle {
     }
 
     #[test]
-    fn command_palette_includes_checkpoint_commands() {
+    fn command_palette_omits_checkpoint_commands() {
         let commands = builtin_commands();
-        assert!(commands.iter().any(|cmd| cmd.name == "checkpoints"));
-        assert!(commands.iter().any(|cmd| cmd.name == "restore-checkpoint"));
+        assert!(!commands.iter().any(|cmd| cmd.name == "checkpoints"));
+        assert!(!commands.iter().any(|cmd| cmd.name == "restore-checkpoint"));
     }
 
     #[test]
@@ -11728,7 +11901,7 @@ mod session_lifecycle {
             .find(|section| section.title == "tools")
             .expect("tools section present");
 
-        assert!(tools.lines.iter().any(|line| line == "▣ Work"));
+        assert!(tools.lines.iter().any(|line| line == "⚑ Workflow"));
         assert!(tools.lines.iter().any(|line| line == "$ Terminal"));
         assert!(!tools.lines.iter().any(|line| line.starts_with("• work")));
     }
@@ -13037,6 +13210,7 @@ mod session_lifecycle {
             git_lines: None,
             sandbox_status: None,
             stale_improve_metadata_message: None,
+            workflow_summary: None,
         };
         let mut runtime_snapshot = RuntimeStateSnapshot::default();
         runtime_snapshot
@@ -13094,6 +13268,7 @@ mod session_lifecycle {
             git_lines: None,
             sandbox_status: None,
             stale_improve_metadata_message: None,
+            workflow_summary: None,
         };
         let status = render_status_text(
             &snapshot,

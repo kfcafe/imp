@@ -34,42 +34,6 @@ impl PromptContext {
     }
 }
 
-fn load_scoped_memory_block(
-    cwd: &std::path::Path,
-    path: &std::path::Path,
-    label: &str,
-    char_limit: usize,
-) -> Option<String> {
-    let store = crate::memory::MemoryStore::load(path, char_limit).ok()?;
-    let filtered: Vec<String> = store
-        .entries()
-        .iter()
-        .filter(|entry| !entry.contains("/tower") || cwd.to_string_lossy().contains("/tower"))
-        .cloned()
-        .collect();
-
-    if filtered.is_empty() {
-        return None;
-    }
-
-    let used: usize = filtered.iter().map(|e| e.len()).sum::<usize>()
-        + if filtered.len() > 1 {
-            (filtered.len() - 1) * 3
-        } else {
-            0
-        };
-    let pct = if char_limit > 0 {
-        (used as f64 / char_limit as f64 * 100.0) as u32
-    } else {
-        0
-    };
-    let bar = "══════════════════════════════════════════════";
-    Some(format!(
-        "{bar}\n{label} [{pct}% — {used}/{char_limit} chars]\n{bar}\n{}",
-        filtered.join("\n§\n")
-    ))
-}
-
 /// Builder for creating a fully wired [`Agent`] from config and context.
 ///
 /// Handles resource discovery, hook loading, system prompt assembly, and tool
@@ -400,7 +364,6 @@ impl AgentBuilder {
             let user_config_dir = Config::user_config_dir();
             let resource_started = Instant::now();
             let agents_md = resources::discover_agents_md(&self.cwd, &user_config_dir);
-            let soul = resources::discover_soul(&self.cwd, &user_config_dir);
             let skills = resources::discover_skills(&self.cwd, &user_config_dir);
             trace_phase("resources_discovery", resource_started);
             agent
@@ -411,26 +374,6 @@ impl AgentBuilder {
             agent.set_workflow_mana_delegation_skill_available(
                 skills.iter().any(|skill| skill.name == "mana-delegation"),
             );
-
-            let (memory_block, user_block) = if self.config.learning.enabled {
-                let memory_started = Instant::now();
-                let mem = load_scoped_memory_block(
-                    &self.cwd,
-                    &user_config_dir.join("memory.md"),
-                    "MEMORY (your personal notes)",
-                    self.config.learning.memory_char_limit,
-                );
-                let user = load_scoped_memory_block(
-                    &self.cwd,
-                    &user_config_dir.join("user.md"),
-                    "USER PROFILE",
-                    self.config.learning.user_char_limit,
-                );
-                trace_phase("memory_load", memory_started);
-                (mem, user)
-            } else {
-                (None, None)
-            };
 
             let prompt_context_started = Instant::now();
             let prompt_context = if self.facts.is_empty() {
@@ -449,15 +392,15 @@ impl AgentBuilder {
                 skills: &skills,
                 facts: &prompt_context.facts,
                 project_memory_status: prompt_context.project_memory_status.as_deref(),
-                personality: Some(&self.config.personality.profile),
-                soul: soul.as_ref(),
+                personality: None,
+                soul: None,
                 task: self.task.as_ref(),
                 role: self.role.as_ref(),
                 mode: &agent.mode,
-                memory: memory_block.as_deref(),
-                user_profile: user_block.as_deref(),
+                memory: None,
+                user_profile: None,
                 cwd: Some(&self.cwd),
-                learning_enabled: self.config.learning.enabled,
+                learning_enabled: false,
                 guardrail_profile: agent.guardrail_profile,
             })
             .text;
@@ -496,15 +439,14 @@ fn apply_role_tool_policy(tools: &mut ToolRegistry, role: &Role) {
 /// This is the canonical list — update here when adding or removing tools.
 pub fn register_native_tools(tools: &mut ToolRegistry) {
     use crate::tools::{
-        ask::AskTool, bash::BashTool, edit::EditTool, git::GitTool, prototype::PrototypeTool,
-        read::ReadTool, scan::ScanTool, web::WebTool, workflow::WorkflowTool, write::WriteTool,
+        ask::AskTool, bash::BashTool, edit::EditTool, git::GitTool, read::ReadTool, scan::ScanTool,
+        web::WebTool, workflow::WorkflowTool, write::WriteTool,
     };
 
     tools.register(Arc::new(AskTool));
     tools.register(Arc::new(BashTool::canonical()));
     tools.register(Arc::new(EditTool));
     tools.register(Arc::new(GitTool));
-    tools.register(Arc::new(PrototypeTool));
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ScanTool));

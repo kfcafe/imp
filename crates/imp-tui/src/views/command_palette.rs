@@ -162,178 +162,29 @@ pub fn merge_workflow_commands(
 }
 
 pub fn builtin_commands() -> Vec<SlashCommand> {
-    vec![
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "improve".into(),
-            description: "Switch workflow mode to Improve in a sandbox branch/worktree".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "improve-safe".into(),
-            description: "Switch workflow mode to research-only Improve".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "improve-merge".into(),
-            description: "Merge active Improve branch after reviewing changelog".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "improve-help".into(),
-            description: "Explain Improve autoresearch guardrails".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "eval".into(),
-            description: "Save latest run as an eval candidate (/eval <expected> [--note ...] [--verifier ...])".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "status".into(),
-            description: "Show active imp work status".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "autonomy".into(),
-            description: "Set autonomy mode (/autonomy safe|local-auto|allow-all-local)".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "clean".into(),
-            description: "Clean active sandbox/artifacts safely".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "loop".into(),
-            description: "Loop current mana work or a prompt (/loop [message|continue])".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "queue".into(),
-            description: "Show or clear queued follow-up prompts (/queue clear)".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "run".into(),
-            description: "Set active mana run (/run <id>, /run clear)".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "stop".into(),
-            description: "Stop active imp work and clear pending/queued loop work".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "scope".into(),
-            description: "Set active mana scope (/scope <id>, /scope clear)".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "model".into(),
-            description: "Select model".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "settings".into(),
-            description: "Open settings".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "mana".into(),
-            description: "Open mana work graph navigator".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "tree".into(),
-            description: "Session tree view".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "fork".into(),
-            description: "Fork session at current point".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "compact".into(),
-            description: "Compact context".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "new".into(),
-            description: "New session".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "resume".into(),
-            description: "Resume/search sessions".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "name".into(),
-            description: "Name current session".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "copy".into(),
-            description: "Copy last response".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "export".into(),
-            description: "Export session".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "personality".into(),
-            description: "Customize imp personality".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "memory".into(),
-            description: "View/edit agent memory".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "checkpoints".into(),
-            description: "List recorded file checkpoints".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "restore-checkpoint".into(),
-            description: "Restore files from a checkpoint by id or label".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "reload".into(),
-            description: "Reload extensions".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "hotkeys".into(),
-            description: "Show keyboard shortcuts".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "login".into(),
-            description: "OAuth login for Anthropic or OpenAI/ChatGPT".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "secrets".into(),
-            description: "Configure API keys / multi-field service secrets".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "setup".into(),
-            description: "Run setup wizard".into(),
-        },
-        SlashCommand {
-            kind: SlashCommandKind::Builtin,
-            name: "quit".into(),
-            description: "Quit".into(),
-        },
+    [
+        ("new", "Start a new session"),
+        ("resume", "Resume/search sessions"),
+        ("model", "Select model"),
+        ("compact", "Compact context"),
+        ("quit", "Quit"),
+        ("loop", "Continue or auto-loop current intent"),
+        ("stop", "Stop active work/loop"),
+        ("reload", "Reload config and Lua extensions"),
+        ("setup", "Run setup wizard"),
+        ("secrets", "Configure API keys / service secrets"),
+        ("login", "OAuth login for Anthropic, OpenAI, or Kimi Code"),
+        ("name", "Name current session"),
+        ("tree", "Session tree view"),
+        ("settings", "Open settings"),
     ]
+    .into_iter()
+    .map(|(name, description)| SlashCommand {
+        kind: SlashCommandKind::Builtin,
+        name: name.into(),
+        description: description.into(),
+    })
+    .collect()
 }
 
 /// State for the command palette.

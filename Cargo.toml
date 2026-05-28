@@ -23,7 +23,6 @@ default-members = [
     "crates/imp-lua",
     "crates/imp-tui",
     "crates/imp-cli",
-    "crates/imp-gui",
 ]
 members = [
     "crates/imp-llm",

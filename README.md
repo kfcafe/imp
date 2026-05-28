@@ -26,16 +26,15 @@ Runtime features:
 - provider-flexible model runtime
 - structured native tools
 - durable JSONL sessions
-- branchable conversation history
 - context compaction
-- verification gates
+- workflow-backed planning and verification
 - trace/evidence artifacts
 - OS-backed secret storage
 - runtime policy for tools, writes, autonomy, and hooks
 
 Workflow features:
 
-Workflows are local project records for multi-step work. They keep the plan, execution state, verification, prototype evidence, and closeout notes together instead of leaving them only in the conversation.
+Workflows are local project records for multi-step work. They keep the plan, execution state, verification, and closeout notes together instead of leaving them only in the conversation.
 
 - workflow artifacts under `.imp/workflows`
 - YAML workflow schema
@@ -43,7 +42,6 @@ Workflows are local project records for multi-step work. They keep the plan, exe
 - append-only workflow events
 - next-action selection
 - acceptance/check tracking
-- prototype experiments with evidence and follow-ups
 - results and closeout records
 
 Extension features:
@@ -134,9 +132,7 @@ imp secrets doctor
 | `scan` | tree-sitter code search/extraction |
 | `web` | web/GitHub search and page reads |
 | `ask_user` | structured user prompts |
-| `prototype` | disposable experiments with evidence |
 | `workflow` | workflow list/show/validate/run/update |
-| `memory` | persistent agent memory |
 
 The model uses native tools instead of relying only on shell commands. This gives imp narrower, policy-checkable operations for common development tasks.
 
@@ -150,7 +146,7 @@ Tool execution rules:
 
 ## Workflows
 
-Workflows are YAML-backed project artifacts for work that needs more structure than a single prompt. A workflow can describe the plan, the required context, the execution steps, the checks, any prototype experiments, and the evidence needed to close the work.
+Workflows are YAML-backed project artifacts for work that needs more structure than a single prompt. A workflow can describe the plan, the required context, the execution steps, the checks, verification results, and the evidence needed to close the work.
 
 Workflow root:
 
@@ -174,7 +170,7 @@ Workflow schema fields:
 - steps
 - dependencies
 - checks
-- prototype experiments and their evidence
+- verification evidence
 - workers
 - results
 - closeout rules
@@ -192,24 +188,24 @@ update
 Workflow lifecycle:
 
 ```text
-inspect → validate → run → update → events → prototype/verify → review → closeout
+inspect → validate → run → update → verify → review → closeout
 ```
 
 Update behavior:
 
-- validates the edited workflow
+- validates the edited workflow before writing
+- rejects oversized workflow YAML before parsing
+- opens/preflights `events.jsonl`
 - writes allowed status/path changes
 - appends `events.jsonl`
 - rejects invalid status values
 - keeps workflow state file-backed and reviewable
 
-Slash commands:
+Workflow command surface:
 
-| Command | Feature |
-|---|---|
-| `/plan` | workflow planning |
-| `/status` | workflow/session status |
-| `/run` | next workflow action |
+- use the native `workflow` tool for list/show/validate/run/update from agent turns
+- use workflows as the durable replacement for older `/plan`, `/run`, `/debug`, `/review`, and `/verify` task-type commands
+- current runner selects and records next actions; executable build-step orchestration is tracked as follow-up work
 
 Current storage is local and file-backed. API-addressable workflows are planned.
 
@@ -247,8 +243,12 @@ imp evidence latest
 | `Ctrl+L` | model selector |
 | `Shift+Tab` | thinking level |
 | `/compact` | context compaction |
+| `/model` | model selector |
 | `/settings` | settings editor |
 | `/secrets` | credential manager |
+| `/login` | provider OAuth login |
+| `/new` / `/resume` | session lifecycle |
+| `/loop` / `/stop` | continue or stop active work |
 
 ## RPC mode
 
@@ -400,11 +400,11 @@ Active:
 - OS-backed secrets
 - policy controls
 - Lua extensions
+- Rust SDK preview
 
 Preview/planned:
 
-- Rust SDK preview
-- limited TypeScript/Pi extension compatibility
+- executable workflow runner for build-step orchestration
 - MCP planned
 - `.imp/agents` planned
 - ACP/editor adapters planned
@@ -414,6 +414,7 @@ Preview/planned:
 Compatibility/legacy:
 
 - legacy `mana` integration is optional and compatibility-oriented
+- TypeScript/Pi extension compatibility is experimental and not a shipped extension surface
 
 ## Technical docs
 
