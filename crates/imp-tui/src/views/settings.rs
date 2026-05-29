@@ -1,6 +1,7 @@
 use imp_core::config::{
-    AnimationLevel, ChatToolDisplay, Config, ContextConfig, ContinuePolicy, ManaConfig,
-    ManaRunConfig, ManaScopePreference, SidebarStyle, ToolOutputDisplay,
+    AgentMode, AnimationLevel, ChatToolDisplay, Config, ContextConfig, ContinuePolicy, LuaConfig,
+    ManaConfig, ManaRunConfig, ManaScopePreference, ShellBackend, SidebarStyle, ToolOutputDisplay,
+    WriteOverwritePolicy,
 };
 use imp_core::tools::web::types::SearchProvider;
 use imp_llm::auth::AuthStore;
@@ -39,6 +40,13 @@ pub enum SettingsField {
     ShowContextUsage,
     NotifyOnAgentComplete,
     ContinuePolicy,
+    AgentMode,
+    WriteOverwritePolicy,
+    ShellBackend,
+    LuaNativeTools,
+    LuaShellExec,
+    LuaHttp,
+    LuaSecrets,
     ImproveAutoTurnBudget,
     LoopTurnBudget,
     WebSearchProvider,
@@ -107,7 +115,15 @@ const UI_FIELDS: &[SettingsField] = &[
     SettingsField::ShowContextUsage,
 ];
 
-const SECURITY_FIELDS: &[SettingsField] = &[];
+const SECURITY_FIELDS: &[SettingsField] = &[
+    SettingsField::AgentMode,
+    SettingsField::WriteOverwritePolicy,
+    SettingsField::ShellBackend,
+    SettingsField::LuaNativeTools,
+    SettingsField::LuaShellExec,
+    SettingsField::LuaHttp,
+    SettingsField::LuaSecrets,
+];
 
 const WEB_FIELDS: &[SettingsField] = &[
     SettingsField::WebSearchProvider,
@@ -149,6 +165,13 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::ShowContextUsage,
     SettingsField::NotifyOnAgentComplete,
     SettingsField::ContinuePolicy,
+    SettingsField::AgentMode,
+    SettingsField::WriteOverwritePolicy,
+    SettingsField::ShellBackend,
+    SettingsField::LuaNativeTools,
+    SettingsField::LuaShellExec,
+    SettingsField::LuaHttp,
+    SettingsField::LuaSecrets,
     SettingsField::ImproveAutoTurnBudget,
     SettingsField::LoopTurnBudget,
     SettingsField::WebSearchProvider,
@@ -190,7 +213,7 @@ impl SettingsTab {
 
     fn empty_message(self) -> Option<&'static str> {
         match self {
-            SettingsTab::Security => Some("Security ask/act thresholds are coming soon."),
+            SettingsTab::Security => None,
             SettingsTab::Mana => None,
             _ => None,
         }
@@ -237,6 +260,13 @@ pub struct SettingsState {
     pub show_context_usage: bool,
     pub notify_on_agent_complete: bool,
     pub continue_policy: ContinuePolicy,
+    pub agent_mode: AgentMode,
+    pub write_overwrite_policy: WriteOverwritePolicy,
+    pub shell_backend: ShellBackend,
+    pub lua_native_tools: bool,
+    pub lua_shell_exec: bool,
+    pub lua_http: bool,
+    pub lua_secrets: bool,
     pub improve_auto_turn_budget: u32,
     pub loop_turn_budget: u32,
     pub web_search_provider: Option<SearchProvider>,
@@ -345,6 +375,16 @@ impl SettingsState {
             show_context_usage: config.ui.show_context_usage,
             notify_on_agent_complete: config.ui.notify_on_agent_complete,
             continue_policy: config.ui.continue_policy,
+            agent_mode: config.mode,
+            write_overwrite_policy: config.write.overwrite_policy,
+            shell_backend: config.shell.backend.clone(),
+            lua_native_tools: config
+                .lua
+                .resolve_policy(config.mode)
+                .allow_native_tool_calls,
+            lua_shell_exec: config.lua.resolve_policy(config.mode).allow_shell_exec,
+            lua_http: config.lua.resolve_policy(config.mode).allow_http,
+            lua_secrets: config.lua.resolve_policy(config.mode).allow_secrets,
             improve_auto_turn_budget: config.ui.improve_auto_turn_budget,
             loop_turn_budget: config.ui.loop_turn_budget,
             web_search_provider: config.web.search_provider,
@@ -500,6 +540,35 @@ impl SettingsState {
                     ContinuePolicy::Aggressive => ContinuePolicy::Disabled,
                 };
             }
+            SettingsField::AgentMode => {
+                self.agent_mode = match self.agent_mode {
+                    AgentMode::Full => AgentMode::Worker,
+                    AgentMode::Worker => AgentMode::Orchestrator,
+                    AgentMode::Orchestrator => AgentMode::Planner,
+                    AgentMode::Planner => AgentMode::Reviewer,
+                    AgentMode::Reviewer => AgentMode::Auditor,
+                    AgentMode::Auditor => AgentMode::Full,
+                };
+            }
+            SettingsField::WriteOverwritePolicy => {
+                self.write_overwrite_policy = match self.write_overwrite_policy {
+                    WriteOverwritePolicy::Warn => WriteOverwritePolicy::RequireRead,
+                    WriteOverwritePolicy::RequireRead => WriteOverwritePolicy::BlockStale,
+                    WriteOverwritePolicy::BlockStale => WriteOverwritePolicy::Deny,
+                    WriteOverwritePolicy::Deny => WriteOverwritePolicy::Warn,
+                };
+            }
+            SettingsField::ShellBackend => {
+                self.shell_backend = match self.shell_backend {
+                    ShellBackend::Sh => ShellBackend::Rush,
+                    ShellBackend::Rush => ShellBackend::RushDaemon,
+                    ShellBackend::RushDaemon => ShellBackend::Sh,
+                };
+            }
+            SettingsField::LuaNativeTools => self.lua_native_tools = !self.lua_native_tools,
+            SettingsField::LuaShellExec => self.lua_shell_exec = !self.lua_shell_exec,
+            SettingsField::LuaHttp => self.lua_http = !self.lua_http,
+            SettingsField::LuaSecrets => self.lua_secrets = !self.lua_secrets,
             SettingsField::ImproveAutoTurnBudget => {
                 self.improve_auto_turn_budget =
                     self.improve_auto_turn_budget.saturating_add(1).min(100);
@@ -654,6 +723,35 @@ impl SettingsState {
                     ContinuePolicy::Aggressive => ContinuePolicy::Balanced,
                 };
             }
+            SettingsField::AgentMode => {
+                self.agent_mode = match self.agent_mode {
+                    AgentMode::Full => AgentMode::Auditor,
+                    AgentMode::Worker => AgentMode::Full,
+                    AgentMode::Orchestrator => AgentMode::Worker,
+                    AgentMode::Planner => AgentMode::Orchestrator,
+                    AgentMode::Reviewer => AgentMode::Planner,
+                    AgentMode::Auditor => AgentMode::Reviewer,
+                };
+            }
+            SettingsField::WriteOverwritePolicy => {
+                self.write_overwrite_policy = match self.write_overwrite_policy {
+                    WriteOverwritePolicy::Warn => WriteOverwritePolicy::Deny,
+                    WriteOverwritePolicy::RequireRead => WriteOverwritePolicy::Warn,
+                    WriteOverwritePolicy::BlockStale => WriteOverwritePolicy::RequireRead,
+                    WriteOverwritePolicy::Deny => WriteOverwritePolicy::BlockStale,
+                };
+            }
+            SettingsField::ShellBackend => {
+                self.shell_backend = match self.shell_backend {
+                    ShellBackend::Sh => ShellBackend::RushDaemon,
+                    ShellBackend::Rush => ShellBackend::Sh,
+                    ShellBackend::RushDaemon => ShellBackend::Rush,
+                };
+            }
+            SettingsField::LuaNativeTools => self.lua_native_tools = !self.lua_native_tools,
+            SettingsField::LuaShellExec => self.lua_shell_exec = !self.lua_shell_exec,
+            SettingsField::LuaHttp => self.lua_http = !self.lua_http,
+            SettingsField::LuaSecrets => self.lua_secrets = !self.lua_secrets,
             SettingsField::ImproveAutoTurnBudget => {
                 self.improve_auto_turn_budget =
                     self.improve_auto_turn_budget.saturating_sub(1).max(1);
@@ -911,6 +1009,16 @@ impl SettingsState {
         };
         config.web = imp_core::tools::web::types::WebConfig {
             search_provider: self.web_search_provider,
+        };
+        config.mode = self.agent_mode;
+        config.write.overwrite_policy = self.write_overwrite_policy;
+        config.shell.backend = self.shell_backend.clone();
+        config.lua = LuaConfig {
+            allow_native_tool_calls: Some(self.lua_native_tools),
+            allow_shell_exec: Some(self.lua_shell_exec),
+            allow_http: Some(self.lua_http),
+            allow_secrets: Some(self.lua_secrets),
+            allowed_env: config.lua.allowed_env.clone(),
         };
         config.mana = ManaConfig {
             scope: self.mana_scope,
@@ -1584,6 +1692,106 @@ fn render_settings_field(
                 ContinuePolicy::Balanced => "balanced",
                 ContinuePolicy::Aggressive => "aggressive",
             },
+            "← →",
+        ),
+        SettingsField::AgentMode => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Agent mode",
+            match state.agent_mode {
+                AgentMode::Full => "full",
+                AgentMode::Worker => "worker",
+                AgentMode::Orchestrator => "orchestrator",
+                AgentMode::Planner => "planner",
+                AgentMode::Reviewer => "reviewer",
+                AgentMode::Auditor => "auditor",
+            },
+            "← →",
+        ),
+        SettingsField::WriteOverwritePolicy => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Write safety",
+            match state.write_overwrite_policy {
+                WriteOverwritePolicy::Warn => "warn",
+                WriteOverwritePolicy::RequireRead => "require read",
+                WriteOverwritePolicy::BlockStale => "block stale",
+                WriteOverwritePolicy::Deny => "deny overwrites",
+            },
+            "← →",
+        ),
+        SettingsField::ShellBackend => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Shell backend",
+            match state.shell_backend {
+                ShellBackend::Sh => "sh",
+                ShellBackend::Rush => "rush",
+                ShellBackend::RushDaemon => "rush-daemon",
+            },
+            "← →",
+        ),
+        SettingsField::LuaNativeTools => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Lua native tools",
+            if state.lua_native_tools { "on" } else { "off" },
+            "← →",
+        ),
+        SettingsField::LuaShellExec => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Lua shell exec",
+            if state.lua_shell_exec { "on" } else { "off" },
+            "← →",
+        ),
+        SettingsField::LuaHttp => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Lua HTTP",
+            if state.lua_http { "on" } else { "off" },
+            "← →",
+        ),
+        SettingsField::LuaSecrets => render_field(
+            state,
+            theme,
+            buf,
+            inner,
+            scroll_offset,
+            row,
+            field_index(field),
+            "Lua secrets",
+            if state.lua_secrets { "on" } else { "off" },
             "← →",
         ),
         SettingsField::ImproveAutoTurnBudget => {
