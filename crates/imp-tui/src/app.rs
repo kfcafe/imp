@@ -279,6 +279,7 @@ const ACTIVE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const IDLE_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 const SLOW_TUI_EVENT_THRESHOLD: Duration = Duration::from_millis(16);
 const SLOW_TUI_RENDER_THRESHOLD: Duration = Duration::from_millis(33);
+const AGENT_START_STATUS_DELAY: Duration = Duration::from_millis(500);
 
 struct AgentStartRequest {
     session: SessionManager,
@@ -342,6 +343,10 @@ enum RuntimeSignal {
     UserMessagePersistFailed(String),
     AgentStartCompleted(AgentStartResult),
     AgentStartFailed(String),
+    AgentStartStatus {
+        key: String,
+        text: Option<String>,
+    },
     #[cfg(feature = "mana-ui")]
     ManaNavigatorLoaded(ManaNavigatorState),
     #[cfg(feature = "mana-ui")]
@@ -1323,6 +1328,7 @@ fn runtime_signal_kind(signal: &RuntimeSignal) -> &'static str {
         RuntimeSignal::UserMessagePersistFailed(_) => "user_message_persist_failed",
         RuntimeSignal::AgentStartCompleted(_) => "agent_start_completed",
         RuntimeSignal::AgentStartFailed(_) => "agent_start_failed",
+        RuntimeSignal::AgentStartStatus { .. } => "agent_start_status",
         #[cfg(feature = "mana-ui")]
         RuntimeSignal::ManaNavigatorLoaded(_) => "mana_navigator_loaded",
         #[cfg(feature = "mana-ui")]
@@ -1706,6 +1712,16 @@ fn start_agent_from_request(
         task,
         event_task,
     })
+}
+
+fn agent_start_join_result_to_signal(
+    result: Result<Result<AgentStartResult, String>, tokio::task::JoinError>,
+) -> RuntimeSignal {
+    match result {
+        Ok(Ok(result)) => RuntimeSignal::AgentStartCompleted(result),
+        Ok(Err(error)) => RuntimeSignal::AgentStartFailed(error),
+        Err(error) => RuntimeSignal::AgentStartFailed(format!("Agent start task failure: {error}")),
+    }
 }
 
 fn workflow_context_prompt_for_request(request: &AgentStartRequest) -> Option<String> {
@@ -2805,6 +2821,13 @@ impl App {
             RuntimeSignal::UserMessagePersistFailed(error) => self.push_error_msg(&error),
             RuntimeSignal::AgentStartCompleted(result) => self.finish_agent_start(result),
             RuntimeSignal::AgentStartFailed(error) => self.fail_agent_start(error),
+            RuntimeSignal::AgentStartStatus { key, text } => {
+                if let Some(text) = text {
+                    self.status_items.insert(key, text);
+                } else {
+                    self.status_items.remove(&key);
+                }
+            }
             #[cfg(feature = "mana-ui")]
             RuntimeSignal::ManaNavigatorLoaded(state) => self.finish_mana_navigator_load(state),
             #[cfg(feature = "mana-ui")]
@@ -5445,17 +5468,32 @@ impl App {
         let signal_tx = self.runtime_signal_tx.clone();
         self.trace_tui("agent_start_task queued");
         let start_task = tokio::spawn(async move {
-            let signal = match tokio::task::spawn_blocking(move || {
+            let mut build_task = tokio::task::spawn_blocking(move || {
                 start_agent_from_request(request, &text, agent_cwd)
-            })
-            .await
-            {
-                Ok(Ok(result)) => RuntimeSignal::AgentStartCompleted(result),
-                Ok(Err(error)) => RuntimeSignal::AgentStartFailed(error),
-                Err(error) => {
-                    RuntimeSignal::AgentStartFailed(format!("Agent start task failure: {error}"))
+            });
+            tokio::select! {
+                _ = tokio::time::sleep(AGENT_START_STATUS_DELAY) => {
+                    let _ = signal_tx
+                        .send(RuntimeSignal::AgentStartStatus {
+                            key: "startup".into(),
+                            text: Some("indexing repo…".into()),
+                        })
+                        .await;
                 }
-            };
+                result = &mut build_task => {
+                    let signal = agent_start_join_result_to_signal(result);
+                    let _ = signal_tx.send(signal).await;
+                    return;
+                }
+            }
+
+            let signal = agent_start_join_result_to_signal(build_task.await);
+            let _ = signal_tx
+                .send(RuntimeSignal::AgentStartStatus {
+                    key: "startup".into(),
+                    text: None,
+                })
+                .await;
             let _ = signal_tx.send(signal).await;
         });
         self.agent_start_task = Some(start_task);
@@ -5463,6 +5501,7 @@ impl App {
 
     fn finish_agent_start(&mut self, result: AgentStartResult) {
         self.agent_start_task = None;
+        self.status_items.remove("startup");
         self.agent_handle = Some(AgentHandle {
             event_rx: tokio::sync::mpsc::channel(1).1,
             command_tx: result.command_tx,
@@ -5474,6 +5513,7 @@ impl App {
 
     fn fail_agent_start(&mut self, error: String) {
         self.agent_start_task = None;
+        self.status_items.remove("startup");
         self.is_streaming = false;
         self.streaming_anchor_user_index = None;
         if self
@@ -11606,6 +11646,26 @@ mod session_lifecycle {
             .messages
             .iter()
             .any(|message| { message.content.contains("Verification failed: unit tests") }));
+    }
+
+    #[test]
+    fn agent_start_status_updates_and_clears_startup_status_item() {
+        let mut app = make_app();
+
+        app.handle_runtime_signal(RuntimeSignal::AgentStartStatus {
+            key: "startup".into(),
+            text: Some("indexing repo…".into()),
+        });
+        assert_eq!(
+            app.status_items.get("startup").map(String::as_str),
+            Some("indexing repo…")
+        );
+
+        app.handle_runtime_signal(RuntimeSignal::AgentStartStatus {
+            key: "startup".into(),
+            text: None,
+        });
+        assert!(!app.status_items.contains_key("startup"));
     }
 
     #[test]

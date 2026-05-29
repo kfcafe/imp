@@ -8,7 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoContextSummary {
@@ -123,22 +123,26 @@ fn git_source_files(root: &Path) -> Option<Vec<PathBuf>> {
         .filter(|bytes| !bytes.is_empty())
         .filter_map(|bytes| std::str::from_utf8(bytes).ok())
         .map(|relative| root.join(relative))
-        .filter(|path| scan::is_supported(path) && !is_heavyweight_context_path(root, path))
+        .filter(|path| scan::is_supported(path))
         .collect::<Vec<_>>();
     Some(files)
 }
 
 fn is_heavyweight_context_path(root: &Path, path: &Path) -> bool {
-    let relative = path.strip_prefix(root).unwrap_or(path);
-    relative.components().any(|component| {
-        let std::path::Component::Normal(name) = component else {
-            return false;
-        };
-        matches!(
-            name.to_string_lossy().as_ref(),
-            "evals" | "worktrees" | ".imp" | ".direnv" | ".cache"
-        )
-    })
+    scan_ignored_context_path(root, path)
+}
+
+fn scan_ignored_context_path(root: &Path, path: &Path) -> bool {
+    let Some(relative) = path.strip_prefix(root).ok() else {
+        return false;
+    };
+    let output = Command::new("git")
+        .arg("check-ignore")
+        .arg("--quiet")
+        .arg(relative)
+        .current_dir(root)
+        .status();
+    matches!(output, Ok(status) if status.success())
 }
 
 fn repo_fingerprint(root: &Path, files: &[PathBuf]) -> RepoFingerprint {
