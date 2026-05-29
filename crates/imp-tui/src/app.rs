@@ -1058,7 +1058,7 @@ fn startup_skill_hits_in_sections(area: Rect, sections: &[StartupSection]) -> Ve
 }
 
 fn startup_skill_hits_in_section(area: Rect, section: &StartupSection) -> Vec<StartupSkillHit> {
-    if section.title != "skills" || area.height < 3 || area.width < 12 {
+    if !section.title.starts_with("skills") || area.height < 3 || area.width < 12 {
         return Vec::new();
     }
 
