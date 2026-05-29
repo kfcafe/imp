@@ -2778,9 +2778,11 @@ impl App {
                     .as_ref()
                     .is_some_and(|task| !task.is_finished());
                 if !has_active_replacement {
-                    if let Some(task) = self.agent_event_task.take() {
-                        task.abort();
-                    }
+                    // Do not abort the event bridge here. Agent task completion can be
+                    // observed before the bridge has forwarded the terminal AgentEnd
+                    // event into the TUI runtime signal queue. Aborting it races away
+                    // that AgentEnd, leaving the UI in a permanently streaming state
+                    // where subsequent user replies are only queued as follow-ups.
                     self.agent_handle = None;
                 }
             }
@@ -2790,9 +2792,8 @@ impl App {
                     .as_ref()
                     .is_some_and(|task| !task.is_finished());
                 if !has_active_replacement {
-                    if let Some(task) = self.agent_event_task.take() {
-                        task.abort();
-                    }
+                    // Let the event bridge drain any terminal AgentEnd/Error events
+                    // that were emitted just before the task failed.
                     self.agent_handle = None;
                 }
                 self.present_agent_failure(error);
@@ -4053,6 +4054,31 @@ impl App {
         Ok(())
     }
 
+    fn agent_work_is_active(&self) -> bool {
+        self.agent_start_task.is_some()
+            || self
+                .agent_task
+                .as_ref()
+                .is_some_and(|task| !task.is_finished())
+    }
+
+    fn recover_stale_streaming_state(&mut self, reason: &str) -> bool {
+        if !self.is_streaming || self.agent_work_is_active() {
+            return false;
+        }
+
+        self.is_streaming = false;
+        self.streaming_anchor_user_index = None;
+        if let Some(last) = self.latest_streaming_message_mut() {
+            last.is_streaming = false;
+        }
+        self.message_queue.clear();
+        self.push_warning_msg(&format!(
+            "Recovered stale agent state ({reason}). Starting a new run."
+        ));
+        true
+    }
+
     fn handle_normal_key(&mut self, key: KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
         if self.is_copy_shortcut(key) {
             let _ = self.copy_selection();
@@ -4099,7 +4125,9 @@ impl App {
 
         match action {
             Some(Action::Submit) => {
-                if self.is_streaming {
+                if self.recover_stale_streaming_state("no active agent task") {
+                    self.send_message();
+                } else if self.is_streaming {
                     let text = self.editor.content().to_string();
                     if !text.trim().is_empty() {
                         self.queue_streaming_message(QueuedMessage::Steer(text));
@@ -11499,6 +11527,71 @@ mod session_lifecycle {
 
         assert_eq!(app.messages.last().unwrap().content, "012");
         assert!(app.runtime_signal_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn submit_recovers_stale_streaming_state_and_starts_new_run() {
+        let mut app = make_app();
+        app.is_streaming = true;
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: true,
+            timestamp: imp_llm::now(),
+        });
+        app.editor.set_content("try again");
+
+        app.handle_normal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+            .unwrap();
+
+        assert!(app.messages.iter().any(|message| {
+            message.role == MessageRole::Warning
+                && message.content.contains("Recovered stale agent state")
+        }));
+        assert_eq!(app.pending_agent_prompt.as_deref(), Some("try again"));
+        assert!(app.is_streaming);
+        assert_eq!(app.messages.last().unwrap().role, MessageRole::Assistant);
+        assert!(app.messages.last().unwrap().is_streaming);
+    }
+
+    #[tokio::test]
+    async fn agent_task_completion_keeps_event_bridge_alive_for_terminal_events() {
+        let mut app = make_app();
+        app.is_streaming = true;
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            assistant_blocks: Vec::new(),
+            is_streaming: true,
+            timestamp: imp_llm::now(),
+        });
+        app.agent_event_task = Some(tokio::spawn(std::future::pending::<()>()));
+
+        app.handle_runtime_signal(RuntimeSignal::AgentTaskCompleted);
+
+        assert!(app.agent_handle.is_none());
+        assert!(app.agent_event_task.is_some());
+        assert!(app.is_streaming);
+
+        app.handle_runtime_signal(RuntimeSignal::AgentEvent(AgentEvent::AgentEnd {
+            usage: Usage::default(),
+            cost: Cost::default(),
+            status: imp_core::agent::RunFinalStatus::Done {
+                reason: imp_core::agent::StopReason::WorkCompleted,
+            },
+        }));
+
+        assert!(!app.is_streaming);
+        assert!(!app.messages.last().unwrap().is_streaming);
+
+        if let Some(task) = app.agent_event_task.take() {
+            task.abort();
+        }
     }
 
     #[test]
