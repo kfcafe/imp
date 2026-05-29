@@ -1145,13 +1145,21 @@ pub async fn run() {
 
     // If stdin was piped without -p, run in print mode with stdin as prompt
     if let Some(ref stdin) = stdin_content {
-        let remaining: Vec<&str> = cli.args.iter().map(|s| s.as_str()).collect();
-        let instruction = if remaining.is_empty() {
-            String::new()
-        } else {
-            remaining.join(" ")
-        };
+        let remaining = prompt_args(&cli.args);
+        let instruction = remaining.join(" ");
         let full_prompt = build_full_prompt(&instruction, &file_context, &Some(stdin.clone()));
+        if let Err(e) = run_print_mode(&cli, &full_prompt).await {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // If positional prompt text was provided without -p, treat it as a one-shot prompt.
+    // @file arguments still contribute file context and are not included in the prompt text.
+    let bare_prompt_args = prompt_args(&cli.args);
+    if !bare_prompt_args.is_empty() {
+        let full_prompt = build_full_prompt(&bare_prompt_args.join(" "), &file_context, &None);
         if let Err(e) = run_print_mode(&cli, &full_prompt).await {
             eprintln!("Error: {e}");
             std::process::exit(1);
@@ -4167,6 +4175,13 @@ fn expand_file_args(args: &[String]) -> String {
     parts.join("\n\n")
 }
 
+fn prompt_args(args: &[String]) -> Vec<&str> {
+    args.iter()
+        .filter(|arg| !arg.starts_with('@'))
+        .map(String::as_str)
+        .collect()
+}
+
 /// Build the full prompt from user text, @file context, and stdin.
 fn build_full_prompt(prompt: &str, file_context: &str, stdin: &Option<String>) -> String {
     let mut parts = Vec::new();
@@ -4242,6 +4257,26 @@ mod tests {
 
     fn empty_auth_store() -> AuthStore {
         AuthStore::new(std::path::PathBuf::from("auth.json"))
+    }
+
+    #[test]
+    fn prompt_args_excludes_file_context_args() {
+        let args = vec![
+            "help".to_string(),
+            "me".to_string(),
+            "@README.md".to_string(),
+            "install".to_string(),
+            "utop".to_string(),
+        ];
+
+        assert_eq!(prompt_args(&args), vec!["help", "me", "install", "utop"]);
+    }
+
+    #[test]
+    fn build_full_prompt_keeps_bare_prompt_after_file_context() {
+        let prompt = build_full_prompt("help me install utop", "<file>ctx</file>", &None);
+
+        assert_eq!(prompt, "<file>ctx</file>\n\nhelp me install utop");
     }
 
     #[cfg(feature = "mana-ui")]
