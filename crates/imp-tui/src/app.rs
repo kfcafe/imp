@@ -212,10 +212,15 @@ impl std::fmt::Debug for SessionOpenResult {
     }
 }
 
+const SESSION_LIST_PAGE_SIZE: usize = 24;
+const SESSION_LIST_PREFETCH_REMAINING: usize = 6;
+
 #[derive(Debug)]
 struct SessionListResult {
     sessions: Vec<SessionInfo>,
     preferred_cwd: PathBuf,
+    offset: usize,
+    limit: usize,
 }
 
 fn open_url(url: &str) {
@@ -745,7 +750,10 @@ fn load_recent_sessions(cwd: &Path, limit: usize) -> Vec<SessionInfo> {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_none_or(|extension| extension != "jsonl") {
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "jsonl")
+        {
             continue;
         }
 
@@ -777,7 +785,11 @@ fn load_recent_sessions(cwd: &Path, limit: usize) -> Vec<SessionInfo> {
                 continue;
             };
             match entry {
-                SessionEntry::Header { created_at: at, cwd, .. } => {
+                SessionEntry::Header {
+                    created_at: at,
+                    cwd,
+                    ..
+                } => {
                     created_at = at;
                     session_cwd = cwd;
                     if session_cwd != cwd_string {
@@ -824,6 +836,7 @@ fn load_recent_sessions(cwd: &Path, limit: usize) -> Vec<SessionInfo> {
                 message_count
             },
             first_message,
+            last_message: None,
             name,
             summary,
         });
@@ -5058,6 +5071,7 @@ impl App {
                     if let UiMode::SessionPicker(ref mut state) = self.mode {
                         state.move_down();
                     }
+                    self.maybe_load_more_sessions();
                 }
                 _ => {}
             }
@@ -7051,10 +7065,12 @@ impl App {
         let signal_tx = self.runtime_signal_tx.clone();
         self.session_list_task = Some(tokio::spawn(async move {
             let signal = match tokio::task::spawn_blocking(move || {
-                SessionManager::list(&session_dir)
+                SessionManager::list_page(&session_dir, 0, SESSION_LIST_PAGE_SIZE, None)
                     .map(|sessions| SessionListResult {
                         sessions,
                         preferred_cwd,
+                        offset: 0,
+                        limit: SESSION_LIST_PAGE_SIZE,
                     })
                     .map_err(|error| format!("Failed to list sessions: {error}"))
             })
@@ -7070,8 +7086,59 @@ impl App {
         }));
     }
 
+    fn start_session_list_page_load(&mut self, offset: usize, query: Option<String>) {
+        if self.session_list_task.is_some() {
+            return;
+        }
+        let session_dir = imp_core::storage::global_sessions_dir();
+        let preferred_cwd = self.cwd.clone();
+        let signal_tx = self.runtime_signal_tx.clone();
+        let query_for_task = query.clone();
+        self.session_list_task = Some(tokio::spawn(async move {
+            let signal = match tokio::task::spawn_blocking(move || {
+                SessionManager::list_page(
+                    &session_dir,
+                    offset,
+                    SESSION_LIST_PAGE_SIZE,
+                    query_for_task.as_deref(),
+                )
+                .map(|sessions| SessionListResult {
+                    sessions,
+                    preferred_cwd,
+                    offset,
+                    limit: SESSION_LIST_PAGE_SIZE,
+                })
+                .map_err(|error| format!("Failed to list sessions: {error}"))
+            })
+            .await
+            {
+                Ok(Ok(result)) => RuntimeSignal::SessionListLoaded(result),
+                Ok(Err(error)) => RuntimeSignal::SessionListFailed(error),
+                Err(error) => {
+                    RuntimeSignal::SessionListFailed(format!("Session list task failure: {error}"))
+                }
+            };
+            let _ = signal_tx.send(signal).await;
+        }));
+    }
+
+    fn maybe_load_more_sessions(&mut self) {
+        let next_offset = match &mut self.mode {
+            UiMode::SessionPicker(state)
+                if state.should_load_more(SESSION_LIST_PREFETCH_REMAINING) =>
+            {
+                let next_offset = state.next_offset();
+                state.set_loading_more(true);
+                next_offset
+            }
+            _ => return,
+        };
+        self.start_session_list_page_load(next_offset, None);
+    }
+
     fn finish_session_list_load(&mut self, result: SessionListResult) {
-        if result.sessions.is_empty() {
+        let has_more = result.sessions.len() >= result.limit;
+        if result.sessions.is_empty() && result.offset == 0 {
             self.mode = UiMode::Normal;
             self.push_system_msg("No saved sessions found.");
             return;
@@ -7079,16 +7146,20 @@ impl App {
 
         let preferred_cwd = result.preferred_cwd;
         if let UiMode::SessionPicker(state) = &mut self.mode {
-            state.finish_loading(result.sessions);
-            if state.filtered_indices.is_empty() {
-                self.mode = UiMode::Normal;
-                self.push_system_msg("No saved sessions found.");
+            if result.offset == 0 {
+                state.finish_loading(result.sessions);
+                state.has_more = has_more;
+                if state.filtered_indices.is_empty() {
+                    self.mode = UiMode::Normal;
+                    self.push_system_msg("No saved sessions found.");
+                }
+            } else {
+                state.append_sessions(result.sessions, has_more);
             }
         } else {
-            self.mode = UiMode::SessionPicker(SessionPickerState::new(
-                result.sessions,
-                Some(&preferred_cwd),
-            ));
+            let mut state = SessionPickerState::new(result.sessions, Some(&preferred_cwd));
+            state.has_more = has_more;
+            self.mode = UiMode::SessionPicker(state);
         }
     }
 
@@ -7150,6 +7221,7 @@ impl App {
                 if let UiMode::SessionPicker(ref mut state) = self.mode {
                     state.move_down();
                 }
+                self.maybe_load_more_sessions();
             }
             KeyCode::Backspace => {
                 if let UiMode::SessionPicker(ref mut state) = self.mode {
@@ -9727,6 +9799,7 @@ mod session_lifecycle {
             updated_at: 2,
             message_count: 1,
             first_message: Some("hello".into()),
+            last_message: Some("hello".into()),
             name: None,
             summary: None,
         };
@@ -9734,6 +9807,8 @@ mod session_lifecycle {
         app.finish_session_list_load(SessionListResult {
             sessions: vec![info],
             preferred_cwd: temp.path().to_path_buf(),
+            offset: 0,
+            limit: SESSION_LIST_PAGE_SIZE,
         });
 
         match &app.mode {

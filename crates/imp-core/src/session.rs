@@ -116,6 +116,7 @@ pub struct SessionInfo {
     pub updated_at: u64,
     pub message_count: usize,
     pub first_message: Option<String>,
+    pub last_message: Option<String>,
     pub name: Option<String>,
     pub summary: Option<String>,
 }
@@ -1727,9 +1728,9 @@ fn summarize_session_title(text: &str, max_chars: usize) -> String {
 }
 
 fn recent_session_files(session_dir: &Path) -> Result<Vec<(PathBuf, u64)>> {
-    let mut files = Vec::new();
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
     if !session_dir.exists() {
-        return Ok(files);
+        return Ok(Vec::new());
     }
 
     for dir_entry in std::fs::read_dir(session_dir)? {
@@ -1739,22 +1740,25 @@ fn recent_session_files(session_dir: &Path) -> Result<Vec<(PathBuf, u64)>> {
             continue;
         }
 
-        let updated_at = dir_entry
+        let modified = dir_entry
             .metadata()
             .ok()
             .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let updated_at = modified
+            .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        files.push((path, updated_at));
+        files.push((path, updated_at, modified));
     }
 
-    files.sort_by(|(path_a, updated_at_a), (path_b, updated_at_b)| {
-        updated_at_b
-            .cmp(updated_at_a)
-            .then_with(|| path_b.cmp(path_a))
+    files.sort_by(|(path_a, _, modified_a), (path_b, _, modified_b)| {
+        modified_b.cmp(modified_a).then_with(|| path_b.cmp(path_a))
     });
-    Ok(files)
+    Ok(files
+        .into_iter()
+        .map(|(path, updated_at, _)| (path, updated_at))
+        .collect())
 }
 
 fn session_info_matches(info: &SessionInfo, needle: &str) -> bool {
@@ -1783,6 +1787,7 @@ fn read_session_info(path: &Path, updated_at: u64) -> Result<SessionInfo> {
     let mut message_count = 0;
     let mut compaction_count = 0;
     let mut first_message = None;
+    let mut last_message = None;
     let mut name = None;
     let mut summary = None;
     let mut summary_parts = Vec::new();
@@ -1808,6 +1813,9 @@ fn read_session_info(path: &Path, updated_at: u64) -> Result<SessionInfo> {
                 message_count += 1;
                 if first_message.is_none() {
                     first_message = extract_text(&message);
+                }
+                if let Some(text) = extract_text(&message) {
+                    last_message = Some(text);
                 }
                 if summary.is_none() && summary_parts.len() < 3 {
                     if let Message::Assistant(_) = message {
@@ -1883,6 +1891,7 @@ fn read_session_info(path: &Path, updated_at: u64) -> Result<SessionInfo> {
             message_count
         },
         first_message,
+        last_message,
         name,
         summary,
     })
@@ -2021,6 +2030,7 @@ mod tests {
             updated_at: 0,
             message_count: 1,
             first_message: Some("help me with oauth login issues".into()),
+            last_message: Some("fixed oauth login issues".into()),
             name: None,
             summary: Some(
                 "Investigated OAuth login failures and refreshed provider auth flow".into(),
@@ -2342,15 +2352,55 @@ mod tests {
         counts.sort();
         assert_eq!(counts, vec![1, 2]);
 
-        // first_message should be set
+        // first_message and last_message should be set
         for s in &sessions {
             assert!(s.first_message.is_some());
+            assert!(s.last_message.is_some());
         }
 
         assert!(sessions.iter().any(|s| s.name.as_deref() == Some("First")));
         assert!(sessions
             .iter()
             .any(|s| s.summary.as_deref() == Some("Second session summary")));
+    }
+
+    #[test]
+    fn session_list_page_orders_by_updated_time_and_limits() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join("sessions");
+        let cwd = tmp.path().join("project");
+
+        let mut old = SessionManager::new(&cwd, &session_dir).unwrap();
+        old.append(make_msg_entry("old", "old session")).unwrap();
+        let _old_path = old.path().unwrap().to_path_buf();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut new = SessionManager::new(&cwd, &session_dir).unwrap();
+        new.append(make_msg_entry("new", "new session")).unwrap();
+        let new_path = new.path().unwrap().to_path_buf();
+
+        let sessions = SessionManager::list_page(&session_dir, 0, 1, None).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].path, new_path);
+    }
+
+    #[test]
+    fn session_list_captures_last_message() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join("sessions");
+        let cwd = tmp.path().join("project");
+
+        let mut session = SessionManager::new(&cwd, &session_dir).unwrap();
+        session
+            .append(make_msg_entry("first", "first prompt"))
+            .unwrap();
+        session
+            .append(make_msg_entry("last", "latest response"))
+            .unwrap();
+
+        let sessions = SessionManager::list(&session_dir).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].first_message.as_deref(), Some("first prompt"));
+        assert_eq!(sessions[0].last_message.as_deref(), Some("latest response"));
     }
 
     #[test]
