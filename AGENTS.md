@@ -30,12 +30,21 @@ Agents working in this repo should build the right version of a change, not the 
 - Start from the intended product/runtime behavior and make the implementation match that intent.
 - Prefer complete, durable solutions over thin shims, placeholders, mocked behavior, or partial paths that only pass the happy case.
 - Keep changes focused, but do not underbuild core behavior just to minimize the diff.
+- Do not stop after a token checkpoint when the accepted task clearly requires a larger coherent implementation; continue through the planned implementation, tests, and verification until the workflow is complete, blocked by real evidence, or needs a user decision.
+- Use small reversible commits/edits as an execution technique, not as a reason to deliver partial behavior.
 - Follow the real control flow, persistence model, policy boundaries, error handling, and user-facing UX that production code requires.
 - When a request implies a workflow, implement the full workflow end-to-end unless scope, risk, or missing context requires asking first.
 - Preserve existing architecture when it is sound; improve the seam when the current seam would force a brittle or fake solution.
 - Include meaningful tests or verification for the behavior that matters, including important failure and edge paths.
 - Do not leave TODO-driven behavior, silent fallbacks, or intentionally incomplete implementations unless explicitly agreed and documented.
 - If the complete solution is materially larger than expected, pause and explain the scope tradeoff instead of silently shipping a minimal substitute.
+
+## Communication
+
+- Keep implementation updates conversational and responsive to the user's framing.
+- If the user describes behavior using product terms that do not map exactly to the codebase, acknowledge the intent and translate it briefly into the local architecture. For example, if they say "DOM" for a TUI list, say that the equivalent is the visible rendered rows/viewport.
+- Do not reduce progress updates to only "what changed / verification". Include the next relevant product or implementation implication when it helps the user track whether their actual idea is being addressed.
+- Keep this brief; one or two natural sentences are usually enough, with verification only when it matters.
 
 ## Extension reality
 

@@ -87,6 +87,41 @@ pub struct WorkflowStep {
     pub checks: Vec<String>,
     #[serde(default)]
     pub prototypes: Vec<String>,
+    #[serde(default)]
+    pub action: Option<WorkflowStepAction>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowStepAction {
+    pub kind: WorkflowStepActionKind,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub worker: Option<String>,
+    pub objective: String,
+    #[serde(default)]
+    pub instructions: Vec<String>,
+    #[serde(default)]
+    pub write_scope: Vec<PathBuf>,
+    #[serde(default)]
+    pub completion: WorkflowStepActionCompletion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowStepActionKind {
+    Agent,
+    Worker,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowStepActionCompletion {
+    #[serde(default)]
+    pub checks: Vec<String>,
+    #[serde(default)]
+    pub artifacts: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -134,6 +169,12 @@ pub struct WorkflowCheck {
     pub question: Option<String>,
     #[serde(default)]
     pub decision: Option<String>,
+    #[serde(default)]
+    pub pattern: Option<String>,
+    #[serde(default)]
+    pub paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub broad: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,6 +187,9 @@ pub enum CheckKind {
     Approval,
     Aggregate,
     Closeout,
+    ChangedFiles,
+    Presence,
+    Absence,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -365,8 +409,11 @@ pub fn validate_workflow(
     validate_directory_id(doc, options, &mut diagnostics);
     validate_step_references(doc, options, &mut diagnostics);
     validate_check_references(doc, &mut diagnostics);
+    validate_check_contracts(doc, &mut diagnostics);
+    validate_implementation_step_evidence(doc, &mut diagnostics);
     validate_acceptance(doc, &mut diagnostics);
     validate_closeout(doc, &mut diagnostics);
+    validate_action_contracts(doc, &mut diagnostics);
     validate_parent_link(doc, options, &mut diagnostics);
     validate_passed_artifacts(doc, options, &mut diagnostics);
     validate_step_cycles(doc, &mut diagnostics);
@@ -504,6 +551,44 @@ fn validate_step_references(
     }
 }
 
+fn validate_action_contracts(doc: &WorkflowDocument, diagnostics: &mut Vec<WorkflowDiagnostic>) {
+    for (step_id, step) in &doc.steps {
+        let Some(action) = &step.action else {
+            continue;
+        };
+
+        if action.objective.trim().is_empty() {
+            diagnostics.push(WorkflowDiagnostic::new(
+                format!("steps.{step_id}.action.objective"),
+                "action objective must not be empty",
+            ));
+        }
+
+        if matches!(action.kind, WorkflowStepActionKind::Worker) {
+            match action.worker.as_deref() {
+                Some(worker) if doc.workers.contains_key(worker) => {}
+                Some(worker) => diagnostics.push(WorkflowDiagnostic::new(
+                    format!("steps.{step_id}.action.worker"),
+                    format!("unknown worker `{worker}`"),
+                )),
+                None => diagnostics.push(WorkflowDiagnostic::new(
+                    format!("steps.{step_id}.action.worker"),
+                    "worker action must reference a worker",
+                )),
+            }
+        }
+
+        for check in &action.completion.checks {
+            if !doc.checks.contains_key(check) {
+                diagnostics.push(WorkflowDiagnostic::new(
+                    format!("steps.{step_id}.action.completion.checks"),
+                    format!("unknown check `{check}`"),
+                ));
+            }
+        }
+    }
+}
+
 fn validate_check_references(doc: &WorkflowDocument, diagnostics: &mut Vec<WorkflowDiagnostic>) {
     for (check_id, check) in &doc.checks {
         for dependency in &check.requires {
@@ -515,6 +600,74 @@ fn validate_check_references(doc: &WorkflowDocument, diagnostics: &mut Vec<Workf
             }
         }
     }
+}
+
+fn validate_check_contracts(doc: &WorkflowDocument, diagnostics: &mut Vec<WorkflowDiagnostic>) {
+    for (check_id, check) in &doc.checks {
+        match check.kind {
+            CheckKind::Presence | CheckKind::Absence => {
+                if check.path.is_none() && check.file.is_none() {
+                    diagnostics.push(WorkflowDiagnostic::new(
+                        format!("checks.{check_id}.path"),
+                        "presence/absence check must include path or file",
+                    ));
+                }
+                if check
+                    .pattern
+                    .as_deref()
+                    .is_none_or(|pattern| pattern.trim().is_empty())
+                {
+                    diagnostics.push(WorkflowDiagnostic::new(
+                        format!("checks.{check_id}.pattern"),
+                        "presence/absence check must include a non-empty pattern",
+                    ));
+                }
+            }
+            CheckKind::ChangedFiles => {
+                if check.paths.is_empty() {
+                    diagnostics.push(WorkflowDiagnostic::new(
+                        format!("checks.{check_id}.paths"),
+                        "changed_files check must include at least one path",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn validate_implementation_step_evidence(
+    doc: &WorkflowDocument,
+    diagnostics: &mut Vec<WorkflowDiagnostic>,
+) {
+    if doc.kind != "implementation" {
+        return;
+    }
+
+    for (step_id, step) in &doc.steps {
+        if !matches!(step.kind, StepKind::Build) {
+            continue;
+        }
+        if step
+            .checks
+            .iter()
+            .filter_map(|check_id| doc.checks.get(check_id))
+            .any(is_implementation_evidence_check)
+        {
+            continue;
+        }
+        diagnostics.push(WorkflowDiagnostic::new(
+            format!("steps.{step_id}.checks"),
+            "implementation build step must include change-sensitive implementation evidence; broad command checks alone are not sufficient",
+        ));
+    }
+}
+
+fn is_implementation_evidence_check(check: &WorkflowCheck) -> bool {
+    matches!(
+        check.kind,
+        CheckKind::Artifact | CheckKind::ChangedFiles | CheckKind::Presence | CheckKind::Absence
+    ) || (matches!(check.kind, CheckKind::Command) && !check.broad)
 }
 
 fn validate_acceptance(doc: &WorkflowDocument, diagnostics: &mut Vec<WorkflowDiagnostic>) {
@@ -898,6 +1051,191 @@ closeout:
             next_runnable_steps(&doc),
             vec!["add_schema_module".to_owned()]
         );
+    }
+
+    #[test]
+    fn evidence_quality_check_kinds() {
+        let yaml = r#"
+schema: imp.workflow/v1
+id: evidence-quality
+title: Evidence Quality
+status: active
+kind: implementation
+settings: {}
+spec:
+  goal: Validate evidence check kinds.
+  acceptance:
+    done:
+      text: Evidence is checked.
+      status: todo
+      checks: [source_changed, classifier_removed, prompt_present]
+context: {}
+steps:
+  implement:
+    kind: build
+    status: todo
+    checks: [source_changed, classifier_removed, prompt_present]
+prototypes: {}
+checks:
+  source_changed:
+    kind: changed_files
+    status: pending
+    paths: [crates/imp-core/src/workflow/schema.rs]
+  classifier_removed:
+    kind: absence
+    status: pending
+    path: crates/imp-core/src/agent/mod.rs
+    pattern: classify_stop_reason_from_text
+  prompt_present:
+    kind: presence
+    status: pending
+    file: crates/imp-core/src/system_prompt.rs
+    pattern: Tool routing
+workers: {}
+results:
+  path: .imp/workflows/evidence-quality/results.md
+closeout:
+  done:
+    requires: [source_changed]
+"#;
+        let doc: WorkflowDocument = serde_yaml::from_str(yaml).expect("workflow parses");
+        let diagnostics = validate_workflow(
+            &doc,
+            &ValidateOptions::draft(PathBuf::from(".imp/workflows/evidence-quality")),
+        );
+        assert_eq!(diagnostics, Vec::new(), "{diagnostics:#?}");
+
+        let broken_yaml = yaml
+            .replace(
+                "paths: [crates/imp-core/src/workflow/schema.rs]",
+                "paths: []",
+            )
+            .replace("pattern: classify_stop_reason_from_text", "pattern: ''")
+            .replace(
+                "file: crates/imp-core/src/system_prompt.rs",
+                "question: missing file",
+            );
+        let broken_doc: WorkflowDocument =
+            serde_yaml::from_str(&broken_yaml).expect("workflow parses");
+        let diagnostics = validate_workflow(
+            &broken_doc,
+            &ValidateOptions::draft(PathBuf::from(".imp/workflows/evidence-quality")),
+        );
+        let messages = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            messages.contains("changed_files check must include at least one path"),
+            "{diagnostics:#?}"
+        );
+        assert!(
+            messages.contains("presence/absence check must include a non-empty pattern"),
+            "{diagnostics:#?}"
+        );
+        assert!(
+            messages.contains("presence/absence check must include path or file"),
+            "{diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn weak_implementation_checks_are_rejected() {
+        let yaml = r#"
+schema: imp.workflow/v1
+id: weak-implementation
+title: Weak Implementation
+status: active
+kind: implementation
+settings: {}
+spec:
+  goal: Reject broad checks alone.
+  acceptance:
+    done:
+      text: Work is done.
+      status: todo
+      checks: [broad_tests]
+context: {}
+steps:
+  implement:
+    kind: build
+    status: todo
+    checks: [broad_tests]
+prototypes: {}
+checks:
+  broad_tests:
+    kind: command
+    status: pending
+    broad: true
+    command: cargo test -p imp-core --lib
+workers: {}
+results:
+  path: .imp/workflows/weak-implementation/results.md
+closeout:
+  done:
+    requires: [broad_tests]
+"#;
+        let doc: WorkflowDocument = serde_yaml::from_str(yaml).expect("workflow parses");
+        let diagnostics = validate_workflow(
+            &doc,
+            &ValidateOptions::draft(PathBuf::from(".imp/workflows/weak-implementation")),
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.path == "steps.implement.checks"
+                    && diagnostic.message.contains("broad command checks alone")),
+            "{diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn implementation_steps_require_change_sensitive_evidence() {
+        let yaml = r#"
+schema: imp.workflow/v1
+id: strong-implementation
+title: Strong Implementation
+status: active
+kind: implementation
+settings: {}
+spec:
+  goal: Accept change-sensitive evidence.
+  acceptance:
+    done:
+      text: Work is done.
+      status: todo
+      checks: [source_changed, broad_tests]
+context: {}
+steps:
+  implement:
+    kind: build
+    status: todo
+    checks: [source_changed, broad_tests]
+prototypes: {}
+checks:
+  source_changed:
+    kind: changed_files
+    status: pending
+    paths: [crates/imp-core/src/workflow/schema.rs]
+  broad_tests:
+    kind: command
+    status: pending
+    broad: true
+    command: cargo test -p imp-core --lib
+workers: {}
+results:
+  path: .imp/workflows/strong-implementation/results.md
+closeout:
+  done:
+    requires: [broad_tests]
+"#;
+        let doc: WorkflowDocument = serde_yaml::from_str(yaml).expect("workflow parses");
+        let diagnostics = validate_workflow(
+            &doc,
+            &ValidateOptions::draft(PathBuf::from(".imp/workflows/strong-implementation")),
+        );
+        assert_eq!(diagnostics, Vec::new(), "{diagnostics:#?}");
     }
 
     #[test]

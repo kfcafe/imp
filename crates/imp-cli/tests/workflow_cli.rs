@@ -64,7 +64,7 @@ fn workflow_cli_lists_shows_validates_runs_and_updates() {
     assert_success_contains(
         temp.path(),
         &["workflow", "run", "cli-fixture"],
-        "Next workflow action: run step plan [plan]",
+        "Workflow blocked: missing action contract for step plan [plan]",
     );
     assert_success_contains(
         temp.path(),

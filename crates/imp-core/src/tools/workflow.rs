@@ -11,8 +11,8 @@ use super::{Tool, ToolContext, ToolOutput};
 use crate::error::Result;
 use crate::workflow::{
     load_workflow, load_workflow_raw, next_runnable_steps, validate_workflow, CheckKind,
-    CheckStatus, StepKind, StepStatus, ValidateOptions, ValidationMode, WorkflowDocument,
-    WorkflowWorker,
+    CheckStatus, StepKind, StepStatus, ValidateOptions, ValidationMode, WorkflowCheck,
+    WorkflowDocument, WorkflowStep, WorkflowStepAction, WorkflowStepActionKind, WorkflowWorker,
 };
 
 pub struct WorkflowTool;
@@ -144,14 +144,22 @@ struct WorkflowWorkerAssignment {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum WorkflowNextAction {
-    RanCommandChecks {
-        step: String,
-        step_status: String,
-        checks: Vec<WorkflowCommandCheckRun>,
+    OrchestratedCommandChecks {
+        steps: Vec<WorkflowCommandStepRun>,
         reconciled: Vec<String>,
     },
     ValidationBlocked {
         diagnostics: Vec<WorkflowDiagnosticView>,
+    },
+    AgentAction {
+        step: String,
+        step_kind: String,
+        contract: WorkflowAgentActionContract,
+    },
+    MissingActionContract {
+        step: String,
+        step_kind: String,
+        reason: String,
     },
     RunStep {
         step: String,
@@ -165,6 +173,20 @@ enum WorkflowNextAction {
     NoRunnableSteps {
         blocked_steps: Vec<WorkflowBlockedStep>,
     },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowAgentActionContract {
+    workflow_id: String,
+    step: String,
+    step_kind: String,
+    role: String,
+    objective: String,
+    instructions: Vec<String>,
+    write_scope: Vec<String>,
+    completion_checks: Vec<String>,
+    completion_artifacts: Vec<String>,
+    worker: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -393,53 +415,72 @@ async fn run_action(
         })
         .collect::<Vec<_>>();
 
-    let next_action = if !diagnostics.is_empty() {
-        WorkflowNextAction::ValidationBlocked {
-            diagnostics: diagnostic_views.clone(),
-        }
-    } else if let Some(step_id) = next_runnable_steps(&doc).into_iter().next() {
-        match run_command_checks(workflows_root, &root, &doc, &step_id, ctx).await? {
-            Some(summary) => WorkflowNextAction::RanCommandChecks {
-                step: step_id,
-                step_status: summary.step_status,
-                checks: summary.checks,
-                reconciled: summary.reconciled,
+    let (next_action, result_status) = if !diagnostics.is_empty() {
+        (
+            WorkflowNextAction::ValidationBlocked {
+                diagnostics: diagnostic_views.clone(),
             },
-            None => {
-                let step = doc.steps.get(&step_id).expect("runnable step exists");
-                let worker_assignment = step.worker.as_ref().and_then(|worker_id| {
-                    doc.workers.get(worker_id).map(|worker| {
-                        worker_assignment(
-                            &id,
-                            &step_id,
-                            step,
-                            worker_id,
-                            worker,
-                            &step.checks,
-                            &doc,
-                        )
-                    })
-                });
-                WorkflowNextAction::RunStep {
-                    step: step_id,
-                    step_kind: format!("{:?}", step.kind).to_case(),
-                    worker: step.worker.clone(),
-                    worker_assignment: Box::new(worker_assignment),
-                    checks: step.checks.clone(),
-                    workflow: step.workflow.clone(),
-                    depends_on: step.depends_on.clone(),
+            format!("{:?}", doc.status).to_case(),
+        )
+    } else {
+        let mut current_doc = doc;
+        let mut ran_steps = Vec::new();
+        let mut all_reconciled = Vec::new();
+        let mut deferred_action = None;
+
+        loop {
+            let Some(step_id) = next_runnable_steps(&current_doc).into_iter().next() else {
+                break;
+            };
+
+            match run_command_checks(workflows_root, &root, &current_doc, &step_id, ctx).await? {
+                Some(summary) => {
+                    all_reconciled.extend(summary.reconciled.clone());
+                    ran_steps.push(WorkflowCommandStepRun {
+                        step: step_id,
+                        step_status: summary.step_status,
+                        checks: summary.checks,
+                    });
+                    current_doc = load_workflow(&root.join("workflow.yaml")).map_err(|error| {
+                        crate::error::Error::Tool(format!(
+                            "failed to reload {} after run: {error}",
+                            root.join("workflow.yaml").display()
+                        ))
+                    })?;
+                }
+                None => {
+                    let step = current_doc
+                        .steps
+                        .get(&step_id)
+                        .expect("runnable step exists");
+                    if ran_steps.is_empty() {
+                        deferred_action =
+                            Some(action_for_runnable_step(&id, &step_id, step, &current_doc));
+                    }
+                    break;
                 }
             }
         }
-    } else {
-        WorkflowNextAction::NoRunnableSteps {
-            blocked_steps: blocked_steps(&doc),
-        }
+
+        let result_status = format!("{:?}", current_doc.status).to_case();
+        let action = if let Some(action) = deferred_action {
+            action
+        } else if !ran_steps.is_empty() {
+            WorkflowNextAction::OrchestratedCommandChecks {
+                steps: ran_steps,
+                reconciled: all_reconciled,
+            }
+        } else {
+            WorkflowNextAction::NoRunnableSteps {
+                blocked_steps: blocked_steps(&current_doc),
+            }
+        };
+        (action, result_status)
     };
 
     let result = WorkflowRunResult {
         id: id.clone(),
-        status: format!("{:?}", doc.status).to_case(),
+        status: result_status,
         next_action,
     };
     let text = render_run_result(&result);
@@ -456,6 +497,13 @@ struct WorkflowCommandCheckRun {
     command: String,
     status: String,
     exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowCommandStepRun {
+    step: String,
+    step_status: String,
+    checks: Vec<WorkflowCommandCheckRun>,
 }
 
 struct CommandCheckRunSummary {
@@ -478,9 +526,16 @@ async fn run_command_checks(
         .checks
         .iter()
         .filter_map(|check_id| doc.checks.get(check_id).map(|check| (check_id, check)))
-        .filter(|(_, check)| matches!(check.kind, CheckKind::Command))
+        .filter(|(_, check)| {
+            matches!(
+                check.kind,
+                CheckKind::Command
+                    | CheckKind::Presence
+                    | CheckKind::Absence
+                    | CheckKind::ChangedFiles
+            )
+        })
         .filter(|(_, check)| matches!(check.status, CheckStatus::Pending))
-        .filter_map(|(check_id, check)| check.command.as_ref().map(|command| (check_id, command)))
         .collect::<Vec<_>>();
     if runnable.is_empty() {
         return Ok(None);
@@ -509,46 +564,40 @@ async fn run_command_checks(
     let mut event_file = open_workflow_event_file(&event_path)?;
     let mut executed = Vec::new();
     let mut failed_check = false;
-    let cwd = workflows_root.parent().unwrap_or(workflows_root);
-    for (check_id, command) in runnable {
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(cwd)
-            .output()
-            .await
-            .map_err(|error| {
-                crate::error::Error::Tool(format!("failed to run check `{check_id}`: {error}"))
-            })?;
-        let status = if output.status.success() {
-            "passed"
-        } else {
-            failed_check = true;
-            "failed"
+    let cwd = workflows_root
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(workflows_root);
+    for (check_id, check) in runnable {
+        let (status, reason, exit_code) = match evaluate_pending_check(check, cwd).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                failed_check = true;
+                ("failed".to_string(), error, None)
+            }
         };
-        set_nested_mapping_string(&mut yaml, &["checks", check_id], "status", status)?;
+        if status != "passed" {
+            failed_check = true;
+        }
+        set_nested_mapping_string(&mut yaml, &["checks", check_id], "status", &status)?;
         append_workflow_event(
             &mut event_file,
             &WorkflowUpdateEvent {
                 timestamp: Utc::now().to_rfc3339(),
                 action: "run".to_string(),
                 path: format!("checks.{check_id}.status"),
-                value: serde_json::Value::String(status.to_string()),
-                reason: format!(
-                    "command `{}` exited with {}",
-                    command,
-                    output
-                        .status
-                        .code()
-                        .map_or_else(|| "signal".to_string(), |code| code.to_string())
-                ),
+                value: serde_json::Value::String(status.clone()),
+                reason,
             },
         )?;
         executed.push(WorkflowCommandCheckRun {
             check: check_id.clone(),
-            command: command.clone(),
-            status: status.to_string(),
-            exit_code: output.status.code(),
+            command: check
+                .command
+                .clone()
+                .unwrap_or_else(|| format!("{:?}", check.kind).to_case()),
+            status,
+            exit_code,
         });
     }
 
@@ -668,33 +717,78 @@ fn reconcile_workflow_statuses(
 
 fn render_run_result(result: &WorkflowRunResult) -> String {
     match &result.next_action {
-        WorkflowNextAction::RanCommandChecks {
-            step,
-            step_status,
-            checks,
-            reconciled,
-        } => {
+        WorkflowNextAction::OrchestratedCommandChecks { steps, reconciled } => {
+            let check_count: usize = steps.iter().map(|step| step.checks.len()).sum();
             let mut lines = vec![format!(
-                "Workflow `{}` ran {} command check(s) for step `{step}`; step is `{step_status}`.",
+                "Workflow `{}` orchestrated {} step(s) and ran {} command check(s).",
                 result.id,
-                checks.len()
+                steps.len(),
+                check_count
             )];
-            for check in checks {
-                lines.push(format!(
-                    "- {}: {} (exit {})",
-                    check.check,
-                    check.status,
-                    check
-                        .exit_code
-                        .map(|code| code.to_string())
-                        .unwrap_or_else(|| "signal".to_string())
-                ));
+            for step in steps {
+                lines.push(format!("- step {}: {}", step.step, step.step_status));
+                for check in &step.checks {
+                    lines.push(format!(
+                        "  - {}: {} (exit {})",
+                        check.check,
+                        check.status,
+                        check
+                            .exit_code
+                            .map(|code| code.to_string())
+                            .unwrap_or_else(|| "signal".to_string())
+                    ));
+                }
             }
             if !reconciled.is_empty() {
                 lines.push(format!("Reconciled: {}", reconciled.join(", ")));
             }
             lines.join("\n")
         }
+        WorkflowNextAction::AgentAction {
+            step,
+            step_kind,
+            contract,
+        } => {
+            let mut lines = vec![format!("Workflow needs agent action: {step} [{step_kind}]")];
+            lines.push(String::new());
+            lines.push(format!("Role: {}", contract.role));
+            if let Some(worker) = &contract.worker {
+                lines.push(format!("Worker: {worker}"));
+            }
+            lines.push(format!("Objective: {}", contract.objective));
+            if !contract.instructions.is_empty() {
+                lines.push(String::new());
+                lines.push("Instructions:".to_string());
+                for instruction in &contract.instructions {
+                    lines.push(format!("- {instruction}"));
+                }
+            }
+            if !contract.write_scope.is_empty() {
+                lines.push(String::new());
+                lines.push("Allowed writes:".to_string());
+                for path in &contract.write_scope {
+                    lines.push(format!("- {path}"));
+                }
+            }
+            if !contract.completion_checks.is_empty() || !contract.completion_artifacts.is_empty() {
+                lines.push(String::new());
+                lines.push("Completion:".to_string());
+                for check in &contract.completion_checks {
+                    lines.push(format!("- check: {check}"));
+                }
+                for artifact in &contract.completion_artifacts {
+                    lines.push(format!("- artifact: {artifact}"));
+                }
+            }
+            lines.join("\n")
+        }
+        WorkflowNextAction::MissingActionContract {
+            step,
+            step_kind,
+            reason,
+        } => format!(
+            "Workflow blocked: missing action contract for step {step} [{step_kind}].\n{reason}"
+        ),
         WorkflowNextAction::ValidationBlocked { diagnostics } => {
             let mut text = format!(
                 "Workflow `{}` is blocked by validation diagnostics:",
@@ -796,10 +890,200 @@ fn blocked_steps(doc: &WorkflowDocument) -> Vec<WorkflowBlockedStep> {
         .collect()
 }
 
+async fn evaluate_pending_check(
+    check: &WorkflowCheck,
+    cwd: &Path,
+) -> std::result::Result<(String, String, Option<i32>), String> {
+    match check.kind {
+        CheckKind::Command => {
+            let command = check
+                .command
+                .as_deref()
+                .ok_or_else(|| "command check is missing command".to_string())?;
+            let output = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .current_dir(cwd)
+                .output()
+                .await
+                .map_err(|error| format!("failed to run command check: {error}"))?;
+            let status = if output.status.success() {
+                "passed"
+            } else {
+                "failed"
+            };
+            Ok((
+                status.to_string(),
+                format!(
+                    "command `{}` exited with {}",
+                    command,
+                    output
+                        .status
+                        .code()
+                        .map_or_else(|| "signal".to_string(), |code| code.to_string())
+                ),
+                output.status.code(),
+            ))
+        }
+        CheckKind::Presence | CheckKind::Absence => {
+            let path = check
+                .path
+                .as_ref()
+                .or(check.file.as_ref())
+                .ok_or_else(|| "presence/absence check is missing path or file".to_string())?;
+            let pattern = check
+                .pattern
+                .as_deref()
+                .ok_or_else(|| "presence/absence check is missing pattern".to_string())?;
+            let full_path = if path.is_absolute() {
+                path.clone()
+            } else {
+                cwd.join(path)
+            };
+            let content = fs::read_to_string(&full_path)
+                .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+            let contains = content.contains(pattern);
+            let passed = match check.kind {
+                CheckKind::Presence => contains,
+                CheckKind::Absence => !contains,
+                _ => unreachable!(),
+            };
+            let status = if passed { "passed" } else { "failed" };
+            let expectation = if matches!(check.kind, CheckKind::Presence) {
+                "contains"
+            } else {
+                "does not contain"
+            };
+            Ok((
+                status.to_string(),
+                format!("{} {} `{}`", path.display(), expectation, pattern),
+                None,
+            ))
+        }
+        CheckKind::ChangedFiles => {
+            if check.paths.is_empty() {
+                return Err("changed_files check is missing paths".to_string());
+            }
+            let mut command = tokio::process::Command::new("git");
+            command
+                .arg("status")
+                .arg("--porcelain")
+                .arg("--")
+                .args(&check.paths)
+                .current_dir(cwd);
+            let output = command
+                .output()
+                .await
+                .map_err(|error| format!("failed to inspect git status: {error}"))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "git status failed with {}",
+                    output
+                        .status
+                        .code()
+                        .map_or_else(|| "signal".to_string(), |code| code.to_string())
+                ));
+            }
+            let changed = !String::from_utf8_lossy(&output.stdout).trim().is_empty();
+            let status = if changed { "passed" } else { "failed" };
+            Ok((
+                status.to_string(),
+                format!(
+                    "changed files check inspected {} path(s)",
+                    check.paths.len()
+                ),
+                output.status.code(),
+            ))
+        }
+        _ => Err(format!("check kind {:?} is not runnable", check.kind)),
+    }
+}
+
+fn action_for_runnable_step(
+    workflow_id: &str,
+    step_id: &str,
+    step: &WorkflowStep,
+    doc: &WorkflowDocument,
+) -> WorkflowNextAction {
+    let step_kind = format!("{:?}", step.kind).to_case();
+
+    if let Some(action) = &step.action {
+        return WorkflowNextAction::AgentAction {
+            step: step_id.to_string(),
+            step_kind: step_kind.clone(),
+            contract: agent_action_contract(workflow_id, step_id, &step_kind, action),
+        };
+    }
+
+    if step.workflow.is_some() || step.worker.is_some() {
+        let worker_assignment = step.worker.as_ref().and_then(|worker_id| {
+            doc.workers.get(worker_id).map(|worker| {
+                worker_assignment(
+                    workflow_id,
+                    step_id,
+                    step,
+                    worker_id,
+                    worker,
+                    &step.checks,
+                    doc,
+                )
+            })
+        });
+        return WorkflowNextAction::RunStep {
+            step: step_id.to_string(),
+            step_kind,
+            worker: step.worker.clone(),
+            worker_assignment: Box::new(worker_assignment),
+            checks: step.checks.clone(),
+            workflow: step.workflow.clone(),
+            depends_on: step.depends_on.clone(),
+        };
+    }
+
+    WorkflowNextAction::MissingActionContract {
+        step: step_id.to_string(),
+        step_kind,
+        reason: "Add command checks, a child workflow, worker, or action contract.".to_string(),
+    }
+}
+
+fn agent_action_contract(
+    workflow_id: &str,
+    step_id: &str,
+    step_kind: &str,
+    action: &WorkflowStepAction,
+) -> WorkflowAgentActionContract {
+    let role = action.role.clone().unwrap_or_else(|| match action.kind {
+        WorkflowStepActionKind::Agent => "coder".to_string(),
+        WorkflowStepActionKind::Worker => "worker".to_string(),
+    });
+    WorkflowAgentActionContract {
+        workflow_id: workflow_id.to_string(),
+        step: step_id.to_string(),
+        step_kind: step_kind.to_string(),
+        role,
+        objective: action.objective.clone(),
+        instructions: action.instructions.clone(),
+        write_scope: action
+            .write_scope
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+        completion_checks: action.completion.checks.clone(),
+        completion_artifacts: action
+            .completion
+            .artifacts
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+        worker: action.worker.clone(),
+    }
+}
+
 fn worker_assignment(
     workflow_id: &str,
     step_id: &str,
-    step: &crate::workflow::WorkflowStep,
+    step: &WorkflowStep,
     worker_id: &str,
     worker: &WorkflowWorker,
     checks: &[String],
@@ -1450,6 +1734,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_run_executes_presence_absence_checks() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let workflows_root = write_presence_absence_workflow(temp.path());
+        std::fs::write(temp.path().join("subject.txt"), "alpha\nbeta\n").expect("write subject");
+
+        let ctx = test_ctx(temp.path());
+        let output = run_action(
+            &workflows_root,
+            Some("presence-absence-workflow"),
+            WorkflowValidationModeParam::Strict,
+            &ctx,
+        )
+        .await
+        .expect("run succeeds");
+        let text = output.text_content().expect("text output");
+        assert!(text.contains("has_alpha: passed"), "{text}");
+        assert!(text.contains("no_gamma: passed"), "{text}");
+
+        let doc = load_workflow(&workflows_root.join("presence-absence-workflow/workflow.yaml"))
+            .expect("updated workflow loads");
+        assert!(matches!(
+            doc.checks.get("has_alpha").expect("check exists").status,
+            CheckStatus::Passed
+        ));
+        assert!(matches!(
+            doc.checks.get("no_gamma").expect("check exists").status,
+            CheckStatus::Passed
+        ));
+        assert!(matches!(
+            doc.steps.get("verify").expect("step exists").status,
+            StepStatus::Done
+        ));
+    }
+
+    #[tokio::test]
+    async fn workflow_run_executes_changed_files_check() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        init_git_repo(temp.path());
+        std::fs::write(temp.path().join("tracked.txt"), "before\n").expect("write tracked");
+        git(temp.path(), &["add", "tracked.txt"]);
+        git(temp.path(), &["commit", "-m", "initial"]);
+        std::fs::write(temp.path().join("tracked.txt"), "after\n").expect("modify tracked");
+        let workflows_root = write_changed_files_workflow(temp.path());
+
+        let ctx = test_ctx(temp.path());
+        let output = run_action(
+            &workflows_root,
+            Some("changed-files-workflow"),
+            WorkflowValidationModeParam::Strict,
+            &ctx,
+        )
+        .await
+        .expect("run succeeds");
+        let text = output.text_content().expect("text output");
+        assert!(text.contains("source_changed: passed"), "{text}");
+
+        let doc = load_workflow(&workflows_root.join("changed-files-workflow/workflow.yaml"))
+            .expect("updated workflow loads");
+        assert!(matches!(
+            doc.checks
+                .get("source_changed")
+                .expect("check exists")
+                .status,
+            CheckStatus::Passed
+        ));
+        assert!(matches!(
+            doc.steps.get("verify").expect("step exists").status,
+            StepStatus::Done
+        ));
+    }
+
+    #[tokio::test]
+    async fn workflow_run_does_not_complete_build_from_broad_checks_only() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let workflows_root = write_broad_only_build_workflow(temp.path());
+
+        let ctx = test_ctx(temp.path());
+        let output = run_action(
+            &workflows_root,
+            Some("broad-only-workflow"),
+            WorkflowValidationModeParam::Strict,
+            &ctx,
+        )
+        .await
+        .expect("run returns validation diagnostics");
+        let text = output.text_content().expect("text output");
+        assert!(text.contains("blocked by validation diagnostics"), "{text}");
+        assert!(text.contains("broad command checks alone"), "{text}");
+
+        let doc = load_workflow(&workflows_root.join("broad-only-workflow/workflow.yaml"))
+            .expect("workflow still loads");
+        assert!(matches!(
+            doc.steps.get("implement").expect("step exists").status,
+            StepStatus::Ready
+        ));
+        assert!(matches!(
+            doc.checks.get("broad_tests").expect("check exists").status,
+            CheckStatus::Pending
+        ));
+    }
+
+    #[tokio::test]
     async fn workflow_run_marks_step_failed_when_command_check_fails() {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let (workflows_root, workflow_root) = write_command_check_workflow(temp.path(), false);
@@ -1465,7 +1851,7 @@ mod tests {
         .expect("run succeeds");
         let text = output.text_content().expect("text output");
         assert!(text.contains("command_check: failed"), "{text}");
-        assert!(text.contains("step is `failed`"), "{text}");
+        assert!(text.contains("- step verify: failed"), "{text}");
 
         let doc = load_workflow(&workflow_root.join("workflow.yaml"))
             .expect("updated workflow should load");
@@ -1505,8 +1891,99 @@ mod tests {
         .expect("run succeeds");
         let text = output.text_content().expect("text output");
         assert!(
-            text.contains("Next workflow action: run step verify [verify]"),
+            text.contains("Workflow blocked: missing action contract for step verify [verify]."),
             "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_run_renders_agent_action_contract() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let workflows_root = write_agent_action_workflow(temp.path());
+
+        let ctx = test_ctx(temp.path());
+        let output = run_action(
+            &workflows_root,
+            Some("agent-action-workflow"),
+            WorkflowValidationModeParam::Strict,
+            &ctx,
+        )
+        .await
+        .expect("run succeeds");
+        let text = output.text_content().expect("text output");
+        assert!(
+            text.contains("Workflow needs agent action: inspect [context]"),
+            "{text}"
+        );
+        assert!(text.contains("Role: coder"), "{text}");
+        assert!(
+            text.contains("Objective: Inspect workflow action support."),
+            "{text}"
+        );
+        assert!(text.contains("Instructions:"), "{text}");
+        assert!(text.contains("Allowed writes:"), "{text}");
+        assert!(text.contains("Completion:"), "{text}");
+        assert!(text.contains("- check: inspected"), "{text}");
+        assert_eq!(
+            output.details["result"]["next_action"]["kind"],
+            "agent_action"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_run_blocks_missing_action_contract() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let workflows_root = write_missing_action_contract_workflow(temp.path());
+
+        let ctx = test_ctx(temp.path());
+        let output = run_action(
+            &workflows_root,
+            Some("missing-action-workflow"),
+            WorkflowValidationModeParam::Strict,
+            &ctx,
+        )
+        .await
+        .expect("run succeeds");
+        let text = output.text_content().expect("text output");
+        assert!(
+            text.contains("Workflow blocked: missing action contract for step inspect [context]."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Add command checks, a child workflow, worker, or action contract."),
+            "{text}"
+        );
+        assert_eq!(
+            output.details["result"]["next_action"]["kind"],
+            "missing_action_contract"
+        );
+    }
+
+    #[test]
+    fn workflow_validation_rejects_bad_action_contract() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let workflows_root = write_invalid_action_workflow(temp.path());
+        let (_, root, doc) =
+            load_selected_workflow(&workflows_root, Some("invalid-action-workflow"))
+                .expect("workflow loads");
+        let diagnostics = validate_workflow(&doc, &ValidateOptions::strict(root));
+        let messages = diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.path, diagnostic.message))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            messages.contains("steps.inspect.action.objective: action objective must not be empty"),
+            "{messages}"
+        );
+        assert!(
+            messages.contains("steps.inspect.action.worker: unknown worker `missing_worker`"),
+            "{messages}"
+        );
+        assert!(
+            messages
+                .contains("steps.inspect.action.completion.checks: unknown check `missing_check`"),
+            "{messages}"
         );
     }
 
@@ -1829,6 +2306,299 @@ closeout:
         )
         .expect("write workflow");
         (workflows_root, workflow_root)
+    }
+
+    fn write_presence_absence_workflow(root: &Path) -> PathBuf {
+        let workflows_root = root.join(".imp/workflows");
+        let workflow_root = workflows_root.join("presence-absence-workflow");
+        std::fs::create_dir_all(&workflow_root).expect("create workflow root");
+        std::fs::write(
+            workflow_root.join("workflow.yaml"),
+            r#"schema: imp.workflow/v1
+id: presence-absence-workflow
+title: Presence absence workflow
+status: active
+kind: implementation
+spec:
+  goal: Run presence and absence checks.
+  acceptance:
+    content_checked:
+      text: Content is checked.
+      status: todo
+      checks: [has_alpha, no_gamma]
+steps:
+  verify:
+    kind: verify
+    status: ready
+    checks: [has_alpha, no_gamma]
+checks:
+  has_alpha:
+    kind: presence
+    status: pending
+    path: subject.txt
+    pattern: alpha
+  no_gamma:
+    kind: absence
+    status: pending
+    path: subject.txt
+    pattern: gamma
+results:
+  path: .imp/workflows/presence-absence-workflow/results.md
+workers: {}
+closeout:
+  done:
+    requires: [has_alpha, no_gamma]
+"#,
+        )
+        .expect("write workflow");
+        workflows_root
+    }
+
+    fn write_changed_files_workflow(root: &Path) -> PathBuf {
+        let workflows_root = root.join(".imp/workflows");
+        let workflow_root = workflows_root.join("changed-files-workflow");
+        std::fs::create_dir_all(&workflow_root).expect("create workflow root");
+        std::fs::write(
+            workflow_root.join("workflow.yaml"),
+            r#"schema: imp.workflow/v1
+id: changed-files-workflow
+title: Changed files workflow
+status: active
+kind: implementation
+spec:
+  goal: Run changed files check.
+  acceptance:
+    source_changed:
+      text: Source changed.
+      status: todo
+      checks: [source_changed]
+steps:
+  verify:
+    kind: verify
+    status: ready
+    checks: [source_changed]
+checks:
+  source_changed:
+    kind: changed_files
+    status: pending
+    paths: [tracked.txt]
+results:
+  path: .imp/workflows/changed-files-workflow/results.md
+workers: {}
+closeout:
+  done:
+    requires: [source_changed]
+"#,
+        )
+        .expect("write workflow");
+        workflows_root
+    }
+
+    fn write_broad_only_build_workflow(root: &Path) -> PathBuf {
+        let workflows_root = root.join(".imp/workflows");
+        let workflow_root = workflows_root.join("broad-only-workflow");
+        std::fs::create_dir_all(&workflow_root).expect("create workflow root");
+        std::fs::write(
+            workflow_root.join("workflow.yaml"),
+            r#"schema: imp.workflow/v1
+id: broad-only-workflow
+title: Broad only workflow
+status: active
+kind: implementation
+spec:
+  goal: Broad command checks alone should not complete implementation.
+  acceptance:
+    done:
+      text: Work is done.
+      status: todo
+      checks: [broad_tests]
+steps:
+  implement:
+    kind: build
+    status: ready
+    checks: [broad_tests]
+checks:
+  broad_tests:
+    kind: command
+    status: pending
+    broad: true
+    command: true
+results:
+  path: .imp/workflows/broad-only-workflow/results.md
+workers: {}
+closeout:
+  done:
+    requires: [broad_tests]
+"#,
+        )
+        .expect("write workflow");
+        workflows_root
+    }
+
+    fn init_git_repo(root: &Path) {
+        git(root, &["init"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test User"]);
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn write_agent_action_workflow(root: &Path) -> PathBuf {
+        let workflows_root = root.join(".imp/workflows");
+        let workflow_root = workflows_root.join("agent-action-workflow");
+        std::fs::create_dir_all(&workflow_root).expect("create workflow root");
+        std::fs::write(
+            workflow_root.join("workflow.yaml"),
+            r#"schema: imp.workflow/v1
+id: agent-action-workflow
+title: Agent action workflow
+status: active
+kind: implementation
+spec:
+  goal: Dispatch agent action.
+  acceptance:
+    inspected:
+      text: Agent action is dispatched.
+      status: todo
+      checks:
+        - inspected
+steps:
+  inspect:
+    kind: context
+    status: ready
+    checks:
+      - inspected
+    action:
+      kind: agent
+      role: coder
+      objective: Inspect workflow action support.
+      instructions:
+        - Read the workflow runner.
+        - Report the action contract.
+      write_scope:
+        - .imp/workflows/agent-action-workflow/artifacts/inspection.md
+      completion:
+        checks:
+          - inspected
+        artifacts:
+          - .imp/workflows/agent-action-workflow/artifacts/inspection.md
+checks:
+  inspected:
+    kind: review
+    status: pending
+results:
+  path: .imp/workflows/agent-action-workflow/results.md
+workers: {}
+closeout:
+  done:
+    requires:
+      - inspected
+"#,
+        )
+        .expect("write workflow");
+        workflows_root
+    }
+
+    fn write_missing_action_contract_workflow(root: &Path) -> PathBuf {
+        let workflows_root = root.join(".imp/workflows");
+        let workflow_root = workflows_root.join("missing-action-workflow");
+        std::fs::create_dir_all(&workflow_root).expect("create workflow root");
+        std::fs::write(
+            workflow_root.join("workflow.yaml"),
+            r#"schema: imp.workflow/v1
+id: missing-action-workflow
+title: Missing action workflow
+status: active
+kind: implementation
+spec:
+  goal: Report missing action contract.
+  acceptance:
+    inspected:
+      text: Missing action is reported.
+      status: todo
+      checks:
+        - inspected
+steps:
+  inspect:
+    kind: context
+    status: ready
+    checks:
+      - inspected
+checks:
+  inspected:
+    kind: review
+    status: pending
+results:
+  path: .imp/workflows/missing-action-workflow/results.md
+workers: {}
+closeout:
+  done:
+    requires:
+      - inspected
+"#,
+        )
+        .expect("write workflow");
+        workflows_root
+    }
+
+    fn write_invalid_action_workflow(root: &Path) -> PathBuf {
+        let workflows_root = root.join(".imp/workflows");
+        let workflow_root = workflows_root.join("invalid-action-workflow");
+        std::fs::create_dir_all(&workflow_root).expect("create workflow root");
+        std::fs::write(
+            workflow_root.join("workflow.yaml"),
+            r#"schema: imp.workflow/v1
+id: invalid-action-workflow
+title: Invalid action workflow
+status: active
+kind: implementation
+spec:
+  goal: Validate action contracts.
+  acceptance:
+    inspected:
+      text: Invalid action is rejected.
+      status: todo
+      checks:
+        - inspected
+steps:
+  inspect:
+    kind: context
+    status: ready
+    action:
+      kind: worker
+      worker: missing_worker
+      objective: ""
+      completion:
+        checks:
+          - missing_check
+checks:
+  inspected:
+    kind: review
+    status: pending
+results:
+  path: .imp/workflows/invalid-action-workflow/results.md
+workers: {}
+closeout:
+  done:
+    requires:
+      - inspected
+"#,
+        )
+        .expect("write workflow");
+        workflows_root
     }
 
     fn copy_workflow_fixture(id: &str, workflows_root: &Path) {

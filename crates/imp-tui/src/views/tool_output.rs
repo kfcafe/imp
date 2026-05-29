@@ -24,6 +24,7 @@ pub fn styled_tool_output_lines(
         "mana" => styled_mana_output(tc, theme),
         "work" => styled_work_output(tc, theme),
         "web" => styled_web_output(tc, theme),
+        "workflow" => styled_workflow_output(tc, theme),
         "ask_user" | "extend" | "audit_scan" | "openrouter_secret_run" => {
             styled_status_output(tc, theme)
         }
@@ -46,7 +47,7 @@ pub fn styled_sidebar_tool_output_lines(
         "bash" | "shell" => styled_shell_sidebar_output(tc, theme),
         "git" => styled_git_sidebar_output(tc, theme),
         "scan" => styled_scan_sidebar_output(tc, theme),
-        "workflow" => styled_workflow_sidebar_output(tc, theme),
+        "workflow" => styled_workflow_output(tc, theme),
         "mana" => tool_card_output(
             "Mana",
             tc.details.get("action").and_then(Value::as_str),
@@ -257,8 +258,22 @@ fn append_card_meta(
     }
 }
 
-fn styled_workflow_sidebar_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
-    let action = tc.details.get("action").and_then(Value::as_str);
+fn styled_workflow_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
+    let body = workflow_output_body(tc, theme);
+    tool_card_output(
+        "Workflow",
+        tc.details.get("action").and_then(Value::as_str),
+        "⚑",
+        body,
+        theme,
+    )
+}
+
+fn workflow_output_body(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
+    if tc.details.get("action").and_then(Value::as_str) == Some("run") {
+        return workflow_run_body(tc, theme);
+    }
+
     let mut body = Vec::new();
 
     append_card_meta(
@@ -287,8 +302,200 @@ fn styled_workflow_sidebar_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Li
         body.push(Line::raw(""));
     }
     body.extend(styled_plain_output_with(tc, theme, workflow_line_style));
+    body
+}
 
-    tool_card_output("Workflow", action, "⚑", body, theme)
+fn workflow_run_body(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
+    let mut body = Vec::new();
+    let result = tc.details.get("result");
+    let next_action = result.and_then(|result| result.get("next_action"));
+
+    append_card_meta(
+        &mut body,
+        "workflow",
+        result
+            .and_then(|result| result.get("id"))
+            .and_then(Value::as_str)
+            .or_else(|| tc.details.get("id").and_then(Value::as_str)),
+        theme,
+    );
+    append_card_meta(
+        &mut body,
+        "status",
+        result
+            .and_then(|result| result.get("status"))
+            .and_then(Value::as_str),
+        theme,
+    );
+
+    match next_action
+        .and_then(|action| action.get("kind"))
+        .and_then(Value::as_str)
+    {
+        Some("orchestrated_command_checks") => {
+            let steps = next_action
+                .and_then(|action| action.get("steps"))
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let check_count = steps
+                .iter()
+                .filter_map(|step| step.get("checks").and_then(Value::as_array))
+                .map(Vec::len)
+                .sum::<usize>();
+            body.push(Line::from(vec![
+                Span::styled("  ran: ", theme.muted_style()),
+                Span::styled(
+                    format!("{} step(s), {} check(s)", steps.len(), check_count),
+                    theme.success_style(),
+                ),
+            ]));
+            for step in steps {
+                let step_id = step
+                    .get("step")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let step_status = step
+                    .get("step_status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                body.push(Line::from(vec![
+                    Span::styled("  ✓ ", theme.success_style()),
+                    Span::styled(step_id.to_string(), Style::default().fg(theme.fg)),
+                    Span::styled(format!(" — {step_status}"), theme.muted_style()),
+                ]));
+            }
+        }
+        Some("agent_action") => {
+            let contract = next_action.and_then(|action| action.get("contract"));
+            append_card_meta(
+                &mut body,
+                "step",
+                next_action
+                    .and_then(|action| action.get("step"))
+                    .and_then(Value::as_str),
+                theme,
+            );
+            append_card_meta(
+                &mut body,
+                "role",
+                contract
+                    .and_then(|contract| contract.get("role"))
+                    .and_then(Value::as_str),
+                theme,
+            );
+            append_card_meta(
+                &mut body,
+                "objective",
+                contract
+                    .and_then(|contract| contract.get("objective"))
+                    .and_then(Value::as_str),
+                theme,
+            );
+            workflow_array_section(
+                &mut body,
+                "instructions",
+                contract.and_then(|contract| contract.get("instructions")),
+                theme,
+            );
+            workflow_array_section(
+                &mut body,
+                "allowed writes",
+                contract.and_then(|contract| contract.get("write_scope")),
+                theme,
+            );
+            workflow_array_section(
+                &mut body,
+                "completion checks",
+                contract.and_then(|contract| contract.get("completion_checks")),
+                theme,
+            );
+            workflow_array_section(
+                &mut body,
+                "completion artifacts",
+                contract.and_then(|contract| contract.get("completion_artifacts")),
+                theme,
+            );
+        }
+        Some("missing_action_contract") => {
+            append_card_meta(
+                &mut body,
+                "step",
+                next_action
+                    .and_then(|action| action.get("step"))
+                    .and_then(Value::as_str),
+                theme,
+            );
+            append_card_meta(
+                &mut body,
+                "blocked",
+                next_action
+                    .and_then(|action| action.get("reason"))
+                    .and_then(Value::as_str),
+                theme,
+            );
+        }
+        Some("run_step") => {
+            append_card_meta(
+                &mut body,
+                "next step",
+                next_action
+                    .and_then(|action| action.get("step"))
+                    .and_then(Value::as_str),
+                theme,
+            );
+            append_card_meta(
+                &mut body,
+                "worker",
+                next_action
+                    .and_then(|action| action.get("worker"))
+                    .and_then(Value::as_str),
+                theme,
+            );
+        }
+        Some("validation_blocked") => {
+            body.push(Line::from(vec![Span::styled(
+                "  blocked by validation diagnostics",
+                theme.error_style(),
+            )]));
+        }
+        Some("no_runnable_steps") => {
+            body.push(Line::from(vec![Span::styled(
+                "  no runnable workflow steps",
+                theme.muted_style(),
+            )]));
+        }
+        _ => {}
+    }
+
+    if !body.is_empty() {
+        body.push(Line::raw(""));
+    }
+    body.extend(styled_plain_output_with(tc, theme, workflow_line_style));
+    body
+}
+
+fn workflow_array_section(
+    body: &mut Vec<Line<'static>>,
+    label: &str,
+    value: Option<&Value>,
+    theme: &Theme,
+) {
+    let Some(items) = value
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty())
+    else {
+        return;
+    };
+    body.push(card_meta_line(label, "", theme));
+    for item in items {
+        if let Some(text) = item.as_str().filter(|text| !text.is_empty()) {
+            body.push(Line::from(vec![
+                Span::styled("    - ", theme.muted_style()),
+                Span::styled(text.to_string(), Style::default().fg(theme.fg)),
+            ]));
+        }
+    }
 }
 
 fn workflow_value_string(value: &Value) -> Option<String> {
@@ -1533,6 +1740,128 @@ mod tests {
             .any(|line| line.contains("path: steps.context.status")));
         assert!(plain.iter().any(|line| line.contains("value: done")));
         assert!(plain.iter().any(|line| line.contains("Updated workflow")));
+    }
+
+    #[test]
+    fn workflow_run_agent_action_renders_progress_card_inline_and_sidebar() {
+        let mut tc = make_tc(
+            "workflow",
+            Some("Workflow needs agent action: inspect [context]"),
+        );
+        tc.details = json!({
+            "action": "run",
+            "result": {
+                "id": "tui-workflow-run-progress",
+                "status": "planned",
+                "next_action": {
+                    "kind": "agent_action",
+                    "step": "inspect",
+                    "step_kind": "context",
+                    "contract": {
+                        "role": "coder",
+                        "objective": "Inspect workflow progress rendering.",
+                        "instructions": ["Read app.rs", "Write view model notes"],
+                        "write_scope": [".imp/workflows/tui-workflow-run-progress/artifacts/view-model.md"],
+                        "completion_checks": ["current_tui_workflow_surface_inspected"],
+                        "completion_artifacts": [".imp/workflows/tui-workflow-run-progress/artifacts/view-model.md"]
+                    }
+                }
+            }
+        });
+
+        for lines in [
+            styled_tool_output_lines(&tc, &Highlighter::new(), &Theme::default(), false),
+            styled_sidebar_tool_output_lines(&tc, &Highlighter::new(), &Theme::default(), false),
+        ] {
+            let plain = plain_lines(lines);
+            assert_eq!(plain[0], "⚑Workflow · run");
+            assert!(plain
+                .iter()
+                .any(|line| line.contains("workflow: tui-workflow-run-progress")));
+            assert!(plain.iter().any(|line| line.contains("status: planned")));
+            assert!(plain.iter().any(|line| line.contains("step: inspect")));
+            assert!(plain.iter().any(|line| line.contains("role: coder")));
+            assert!(plain
+                .iter()
+                .any(|line| line.contains("objective: Inspect workflow progress rendering.")));
+            assert!(plain.iter().any(|line| line.contains("instructions:")));
+            assert!(plain.iter().any(|line| line.contains("Read app.rs")));
+            assert!(plain.iter().any(|line| line.contains("allowed writes:")));
+            assert!(plain.iter().any(|line| line.contains("completion checks:")));
+            assert!(!plain.iter().any(|line| line.contains("{\"")), "{plain:#?}");
+        }
+    }
+
+    #[test]
+    fn workflow_run_command_orchestration_renders_progress_card() {
+        let mut tc = make_tc(
+            "workflow",
+            Some("Workflow `fixture` orchestrated 2 step(s)."),
+        );
+        tc.details = json!({
+            "action": "run",
+            "result": {
+                "id": "fixture",
+                "status": "done",
+                "next_action": {
+                    "kind": "orchestrated_command_checks",
+                    "steps": [
+                        {"step": "build", "step_status": "done", "checks": [{"check": "build_ok"}]},
+                        {"step": "verify", "step_status": "done", "checks": [{"check": "tests_ok"}]}
+                    ],
+                    "reconciled": ["status"]
+                }
+            }
+        });
+
+        let plain = plain_lines(styled_tool_output_lines(
+            &tc,
+            &Highlighter::new(),
+            &Theme::default(),
+            false,
+        ));
+
+        assert_eq!(plain[0], "⚑Workflow · run");
+        assert!(plain.iter().any(|line| line.contains("status: done")));
+        assert!(plain
+            .iter()
+            .any(|line| line.contains("ran: 2 step(s), 2 check(s)")));
+        assert!(plain.iter().any(|line| line.contains("✓ build — done")));
+        assert!(plain.iter().any(|line| line.contains("✓ verify — done")));
+    }
+
+    #[test]
+    fn workflow_run_missing_contract_renders_blocked_card() {
+        let mut tc = make_tc(
+            "workflow",
+            Some("Workflow blocked: missing action contract for step inspect [context]."),
+        );
+        tc.details = json!({
+            "action": "run",
+            "result": {
+                "id": "fixture",
+                "status": "active",
+                "next_action": {
+                    "kind": "missing_action_contract",
+                    "step": "inspect",
+                    "step_kind": "context",
+                    "reason": "Add command checks, a child workflow, worker, or action contract."
+                }
+            }
+        });
+
+        let plain = plain_lines(styled_sidebar_tool_output_lines(
+            &tc,
+            &Highlighter::new(),
+            &Theme::default(),
+            false,
+        ));
+
+        assert_eq!(plain[0], "⚑Workflow · run");
+        assert!(plain.iter().any(|line| line.contains("step: inspect")));
+        assert!(plain
+            .iter()
+            .any(|line| line.contains("blocked: Add command checks")));
     }
 
     #[test]
