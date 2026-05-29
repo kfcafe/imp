@@ -285,7 +285,7 @@ fn render_section_line(line: &str, theme: &Theme) -> Line<'static> {
 }
 
 fn workflow_or_meta_label_style(label: &str, theme: &Theme) -> Style {
-    if label.starts_with('/') {
+    if label.starts_with('/') || label == "rules" {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
         theme.muted_style()

@@ -1037,92 +1037,40 @@ impl SessionManager {
 
     /// List available sessions in a directory.
     pub fn list(session_dir: &Path) -> Result<Vec<SessionInfo>> {
+        Self::list_page(session_dir, 0, usize::MAX, None)
+    }
+
+    pub fn list_page(
+        session_dir: &Path,
+        offset: usize,
+        limit: usize,
+        query: Option<&str>,
+    ) -> Result<Vec<SessionInfo>> {
+        let mut files = recent_session_files(session_dir)?;
+        if offset > 0 {
+            files = files.into_iter().skip(offset).collect();
+        }
+        if query.is_none() {
+            files.truncate(limit);
+        }
+
+        let query = query
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
         let mut sessions = Vec::new();
-        if !session_dir.exists() {
-            return Ok(sessions);
-        }
-
-        for dir_entry in std::fs::read_dir(session_dir)? {
-            let dir_entry = dir_entry?;
-            let path = dir_entry.path();
-            if path.extension().is_none_or(|e| e != "jsonl") {
-                continue;
-            }
-
-            let updated_at = dir_entry
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-
-            if let Ok(session) = Self::open(&path) {
-                let cwd = session
-                    .entries
-                    .iter()
-                    .find_map(|e| match e {
-                        SessionEntry::Header { cwd, .. } => Some(cwd.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-
-                let created_at = session
-                    .entries
-                    .iter()
-                    .find_map(|e| match e {
-                        SessionEntry::Header { created_at, .. } => Some(*created_at),
-                        _ => None,
-                    })
-                    .unwrap_or(0);
-
-                let mut message_count = session
-                    .entries
-                    .iter()
-                    .filter(|e| matches!(e, SessionEntry::Message { .. }))
-                    .count();
-
-                let first_message = session.entries.iter().find_map(|e| match e {
-                    SessionEntry::Message { message, .. } => extract_text(message),
-                    _ => None,
-                });
-
-                if message_count == 0 {
-                    message_count = session
-                        .entries
-                        .iter()
-                        .filter(|e| matches!(e, SessionEntry::Compaction { .. }))
-                        .count();
+        for (path, updated_at) in files {
+            if let Ok(info) = read_session_info(&path, updated_at) {
+                if query
+                    .as_deref()
+                    .is_none_or(|needle| session_info_matches(&info, needle))
+                {
+                    sessions.push(info);
+                    if query.is_none() && sessions.len() >= limit {
+                        break;
+                    }
                 }
-
-                let name = session.name().map(str::to_string);
-                let summary = session
-                    .summary()
-                    .map(str::to_string)
-                    .or_else(|| derive_session_summary(&session.entries));
-
-                sessions.push(SessionInfo {
-                    id: path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_default(),
-                    path,
-                    cwd,
-                    created_at,
-                    updated_at,
-                    message_count,
-                    first_message,
-                    name,
-                    summary,
-                });
             }
         }
-
-        sessions.sort_by(|a, b| {
-            b.updated_at
-                .cmp(&a.updated_at)
-                .then_with(|| b.created_at.cmp(&a.created_at))
-        });
         Ok(sessions)
     }
 }
@@ -1776,6 +1724,168 @@ fn summarize_session_title(text: &str, max_chars: usize) -> String {
         .join(" ");
 
     truncate_chars_with_suffix(summary.trim(), max_chars, "…")
+}
+
+fn recent_session_files(session_dir: &Path) -> Result<Vec<(PathBuf, u64)>> {
+    let mut files = Vec::new();
+    if !session_dir.exists() {
+        return Ok(files);
+    }
+
+    for dir_entry in std::fs::read_dir(session_dir)? {
+        let dir_entry = dir_entry?;
+        let path = dir_entry.path();
+        if path.extension().is_none_or(|e| e != "jsonl") {
+            continue;
+        }
+
+        let updated_at = dir_entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        files.push((path, updated_at));
+    }
+
+    files.sort_by(|(path_a, updated_at_a), (path_b, updated_at_b)| {
+        updated_at_b
+            .cmp(updated_at_a)
+            .then_with(|| path_b.cmp(path_a))
+    });
+    Ok(files)
+}
+
+fn session_info_matches(info: &SessionInfo, needle: &str) -> bool {
+    info.name
+        .as_deref()
+        .is_some_and(|value| value.to_ascii_lowercase().contains(needle))
+        || info
+            .summary
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains(needle))
+        || info
+            .first_message
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains(needle))
+        || info.cwd.to_ascii_lowercase().contains(needle)
+        || info.id.to_ascii_lowercase().contains(needle)
+}
+
+fn read_session_info(path: &Path, updated_at: u64) -> Result<SessionInfo> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    let mut cwd = String::new();
+    let mut created_at = 0;
+    let mut message_count = 0;
+    let mut compaction_count = 0;
+    let mut first_message = None;
+    let mut name = None;
+    let mut summary = None;
+    let mut summary_parts = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<SessionEntry>(&line) else {
+            continue;
+        };
+        match entry {
+            SessionEntry::Header {
+                cwd: entry_cwd,
+                created_at: entry_created_at,
+                ..
+            } => {
+                cwd = entry_cwd;
+                created_at = entry_created_at;
+            }
+            SessionEntry::Message { message, .. } => {
+                message_count += 1;
+                if first_message.is_none() {
+                    first_message = extract_text(&message);
+                }
+                if summary.is_none() && summary_parts.len() < 3 {
+                    if let Message::Assistant(_) = message {
+                        if let Some(text) = extract_text(&message) {
+                            let trimmed = cleanup_summary_text(&text);
+                            if !trimmed.is_empty() {
+                                summary_parts.push(trimmed);
+                            }
+                        }
+                    }
+                }
+            }
+            SessionEntry::Compaction {
+                summary: compaction_summary,
+                ..
+            } => {
+                compaction_count += 1;
+                if summary.is_none() {
+                    let trimmed = cleanup_summary_text(&compaction_summary);
+                    if !trimmed.is_empty() {
+                        summary_parts.clear();
+                        summary_parts.push(trimmed);
+                    }
+                }
+            }
+            SessionEntry::SessionMeta {
+                name: meta_name,
+                summary: meta_summary,
+                ..
+            } => {
+                name = meta_name;
+                if meta_summary
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                {
+                    summary = meta_summary
+                        .map(|value| truncate_chars_with_suffix(value.trim(), 120, "…"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let summary = summary.or_else(|| {
+        if summary_parts.is_empty() {
+            None
+        } else {
+            let collapsed = summary_parts
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if collapsed.is_empty() {
+                None
+            } else {
+                Some(truncate_chars_with_suffix(&collapsed, 120, "…"))
+            }
+        }
+    });
+
+    Ok(SessionInfo {
+        id: path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        path: path.to_path_buf(),
+        cwd,
+        created_at,
+        updated_at,
+        message_count: if message_count == 0 {
+            compaction_count
+        } else {
+            message_count
+        },
+        first_message,
+        name,
+        summary,
+    })
 }
 
 /// Read just the first non-empty line of a file.

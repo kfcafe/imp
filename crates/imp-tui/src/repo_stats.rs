@@ -33,13 +33,12 @@ pub fn scan_repo(root: &Path) -> io::Result<Option<RepoStats>> {
         return Ok(None);
     };
 
-    let index = imp_core::repo_intelligence::index_repo(root).ok();
     Ok(Some(RepoStats {
         primary_language: (*primary_language).to_string(),
         code_lines: total_lines,
         files: languages.iter().map(|(_, stats)| stats.files).sum(),
-        symbols: index.as_ref().map(|summary| summary.symbols),
-        tests: index.as_ref().map(|summary| summary.tests),
+        symbols: None,
+        tests: None,
     }))
 }
 

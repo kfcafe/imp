@@ -1,0 +1,147 @@
+imp startup screen wireframe
+============================
+
+Goals
+-----
+- First paint should be fast and useful even while repo/workflow stats load.
+- Recent sessions should live under the session panel, not consume a full column.
+- Rules should render as white/default emphasis, not muted.
+- Workflow panel should show real workflow state and recent activity, not /plan /run /verify command advertising.
+- Tools should show native tools first, then Lua extensions underneath so extension capability is visible.
+- Wide layouts should use the full available screen width instead of leaving a ragged right side.
+- Avoid showing expensive counts unless cached or already loaded.
+
+Wide layout, full width
+-----------------------
+
+╭─ imp · 0.2.9 ─────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                        │
+│ ╭─ welcome to imp. ─────────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ input        prompt, request, bug, or goal        /resume      browse saved work        Ctrl+L       switch model  │ │
+│ │ /settings    runtime, provider, permissions       Esc          close menus              Ctrl+C       quit/interrupt│ │
+│ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                                        │
+│ ╭─ session ───────────────────────────────────────╮ ╭─ workflows ───────────────────────────────────────────────────╮ │
+│ │ project: imp                                    │ │ active                                                       │ │
+│ │ session: new chat                               │ │ • startup-tui-polish                         in progress  │ │
+│ │ provider: anthropic                             │ │   next: move recent sessions under session                 │ │
+│ │ web: brave                                      │ │   verify: cargo test -p imp-tui startup --lib              │ │
+│ │ repo: Rust · 165k loc · 1.9k files              │ │   updated: 4m ago                                          │ │
+│ │ rules: ~/.imp/AGENTS.md                         │ │                                                              │ │
+│ │        AGENTS.md                                │ │ recent                                                       │ │
+│ │                                                 │ │ • scan-tool-upgrade                         done · 2h ago   │ │
+│ │ recent sessions                                 │ │ • workflow-sidebar-polish                   blocked · 1d ago│ │
+│ │ • startup scan/layout fixes · 4m ago            │ │ • repo-stats-startup                        done · 1d ago   │ │
+│ │ • workflow sidebar polish · 1h ago              │ │                                                              │ │
+│ │ • scan tool ranking notes · 2h ago              │ │ summary                                                      │ │
+│ │ • imp-tui perf pass · 1d ago                    │ │ 1 active · 2 waiting · 5 done this week                     │ │
+│ ╰─────────────────────────────────────────────────╯ ╰──────────────────────────────────────────────────────────────╯ │
+│                                                                                                                        │
+│ ╭─ tools ─────────────────────────────────────────╮ ╭─ skills · 12 installed ──────────────────────────────────────╮ │
+│ │ native                                          │ │ • rust                 • testing             • pr-review     │ │
+│ │ ? Ask user       ▣ Read          $ Bash         │ │ • production           • debug               • security-audit│ │
+│ │ ◧ Scan           ✎ Edit          ◇ Workflow     │ │ • gh                   • jq-yq               • writing-style │ │
+│ │ ◆ Web            ⌕ Search        ◎ Audit        │ │ … +3 more                                                   │ │
+│ │                                                 │ ╰──────────────────────────────────────────────────────────────╯ │
+│ │ lua extensions                                  │                                                                  │
+│ │ • slash:release-notes                           │ ╭─ repo activity ─────────────────────────────────────────────╮ │
+│ │ • slash:benchmark                               │ │ git: nightly ahead 41 · clean at startup                    │ │
+│ │ • sidebar:diff-summary                          │ │ last change: b936b79 · startup metadata polish              │ │
+│ │ • tool:project-notes                            │ │ scan: stats loading progressively                           │ │
+│ ╰─────────────────────────────────────────────────╯ ╰──────────────────────────────────────────────────────────────╯ │
+│                                                                                                                        │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+Wide layout notes
+-----------------
+- Use a real two-column grid across the full inner width.
+- Top row: session + workflows, both wide enough for useful text.
+- Bottom row: tools/extensions + skills/repo activity.
+- Workflows get a wide column because their useful content is multi-field: status, next step, verify command, updated time.
+- Recent sessions stay inside session because they are contextual to resuming work.
+- Lua extensions are grouped under tools because they extend tool/command capability.
+
+Narrow layout
+-------------
+
+╭─ imp · 0.2.9 ─────────────────────────────╮
+│ ╭─ welcome to imp. ─────────────────────╮ │
+│ │ input      prompt, request, bug, goal │ │
+│ │ /resume    browse saved work         │ │
+│ │ /settings  runtime                   │ │
+│ │ Ctrl+L     switch model              │ │
+│ ╰───────────────────────────────────────╯ │
+│                                           │
+│ ╭─ session ─────────────────────────────╮ │
+│ │ project: imp                          │ │
+│ │ session: new chat                     │ │
+│ │ provider: anthropic                   │ │
+│ │ web: brave                            │ │
+│ │ repo: scanning…                       │ │
+│ │ rules: ~/.imp/AGENTS.md               │ │
+│ │        AGENTS.md                      │ │
+│ │                                       │ │
+│ │ recent sessions                       │ │
+│ │ • startup screen polish · 4m ago      │ │
+│ │ • scan tool ranking · 2h ago          │ │
+│ ╰───────────────────────────────────────╯ │
+│                                           │
+│ ╭─ workflows ───────────────────────────╮ │
+│ │ active                                │ │
+│ │ • startup-tui-polish    in progress  │ │
+│ │   next: adjust layout + verify        │ │
+│ │   updated: 4m ago                     │ │
+│ │                                       │ │
+│ │ recent                                │ │
+│ │ • scan-tool-upgrade     done · 2h ago │ │
+│ │ • repo-stats-startup    done · 1d ago │ │
+│ ╰───────────────────────────────────────╯ │
+│                                           │
+│ ╭─ tools ───────────────────────────────╮ │
+│ │ native                                │ │
+│ │ ? Ask user  ▣ Read  $ Bash  ◧ Scan    │ │
+│ │ ✎ Edit      ◇ Workflow      … +6      │ │
+│ │                                       │ │
+│ │ lua extensions                        │ │
+│ │ • slash:release-notes                 │ │
+│ │ • slash:benchmark                     │ │
+│ ╰───────────────────────────────────────╯ │
+╰───────────────────────────────────────────╯
+
+Progressive loading notes
+-------------------------
+- First paint:
+  - project
+  - session
+  - provider
+  - web
+  - rules
+  - actions
+  - native tools from static registry
+- Fast async:
+  - primary language
+  - LOC
+  - file count
+  - recent sessions if not already cached
+  - Lua extension list if runtime metadata is cheap
+- Slow/background or cached only:
+  - symbols
+  - tests
+  - workflow aggregate counts
+  - repo intelligence index
+  - expensive extension metadata
+
+Workflow panel data preference
+------------------------------
+1. Active workflow from .imp/workflows with status, next step, verify command, and updated time.
+2. Recently updated workflows with status and age.
+3. Summary counts only if cheap/cached.
+4. Configured workflow profiles only if there is no durable workflow state.
+5. Do not show /plan /run /verify as workflow content.
+
+Open questions
+--------------
+- Should skills be hidden unless there are project-local skills?
+- Should repo activity be shown, or should the lower-right panel be something else?
+- Should Lua extensions show command names, extension names, or both?
+- Should repo stats show counts at all, or only language + repo state?
