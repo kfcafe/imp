@@ -5,7 +5,7 @@ use crate::agent::{
     autonomy::{
         edited_files_verification_obligation, failed_command_recovery_obligation, ObligationKind,
     },
-    Agent, AgentEvent, ContentBlock, LoopDecision, Message, RunFinalStatus,
+    Agent, AgentEvent, ContentBlock, LoopDecision, Message, RunFinalStatus, StopReason,
 };
 use crate::config::AgentMode;
 use crate::eval_candidate::{redact_eval_candidate, EvalArtifactRef};
@@ -470,8 +470,20 @@ impl Agent {
         if !workflow_layer_may_override_finish(&decision) {
             return decision;
         }
-        self.workflow_controller_continue_decision()
-            .unwrap_or(decision)
+        let controller_decision = self.workflow_controller_continue_decision();
+        if controller_decision.is_none()
+            && matches!(
+                decision,
+                LoopDecision::Finish {
+                    status: RunFinalStatus::Done {
+                        reason: StopReason::NoAutomaticFollowUp | StopReason::NoProgress
+                    }
+                }
+            )
+        {
+            return decision;
+        }
+        controller_decision.unwrap_or(decision)
     }
 
     pub(in crate::agent) fn should_retry_unanswered_execution_debt(
@@ -495,13 +507,13 @@ impl Agent {
             self.obligation_ledger
                 .add(failed_command_recovery_obligation());
         }
-        if tool_results_include_successful_edit(tool_results) {
-            self.obligation_ledger
-                .add(edited_files_verification_obligation());
-        }
         if tool_results_include_successful_check(tool_results) {
             self.obligation_ledger
                 .resolve_kind(ObligationKind::EditedFilesVerification);
+        }
+        if tool_results_include_successful_edit(tool_results) {
+            self.obligation_ledger
+                .add(edited_files_verification_obligation());
         }
         if tool_results_indicate_execution_evidence(tool_results, self.mode) {
             self.obligation_ledger

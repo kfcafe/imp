@@ -233,21 +233,6 @@ fn identity_layer(
     }
     s.push_str("- Use `read` before explaining or editing specific files; use `edit`/`write` for file changes.\n");
 
-    s.push_str("\nOperating rules:\n");
-    s.push_str("- Re-check the user's intent each turn; distinguish discussion, planning, implementation, review, and orchestration.\n");
-    s.push_str("- Ask a focused clarification before continuing when the user asks to continue a plan, workflow, or previous thread but the next artifact/action is ambiguous.\n");
-    s.push_str("- Treat workflow/run statuses such as done, done_with_concerns, blocked, and needs_context as internal closeout semantics, not mandatory response headings. Use natural conversational replies unless the user explicitly asks for a status report or a workflow/task is actually being closed out.\n");
-    s.push_str("- Ground repository claims in files or tool output inspected in this session; inspect named files, symbols, commands, and errors before acting on them.\n");
-    s.push_str("- For analysis-only requests, stay read-only. For implementation, make small reversible changes and verify with the narrowest useful check.\n");
-    s.push_str("- Treat failed commands, compiler errors, and missing evidence as blockers to resolve or report; never claim unverified success.\n");
-    s.push_str("- Ask one focused question when uncertainty changes scope, risk, architecture, destructive action, or user-visible behavior; otherwise proceed on low-risk local assumptions.\n");
-    s.push_str("- Keep replies concise and evidence-oriented: what changed or was found, how it was verified, and what remains.\n");
-    s.push_str("- Use native workflows when durable work structure, verification, dependencies, retries, decisions, handoff, or recovery matter; make tasks detailed enough for another agent to execute cold.\n");
-    s.push_str("- For durable project work, use workflow steps/checks/acceptance/decisions deliberately, keep artifacts tied to an adopted goal, and avoid noisy writes for small one-pass work.\n");
-    s.push_str("- Record progress after failures or material planning changes before relying on chat memory.\n");
-    s.push_str("- When working from a workflow task, treat its scope, dependencies, acceptance criteria, and verify command as the execution contract; do not broaden into unrelated cleanup.\n");
-    s.push_str("- Stop only on verified completion, a real blocker, or a user-facing decision point; workflow updates are checkpoints, not proof of completion.\n");
-
     // Append role instructions after identity layer
     if let Some(role) = role {
         if let Some(ref instructions) = role.instructions {
@@ -765,56 +750,48 @@ mod tests {
     // -- Layer 1: Identity --
 
     #[test]
-    fn system_prompt_includes_operating_rules() {
+    fn system_prompt_omits_generated_operating_rules() {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
-        assert!(result.text.contains("Operating rules:"));
-        assert!(result.text.contains(
+        assert!(!result.text.contains("Operating rules:"));
+        assert!(!result.text.contains(
             "Ground repository claims in files or tool output inspected in this session"
         ));
-        assert!(result.text.contains(
+        assert!(!result.text.contains(
             "For analysis-only requests, stay read-only. For implementation, make small reversible changes"
         ));
     }
 
     #[test]
-    fn system_prompt_includes_clarification_and_natural_closeout_guidance() {
+    fn system_prompt_omits_clarification_and_natural_closeout_guidance() {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
-        assert!(result.text.contains(
+        assert!(!result.text.contains(
             "Ask a focused clarification before continuing when the user asks to continue a plan"
         ));
-        assert!(result
+        assert!(!result
             .text
             .contains("internal closeout semantics, not mandatory response headings"));
-        assert!(result
+        assert!(!result
             .text
             .contains("Use natural conversational replies unless the user explicitly asks"));
     }
 
     #[test]
-    fn system_prompt_includes_conversation_time_workflow_planning_doctrine() {
+    fn system_prompt_omits_conversation_time_workflow_planning_doctrine() {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
-        assert!(result.text.contains("For durable project work"));
-        assert!(result.text.contains("tied to an adopted goal"));
-        assert!(result
+        assert!(!result.text.contains("For durable project work"));
+        assert!(!result.text.contains("tied to an adopted goal"));
+        assert!(!result
             .text
             .contains("workflow steps/checks/acceptance/decisions"));
-        assert!(result.text.contains(
+        assert!(!result.text.contains(
             "Record progress after failures or material planning changes before relying on chat memory"
         ));
-        assert!(result
+        assert!(!result
             .text
             .contains("workflow updates are checkpoints, not proof of completion"));
-        assert_eq!(
-            result
-                .text
-                .matches("workflow updates are checkpoints, not proof of completion")
-                .count(),
-            1,
-            "workflow checkpoint guidance should appear once"
-        );
         assert!(!result.text.contains("explanation-only answers"));
         assert!(!result.text.contains("Imp-work doctrine:"));
         assert!(!result
@@ -851,7 +828,7 @@ mod tests {
         assert!(result
             .text
             .contains("Use `workflow` for durable project plans"));
-        assert!(result
+        assert!(!result
             .text
             .contains("Use native workflows when durable work"));
         assert!(!result.text.contains("Use mana when durable work"));
@@ -1666,14 +1643,12 @@ mod tests {
 
         // All layers present in order
         let identity_pos = result.text.find("You are imp").unwrap();
-        let policy_pos = result.text.find("Operating rules").unwrap();
         let context_pos = result.text.find("# Project Context").unwrap();
         let skills_pos = result.text.find("Available skills").unwrap();
         let facts_pos = result.text.find("Project facts").unwrap();
         let task_pos = result.text.find("## Task").unwrap();
 
-        assert!(identity_pos < policy_pos, "identity before policy");
-        assert!(policy_pos < context_pos, "policy before context");
+        assert!(identity_pos < context_pos, "identity before context");
         assert!(context_pos < skills_pos, "context before skills");
         assert!(skills_pos < facts_pos, "skills before facts");
         assert!(facts_pos < task_pos, "facts before task");

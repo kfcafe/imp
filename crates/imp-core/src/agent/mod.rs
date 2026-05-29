@@ -275,7 +275,7 @@ impl Agent {
         let planning_only_progress =
             workflow_signals.execution_debt && !workflow_signals.execution_evidence;
         let mana_stop_reason = workflow_signals.stop_reason;
-        let planner_text_stop_reason = planner_stop_reason(message, self.mode);
+        let planner_text_stop_reason = None;
 
         let failed_bash_needs_recovery =
             tool_results_indicate_failed_bash_command(tool_results, self.mode)
@@ -284,15 +284,7 @@ impl Agent {
         if failed_bash_needs_recovery {
             obligation_ledger.add(failed_command_recovery_obligation());
         }
-        let execution_text_stop_reason = if failed_bash_needs_recovery
-            || self.should_retry_unanswered_execution_debt(
-                tool_results,
-                workflow_signals.execution_evidence,
-            ) {
-            None
-        } else {
-            execution_stop_reason(message, self.mode)
-        };
+        let execution_text_stop_reason = None;
         let continue_recommendation = if let Some(recommendation) =
             self.workflow_continue_recommendation(&workflow_signals)
         {
@@ -374,6 +366,10 @@ impl Agent {
             }
             ContinueReason::ExecutionDebt => {
                 self.queued_execution_debt_follow_up_count += 1;
+                self.obligation_ledger
+                    .resolve_kind(autonomy::ObligationKind::FailedCommandRecovery);
+                self.obligation_ledger
+                    .resolve_kind(autonomy::ObligationKind::EditedFilesVerification);
             }
             ContinueReason::ToolResultsNeedInterpretation
             | ContinueReason::QueuedUserFollowUp
@@ -788,88 +784,6 @@ fn tool_results_indicate_work_completed(
     }
 
     saw_edit_like_success && saw_successful_check
-}
-
-fn planner_stop_reason(message: &AssistantMessage, mode: AgentMode) -> Option<StopReason> {
-    if !matches!(mode, AgentMode::Planner) {
-        return None;
-    }
-
-    classify_stop_reason_from_text(message, true)
-}
-
-fn execution_stop_reason(message: &AssistantMessage, mode: AgentMode) -> Option<StopReason> {
-    if !matches!(
-        mode,
-        AgentMode::Full | AgentMode::Orchestrator | AgentMode::Worker
-    ) {
-        return None;
-    }
-
-    match classify_stop_reason_from_text(message, false) {
-        Some(reason @ (StopReason::UserBlocker | StopReason::WorkCompleted)) => Some(reason),
-        _ => None,
-    }
-}
-
-fn classify_stop_reason_from_text(
-    message: &AssistantMessage,
-    planner_mode: bool,
-) -> Option<StopReason> {
-    let text = assistant_message_text(message);
-    if text.trim().is_empty() {
-        return None;
-    }
-
-    let lower = text.to_ascii_lowercase();
-
-    let blocker_signal = [
-        "blocked",
-        "need your input",
-        "which should",
-        "waiting on you",
-        "approval",
-        "before i continue",
-        "before continuing",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-    if blocker_signal {
-        return Some(StopReason::UserBlocker);
-    }
-
-    if planner_mode {
-        let decomposition_complete_signal = [
-            "externalized into mana",
-            "created the units",
-            "created child units",
-            "decomposition is complete",
-            "plan is complete",
-            "ready for handoff",
-        ]
-        .iter()
-        .any(|needle| lower.contains(needle));
-        if decomposition_complete_signal {
-            return Some(StopReason::DecompositionCompleted);
-        }
-    } else {
-        let work_complete_signal = [
-            "all done",
-            "done",
-            "completed",
-            "finished",
-            "implemented",
-            "fixed",
-            "handled",
-        ]
-        .iter()
-        .any(|needle| lower.contains(needle));
-        if work_complete_signal {
-            return Some(StopReason::WorkCompleted);
-        }
-    }
-
-    None
 }
 
 /// Build an AssistantMessage from accumulated stream parts while preserving
@@ -1949,13 +1863,11 @@ mod tests {
             text_response("done", 100, 10),
             text_response("done", 100, 10),
             text_response("done", 100, 10),
+            text_response("done", 100, 10),
+            text_response("done", 100, 10),
         ]));
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent
-            .workflow_layer
-            .controller_mut()
-            .record_closeout_ready();
         agent.tools.register(Arc::new(WriteTool));
 
         let events_task = tokio::spawn(collect_events(handle));
@@ -4068,12 +3980,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execution_stops_after_work_completed_text() {
-        let provider = Arc::new(MockProvider::new(vec![text_response(
-            "All done! Implemented the change and finished the task.",
-            100,
-            20,
-        )]));
+    async fn execution_does_not_stop_after_work_completed_text() {
+        let provider = Arc::new(MockProvider::new(vec![
+            text_response(
+                "All done! Implemented the change and finished the task.",
+                100,
+                20,
+            ),
+            text_response("No further runtime evidence is available.", 100, 20),
+        ]));
 
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
@@ -4094,15 +4009,38 @@ mod tests {
             .collect();
 
         assert_eq!(user_texts, vec!["Implement the change".to_string()]);
+        assert_eq!(
+            agent
+                .assess_post_turn(
+                    agent
+                        .messages
+                        .iter()
+                        .rev()
+                        .find_map(|message| match message {
+                            Message::Assistant(assistant) => Some(assistant),
+                            _ => None,
+                        })
+                        .unwrap(),
+                    &[],
+                    false,
+                    &TurnManaReview::no_change(0),
+                )
+                .text_fallback
+                .execution_stop_reason,
+            None
+        );
     }
 
     #[tokio::test]
-    async fn execution_stops_for_user_blocker_text() {
-        let provider = Arc::new(MockProvider::new(vec![text_response(
-            "Blocked: I need your input on which path to take before continuing.",
-            100,
-            20,
-        )]));
+    async fn execution_does_not_stop_for_user_blocker_text() {
+        let provider = Arc::new(MockProvider::new(vec![
+            text_response(
+                "Blocked: I need your input on which path to take before continuing.",
+                100,
+                20,
+            ),
+            text_response("No further runtime evidence is available.", 100, 20),
+        ]));
 
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
@@ -4123,6 +4061,26 @@ mod tests {
             .collect();
 
         assert_eq!(user_texts, vec!["Implement the change".to_string()]);
+        assert_eq!(
+            agent
+                .assess_post_turn(
+                    agent
+                        .messages
+                        .iter()
+                        .rev()
+                        .find_map(|message| match message {
+                            Message::Assistant(assistant) => Some(assistant),
+                            _ => None,
+                        })
+                        .unwrap(),
+                    &[],
+                    false,
+                    &TurnManaReview::no_change(0),
+                )
+                .text_fallback
+                .execution_stop_reason,
+            None
+        );
     }
 
     #[tokio::test]
@@ -5174,10 +5132,6 @@ mod integration {
     fn create_agent_with_tools(provider: Arc<dyn Provider>, cwd: PathBuf) -> (Agent, AgentHandle) {
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, cwd);
-        agent
-            .workflow_layer
-            .controller_mut()
-            .record_closeout_ready();
         agent.tools.register(Arc::new(WriteTool));
         agent.tools.register(Arc::new(ReadTool));
         agent.tools.register(Arc::new(EditTool));
@@ -5192,10 +5146,6 @@ mod integration {
     ) -> (Agent, AgentHandle) {
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, cwd);
-        agent
-            .workflow_layer
-            .controller_mut()
-            .record_closeout_ready();
         agent.tools.register(Arc::new(WriteTool));
         agent.tools.register(Arc::new(ReadTool));
         agent.tools.register(Arc::new(EditTool));
@@ -5224,6 +5174,8 @@ mod integration {
                 20,
             ),
             text_response("The file contains: hello world", 100, 20),
+            text_response("Done.", 100, 20),
+            text_response("Done.", 100, 20),
             text_response("Done.", 100, 20),
             text_response("Done.", 100, 20),
         ]));
@@ -5309,6 +5261,8 @@ mod integration {
                 20,
             ),
             text_response("Done", 100, 20),
+            text_response("Done", 100, 20),
+            text_response("Done", 100, 20),
         ]));
 
         let (mut agent, handle) = create_agent_with_tools(provider, tmp.path().to_path_buf());
@@ -5363,6 +5317,8 @@ mod integration {
                 20,
             ),
             text_response("Found it!", 100, 20),
+            text_response("Done.", 100, 20),
+            text_response("Done.", 100, 20),
             text_response("Done.", 100, 20),
             text_response("Done.", 100, 20),
         ]));
