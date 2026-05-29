@@ -1,8 +1,16 @@
 use crate::tools::scan;
 use crate::tools::scan::types::ScanResult;
+use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
+use std::fs;
+use std::hash::{Hash, Hasher};
+use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+const CACHE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoContextSummary {
     pub root: PathBuf,
     pub primary_language: Option<String>,
@@ -30,35 +38,202 @@ impl RepoContextSummary {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoIndexSummary {
     pub symbols: usize,
     pub tests: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CachedRepoContextSummary {
+    version: u32,
+    fingerprint: RepoFingerprint,
+    summary: RepoContextSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RepoFingerprint {
+    root: PathBuf,
+    signature: u64,
+}
+
 pub fn index_repo(root: &Path) -> crate::Result<RepoIndexSummary> {
-    let files = scan::collect_source_files(root)?;
+    let files = repo_context_files(root)?;
     Ok(index_files(&files, root))
 }
 
 pub fn summarize_repo_context(root: &Path) -> crate::Result<Option<RepoContextSummary>> {
-    let files = scan::collect_source_files(root)?;
+    let files = repo_context_files(root)?;
     if files.is_empty() {
         return Ok(None);
     }
+
+    let fingerprint = repo_fingerprint(root, &files);
+    if let Some(summary) = read_cached_summary(&fingerprint) {
+        return Ok(Some(summary));
+    }
+
     let index = index_files(&files, root);
-    Ok(Some(RepoContextSummary {
+    let summary = RepoContextSummary {
         root: root.to_path_buf(),
         primary_language: primary_language(&files),
         files: files.len(),
         symbols: index.symbols,
         tests: index.tests,
-    }))
+    };
+    let _ = write_cached_summary(&fingerprint, &summary);
+    Ok(Some(summary))
 }
 
 pub fn index_files(files: &[PathBuf], root: &Path) -> RepoIndexSummary {
     let result = scan::extract_files(files, root);
     summarize_scan_result(&result)
+}
+
+fn repo_context_files(root: &Path) -> crate::Result<Vec<PathBuf>> {
+    if let Some(files) = git_source_files(root) {
+        return Ok(files);
+    }
+
+    let mut files = scan::collect_source_files(root)?;
+    files.retain(|file| !is_heavyweight_context_path(root, file));
+    Ok(files)
+}
+
+fn git_source_files(root: &Path) -> Option<Vec<PathBuf>> {
+    if !root.is_dir() {
+        return None;
+    }
+    let output = Command::new("git")
+        .arg("ls-files")
+        .arg("-z")
+        .arg("--cached")
+        .arg("--others")
+        .arg("--exclude-standard")
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let files = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|bytes| !bytes.is_empty())
+        .filter_map(|bytes| std::str::from_utf8(bytes).ok())
+        .map(|relative| root.join(relative))
+        .filter(|path| scan::is_supported(path) && !is_heavyweight_context_path(root, path))
+        .collect::<Vec<_>>();
+    Some(files)
+}
+
+fn is_heavyweight_context_path(root: &Path, path: &Path) -> bool {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    relative.components().any(|component| {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        matches!(
+            name.to_string_lossy().as_ref(),
+            "evals" | "worktrees" | ".imp" | ".direnv" | ".cache"
+        )
+    })
+}
+
+fn repo_fingerprint(root: &Path, files: &[PathBuf]) -> RepoFingerprint {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut hasher = DefaultHasher::new();
+    CACHE_VERSION.hash(&mut hasher);
+    canonical_root.hash(&mut hasher);
+    files.len().hash(&mut hasher);
+
+    if let Some(git_signature) = git_signature(root) {
+        git_signature.hash(&mut hasher);
+    } else {
+        let mut sorted_files = files.to_vec();
+        sorted_files.sort();
+        for file in sorted_files {
+            let relative = file.strip_prefix(root).unwrap_or(&file);
+            relative.hash(&mut hasher);
+            if let Ok(meta) = fs::metadata(&file) {
+                meta.len().hash(&mut hasher);
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+                        duration.as_secs().hash(&mut hasher);
+                        duration.subsec_nanos().hash(&mut hasher);
+                    }
+                }
+            }
+        }
+    }
+
+    RepoFingerprint {
+        root: canonical_root,
+        signature: hasher.finish(),
+    }
+}
+
+fn git_signature(root: &Path) -> Option<String> {
+    if !root.is_dir() {
+        return None;
+    }
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !head.status.success() {
+        return None;
+    }
+    let status = Command::new("git")
+        .args(["status", "--porcelain=v1", "--untracked-files=normal"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !status.status.success() {
+        return None;
+    }
+
+    let mut signature = String::new();
+    signature.push_str(std::str::from_utf8(&head.stdout).ok()?.trim());
+    signature.push('\n');
+    signature.push_str(std::str::from_utf8(&status.stdout).ok()?);
+    Some(signature)
+}
+
+fn cache_path(fingerprint: &RepoFingerprint) -> PathBuf {
+    crate::storage::global_indexes_dir()
+        .join("repo-intelligence")
+        .join(format!("{:016x}.json", fingerprint.signature))
+}
+
+fn read_cached_summary(fingerprint: &RepoFingerprint) -> Option<RepoContextSummary> {
+    let path = cache_path(fingerprint);
+    let text = fs::read_to_string(path).ok()?;
+    let cached: CachedRepoContextSummary = serde_json::from_str(&text).ok()?;
+    if cached.version == CACHE_VERSION && cached.fingerprint == *fingerprint {
+        Some(cached.summary)
+    } else {
+        None
+    }
+}
+
+fn write_cached_summary(
+    fingerprint: &RepoFingerprint,
+    summary: &RepoContextSummary,
+) -> io::Result<()> {
+    let path = cache_path(fingerprint);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let cached = CachedRepoContextSummary {
+        version: CACHE_VERSION,
+        fingerprint: fingerprint.clone(),
+        summary: summary.clone(),
+    };
+    let json = serde_json::to_vec(&cached).map_err(io::Error::other)?;
+    fs::write(path, json)
 }
 
 fn primary_language(files: &[PathBuf]) -> Option<String> {
