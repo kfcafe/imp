@@ -2592,7 +2592,7 @@ impl App {
 
     fn handle_terminal_event(&mut self, event: Event) -> Result<(), Box<dyn std::error::Error>> {
         match event {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
+            Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 self.handle_key(key)?;
             }
             Event::Paste(text) => {
