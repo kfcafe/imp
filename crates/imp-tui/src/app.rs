@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::hash::Hasher;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -731,16 +731,118 @@ fn display_rule_path(path: &Path) -> String {
 
 fn load_recent_sessions(cwd: &Path, limit: usize) -> Vec<SessionInfo> {
     let session_dir = imp_core::storage::global_sessions_dir();
-    SessionManager::list(&session_dir)
-        .map(|sessions| {
-            let cwd_string = cwd.display().to_string();
-            sessions
-                .into_iter()
-                .filter(|session| session.cwd == cwd_string)
-                .take(limit)
-                .collect()
-        })
-        .unwrap_or_default()
+    let Ok(entries) = std::fs::read_dir(&session_dir) else {
+        return Vec::new();
+    };
+
+    let cwd_string = cwd.display().to_string();
+    let mut sessions = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "jsonl") {
+            continue;
+        }
+
+        let updated_at = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let reader = std::io::BufReader::new(file);
+        let mut created_at = 0;
+        let mut session_cwd = String::new();
+        let mut name = None;
+        let mut summary = None;
+        let mut first_message = None;
+        let mut message_count = 0;
+        let mut compaction_count = 0;
+
+        for line in reader.lines().map_while(Result::ok) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(entry) = serde_json::from_str::<SessionEntry>(&line) else {
+                continue;
+            };
+            match entry {
+                SessionEntry::Header { created_at: at, cwd, .. } => {
+                    created_at = at;
+                    session_cwd = cwd;
+                    if session_cwd != cwd_string {
+                        break;
+                    }
+                }
+                SessionEntry::Message { message, .. } => {
+                    message_count += 1;
+                    if first_message.is_none() {
+                        first_message = message_text(&message);
+                    }
+                }
+                SessionEntry::Compaction { .. } => {
+                    compaction_count += 1;
+                }
+                SessionEntry::SessionMeta {
+                    name: meta_name,
+                    summary: meta_summary,
+                    ..
+                } => {
+                    name = meta_name;
+                    summary = meta_summary;
+                }
+                _ => {}
+            }
+        }
+
+        if session_cwd != cwd_string {
+            continue;
+        }
+
+        sessions.push(SessionInfo {
+            id: path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            path,
+            cwd: session_cwd,
+            created_at,
+            updated_at,
+            message_count: if message_count == 0 {
+                compaction_count
+            } else {
+                message_count
+            },
+            first_message,
+            name,
+            summary,
+        });
+    }
+
+    sessions.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+    });
+    sessions.truncate(limit);
+    sessions
+}
+
+fn message_text(message: &Message) -> Option<String> {
+    let blocks = match message {
+        Message::User(user) => &user.content,
+        Message::Assistant(assistant) => &assistant.content,
+        Message::ToolResult(tool_result) => &tool_result.content,
+    };
+    blocks.iter().find_map(|block| match block {
+        ContentBlock::Text { text } => Some(text.clone()),
+        _ => None,
+    })
 }
 
 fn recent_session_lines(sessions: &[SessionInfo]) -> Vec<String> {
