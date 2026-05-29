@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const CACHE_VERSION: u32 = 2;
+const MAX_REPO_INTELLIGENCE_FILES: usize = 2_000;
+const MAX_REPO_INTELLIGENCE_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoContextSummary {
@@ -63,8 +65,12 @@ pub fn index_repo(root: &Path) -> crate::Result<RepoIndexSummary> {
 }
 
 pub fn summarize_repo_context(root: &Path) -> crate::Result<Option<RepoContextSummary>> {
+    if !is_repo_intelligence_candidate(root) {
+        return Ok(None);
+    }
+
     let files = repo_context_files(root)?;
-    if files.is_empty() {
+    if files.is_empty() || repo_context_too_large(&files) {
         return Ok(None);
     }
 
@@ -98,6 +104,62 @@ fn repo_context_files(root: &Path) -> crate::Result<Vec<PathBuf>> {
     let mut files = scan::collect_source_files(root)?;
     files.retain(|file| !is_heavyweight_context_path(root, file));
     Ok(files)
+}
+
+fn is_repo_intelligence_candidate(root: &Path) -> bool {
+    if !root.is_dir() || is_home_dir(root) {
+        return false;
+    }
+
+    if Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(root)
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return true;
+    }
+
+    [
+        "AGENTS.md",
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+        "deno.json",
+        "mix.exs",
+    ]
+    .iter()
+    .any(|marker| root.join(marker).is_file())
+}
+
+fn is_home_dir(path: &Path) -> bool {
+    let Some(home) = std::env::var_os("HOME") else {
+        return false;
+    };
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let home = PathBuf::from(home)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()));
+    path == home
+}
+
+fn repo_context_too_large(files: &[PathBuf]) -> bool {
+    if files.len() > MAX_REPO_INTELLIGENCE_FILES {
+        return true;
+    }
+
+    let mut total_bytes = 0_u64;
+    for file in files {
+        let Ok(meta) = fs::metadata(file) else {
+            continue;
+        };
+        total_bytes = total_bytes.saturating_add(meta.len());
+        if total_bytes > MAX_REPO_INTELLIGENCE_BYTES {
+            return true;
+        }
+    }
+    false
 }
 
 fn git_source_files(root: &Path) -> Option<Vec<PathBuf>> {
@@ -323,5 +385,23 @@ fn builds_widget() {}
         assert!(rendered.contains("- primary language: Rust"));
         assert!(rendered.contains("- symbols: 34"));
         assert!(rendered.contains("- tests: 5"));
+    }
+
+    #[test]
+    fn skips_home_directory_as_repo_intelligence_candidate() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+
+        assert!(!is_repo_intelligence_candidate(&PathBuf::from(home)));
+    }
+
+    #[test]
+    fn skips_large_contexts_before_indexing() {
+        let files = (0..=MAX_REPO_INTELLIGENCE_FILES)
+            .map(|index| PathBuf::from(format!("file-{index}.rs")))
+            .collect::<Vec<_>>();
+
+        assert!(repo_context_too_large(&files));
     }
 }
