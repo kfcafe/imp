@@ -7,15 +7,15 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use imp_core::ManaUnitRef;
 use imp_core::eval_candidate::{
-    redact_eval_candidate, EvalActualBehavior, EvalCandidate, EvalExpectedBehavior,
-    EvalFailureMode, EvalPrivacy, EvalRedactionStatus, EvalVerifier,
+    EvalActualBehavior, EvalCandidate, EvalExpectedBehavior, EvalFailureMode, EvalPrivacy,
+    EvalRedactionStatus, EvalVerifier, redact_eval_candidate,
 };
 use imp_core::format_error_for_display;
 use imp_core::ui::WidgetContent;
-use imp_core::ManaUnitRef;
 #[cfg(feature = "mana-ui")]
-use imp_core::{mana_run_summary, stop_mana_run, ManaRunSummary};
+use imp_core::{ManaRunSummary, mana_run_summary, stop_mana_run};
 #[cfg(not(feature = "mana-ui"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ManaRunSummary {
@@ -53,12 +53,13 @@ use mana_core::api;
 use imp_lua::LuaRuntime;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use imp_core::Error as ImpCoreError;
 use imp_core::agent::{AgentCommand, AgentEvent, AgentHandle};
 use imp_core::builder::AgentBuilder;
 use imp_core::compaction::{
-    execute_compaction_with_retry, execute_manual_compaction, prepare_messages_for_compaction,
-    select_compaction_strategy, CompactionCapabilities, CompactionStrategy,
-    COMPACTION_SUMMARY_PREFIX, DEFAULT_KEEP_RECENT_GROUPS,
+    COMPACTION_SUMMARY_PREFIX, CompactionCapabilities, CompactionStrategy,
+    DEFAULT_KEEP_RECENT_GROUPS, execute_compaction_with_retry, execute_manual_compaction,
+    prepare_messages_for_compaction, select_compaction_strategy,
 };
 use imp_core::config::Config;
 use imp_core::runtime::{RuntimeStateAccumulator, RuntimeStateSnapshot};
@@ -68,63 +69,62 @@ use imp_core::trust::{Provenance, RiskLabel, TrustLabel};
 use imp_core::workflow::{
     AutonomyMode, VerificationCloseoutEffect, VerificationGate, VerificationGateStatus,
 };
-use imp_core::workflow_profiles::{WorkflowProfile, WorkflowSuggest};
-use imp_core::Error as ImpCoreError;
 use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelMeta, ModelRegistry, ProviderRegistry};
 use imp_llm::providers::create_provider;
 use imp_llm::{
-    truncate_chars_with_suffix, ContentBlock, Cost, Message, Model, StreamEvent, ThinkingLevel,
-    Usage, UserMessage,
+    ContentBlock, Cost, Message, Model, StreamEvent, ThinkingLevel, Usage, UserMessage,
+    truncate_chars_with_suffix,
 };
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
-use ratatui::Frame;
 
 use crate::animation::{
-    title_loop_frame, title_loop_glyph, title_spinner_frame, title_working_glyph, AnimationState,
+    AnimationState, title_loop_frame, title_loop_glyph, title_spinner_frame, title_working_glyph,
 };
 use crate::event_source::TerminalEventSource;
 use crate::highlight::Highlighter;
 use crate::keybindings::{self, Action};
 use crate::selection::{
-    extract_selected_text, SelectablePane, SelectionOverlay, SelectionState, TextSurface,
+    SelectablePane, SelectionOverlay, SelectionState, TextSurface, extract_selected_text,
 };
-use crate::terminal::{ring_terminal_bell, set_window_title, InteractiveTerminal};
+use crate::terminal::{InteractiveTerminal, ring_terminal_bell, set_window_title};
 use crate::theme::Theme;
 use crate::turn_tracker::TurnTracker;
 use crate::views::ask_bar::AskState;
 use crate::views::chat::{
-    build_chat_render_data, build_click_map_from_rendered_lines, build_text_surface_from_lines,
+    DisplayMessage, MessageRole, RenderedChatView, build_chat_render_data,
+    build_click_map_from_rendered_lines, build_text_surface_from_lines,
     clamped_scroll_offset_for_total_lines, scroll_offset_for_message_at_top, visible_line_window,
-    DisplayMessage, MessageRole, RenderedChatView,
 };
 use crate::views::command_palette::{
-    builtin_commands, merge_extension_commands, merge_skill_commands, merge_workflow_commands,
-    CommandPaletteState, CommandPaletteView,
+    CommandPaletteState, CommandPaletteView, builtin_commands, merge_extension_commands,
+    merge_skill_commands,
 };
 use crate::views::editor::{EditorState, EditorView, WorkflowMode};
-use crate::views::login_picker::{login_providers, LoginPickerState, LoginPickerView};
+use crate::views::login_picker::{LoginPickerState, LoginPickerView, login_providers};
 #[cfg(feature = "mana-ui")]
 use crate::views::mana_navigator::{ManaNavigatorState, ManaNavigatorView};
 use crate::views::model_selector::{ModelSelection, ModelSelectorState, ModelSelectorView};
-use crate::views::secrets_picker::{secret_providers, SecretsPickerState, SecretsPickerView};
+use crate::views::secrets_picker::{SecretsPickerState, SecretsPickerView, secret_providers};
 use crate::views::session_picker::{SessionPickerState, SessionPickerView};
 use crate::views::settings::{SettingsState, SettingsView};
 use crate::views::sidebar::{
-    build_detail_render_data, build_detail_text_surface_from_plain_lines, build_stream_lines,
-    sidebar_sub_areas, thinking_detail_render_data, Sidebar, SidebarDetailRenderData, SidebarView,
+    Sidebar, SidebarDetailRenderData, SidebarView, build_detail_render_data,
+    build_detail_text_surface_from_plain_lines, build_stream_lines, sidebar_sub_areas,
+    thinking_detail_render_data,
 };
 use crate::views::startup::{
-    action_block_height, visible_section_count, StartupAction, StartupPanelData, StartupPanelView,
-    StartupSection,
+    StartupAction, StartupPanelData, StartupPanelView, StartupSection, action_block_height,
+    visible_section_count,
 };
 use crate::views::status::StatusInfo;
-use crate::views::tools::{tool_display_icon, tool_display_name, DisplayToolCall};
-use crate::views::tree::{flatten_tree, TreeView, TreeViewState};
-use crate::views::welcome::{needs_welcome, WelcomeState, WelcomeStep, WelcomeView};
+use crate::views::tools::{DisplayToolCall, tool_display_icon, tool_display_name};
+use crate::views::tree::{TreeView, TreeViewState, flatten_tree};
+use crate::views::welcome::{WelcomeState, WelcomeStep, WelcomeView, needs_welcome};
 
 const LUA_RESTART_DIRECTIVE: &str = "__IMP_RESTART_AFTER_COMMAND__";
 
@@ -187,10 +187,6 @@ pub enum AskReply {
     Select(tokio::sync::oneshot::Sender<Option<usize>>),
     MultiSelect(tokio::sync::oneshot::Sender<Option<Vec<usize>>>),
     Input(tokio::sync::oneshot::Sender<Option<String>>),
-    WorkflowSuggestion {
-        profile: WorkflowProfile,
-        prompt: String,
-    },
 }
 
 #[derive(Debug)]
@@ -445,7 +441,6 @@ struct SidebarDetailCache {
 #[derive(Debug, Clone, Default)]
 struct StartupSurfaceMetadata {
     skills: Vec<imp_core::resources::Skill>,
-    workflows: Vec<WorkflowProfile>,
     recent_sessions: Vec<SessionInfo>,
     repo_stats: Option<RepoStatsState>,
     rule_files: Vec<PathBuf>,
@@ -577,25 +572,6 @@ fn mana_run_detail_render_data(run: &ManaRunSummary, theme: &Theme) -> SidebarDe
         lines.push(Line::from(Span::styled(line.clone(), style)));
     }
     SidebarDetailRenderData { lines, plain_lines }
-}
-
-fn workflow_sort_key(workflow: &WorkflowProfile) -> std::time::SystemTime {
-    let root = PathBuf::from(".imp").join("workflows").join(&workflow.name);
-    std::fs::metadata(root.join("events.jsonl"))
-        .and_then(|metadata| metadata.modified())
-        .or_else(|_| {
-            std::fs::metadata(root.join("workflow.yaml")).and_then(|metadata| metadata.modified())
-        })
-        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-}
-
-fn workflow_age(workflow: &WorkflowProfile) -> String {
-    let modified = workflow_sort_key(workflow);
-    let updated_at = modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default();
-    format_age(updated_at)
 }
 
 enum RepoStatsScanRoot {
@@ -1972,244 +1948,6 @@ fn include_current_model_option(
     (models, canonical_id)
 }
 
-fn render_tui_workflow_list(workflows_root: &Path) -> Result<String, String> {
-    let mut workflows = Vec::new();
-    for (_, workflow) in load_tui_workflows(workflows_root)? {
-        let id = workflow
-            .get("id")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown");
-        let status = workflow
-            .get("status")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown");
-        let title = workflow
-            .get("title")
-            .and_then(|value| value.as_str())
-            .unwrap_or("");
-        workflows.push(format!("- {id} [{status}] {title}"));
-    }
-    if workflows.is_empty() {
-        Ok("No workflows found under .imp/workflows.".to_string())
-    } else {
-        workflows.sort();
-        Ok(format!("Workflows:\n{}", workflows.join("\n")))
-    }
-}
-
-fn render_tui_workflow_show(workflow: &serde_yaml::Value) -> Result<String, String> {
-    let id = yaml_str(workflow, "id");
-    let status = yaml_str(workflow, "status");
-    let title = yaml_str(workflow, "title");
-    let goal = workflow
-        .get("spec")
-        .and_then(|spec| spec.get("goal"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("")
-        .trim();
-    let acceptance = workflow
-        .get("spec")
-        .and_then(|spec| spec.get("acceptance"))
-        .and_then(|value| value.as_mapping());
-    let acceptance_total = acceptance.map(|map| map.len()).unwrap_or(0);
-    let acceptance_done = acceptance
-        .map(|map| {
-            map.values()
-                .filter(|item| item.get("status").and_then(|value| value.as_str()) == Some("done"))
-                .count()
-        })
-        .unwrap_or(0);
-    let mut text = format!(
-        "Workflow: {id} [{status}]\nTitle: {title}\nGoal: {goal}\nAcceptance: {acceptance_done}/{acceptance_total} done"
-    );
-    if let Some(steps) = workflow.get("steps").and_then(|value| value.as_mapping()) {
-        text.push_str("\nSteps:");
-        for (key, step) in steps {
-            let step_id = key.as_str().unwrap_or("unknown");
-            let step_status = step
-                .get("status")
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown");
-            let step_kind = step
-                .get("kind")
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown");
-            text.push_str(&format!("\n- {step_id} [{step_status}] {step_kind}"));
-        }
-    }
-    Ok(text)
-}
-
-fn render_tui_workflow_validate(workflows_root: &Path, id: Option<&str>) -> Result<String, String> {
-    let paths = if let Some(id) = id {
-        vec![workflows_root.join(id).join("workflow.yaml")]
-    } else {
-        load_tui_workflows(workflows_root)?
-            .into_iter()
-            .map(|(path, _)| path)
-            .collect::<Vec<_>>()
-    };
-    if paths.is_empty() {
-        return Ok("No workflows found under .imp/workflows.".to_string());
-    }
-
-    let mut ok_count = 0usize;
-    let mut lines = Vec::new();
-    for path in paths {
-        let workflow = imp_core::workflow::load_workflow(&path)
-            .map_err(|err| format!("failed to load {}: {err}", path.display()))?;
-        let root = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| workflows_root.to_path_buf());
-        let diagnostics = imp_core::workflow::validate_workflow(
-            &workflow,
-            &imp_core::workflow::ValidateOptions::strict(root),
-        );
-        if diagnostics.is_empty() {
-            ok_count += 1;
-            lines.push(format!("- {}: ok", workflow.id));
-        } else {
-            lines.push(format!("- {}: diagnostics", workflow.id));
-            for diagnostic in diagnostics {
-                lines.push(format!("  - {}: {}", diagnostic.path, diagnostic.message));
-            }
-        }
-    }
-
-    Ok(format!(
-        "Validated {} workflow(s): {} ok, {} with diagnostics.\n{}",
-        lines.iter().filter(|line| line.starts_with("- ")).count(),
-        ok_count,
-        lines
-            .iter()
-            .filter(|line| line.ends_with(": diagnostics"))
-            .count(),
-        lines.join("\n")
-    ))
-}
-
-fn render_tui_workflow_run(workflow: &serde_yaml::Value) -> Result<String, String> {
-    let id = yaml_str(workflow, "id");
-    let Some(steps) = workflow.get("steps").and_then(|value| value.as_mapping()) else {
-        return Ok(format!("Workflow `{id}` has no steps."));
-    };
-    for (key, step) in steps {
-        let step_id = key.as_str().unwrap_or("unknown");
-        let status = step
-            .get("status")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown");
-        if status != "todo" && status != "ready" {
-            continue;
-        }
-        if !step_dependencies_done(workflow, step) {
-            continue;
-        }
-        let kind = step
-            .get("kind")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown");
-        let mut text = format!("Next workflow action: run step {step_id} [{kind}]");
-        if let Some(worker) = step.get("worker").and_then(|value| value.as_str()) {
-            text.push_str(&format!("\nWorker: {worker}"));
-        }
-        if let Some(child) = step.get("workflow").and_then(|value| value.as_str()) {
-            text.push_str(&format!("\nWorkflow: {child}"));
-        }
-        return Ok(text);
-    }
-    Ok(format!("No runnable workflow steps for `{id}`."))
-}
-
-fn step_dependencies_done(workflow: &serde_yaml::Value, step: &serde_yaml::Value) -> bool {
-    let Some(deps) = step.get("depends_on").and_then(|value| value.as_sequence()) else {
-        return true;
-    };
-    let Some(steps) = workflow.get("steps").and_then(|value| value.as_mapping()) else {
-        return false;
-    };
-    deps.iter().all(|dep| {
-        let Some(dep_id) = dep.as_str() else {
-            return false;
-        };
-        let key = serde_yaml::Value::String(dep_id.to_string());
-        let Some(dep_step) = steps.get(&key) else {
-            return false;
-        };
-        matches!(
-            dep_step.get("status").and_then(|value| value.as_str()),
-            Some("done") | Some("done_with_concerns")
-        )
-    })
-}
-
-fn load_tui_workflow(
-    workflows_root: &Path,
-    id: Option<&str>,
-) -> Result<(PathBuf, serde_yaml::Value), String> {
-    let workflows = load_tui_workflows(workflows_root)?;
-    if let Some(id) = id {
-        workflows
-            .into_iter()
-            .find(|(_, workflow)| workflow.get("id").and_then(|value| value.as_str()) == Some(id))
-            .ok_or_else(|| format!("workflow `{id}` not found"))
-    } else {
-        let active = workflows
-            .iter()
-            .filter(|(_, workflow)| {
-                workflow.get("status").and_then(|value| value.as_str()) == Some("active")
-            })
-            .count();
-        if active == 1 {
-            workflows
-                .into_iter()
-                .find(|(_, workflow)| {
-                    workflow.get("status").and_then(|value| value.as_str()) == Some("active")
-                })
-                .ok_or_else(|| "active workflow not found".to_string())
-        } else if workflows.len() == 1 {
-            workflows
-                .into_iter()
-                .next()
-                .ok_or_else(|| "workflow not found".to_string())
-        } else if workflows.is_empty() {
-            Err("no workflows found under .imp/workflows".to_string())
-        } else {
-            Err("multiple workflows found; pass a workflow id".to_string())
-        }
-    }
-}
-
-fn load_tui_workflows(workflows_root: &Path) -> Result<Vec<(PathBuf, serde_yaml::Value)>, String> {
-    if !workflows_root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut workflows = Vec::new();
-    let entries = std::fs::read_dir(workflows_root).map_err(|err| err.to_string())?;
-    for entry in entries {
-        let entry = entry.map_err(|err| err.to_string())?;
-        let path = entry.path().join("workflow.yaml");
-        if !path.exists() {
-            continue;
-        }
-        let raw = std::fs::read_to_string(&path)
-            .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-        let workflow = serde_yaml::from_str(&raw)
-            .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
-        workflows.push((path, workflow));
-    }
-    workflows.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(workflows)
-}
-
-fn yaml_str<'a>(workflow: &'a serde_yaml::Value, key: &str) -> &'a str {
-    workflow
-        .get(key)
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown")
-}
-
 impl App {
     pub fn new(
         config: Config,
@@ -3369,10 +3107,6 @@ impl App {
 
         StartupSurfaceMetadata {
             skills: imp_core::resources::discover_skills(cwd, &user_config_dir),
-            workflows: config
-                .workflow_registry()
-                .map(|registry| registry.iter().cloned().collect())
-                .unwrap_or_default(),
             provider_id,
             web_summary,
             recent_sessions: load_recent_sessions(cwd, 5),
@@ -3462,18 +3196,6 @@ impl App {
                 .collect::<Vec<_>>()
         };
 
-        let workflow_lines = if self.startup_surface_metadata.workflows.is_empty() {
-            vec!["• none configured".to_string()]
-        } else {
-            let mut workflows = self.startup_surface_metadata.workflows.clone();
-            workflows.sort_by_key(|workflow| std::cmp::Reverse(workflow_sort_key(workflow)));
-            workflows
-                .iter()
-                .take(5)
-                .map(|workflow| format!("• {} · {}", workflow.name, workflow_age(workflow)))
-                .collect::<Vec<_>>()
-        };
-
         let sections = vec![
             StartupSection {
                 title: "session".to_string(),
@@ -3486,10 +3208,6 @@ impl App {
             StartupSection {
                 title: format!("skills · {} installed", skills.len()),
                 lines: skill_lines,
-            },
-            StartupSection {
-                title: "workflows".to_string(),
-                lines: workflow_lines,
             },
             StartupSection {
                 title: "recent sessions".to_string(),
@@ -5846,11 +5564,6 @@ impl App {
         if !text.contains('\n') {
             if let Some(cmd_text) = text.strip_prefix('/') {
                 let typed = cmd_text.trim();
-                if self.try_workflow_command(typed) {
-                    self.editor.push_history();
-                    self.editor.clear();
-                    return;
-                }
                 let canonical_typed = if typed.eq_ignore_ascii_case("improve safe") {
                     "improve safe"
                 } else {
@@ -5892,13 +5605,8 @@ impl App {
             return;
         }
 
-        if let Some(suggestion) = self.workflow_suggestion_for_prompt(&text) {
-            self.editor.push_history();
-            self.editor.clear();
-            self.ask_workflow_suggestion(suggestion, text.clone());
-            self.needs_redraw = true;
-            return;
-        }
+        // Send natural-language prompts directly; workflow profiles are not surfaced
+        // as slash-command takeover UX in the TUI.
         // Add user message, assistant placeholder, and session entry before deferring agent start.
         self.enqueue_visible_agent_turn(text.clone());
         self.editor.push_history();
@@ -6120,220 +5828,10 @@ impl App {
         }
     }
 
-    fn workflow_plan_command(&mut self, goal: &str) {
-        let goal = goal.trim();
-        if goal.is_empty() {
-            self.push_system_msg("Usage: /plan <goal>");
-            return;
-        }
-        let prompt = format!(
-            "Plan this as an imp-native workflow. Use the `workflow` tool and `.imp/workflows` schema as the source of truth. Goal: {goal}"
-        );
-        self.push_system_msg("Planning with native workflow tool. The agent should create or update a workflow artifact before implementation.");
-        self.enqueue_visible_agent_turn_with_prompt(format!("/plan {goal}"), prompt);
-    }
-
-    fn workflow_run_command(&mut self, id: &str) {
-        let mut params = serde_json::json!({ "action": "run" });
-        let id = id.trim();
-        if !id.is_empty() {
-            params["id"] = serde_json::Value::String(id.to_string());
-        }
-        match self.execute_workflow_tool(params) {
-            Ok(text) => self.push_system_msg(&text),
-            Err(err) => self.push_error_msg(&format!("Workflow run failed: {err}")),
-        }
-    }
-
-    fn workflow_inspect_command(&mut self, args: &str) {
-        let mut parts = args.split_whitespace();
-        let action = parts.next().unwrap_or("show");
-        let id = parts.next();
-        let action = match action {
-            "list" | "show" | "validate" | "run" | "update" => action,
-            other => {
-                self.push_system_msg(&format!(
-                    "Usage: /workflow [list|show|validate|run|update] [id] (unknown action `{other}`)"
-                ));
-                return;
-            }
-        };
-        let mut params = serde_json::json!({ "action": action });
-        if let Some(id) = id {
-            params["id"] = serde_json::Value::String(id.to_string());
-        }
-        match self.execute_workflow_tool(params) {
-            Ok(text) => self.push_system_msg(&text),
-            Err(err) => self.push_error_msg(&format!("Workflow command failed: {err}")),
-        }
-    }
-
-    fn execute_workflow_tool(&self, params: serde_json::Value) -> Result<String, String> {
-        let action = params
-            .get("action")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| "workflow command missing action".to_string())?;
-        let id = params.get("id").and_then(|value| value.as_str());
-        let workflows_root = self.cwd.join(".imp/workflows");
-        match action {
-            "list" => render_tui_workflow_list(&workflows_root),
-            "show" => {
-                let (_, workflow) = load_tui_workflow(&workflows_root, id)?;
-                render_tui_workflow_show(&workflow)
-            }
-            "validate" => render_tui_workflow_validate(&workflows_root, id),
-            "run" => {
-                let (_, workflow) = load_tui_workflow(&workflows_root, id)?;
-                render_tui_workflow_run(&workflow)
-            }
-            other => Err(format!("unsupported workflow action `{other}`")),
-        }
-    }
-
-    fn workflow_registry(&mut self) -> Option<imp_core::workflow_profiles::WorkflowRegistry> {
-        match self.config.workflow_registry() {
-            Ok(registry) => Some(registry),
-            Err(err) => {
-                self.push_warning_msg(&format!("Workflow config error: {err}"));
-                None
-            }
-        }
-    }
-
-    fn try_workflow_command(&mut self, typed: &str) -> bool {
-        let mut parts = typed.splitn(2, char::is_whitespace);
-        let Some(name) = parts.next().filter(|name| !name.is_empty()) else {
-            return false;
-        };
-        if matches!(name, "workflow" | "workflows") {
-            return false;
-        }
-        let Some(registry) = self.workflow_registry() else {
-            return false;
-        };
-        let Some(profile) = registry.get(name).cloned() else {
-            return false;
-        };
-        let prompt = parts.next().unwrap_or_default().trim();
-        if prompt.is_empty() {
-            self.show_workflow_profile(&profile.name);
-            return true;
-        }
-        self.enqueue_workflow_turn(profile, prompt.to_string());
-        true
-    }
-
-    fn enqueue_workflow_turn(&mut self, profile: WorkflowProfile, prompt: String) {
-        let wrapped = profile.wrap_prompt(&prompt);
-        self.push_system_msg(&format!(
-            "Using /{} · {}",
-            profile.name, profile.confirm_body
-        ));
-        self.enqueue_visible_agent_turn_with_prompt(
-            format!("/{} {}", profile.name, prompt),
-            wrapped,
-        );
-    }
-
-    fn workflow_suggestion_for_prompt(&mut self, prompt: &str) -> Option<WorkflowProfile> {
-        let registry = self.workflow_registry()?;
-        let suggestion = registry.infer(prompt)?;
-        match suggestion.profile.suggest {
-            WorkflowSuggest::Never => None,
-            WorkflowSuggest::Auto => Some(suggestion.profile),
-            WorkflowSuggest::Ask => Some(suggestion.profile),
-        }
-    }
-
-    fn ask_workflow_suggestion(&mut self, profile: WorkflowProfile, prompt: String) {
-        let title = if profile.confirm_title.trim().is_empty() {
-            format!("Use /{}?", profile.name)
-        } else {
-            profile.confirm_title.clone()
-        };
-        let mut choices = vec![format!("Use /{}", profile.name), "Normal".to_string()];
-        if !profile.confirm_body.trim().is_empty() {
-            choices[0] = format!("{} · {}", choices[0], profile.confirm_body.trim());
-        }
-        let options = choices
-            .into_iter()
-            .map(|label| crate::views::ask_bar::AskOption {
-                label,
-                description: None,
-                checked: false,
-            })
-            .collect();
-        self.begin_ask(
-            AskState::new(title, String::new(), options, false),
-            AskReply::WorkflowSuggestion { profile, prompt },
-        );
-    }
-
-    fn show_workflows(&mut self) {
-        let Some(registry) = self.workflow_registry() else {
-            return;
-        };
-        let profiles = registry.iter().collect::<Vec<_>>();
-        if profiles.is_empty() {
-            self.push_system_msg("No workflows configured.");
-            return;
-        }
-        let mut lines = vec!["Workflows:".to_string()];
-        for profile in profiles {
-            lines.push(format!("/{} — {}", profile.name, profile.description));
-        }
-        self.push_system_msg(&lines.join("\n"));
-    }
-
-    fn show_workflow_profile(&mut self, name: &str) {
-        let name = name.trim();
-        if name.is_empty() {
-            self.push_system_msg("Usage: /workflow <name>");
-            return;
-        }
-        let Some(registry) = self.workflow_registry() else {
-            return;
-        };
-        match registry.resolve(name) {
-            Ok(profile) => {
-                let aliases = if profile.aliases.is_empty() {
-                    "none".to_string()
-                } else {
-                    profile
-                        .aliases
-                        .iter()
-                        .map(|alias| format!("/{alias}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                let triggers = if profile.triggers.is_empty() {
-                    "none".to_string()
-                } else {
-                    profile.triggers.join(", ")
-                };
-                self.push_system_msg(&format!(
-                    "/{}\n{}\naliases: {}\nsuggest: {:?}\nreadonly: {}\naction: {}\ntriggers: {}",
-                    profile.name,
-                    profile.description,
-                    aliases,
-                    profile.suggest,
-                    profile.readonly,
-                    profile.confirm_body,
-                    triggers
-                ));
-            }
-            Err(err) => self.push_warning_msg(&err.to_string()),
-        }
-    }
-
     fn execute_command(&mut self, cmd: &str) {
         let mut parts = cmd.splitn(2, char::is_whitespace);
         let command = parts.next().unwrap_or("");
         let args = parts.next().unwrap_or("").trim();
-
-        if self.try_workflow_command(cmd) {
-            return;
-        }
 
         match command {
             "quit" | "q" => {
@@ -6468,19 +5966,6 @@ impl App {
             "checkpoints" => self.checkpoints_command(),
             "restore" | "restore-checkpoint" => self.restore_checkpoint_command(args),
             "eval" => self.eval_candidate_command(args),
-            "plan" => self.workflow_plan_command(args),
-            "run" => self.workflow_run_command(args),
-            "workflow" => {
-                let first = args.split_whitespace().next().unwrap_or_default();
-                if matches!(first, "list" | "show" | "validate" | "run" | "update") {
-                    self.workflow_inspect_command(args);
-                } else if args.trim().is_empty() {
-                    self.show_workflows();
-                } else {
-                    self.show_workflow_profile(args.trim());
-                }
-            }
-            "workflows" => self.show_workflows(),
             _ => {
                 // Try Lua extension commands before reporting unknown
                 if !self.try_lua_command(cmd) && !self.try_skill_command(cmd) {
@@ -6706,16 +6191,6 @@ impl App {
             .and_then(|runtime| runtime.lock().ok().map(|guard| guard.command_summaries()))
             .unwrap_or_default();
         let commands = merge_extension_commands(builtin_commands(), extension_commands);
-        let commands = match self.config.workflow_registry() {
-            Ok(registry) => merge_workflow_commands(
-                commands,
-                registry
-                    .iter()
-                    .map(|profile| (profile.name.clone(), profile.description.clone()))
-                    .collect::<Vec<_>>(),
-            ),
-            Err(_) => commands,
-        };
         merge_skill_commands(commands, self.skill_summaries())
     }
 
@@ -7394,51 +6869,6 @@ impl App {
         });
 
         match (&result, reply) {
-            (
-                AskResult::Selected(indices),
-                Some(AskReply::WorkflowSuggestion { profile, prompt }),
-            ) => {
-                let labels: Vec<String> = indices
-                    .iter()
-                    .filter_map(|&i| state.options.get(i).map(|o| o.label.clone()))
-                    .collect();
-                self.messages.push(DisplayMessage {
-                    role: MessageRole::User,
-                    content: labels.join(", "),
-                    thinking: None,
-                    tool_calls: Vec::new(),
-                    assistant_blocks: Vec::new(),
-                    is_streaming: false,
-                    timestamp: imp_llm::now(),
-                });
-                self.invalidate_chat_render_cache();
-                if indices.first().copied() == Some(0) {
-                    self.enqueue_workflow_turn(profile, prompt);
-                } else {
-                    self.enqueue_visible_agent_turn(prompt);
-                }
-            }
-            (AskResult::Text(text), Some(AskReply::WorkflowSuggestion { profile, prompt })) => {
-                self.messages.push(DisplayMessage {
-                    role: MessageRole::User,
-                    content: text.clone(),
-                    thinking: None,
-                    tool_calls: Vec::new(),
-                    assistant_blocks: Vec::new(),
-                    is_streaming: false,
-                    timestamp: imp_llm::now(),
-                });
-                self.invalidate_chat_render_cache();
-                if text
-                    .trim()
-                    .eq_ignore_ascii_case(&format!("Use /{}", profile.name))
-                    || text.trim().starts_with(&format!("Use /{} ·", profile.name))
-                {
-                    self.enqueue_workflow_turn(profile, prompt);
-                } else {
-                    self.enqueue_visible_agent_turn(prompt);
-                }
-            }
             (AskResult::Text(text), Some(AskReply::Input(tx))) => {
                 self.messages.push(DisplayMessage {
                     role: MessageRole::User,
@@ -7666,7 +7096,6 @@ impl App {
                 AskReply::Input(tx) => {
                     let _ = tx.send(None);
                 }
-                AskReply::WorkflowSuggestion { .. } => {}
             }
         }
         // Stop the agent — user wants control back
@@ -8472,7 +7901,7 @@ impl App {
                             Ok(Ok(())) => {}
                             Ok(Err(error)) => return Err(error),
                             Err(_) => {
-                                return Err("Compaction timed out after 180 seconds".to_string())
+                                return Err("Compaction timed out after 180 seconds".to_string());
                             }
                         }
 
@@ -9043,9 +8472,9 @@ mod session_lifecycle {
     use super::*;
     use imp_core::config::Config;
     use imp_core::session::{SessionEntry, SessionManager};
+    use imp_llm::ThinkingLevel;
     use imp_llm::auth::{AuthStore, OAuthCredential, StoredCredential};
     use imp_llm::model::ModelRegistry;
-    use imp_llm::ThinkingLevel;
     use imp_llm::{AssistantMessage, ContentBlock, StopReason};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
@@ -9398,10 +8827,11 @@ mod session_lifecycle {
         app.finish_ask();
 
         assert_eq!(rx.try_recv().unwrap(), Some(1));
-        assert!(app
-            .messages
-            .iter()
-            .any(|message| message.content == "purple"));
+        assert!(
+            app.messages
+                .iter()
+                .any(|message| message.content == "purple")
+        );
     }
 
     #[test]
@@ -9497,21 +8927,23 @@ mod session_lifecycle {
             saved_path.as_deref(),
             Some(path.display().to_string().as_str())
         );
-        assert!(app
-            .messages
-            .iter()
-            .any(|message| message.content.contains("Saved eval candidate")));
+        assert!(
+            app.messages
+                .iter()
+                .any(|message| message.content.contains("Saved eval candidate"))
+        );
     }
 
     #[test]
     fn eval_candidate_command_requires_evidence() {
         let mut app = make_app();
         app.execute_command("eval Expected behavior");
-        assert!(app
-            .messages
-            .iter()
-            .any(|message| message.role == MessageRole::Warning
-                && message.content.contains("No run evidence")));
+        assert!(
+            app.messages
+                .iter()
+                .any(|message| message.role == MessageRole::Warning
+                    && message.content.contains("No run evidence"))
+        );
     }
 
     #[tokio::test]
@@ -9553,10 +8985,11 @@ mod session_lifecycle {
 
         assert!(app.pending_agent_prompt.is_none());
         assert!(app.agent_start_task.is_none());
-        assert!(app
-            .messages
-            .iter()
-            .any(|message| message.role == MessageRole::Error));
+        assert!(
+            app.messages
+                .iter()
+                .any(|message| message.role == MessageRole::Error)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -9603,11 +9036,12 @@ mod session_lifecycle {
         app.editor.set_content("!! pwd");
         app.send_message();
         assert!(app.session.get_messages().is_empty());
-        assert!(app
-            .messages
-            .last()
-            .map(|message| message.content.contains(child.to_string_lossy().as_ref()))
-            .unwrap_or(false));
+        assert!(
+            app.messages
+                .last()
+                .map(|message| message.content.contains(child.to_string_lossy().as_ref()))
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -9662,9 +9096,11 @@ mod session_lifecycle {
 
         let commands = app.slash_commands();
 
-        assert!(commands
-            .iter()
-            .any(|cmd| cmd.name == "explain-code" && cmd.description.contains("Skill:")));
+        assert!(
+            commands
+                .iter()
+                .any(|cmd| cmd.name == "explain-code" && cmd.description.contains("Skill:"))
+        );
     }
 
     #[test]
@@ -10021,12 +9457,13 @@ mod session_lifecycle {
         let mut app = make_app();
         // /mouse is no longer a recognized command — it should fall through to unknown
         app.execute_command("mouse");
-        assert!(app
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("Unknown command"));
+        assert!(
+            app.messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Unknown command")
+        );
     }
 
     #[test]
@@ -10067,9 +9504,11 @@ mod session_lifecycle {
         let commands = app.slash_commands();
 
         assert!(commands.iter().any(|cmd| cmd.name == "new"));
-        assert!(commands
-            .iter()
-            .any(|cmd| cmd.name == "greet" && cmd.description == "Say hello from Lua"));
+        assert!(
+            commands
+                .iter()
+                .any(|cmd| cmd.name == "greet" && cmd.description == "Say hello from Lua")
+        );
     }
 
     #[test]
@@ -10374,102 +9813,27 @@ mod session_lifecycle {
     }
 
     #[tokio::test]
-    async fn workflow_command_wraps_prompt_for_one_turn() {
-        let mut app = make_app();
-        app.execute_command("plan add billing");
-        assert!(app
-            .pending_agent_prompt
-            .as_ref()
-            .unwrap()
-            .contains("Task workflow: plan"));
-        assert!(app
-            .pending_agent_prompt
-            .as_ref()
-            .unwrap()
-            .contains("add billing"));
-        assert!(app
-            .messages
-            .iter()
-            .any(|message| message.content.contains("Using /plan")));
-        assert!(app
-            .messages
-            .iter()
-            .any(|message| message.content == "/plan add billing"));
-    }
-
-    #[tokio::test]
-    async fn workflow_alias_resolves_to_profile() {
-        let mut app = make_app();
-        app.execute_command("spec add billing");
-        assert!(app
-            .pending_agent_prompt
-            .as_ref()
-            .unwrap()
-            .contains("Task workflow: plan"));
-        assert!(app
-            .messages
-            .iter()
-            .any(|message| message.content == "/plan add billing"));
-    }
-
-    #[test]
-    fn workflows_command_lists_profiles() {
-        let mut app = make_app();
-        app.execute_command("workflows");
-        let content = &app.messages.last().unwrap().content;
-        assert!(content.contains("/plan"));
-        assert!(content.contains("/review"));
-    }
-
-    #[test]
-    fn workflow_command_shows_profile_details() {
-        let mut app = make_app();
-        app.execute_command("workflow plan");
-        let content = &app.messages.last().unwrap().content;
-        assert!(content.contains("/plan"));
-        assert!(content.contains("aliases:"));
-        assert!(content.contains("action: Save plan"));
-    }
-
-    #[test]
-    fn natural_prompt_suggests_workflow_without_starting_agent() {
+    async fn natural_prompt_sends_without_workflow_takeover_question() {
         let mut app = make_app();
         app.editor.set_content("please plan this feature");
         app.send_message();
-        assert!(app.pending_agent_prompt.is_none());
-        assert!(matches!(
-            app.ask_reply,
-            Some(AskReply::WorkflowSuggestion { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn accepting_workflow_suggestion_wraps_prompt() {
-        let mut app = make_app();
-        app.editor.set_content("please plan this feature");
-        app.send_message();
-        app.finish_ask();
-        assert!(app
-            .pending_agent_prompt
-            .as_ref()
-            .unwrap()
-            .contains("Task workflow: plan"));
-    }
-
-    #[tokio::test]
-    async fn declining_workflow_suggestion_sends_original_prompt() {
-        let mut app = make_app();
-        app.editor.set_content("please plan this feature");
-        app.send_message();
-        if let Some(state) = app.ask_state.as_mut() {
-            state.cursor = 1;
-        }
-        app.finish_ask();
+        assert!(matches!(app.ask_reply, None));
         assert_eq!(
             app.pending_agent_prompt.as_deref(),
             Some("please plan this feature")
         );
         assert!(app.editor.content().is_empty());
+    }
+
+    #[tokio::test]
+    async fn workflow_slash_commands_are_removed() {
+        let mut app = make_app();
+        app.editor.set_content("/plan this feature");
+        app.send_message();
+        assert!(app.pending_agent_prompt.is_none());
+        let last = app.messages.last().expect("unknown command message");
+        assert_eq!(last.role, MessageRole::Error);
+        assert!(last.content.contains("Unknown command: /plan this feature"));
     }
 
     #[test]
@@ -10878,10 +10242,12 @@ mod session_lifecycle {
             &app.theme,
         );
         assert!(detail.plain_lines.iter().any(|line| line == "# Rust"));
-        assert!(detail
-            .plain_lines
-            .iter()
-            .any(|line| line == "Use result types."));
+        assert!(
+            detail
+                .plain_lines
+                .iter()
+                .any(|line| line == "Use result types.")
+        );
 
         if let Some(previous_home) = previous_home {
             std::env::set_var("HOME", previous_home);
@@ -11117,12 +10483,13 @@ mod session_lifecycle {
         app.handle_normal_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
             .unwrap();
 
-        assert!(app
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("No read file selected"));
+        assert!(
+            app.messages
+                .last()
+                .unwrap()
+                .content
+                .contains("No read file selected")
+        );
     }
 
     #[test]
@@ -11326,19 +10693,21 @@ mod session_lifecycle {
 
         app.handle_normal_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
             .unwrap();
-        assert!(!app
-            .messages
-            .last()
-            .is_some_and(|message| message.content.contains("Copied selection")));
+        assert!(
+            !app.messages
+                .last()
+                .is_some_and(|message| message.content.contains("Copied selection"))
+        );
 
         app.handle_normal_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER))
             .unwrap();
-        assert!(app
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("Copied selection"));
+        assert!(
+            app.messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Copied selection")
+        );
     }
 
     #[test]
@@ -11359,12 +10728,13 @@ mod session_lifecycle {
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER))
             .unwrap();
 
-        assert!(app
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("Copied selection"));
+        assert!(
+            app.messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Copied selection")
+        );
         assert_eq!(app.ctrl_c_count, 0);
     }
 
@@ -11774,16 +11144,18 @@ mod session_lifecycle {
     fn autonomy_command_help_and_unknown_mode_are_user_visible() {
         let mut app = make_app();
         app.execute_command("autonomy help");
-        assert!(app
-            .messages
-            .iter()
-            .any(|message| message.content.contains("Usage: /autonomy")));
+        assert!(
+            app.messages
+                .iter()
+                .any(|message| message.content.contains("Usage: /autonomy"))
+        );
 
         app.execute_command("autonomy dangerous");
-        assert!(app
-            .messages
-            .iter()
-            .any(|message| { message.content.contains("Unknown autonomy mode: dangerous") }));
+        assert!(
+            app.messages
+                .iter()
+                .any(|message| { message.content.contains("Unknown autonomy mode: dangerous") })
+        );
     }
 
     #[test]
@@ -11810,10 +11182,11 @@ mod session_lifecycle {
                 .map(String::as_str),
             Some("unit tests failed required blocks closeout")
         );
-        assert!(app
-            .messages
-            .iter()
-            .any(|message| { message.content.contains("Verification failed: unit tests") }));
+        assert!(
+            app.messages
+                .iter()
+                .any(|message| { message.content.contains("Verification failed: unit tests") })
+        );
     }
 
     #[test]
@@ -11892,10 +11265,11 @@ mod session_lifecycle {
                 ..imp_core::workflow::WorktreeCloseoutResult::default()
             },
         });
-        assert!(app
-            .status_items
-            .get("worktree-closeout")
-            .is_some_and(|value| value.contains("kept worktree")));
+        assert!(
+            app.status_items
+                .get("worktree-closeout")
+                .is_some_and(|value| value.contains("kept worktree"))
+        );
     }
 
     #[test]
@@ -11980,9 +11354,11 @@ mod session_lifecycle {
             app.status_items.get("evidence").map(String::as_str),
             Some(".imp/runs/run_1/evidence.md")
         );
-        assert!(!app.messages.iter().any(|message| message
-            .content
-            .contains("Evidence: .imp/runs/run_1/evidence.md")));
+        assert!(!app.messages.iter().any(|message| {
+            message
+                .content
+                .contains("Evidence: .imp/runs/run_1/evidence.md")
+        }));
     }
 
     #[test]
