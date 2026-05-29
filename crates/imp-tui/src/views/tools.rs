@@ -1029,11 +1029,13 @@ mod tests {
     }
 
     #[test]
-    fn tool_frame_uses_corner_spinner() {
-        assert_eq!(tool_frame(0), "◜");
-        assert_eq!(tool_frame(3), "◝");
-        assert_eq!(tool_frame(6), "◞");
-        assert_eq!(tool_frame(9), "◟");
+    fn tool_frame_uses_slow_simple_spinner() {
+        assert_eq!(tool_frame(0), "◐");
+        assert_eq!(tool_frame(5), "◐");
+        assert_eq!(tool_frame(6), "◓");
+        assert_eq!(tool_frame(12), "◑");
+        assert_eq!(tool_frame(18), "◒");
+        assert_eq!(tool_frame(24), "◐");
     }
 
     #[test]
@@ -1054,7 +1056,7 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert!(running_text.contains("◜ $ cargo test -p imp-tui"));
+        assert!(running_text.contains("◐ $ cargo test -p imp-tui"));
         assert!(!running_text.contains("Terminal"));
     }
 

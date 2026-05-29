@@ -6,7 +6,26 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## [Unreleased]
 
-Use this section for changes that have landed on nightly after the 0.2.9 release.
+Use this section for changes that have landed on nightly after the 0.3.0 release.
+
+## [0.3.0] - 2026-05-29
+
+### Added
+
+- Added actionable workflow run contracts so command-backed workflows can publish clearer execution and verification expectations.
+- Added cached repo intelligence summaries and more visible startup metadata for project context.
+
+### Changed
+
+- Sped up TUI startup and session picker loading, including faster recent-session scans and cached repository intelligence.
+- Simplified agent runtime stop policy so tool results and turn continuation are handled more predictably.
+- Treat bare CLI arguments as one-shot prompts for smoother command-line usage.
+- Increased Tokio worker stack size for deeper async/runtime paths.
+
+### Fixed
+
+- Fixed startup skill hit detection.
+- Handled repeated key events in the TUI.
 
 ## [0.2.9] - 2026-05-28
 
@@ -253,7 +272,8 @@ Initial crates.io release of the imp crate family.
 - Standardized published crates on MIT license metadata.
 - Added crates.io metadata and versioned internal dependencies for published crates.
 
-[Unreleased]: https://github.com/kfcafe/imp/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/kfcafe/imp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kfcafe/imp/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/kfcafe/imp/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/kfcafe/imp/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/kfcafe/imp/compare/v0.2.6...v0.2.7
