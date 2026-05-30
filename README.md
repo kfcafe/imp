@@ -1,12 +1,29 @@
 # imp
 
-Local terminal coding agent in Rust. imp runs through the TUI, one-shot prompts, or a JSONL RPC protocol. It uses structured tools, durable sessions, and file-backed workflows for planned, inspectable development work.
+Local terminal coding agent in Rust. imp runs through a TUI, one-shot prompts, or a JSONL RPC protocol. It uses structured tools, durable sessions, and file-backed workflows for planned, inspectable development work.
+
+## Demo
+
+<video src="docs/assets/imp-demo.mp4" controls muted playsinline width="100%"></video>
+
+If your Markdown viewer does not render embedded video, open [`docs/assets/imp-demo.mp4`](docs/assets/imp-demo.mp4) directly.
 
 ## Install
+
+Homebrew:
 
 ```bash
 brew tap kfcafe/tap && brew install imp
 ```
+
+From a checkout with a recent stable Rust toolchain:
+
+```bash
+cargo install --path .
+imp install-local
+```
+
+## Quickstart
 
 ```bash
 imp                           # TUI
@@ -407,19 +424,19 @@ Preview/planned:
 - executable workflow runner for build-step orchestration
 - MCP planned
 - `.imp/agents` planned
-- ACP/editor adapters planned
+- ACP editor adapter scaffold remains internal/out-of-scope for 0.3.0 unless separately verified
 - hosted sync/team collaboration planned
 - workflow API planned
 
 Compatibility/legacy:
 
-- legacy `mana` integration is optional and compatibility-oriented
 - TypeScript/Pi extension compatibility is experimental and not a shipped extension surface
 
 ## Technical docs
 
 - [Docs index](docs/index.md)
 - [Workflows](docs/workflows.md)
+- [ACP editor adapter scaffold](docs/acp.md) — internal/out-of-scope for 0.3.0 unless separately verified.
 - [RPC protocol](docs/rpc.md)
 - [Native tools](docs/tools.md)
 - [Runtime policy](docs/policy.md)

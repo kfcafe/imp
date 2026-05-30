@@ -5,6 +5,7 @@ This directory contains technical reference pages for imp. README.md is the entr
 ## Core references
 
 - [Workflows](workflows.md) — workflow artifacts, schema, lifecycle, events, prototyping, verification, closeout, and API direction.
+- [ACP editor adapter scaffold](acp.md) — internal/out-of-scope for 0.3.0 unless separately verified; current limitations and editor launch shape.
 - [RPC protocol](rpc.md) — `--mode rpc`, stdin commands, stdout events, `--runtime-json`, and host integration notes.
 - [Native tools](tools.md) — built-in tools, mutability, policy interaction, execution behavior, and display notes.
 - [Runtime policy](policy.md) — modes, autonomy, tool allow/deny rules, write-path rules, hooks, and verify gates.

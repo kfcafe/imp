@@ -122,7 +122,7 @@ Decision vocabulary:
 - Existing `AgentMode::allows_tool` behavior remains authoritative.
 - Existing `RunPolicy::check_tool` and `RunPolicy::check_write_path` behavior
   remains authoritative.
-- Existing bash-equivalent mana blocking remains in force.
+- Existing workflow/tool safety blocking remains in force.
 - Existing repeated-call loop blocking remains in force.
 - Existing schema validation and after-write guardrails remain in force.
 - Existing TUI interactions should not feel more bureaucratic for routine work.
@@ -215,7 +215,7 @@ Default TUI sessions start in `safe` mode:
 
 Safe mode is the compatibility baseline. It keeps current TUI expectations:
 normal reads, edits, shell/tool use, existing `AgentMode` limits, `RunPolicy`
-constraints, repeated-call protection, bash-equivalent mana blocking, schema
+constraints, repeated-call protection, workflow/tool safety blocking, schema
 validation, and guardrails. Use safe mode when you want the agent to behave like
 imp historically behaved.
 
@@ -368,9 +368,3 @@ All modes should preserve:
 
 Allow-all modes should especially leave a useful audit trail. If future code skips
 trace/evidence in allow-all for convenience, treat that as a bug.
-
-See also:
-
-- `docs/reference-monitor-policy.md`
-- `docs/trace-and-evidence-format.md`
-- `docs/imp-next-workflow-runtime.md`
