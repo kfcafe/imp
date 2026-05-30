@@ -1,0 +1,117 @@
+## list models
+MODEL                                    PROVIDER      CONTEXT     $/M IN    $/M OUT
+------------------------------------------------------------------------------------
+claude-sonnet-4-6                        anthropic       1000k      $3.00     $15.00
+claude-haiku-4-5-20251001                anthropic        200k      $1.00      $5.00
+claude-opus-4-6                          anthropic       1000k      $5.00     $25.00
+gpt-5.4                                  openai          1050k      $2.50     $15.00
+gpt-5.4-mini                             openai           400k      $0.75      $4.50
+gpt-5.4-nano                             openai           400k      $0.20      $1.25
+gpt-5.3-chat-latest                      openai           128k      $1.75     $14.00
+gpt-5.3-codex                            openai           400k      $1.75     $14.00
+gpt-5.3-codex-spark                      openai           128k        n/a        n/a
+gemini-2.5-pro                           google          1048k      $1.25     $10.00
+gemini-2.5-flash                         google          1048k      $0.30      $2.50
+deepseek-chat                            deepseek          64k      $0.27      $1.10
+deepseek-reasoner                        deepseek          64k      $0.55      $2.19
+kimi-k2.6                                moonshot         256k        n/a        n/a
+kimi-k2.5                                moonshot         256k        n/a        n/a
+kimi-k2-0905-preview                     moonshot         256k        n/a        n/a
+kimi-k2-turbo-preview                    moonshot         256k        n/a        n/a
+kimi-k2-thinking                         moonshot         256k        n/a        n/a
+kimi-k2-thinking-turbo                   moonshot         256k        n/a        n/a
+kimi2.6                                  kimi-code        262k        n/a        n/a
+kimi-for-coding                          kimi-code        262k        n/a        n/a
+glm-4.7                                  zai              256k        n/a        n/a
+glm-4.7-flash                            zai              128k        n/a        n/a
+glm-5                                    zai              256k        n/a        n/a
+google/gemini-3.1-flash-lite-preview     openrouter      1048k        n/a        n/a
+google/gemini-3-flash-preview            openrouter      1048k        n/a        n/a
+llama-3.3-70b-versatile                  groq             128k      $0.59      $0.79
+## login help
+Log in to a provider. OAuth is supported for Anthropic, OpenAI/ChatGPT, and Kimi Code
+
+Usage: imp login [PROVIDER]
+
+Arguments:
+  [PROVIDER]  Provider to configure (`anthropic`, `openai`, `kimi`, or `kimi-code`). Defaults to anthropic
+
+Options:
+  -h, --help  Print help
+## login openai help
+Log in to a provider. OAuth is supported for Anthropic, OpenAI/ChatGPT, and Kimi Code
+
+Usage: imp login [PROVIDER]
+
+Arguments:
+  [PROVIDER]  Provider to configure (`anthropic`, `openai`, `kimi`, or `kimi-code`). Defaults to anthropic
+
+Options:
+  -h, --help  Print help
+## secrets help/list/doctor
+Save, list, or remove API credentials in secure imp auth storage
+
+Usage: imp secrets [PROVIDER] [COMMAND]
+
+Commands:
+  list     List configured secret providers/services
+  ls       Alias for list
+  show     Show status for one configured provider/service
+  inspect  Alias for show
+  doctor   Verify that configured secrets are readable from secure storage
+  remove   Remove a configured provider/service from secure storage
+  rm       Alias for remove
+  set      Configure or update a provider/service's secret fields
+  help     Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [PROVIDER]  Provider/service to configure (e.g. tavily, exa, resend, my-service)
+
+Options:
+  -h, --help  Print help
+Provider                 Kind      Status  Fields
+-----------------------  --------  ------  ------
+Render (Render)          api_key   ok      api_key
+Anthropic (anthropic)    oauth     ok      access_token
+exa (exa)                api_key   ok      api_key
+Google (google)          api_key   ok      api_key
+kagi (kagi)              api_key   ok      api_key
+Kimi Code (kimi-code)    oauth     ok      access_token
+OpenAI (openai)          oauth     ok      access_token
+ChatGPT (openai-codex)   oauth     ok      access_token
+OpenRouter (openrouter)  api_key   ok      api_key
+plunk (plunk)            2 fields  ok      api_key, secret_key
+porkbun (porkbun)        2 fields  ok      api_key, secret_key
+render (render)          api_key   ok      api_key
+tavily (tavily)          api_key   ok      api_key
+Render (Render) — ok
+  api_key: ok
+Anthropic (anthropic) — ok
+  access_token: ok
+exa (exa) — ok
+  api_key: ok
+Google (google) — ok
+  api_key: ok
+kagi (kagi) — ok
+  api_key: ok
+Kimi Code (kimi-code) — ok
+  access_token: ok
+OpenAI (openai) — ok
+  access_token: ok
+ChatGPT (openai-codex) — ok
+  access_token: ok
+OpenRouter (openrouter) — ok
+  api_key: ok
+plunk (plunk) — ok
+  api_key: ok
+  secret_key: ok
+porkbun (porkbun) — ok
+  api_key: ok
+  secret_key: ok
+render (render) — ok
+  api_key: ok
+tavily (tavily) — ok
+  api_key: ok
+## isolated no-key one-shot
+no-key exit status: 1
+Error: Config error: Auth failed for anthropic: Auth error: No readable secret field 'api_key' found for anthropic. Set ANTHROPIC_API_KEY or run `imp secrets anthropic` to save it again.

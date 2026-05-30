@@ -1,0 +1,162 @@
+schema: imp.workflow/v1
+id: audit-and-repair-workflows
+title: Audit and repair native workflows
+status: done
+kind: maintenance
+settings:
+  worktree: shared
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Deeply trial the native workflow tool against real .imp/workflows artifacts, identify edge cases, and repair workflow/tool issues found during dogfooding.
+  user_value: |
+    Make workflow artifacts trustworthy as executable project plans and make the workflow tool safer under real use, especially around validation, run selection, update atomicity, and auditability.
+  non_goals:
+  - Rewrite unrelated product roadmap content.
+  - Close or weaken workflows without evidence from validation or verification.
+  - Perform destructive git history operations.
+  acceptance:
+    baseline_validated:
+      text: All existing workflow artifacts are validated in strict mode and baseline results are recorded.
+      status: done
+      checks:
+      - strict_validation_baseline
+    edge_cases_trialed:
+      text: Workflow tool list/show/validate/run/update are exercised against real and temporary edge-case workflows.
+      status: done
+      checks:
+      - edge_case_matrix_recorded
+    repairs_implemented:
+      text: Any confirmed workflow/tool defects found during dogfooding are fixed or explicitly recorded as follow-up concerns.
+      status: done
+      checks:
+      - repairs_verified
+    results_recorded:
+      text: Findings, verification, concerns, and next tasks are written to this workflow's results.
+      status: done
+      checks:
+      - results_rendered
+  approval_required_for:
+  - removing or weakening acceptance criteria
+  - changing existing workflow goals outside repair scope
+  - deleting workflow artifacts
+context:
+  validation_baseline:
+    artifact: .imp/workflows/audit-and-repair-workflows/results.md
+    status: done
+  workflow_tool_code:
+    file: crates/imp-core/src/tools/workflow.rs
+    status: done
+steps:
+  inventory:
+    kind: plan
+    status: done
+    checks:
+    - strict_validation_baseline
+  trial_read_paths:
+    kind: verify
+    status: done
+    depends_on:
+    - inventory
+    checks:
+    - list_show_validate_trialed
+  trial_run_paths:
+    kind: verify
+    status: done
+    depends_on:
+    - trial_read_paths
+    checks:
+    - run_selection_trialed
+  trial_update_paths:
+    kind: verify
+    status: done
+    depends_on:
+    - trial_read_paths
+    checks:
+    - update_atomicity_trialed
+  repair_defects:
+    kind: build
+    status: done
+    worker: builder
+    depends_on:
+    - trial_run_paths
+    - trial_update_paths
+    checks:
+    - repairs_verified
+  closeout:
+    kind: closeout
+    status: done
+    depends_on:
+    - repair_defects
+    checks:
+    - results_rendered
+    - required_checks_passed
+prototypes: {}
+checks:
+  strict_validation_baseline:
+    kind: command
+    status: passed
+    command: workflow validate --strict
+  list_show_validate_trialed:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/audit-and-repair-workflows/results.md
+  run_selection_trialed:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/audit-and-repair-workflows/results.md
+  update_atomicity_trialed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_update_rejects_unwritable_event_log_without_replacing_yaml
+  edge_case_matrix_recorded:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/audit-and-repair-workflows/artifacts/edge-cases.md
+  repairs_verified:
+    kind: command
+    status: passed
+    command: 'cargo test -p imp-core tools::workflow::tests::'
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/audit-and-repair-workflows/results.md
+  required_checks_passed:
+    kind: aggregate
+    status: passed
+workers:
+  parent:
+    role: orchestrator
+    writes:
+    - workflow
+    - results
+    - docs
+    writes_code: false
+  builder:
+    role: builder
+    writes:
+    - code
+    - tests
+    - workflow
+    worktree: shared
+results:
+  path: .imp/workflows/audit-and-repair-workflows/results.md
+  required_claims:
+  - baseline validation result
+  - edge cases trialed
+  - defects fixed or recorded
+  - verification performed
+  - concerns and next tasks
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+    - results_rendered
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

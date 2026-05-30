@@ -1,0 +1,321 @@
+schema: imp.workflow/v1
+id: tighten-imp-product-surface
+title: Tighten imp product surface
+status: done_with_concerns
+kind: cleanup
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Cut imp back into a minimal, extensible coding agent with a strong TUI and one-shot path, using workflows as the durable orchestration primitive and removing experimental feature surfaces that no longer provide real product value.
+  user_value: |
+    Make imp feel coherent, fast, and shippable after experimentation: fewer commands, fewer overlapping durable-work concepts, less backend code, and clearer product identity influenced by Pi's minimal extensibility and Codex's well-engineered agentic runtime.
+
+    Product principles: TUI and one-shot are first-class; CLI chat is not. Workflow is the durable orchestration primitive. Commands should be essential session/control/config affordances, not task-type shortcuts. If a command is removed, inspect whether its backend can also be removed safely. Prefer archiving experimental files to ~/imp-archive over preserving bloated active code paths. Maintain Pi's influence as a minimal, extensible coding agent while taking Codex inspiration for solid runtime boundaries.
+  non_goals:
+  - Add a /work command in this workflow.
+  - Preserve compatibility for old slash commands, CLI chat grammar, mana, or imp-work unless they still serve the target product.
+  - Delete or migrate historical markdown work records; archive code/docs to ~/imp-archive when useful instead of hard-deleting valuable history.
+  - Redesign workflows themselves beyond using them as the consolidation target.
+  acceptance:
+    target_surface_defined:
+      text: A target product surface is documented, including the retained TUI commands and removed/deferred commands.
+      status: done
+      checks:
+      - full_codebase_audit_complete
+      - surface_inventory_complete
+      - removal_policy_decided
+    backend_removal_plan_ready:
+      text: Backend code supporting removed commands is inventoried and classified as remove, archive, fold into workflow, or keep.
+      status: done
+      checks:
+      - backend_dependency_inventory_complete
+      - archive_plan_ready
+    first_cut_implemented:
+      text: The first implementation slice removes or archives at least one non-essential surface without breaking TUI or one-shot basics.
+      status: done
+      checks:
+      - focused_diff_reviewed
+      - narrow_checks_passed
+    docs_reflect_tight_product:
+      text: README/help/docs describe the tighter TUI + one-shot + workflow product and stop presenting removed experiments as active features.
+      status: done
+      checks:
+      - docs_updated
+    no_accidental_breakage:
+      text: Relevant cargo checks/tests pass for affected crates.
+      status: done
+      checks:
+      - verification_passed
+  approval_required_for:
+  - removing provider/auth support
+  - removing workflow runtime/tool support
+  - deleting files instead of archiving when the file contains nontrivial design/history
+  - changing the target retained command list
+context:
+  project_instructions:
+    file: AGENTS.md
+    status: done
+  archive_root:
+    artifact: ~/imp-archive
+    status: done
+  prior_audit:
+    artifact: chat audit from 2026-05-27
+    status: done
+  workflow_direction:
+    file: docs/rebuild/imp-workflow-feature-inventory.md
+    status: todo
+  command_palette:
+    file: crates/imp-tui/src/views/command_palette.rs
+    status: todo
+  tui_dispatch:
+    file: crates/imp-tui/src/app.rs
+    status: todo
+  cli_surface:
+    file: crates/imp-cli/src/lib.rs
+    status: todo
+  personality_backend:
+    file: crates/imp-core/src/personality.rs
+    status: todo
+  gui_crate:
+    file: crates/imp-gui
+    status: todo
+steps:
+  confirm_scope:
+    kind: context
+    status: done
+    checks:
+    - user_direction_captured
+    - archive_root_exists
+  audit_codebase:
+    kind: context
+    status: done
+    depends_on:
+    - confirm_scope
+    checks:
+    - full_codebase_audit_complete
+    - prompt_audit_complete
+  inventory_current_surface:
+    kind: context
+    status: done
+    depends_on:
+    - audit_codebase
+    checks:
+    - surface_inventory_complete
+    - backend_dependency_inventory_complete
+  decide_target_surface:
+    kind: plan
+    status: done
+    depends_on:
+    - inventory_current_surface
+    checks:
+    - retained_commands_documented
+    - removed_commands_documented
+    - removal_policy_decided
+  plan_backend_cuts:
+    kind: plan
+    status: done
+    depends_on:
+    - decide_target_surface
+    checks:
+    - archive_plan_ready
+    - backend_cut_sequence_ready
+  cut_default_build_surface:
+    kind: build
+    status: done
+    depends_on:
+    - plan_backend_cuts
+    checks:
+    - imp_gui_not_default
+    - focused_diff_reviewed
+  cut_command_surface:
+    kind: build
+    status: done
+    depends_on:
+    - plan_backend_cuts
+    checks:
+    - tui_commands_tightened
+    - removed_commands_not_advertised
+  cut_dead_backends:
+    kind: build
+    status: done
+    depends_on:
+    - cut_command_surface
+    checks:
+    - personality_disposition_done
+    - cli_chat_disposition_done
+    - mana_disposition_done
+    - eval_improve_disposition_done
+  update_docs:
+    kind: build
+    status: done
+    depends_on:
+    - cut_default_build_surface
+    - cut_command_surface
+    checks:
+    - docs_updated
+  verify:
+    kind: verify
+    status: done
+    depends_on:
+    - update_docs
+    checks:
+    - verification_passed
+  review_closeout:
+    kind: closeout
+    status: done
+    depends_on:
+    - verify
+    checks:
+    - required_checks_passed
+    - results_rendered
+checks:
+  user_direction_captured:
+    kind: context
+    status: passed
+    artifact: chat
+  archive_root_exists:
+    kind: context
+    status: passed
+    path: ~/imp-archive
+  full_codebase_audit_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/tighten-imp-product-surface/artifacts/codebase-audit.md
+  prompt_audit_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/tighten-imp-product-surface/artifacts/prompt-audit.md
+  surface_inventory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/tighten-imp-product-surface/artifacts/surface-inventory.md
+  backend_dependency_inventory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/tighten-imp-product-surface/artifacts/backend-inventory.md
+  retained_commands_documented:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/tighten-imp-product-surface/artifacts/target-surface.md
+  removed_commands_documented:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/tighten-imp-product-surface/artifacts/target-surface.md
+  removal_policy_decided:
+    kind: approval
+    status: passed
+    decision: User approves the retained/removed/deferred command and backend list before broad removal.
+  archive_plan_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/tighten-imp-product-surface/artifacts/archive-plan.md
+  backend_cut_sequence_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/tighten-imp-product-surface/artifacts/backend-cut-sequence.md
+  imp_gui_not_default:
+    kind: artifact
+    status: passed
+    file: Cargo.toml
+  tui_commands_tightened:
+    kind: artifact
+    status: passed
+    file: crates/imp-tui/src/views/command_palette.rs
+  removed_commands_not_advertised:
+    kind: artifact
+    status: passed
+    file: crates/imp-tui/src/app.rs
+  personality_disposition_done:
+    kind: artifact
+    status: passed
+    file: crates/imp-core/src/builder.rs
+    decision: Personality/soul prompt injection and CLI/TUI personality surfaces removed from launch product surface; orphaned TUI personality view is no longer compiled.
+  cli_chat_disposition_done:
+    kind: artifact
+    status: passed
+    file: crates/imp-cli/src/lib.rs
+    decision: CLI chat subcommand and shell runtime removed; --mode chat now exits with an explicit removed-surface error.
+  mana_disposition_done:
+    kind: artifact
+    status: passed
+    file: crates/imp-tui/src/app.rs
+    decision: Mana is removed from the visible TUI command/help/palette product surface. The gated CLI mana namespace remains as compatibility/headless execution until replaced by workflow run execution.
+  eval_improve_disposition_done:
+    kind: artifact
+    status: passed
+    file: crates/imp-cli/src/lib.rs
+    decision: Eval CLI/TUI surfaces and visible Improve commands are removed from the launch product surface. Stranded Improve internals remain for staged removal but are no longer user-discoverable or command-dispatched.
+  focused_diff_reviewed:
+    kind: approval
+    status: passed
+  docs_updated:
+    kind: artifact
+    status: passed
+    file: README.md
+  verification_passed:
+    kind: command
+    status: passed
+    command: cargo check -p imp-core -p imp-tui -p imp-cli
+  narrow_checks_passed:
+    kind: command
+    status: passed
+    command: cargo check -p imp-tui
+  required_checks_passed:
+    kind: aggregate
+    status: passed
+    requires:
+    - full_codebase_audit_complete
+    - prompt_audit_complete
+    - surface_inventory_complete
+    - backend_dependency_inventory_complete
+    - removal_policy_decided
+    - docs_updated
+    - verification_passed
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/tighten-imp-product-surface/results.md
+workers:
+  planner:
+    role: planner
+    writes_code: false
+    responsibilities:
+    - perform full codebase and prompt/runtime prompt audits
+    - inventory product surfaces and backends
+    - draft target surface and cut plan
+  implementer:
+    role: implementer
+    writes_code: true
+    responsibilities:
+    - remove default build/product surfaces after approval
+    - archive files when appropriate
+    - update docs/help
+  reviewer:
+    role: reviewer
+    writes_code: false
+    responsibilities:
+    - check that cuts match target product identity
+    - verify TUI and one-shot remain intact
+results:
+  path: .imp/workflows/tighten-imp-product-surface/results.md
+  required_claims:
+  - target surface defined
+  - commands/backends cut or explicitly deferred
+  - docs updated
+  - verification performed
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+    - results_rendered
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

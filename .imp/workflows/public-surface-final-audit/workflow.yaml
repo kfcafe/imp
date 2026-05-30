@@ -1,0 +1,88 @@
+schema: imp.workflow/v1
+id: public-surface-final-audit
+title: Audit final public 0.3.0 surface
+status: done
+kind: release
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: Verify that every public command, README claim, docs page, and config example matches the shipped 0.3.0 surface.
+  user_value: HN visitors should see a coherent product with no dead commands, misleading previews, or stale terminology.
+  non_goals:
+  - Add new features.
+  - Write the HN post.
+  acceptance:
+    public_surface_truthful:
+      text: Public CLI/TUI/docs/config surfaces are inventoried and stale claims are fixed.
+      status: done
+      checks:
+      - command_surface_captured
+      - docs_claims_audited
+      - stale_claims_fixed
+context:
+  release_scope:
+    artifact: .imp/workflows/prepare-imp-0-3-0-release/artifacts/target-surface.md
+    status: done
+steps:
+  capture_public_surface:
+    kind: context
+    status: done
+    checks:
+    - command_surface_captured
+  audit_docs_claims:
+    kind: context
+    status: done
+    depends_on:
+    - capture_public_surface
+    checks:
+    - docs_claims_audited
+  fix_stale_surface_claims:
+    kind: build
+    status: done
+    depends_on:
+    - audit_docs_claims
+    checks:
+    - stale_claims_fixed
+checks:
+  command_surface_captured:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/public-surface-final-audit/artifacts/command-surface.md
+  docs_claims_audited:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/public-surface-final-audit/artifacts/docs-claims.md
+  stale_claims_fixed:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/public-surface-final-audit/artifacts/fixes.md
+workers:
+  owner:
+    role: owner
+    writes_code: true
+    responsibilities:
+    - execute this workflow
+    - record evidence and blockers
+    - keep changes focused and verified
+results:
+  path: .imp/workflows/public-surface-final-audit/results.md
+  required_claims:
+  - command surface audited
+  - docs surface audited
+  - stale claims fixed or explicitly deferred
+closeout:
+  done:
+    requires:
+    - command_surface_captured
+    - docs_claims_audited
+    - stale_claims_fixed
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

@@ -1,0 +1,234 @@
+schema: imp.workflow/v1
+id: agent-actionable-workflow-run
+title: Make workflow run dispatch agent-actionable steps
+status: done_with_concerns
+kind: feature
+settings:
+  worktree: current
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Extend native workflow run so non-command steps can be fully actionable through explicit agent/worker action contracts, while preserving command orchestration and clear blocked states for underspecified steps.
+  user_value: |
+    Agents can run complete workflows end-to-end without users babysitting /workflow run, including context, planning, implementation, review, and verification steps that require agent judgment rather than shell commands.
+  non_goals:
+  - Fake non-command work as shell commands.
+  - Remove command-check orchestration.
+  - Build network/distributed worker infrastructure.
+  - Change persistence away from .imp/workflows/workflow.yaml and events.jsonl.
+  acceptance:
+    action_contract_schema:
+      text: Workflow steps can declare agent/worker action contracts with role, objective, instructions, write scope, and completion requirements.
+      status: done
+      checks:
+      - schema_supports_action_contracts
+      - validation_covers_action_contracts
+    missing_contract_blocks_clearly:
+      text: A runnable non-command step without a command, child workflow, worker, or action contract produces a clear missing-action-contract blocked state.
+      status: done
+      checks:
+      - missing_contract_tested
+    agent_action_dispatch_contract:
+      text: workflow run renders a human-readable agent action dispatch contract instead of raw JSON when it reaches an agent-actionable step.
+      status: done
+      checks:
+      - agent_dispatch_render_tested
+    runtime_agent_execution:
+      text: The runtime can execute an agent-actionable step from the contract, constrain writes, record events, and continue orchestration after completion.
+      status: blocked
+      checks:
+      - runtime_dispatch_tested
+      - event_log_records_agent_action
+    tui_progress_ready:
+      text: The run result exposes enough structured state for the TUI to display agent workflow progress without showing JSON.
+      status: done
+      checks:
+      - tui_progress_contract_tested
+    regression_verification:
+      text: Command-only workflow run orchestration still completes to done, and focused tests/checks pass.
+      status: done
+      checks:
+      - command_orchestrator_regression_passed
+      - imp_core_tests_passed
+      - imp_tui_check_passed
+  approval_required_for:
+  - changing workflow file location or storage model
+  - adding significant dependencies
+  - broad runtime refactors unrelated to workflow dispatch
+  - removing existing workflow slash commands
+context:
+  project_instructions:
+    file: AGENTS.md
+    status: done
+  workflow_tool:
+    file: crates/imp-core/src/tools/workflow.rs
+    status: todo
+  workflow_schema:
+    search: WorkflowDocument and step schema definitions
+    status: todo
+  runtime_agent:
+    search: Agent runtime dispatch and tool result handling
+    status: todo
+  tui_progress_workflow:
+    file: .imp/workflows/tui-workflow-run-progress/workflow.yaml
+    status: done
+steps:
+  inspect_schema_and_runner:
+    kind: context
+    status: done
+    checks:
+    - schema_and_runner_inspected
+  design_action_contract:
+    kind: plan
+    status: done
+    depends_on:
+    - inspect_schema_and_runner
+    checks:
+    - action_contract_design_written
+  implement_schema_validation:
+    kind: build
+    status: done
+    depends_on:
+    - design_action_contract
+    checks:
+    - schema_supports_action_contracts
+    - validation_covers_action_contracts
+  implement_run_dispatch_result:
+    kind: build
+    status: done
+    depends_on:
+    - implement_schema_validation
+    checks:
+    - missing_contract_tested
+    - agent_dispatch_render_tested
+    - tui_progress_contract_tested
+  wire_runtime_agent_execution:
+    kind: build
+    status: blocked
+    depends_on:
+    - implement_run_dispatch_result
+    checks:
+    - runtime_dispatch_tested
+    - event_log_records_agent_action
+  update_tui_progress_plan:
+    kind: workflow
+    status: done
+    workflow: tui-workflow-run-progress
+    depends_on:
+    - implement_run_dispatch_result
+    checks:
+    - tui_progress_workflow_updated
+  verify_regressions:
+    kind: verify
+    status: done
+    depends_on:
+    - wire_runtime_agent_execution
+    - update_tui_progress_plan
+    checks:
+    - command_orchestrator_regression_passed
+    - imp_core_tests_passed
+    - imp_tui_check_passed
+  closeout:
+    kind: closeout
+    status: done_with_concerns
+    depends_on:
+    - verify_regressions
+    checks:
+    - results_written
+checks:
+  schema_and_runner_inspected:
+    kind: review
+    status: passed
+  action_contract_design_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/agent-actionable-workflow-run/artifacts/action-contract-design.md
+  schema_supports_action_contracts:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_action_contract
+  validation_covers_action_contracts:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_action_contract
+  missing_contract_tested:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_missing_action_contract
+  agent_dispatch_render_tested:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_agent_dispatch
+  tui_progress_contract_tested:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_agent_dispatch
+  runtime_dispatch_tested:
+    kind: command
+    status: blocked
+    command: cargo test -p imp-core workflow_runtime_agent_dispatch
+  event_log_records_agent_action:
+    kind: command
+    status: blocked
+    command: cargo test -p imp-core workflow_runtime_agent_dispatch
+  tui_progress_workflow_updated:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/tui-workflow-run-progress/workflow.yaml
+  command_orchestrator_regression_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-cli workflow_cli_lists_shows_validates_runs_and_updates --test workflow_cli
+  imp_core_tests_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_
+  imp_tui_check_passed:
+    kind: command
+    status: passed
+    command: cargo check -p imp-tui
+  results_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/agent-actionable-workflow-run/results.md
+workers:
+  parent:
+    role: orchestrator
+    writes:
+    - workflow
+    - results
+    - code
+    writes_code: true
+    responsibilities:
+    - define action contracts for non-command workflow steps
+    - keep workflow run output human-readable
+    - preserve command orchestration behavior
+    - make missing action contracts fail clearly
+    - verify with focused regression tests
+  reviewer:
+    role: reviewer
+    writes:
+    - review_artifacts
+    writes_code: false
+    responsibilities:
+    - review schema/runtime boundaries
+    - check that action contracts are not fake shell automation
+results:
+  path: .imp/workflows/agent-actionable-workflow-run/results.md
+  required_claims:
+  - schema/action contract behavior
+  - run dispatch behavior
+  - runtime agent execution behavior
+  - TUI progress implications
+  - verification commands
+  - remaining concerns
+closeout:
+  done:
+    requires:
+    - command_orchestrator_regression_passed
+    - imp_core_tests_passed
+    - imp_tui_check_passed
+    - results_written

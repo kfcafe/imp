@@ -1,0 +1,37 @@
+schema: imp.workflow/v1
+id: reconciliation-dogfood
+title: Reconciliation dogfood
+status: done
+kind: verification
+settings:
+  worktree: none
+  strictness: medium
+  durable: true
+  disposable: true
+  commit_traces: false
+spec:
+  goal: Verify command-check reconciliation derives acceptance and workflow status.
+  acceptance:
+    command_check_reconciles:
+      text: Command check execution marks acceptance and workflow done.
+      status: done
+      checks:
+      - dogfood_command
+steps:
+  verify_reconciliation:
+    kind: verify
+    status: done
+    checks:
+    - dogfood_command
+checks:
+  dogfood_command:
+    kind: command
+    status: passed
+    command: true
+results:
+  path: .imp/workflows/reconciliation-dogfood/results.md
+workers: {}
+closeout:
+  done:
+    requires:
+    - dogfood_command

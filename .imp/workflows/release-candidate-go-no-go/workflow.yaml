@@ -1,0 +1,79 @@
+schema: imp.workflow/v1
+id: release-candidate-go-no-go
+title: Final 0.3.0 release candidate go/no-go
+status: needs_context
+kind: release
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: Aggregate all HN readiness workflow evidence and decide whether imp 0.3.0 is ready to tag and share.
+  user_value: The final release decision is explicit, evidence-backed, and separates blockers from accepted concerns.
+  non_goals:
+  - Create the git tag without explicit approval.
+  - Hide unresolved blockers.
+  acceptance:
+    go_no_go_ready:
+      text: All child workflow results are reviewed and a final tag approval prompt is ready.
+      status: todo
+      checks:
+      - child_results_reviewed
+      - go_no_go_written
+      - tag_approval_pending
+steps:
+  review_child_results:
+    kind: review
+    status: done
+    checks:
+    - child_results_reviewed
+  write_go_no_go:
+    kind: closeout
+    status: blocked
+    depends_on:
+    - review_child_results
+    checks:
+    - go_no_go_written
+    - tag_approval_pending
+checks:
+  child_results_reviewed:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/release-candidate-go-no-go/artifacts/child-results.md
+  go_no_go_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/release-candidate-go-no-go/results.md
+  tag_approval_pending:
+    kind: approval
+    status: pending
+    decision: Ask user before creating v0.3.0 tag.
+workers:
+  owner:
+    role: owner
+    writes_code: true
+    responsibilities:
+    - execute this workflow
+    - record evidence and blockers
+    - keep changes focused and verified
+results:
+  path: .imp/workflows/release-candidate-go-no-go/results.md
+  required_claims:
+  - child workflow statuses
+  - final blockers
+  - accepted concerns
+  - explicit tag approval pending
+closeout:
+  done:
+    requires:
+    - child_results_reviewed
+    - go_no_go_written
+    - tag_approval_pending
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

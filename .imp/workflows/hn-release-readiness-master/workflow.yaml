@@ -1,0 +1,168 @@
+schema: imp.workflow/v1
+id: hn-release-readiness-master
+title: Hacker News release readiness master
+status: active
+kind: release
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: Coordinate all workflows required to make imp 0.3.0 ready to share publicly on Hacker News.
+  user_value: A single durable release train tracks blockers, sequencing, evidence, and go/no-go state so launch readiness is not scattered across chat.
+  non_goals:
+  - Write the Hacker News post itself.
+  - Create the final v0.3.0 git tag without explicit user approval.
+  - Hide known blockers; every concern must be resolved or explicitly accepted.
+  acceptance:
+    all_blockers_resolved:
+      text: All child workflows are done or done_with_concerns with an explicit accepted rationale.
+      status: todo
+      checks:
+      - mana_removal_complete
+      - dependency_advisory_complete
+      - public_surface_audit_complete
+      - install_smoke_complete
+      - provider_auth_smoke_complete
+      - docs_hn_ready
+      - stale_history_disposition_complete
+      - regression_smoke_complete
+      - go_no_go_complete
+context:
+  prior_release_workflow:
+    artifact: .imp/workflows/prepare-imp-0-3-0-release/results.md
+    status: done
+  mana_removal_workflow:
+    artifact: .imp/workflows/remove-mana-vocabulary/workflow.yaml
+    status: active
+steps:
+  finish_mana_removal:
+    kind: build
+    status: done
+    checks:
+    - mana_removal_complete
+  dependency_advisory_cleanup:
+    kind: build
+    status: done
+    depends_on:
+    - finish_mana_removal
+    checks:
+    - dependency_advisory_complete
+  public_surface_final_audit:
+    kind: context
+    status: done
+    depends_on:
+    - finish_mana_removal
+    checks:
+    - public_surface_audit_complete
+  install_smoke_release_candidate:
+    kind: verify
+    status: done
+    depends_on:
+    - dependency_advisory_cleanup
+    - public_surface_final_audit
+    checks:
+    - install_smoke_complete
+  provider_auth_smoke:
+    kind: verify
+    status: done
+    depends_on:
+    - public_surface_final_audit
+    checks:
+    - provider_auth_smoke_complete
+  docs_hn_readiness:
+    kind: build
+    status: done
+    depends_on:
+    - public_surface_final_audit
+    checks:
+    - docs_hn_ready
+  archive_stale_history:
+    kind: build
+    status: done
+    depends_on:
+    - finish_mana_removal
+    checks:
+    - stale_history_disposition_complete
+  cli_tui_regression_smoke:
+    kind: verify
+    status: done
+    depends_on:
+    - dependency_advisory_cleanup
+    - docs_hn_readiness
+    checks:
+    - regression_smoke_complete
+  release_candidate_go_no_go:
+    kind: closeout
+    status: blocked
+    depends_on:
+    - install_smoke_release_candidate
+    - provider_auth_smoke
+    - docs_hn_readiness
+    - archive_stale_history
+    - cli_tui_regression_smoke
+    checks:
+    - go_no_go_complete
+checks:
+  mana_removal_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/remove-mana-vocabulary/results.md
+  dependency_advisory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/dependency-advisory-cleanup/results.md
+  public_surface_audit_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/public-surface-final-audit/results.md
+  install_smoke_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/install-smoke-release-candidate/results.md
+  provider_auth_smoke_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/provider-auth-smoke/results.md
+  docs_hn_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/docs-hn-readiness/results.md
+  stale_history_disposition_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/archive-stale-history/results.md
+  regression_smoke_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/cli-tui-regression-smoke/results.md
+  go_no_go_complete:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/release-candidate-go-no-go/results.md
+workers:
+  owner:
+    role: owner
+    writes_code: true
+    responsibilities:
+    - execute this workflow
+    - record evidence and blockers
+    - keep changes focused and verified
+results:
+  path: .imp/workflows/hn-release-readiness-master/results.md
+  required_claims:
+  - child workflow status summary
+  - remaining accepted concerns
+  - final tag approval pending
+closeout:
+  done:
+    requires:
+    - go_no_go_complete
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

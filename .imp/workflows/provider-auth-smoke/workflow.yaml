@@ -1,0 +1,71 @@
+schema: imp.workflow/v1
+id: provider-auth-smoke
+title: Smoke test provider and auth readiness
+status: done
+kind: release
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: Verify Anthropic and OpenAI-compatible provider/auth setup paths without exposing secrets or requiring live model calls.
+  user_value: Public users should get clear provider setup, credential, and no-key error behavior.
+  non_goals:
+  - Make live paid provider calls.
+  - Print or persist secret values.
+  acceptance:
+    provider_auth_ready:
+      text: Provider/auth commands and error paths are smoke-tested and documented.
+      status: done
+      checks:
+      - provider_auth_plan_written
+      - provider_auth_smoke_passed
+steps:
+  write_provider_auth_plan:
+    kind: plan
+    status: done
+    checks:
+    - provider_auth_plan_written
+  run_provider_auth_smoke:
+    kind: verify
+    status: done
+    depends_on:
+    - write_provider_auth_plan
+    checks:
+    - provider_auth_smoke_passed
+checks:
+  provider_auth_plan_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/provider-auth-smoke/artifacts/provider-auth-plan.md
+  provider_auth_smoke_passed:
+    kind: command
+    status: passed
+    command: imp list-models && imp secrets doctor
+workers:
+  owner:
+    role: owner
+    writes_code: true
+    responsibilities:
+    - execute this workflow
+    - record evidence and blockers
+    - keep changes focused and verified
+results:
+  path: .imp/workflows/provider-auth-smoke/results.md
+  required_claims:
+  - Anthropic setup path checked
+  - OpenAI-compatible setup path checked
+  - no secret values exposed
+closeout:
+  done:
+    requires:
+    - provider_auth_plan_written
+    - provider_auth_smoke_passed
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

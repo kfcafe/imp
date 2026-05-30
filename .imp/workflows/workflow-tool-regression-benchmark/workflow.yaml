@@ -1,0 +1,189 @@
+schema: imp.workflow/v1
+id: workflow-tool-regression-benchmark
+title: Workflow tool regression benchmark
+status: planned
+kind: benchmark
+settings:
+  worktree: current
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Re-test the improved native workflow tool end-to-end, with emphasis on the new workflow run action and the current validate/update/show/list behavior.
+  user_value: |
+    Provide fresh dogfood evidence that workflow run selects the right next step, update records durable events, validation protects schema integrity, and completed workflows report cleanly.
+  non_goals:
+  - Change workflow engine behavior during the benchmark.
+  - Exercise external services or network-dependent actions.
+  - Replace implementation-level unit tests.
+  acceptance:
+    validates_initially:
+      text: The benchmark workflow validates before any state transitions.
+      status: done
+      checks:
+      - initial_validation_passed
+    run_selects_next_steps:
+      text: The workflow run action selects expected runnable steps as dependencies complete.
+      status: todo
+      checks:
+      - initial_run_selected_context
+      - dependent_run_selected_plan
+      - final_run_reports_no_steps
+    update_persists_events:
+      text: Workflow update mutates requested paths and appends event records with reasons.
+      status: todo
+      checks:
+      - status_updates_persisted
+      - events_appended
+    show_and_list_reflect_state:
+      text: Workflow show and list reflect the benchmark state after updates.
+      status: todo
+      checks:
+      - show_reflected_state
+      - list_reflected_state
+    invalid_update_safe:
+      text: Invalid updates fail without corrupting workflow.yaml.
+      status: todo
+      checks:
+      - invalid_update_rejected
+      - workflow_unchanged_after_invalid_update
+    final_validation_passes:
+      text: The completed benchmark validates and renders results.
+      status: todo
+      checks:
+      - final_validation_passed
+      - results_written
+  approval_required_for:
+  - changing spec.goal
+  - removing or weakening spec.acceptance
+  - removing required checks
+context:
+  project_instructions:
+    file: AGENTS.md
+    status: done
+  prior_benchmark:
+    file: .imp/workflows/benchmark-workflow-e2e/workflow.yaml
+    status: done
+steps:
+  context:
+    kind: context
+    status: done
+    checks:
+    - initial_validation_passed
+    - initial_run_selected_context
+  plan_probe:
+    kind: plan
+    status: todo
+    depends_on:
+    - context
+    checks:
+    - dependent_run_selected_plan
+  update_probe:
+    kind: verify
+    status: todo
+    depends_on:
+    - plan_probe
+    checks:
+    - status_updates_persisted
+    - events_appended
+  visibility_probe:
+    kind: verify
+    status: todo
+    depends_on:
+    - update_probe
+    checks:
+    - show_reflected_state
+    - list_reflected_state
+  negative_probe:
+    kind: verify
+    status: todo
+    depends_on:
+    - visibility_probe
+    checks:
+    - invalid_update_rejected
+    - workflow_unchanged_after_invalid_update
+  closeout:
+    kind: closeout
+    status: todo
+    depends_on:
+    - negative_probe
+    checks:
+    - final_validation_passed
+    - final_run_reports_no_steps
+    - results_written
+checks:
+  initial_validation_passed:
+    kind: command
+    status: passed
+    command: true
+  initial_run_selected_context:
+    kind: command
+    status: passed
+    command: true
+  dependent_run_selected_plan:
+    kind: command
+    status: pending
+    command: true
+  status_updates_persisted:
+    kind: command
+    status: pending
+    command: true
+  events_appended:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/workflow-tool-regression-benchmark/events.jsonl
+  show_reflected_state:
+    kind: command
+    status: pending
+    command: true
+  list_reflected_state:
+    kind: command
+    status: pending
+    command: true
+  invalid_update_rejected:
+    kind: command
+    status: pending
+    command: true
+  workflow_unchanged_after_invalid_update:
+    kind: command
+    status: pending
+    command: true
+  final_validation_passed:
+    kind: command
+    status: pending
+    command: true
+  final_run_reports_no_steps:
+    kind: command
+    status: pending
+    command: true
+  results_written:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/workflow-tool-regression-benchmark/results.md
+workers:
+  parent:
+    role: orchestrator
+    writes:
+    - workflow
+    - results
+    writes_code: false
+    responsibilities:
+    - run native workflow tool probes
+    - record evidence
+    - close out benchmark truthfully
+results:
+  path: .imp/workflows/workflow-tool-regression-benchmark/results.md
+  required_claims:
+  - commands run
+  - run selections observed
+  - updates and events observed
+  - invalid update result
+  - final status
+closeout:
+  done:
+    requires:
+    - final_validation_passed
+    - final_run_reports_no_steps
+    - results_written

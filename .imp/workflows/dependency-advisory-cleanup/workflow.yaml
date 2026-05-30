@@ -1,0 +1,88 @@
+schema: imp.workflow/v1
+id: dependency-advisory-cleanup
+title: Resolve 0.3.0 dependency advisories
+status: done
+kind: release
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: Resolve or explicitly accept dependency advisories before the public 0.3.0 launch.
+  user_value: Prevent known vulnerable or abandoned transitive dependencies from undermining public launch credibility.
+  non_goals:
+  - Rewrite unrelated UI/runtime code only for dependency churn.
+  - Accept advisories silently.
+  acceptance:
+    advisories_dispositioned:
+      text: Every OSV/RustSec advisory has a fix, removal, or explicit launch acceptance rationale.
+      status: done
+      checks:
+      - dependency_tree_triaged
+      - fixes_or_acceptance_recorded
+      - deps_scan_rerun
+context:
+  prior_findings:
+    artifact: .imp/workflows/prepare-imp-0-3-0-release/artifacts/audit-scans.md
+    status: done
+steps:
+  triage_dependency_tree:
+    kind: context
+    status: done
+    checks:
+    - dependency_tree_triaged
+  implement_dependency_fixes:
+    kind: build
+    status: done
+    depends_on:
+    - triage_dependency_tree
+    checks:
+    - fixes_or_acceptance_recorded
+  verify_dependency_scan:
+    kind: verify
+    status: done
+    depends_on:
+    - implement_dependency_fixes
+    checks:
+    - deps_scan_rerun
+checks:
+  dependency_tree_triaged:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/dependency-advisory-cleanup/artifacts/dependency-tree.md
+  fixes_or_acceptance_recorded:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/dependency-advisory-cleanup/artifacts/disposition.md
+  deps_scan_rerun:
+    kind: command
+    status: passed
+    command: audit_scan deps .
+workers:
+  owner:
+    role: owner
+    writes_code: true
+    responsibilities:
+    - execute this workflow
+    - record evidence and blockers
+    - keep changes focused and verified
+results:
+  path: .imp/workflows/dependency-advisory-cleanup/results.md
+  required_claims:
+  - advisory list
+  - fix or acceptance rationale for each advisory
+  - verification result
+closeout:
+  done:
+    requires:
+    - dependency_tree_triaged
+    - fixes_or_acceptance_recorded
+    - deps_scan_rerun
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

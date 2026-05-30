@@ -1,0 +1,156 @@
+schema: imp.workflow/v1
+id: update-imp-after-workflow-engine
+title: Update imp after workflow engine
+status: done
+kind: release_update
+parent:
+  workflow: prototype-imp-workflow-engine
+  step: update_imp
+settings:
+  worktree: current
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Rebuild and update the local imp installation after the workflow engine work is complete and verified.
+  user_value: |
+    Make the new workflow engine/tool behavior available in the active local imp binary after implementation lands.
+  non_goals:
+  - Update imp before workflow implementation and verification are complete.
+  - Publish or deploy to remote systems.
+  - Perform destructive git history operations.
+  acceptance:
+    pre_update_checks_pass:
+      text: Required workflow engine checks pass before updating imp.
+      status: done
+      checks:
+      - pre_update_verification_passed
+    imp_rebuilt_or_updated:
+      text: Local imp is rebuilt or updated successfully.
+      status: done
+      checks:
+      - imp_update_command_passed
+    updated_imp_verified:
+      text: Updated imp binary is verified after update.
+      status: done
+      checks:
+      - updated_imp_verified
+  approval_required_for:
+  - changing spec.goal
+  - removing or weakening spec.acceptance
+  - removing required checks
+context:
+  parent_workflow:
+    file: .imp/workflows/prototype-imp-workflow-engine/workflow.yaml
+    status: todo
+  update_skill:
+    file: ~/.imp/skills/imp-update/SKILL.md
+    status: todo
+steps:
+  inspect_update_process:
+    kind: context
+    status: done
+    checks:
+    - update_skill_loaded
+  verify_before_update:
+    kind: verify
+    status: done
+    depends_on:
+    - inspect_update_process
+    checks:
+    - pre_update_verification_passed
+  update_imp:
+    kind: build
+    status: done
+    worker: builder
+    depends_on:
+    - verify_before_update
+    checks:
+    - imp_update_command_passed
+  verify_updated_imp:
+    kind: verify
+    status: done
+    depends_on:
+    - update_imp
+    checks:
+    - updated_imp_verified
+  render_results:
+    kind: review
+    status: done
+    worker: reviewer
+    depends_on:
+    - verify_updated_imp
+    checks:
+    - results_rendered
+    - final_claims_validated
+  closeout:
+    kind: closeout
+    status: done
+    depends_on:
+    - render_results
+    checks:
+    - required_checks_passed
+prototypes: {}
+checks:
+  update_skill_loaded:
+    kind: context
+    status: passed
+    file: ~/.imp/skills/imp-update/SKILL.md
+  pre_update_verification_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_
+  imp_update_command_passed:
+    kind: command
+    status: passed
+    command: TBD after reading imp-update skill
+  updated_imp_verified:
+    kind: command
+    status: passed
+    command: imp --version
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/update-imp-after-workflow-engine/results.md
+  final_claims_validated:
+    kind: closeout
+    status: passed
+  required_checks_passed:
+    kind: aggregate
+    status: passed
+workers:
+  parent:
+    role: orchestrator
+    writes:
+    - workflow
+    - results
+    - docs
+    writes_code: false
+  builder:
+    role: builder
+    writes:
+    - build_artifacts
+    worktree: current
+  reviewer:
+    role: reviewer
+    writes:
+    - review_artifacts
+results:
+  path: .imp/workflows/update-imp-after-workflow-engine/results.md
+  required_claims:
+  - pre-update verification result
+  - update command used
+  - post-update verification result
+  - concerns and rollback notes if any
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+    - final_claims_validated
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

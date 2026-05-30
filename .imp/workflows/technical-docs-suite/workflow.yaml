@@ -1,0 +1,294 @@
+schema: imp.workflow/v1
+id: technical-docs-suite
+title: Create technical documentation suite
+status: active
+kind: docs
+settings:
+  worktree: current
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Move detailed imp technical documentation out of README.md and into targeted docs pages, leaving README.md as a concise entrypoint.
+  user_value: |
+    Give readers focused technical references for workflows, RPC, tools, policy, sessions, Lua extensions, and architecture without making the README broad or noisy.
+  non_goals:
+  - Add a docs site generator or HTML build dependency in this pass.
+  - Redesign public branding or marketing copy.
+  - Document unshipped TypeScript extensions, MCP, ACP, or hosted collaboration as shipped.
+  acceptance:
+    readme_links_docs:
+      text: README.md links to the technical docs index and core docs pages.
+      status: todo
+      checks:
+      - readme_links_verified
+    docs_index_exists:
+      text: docs/index.md exists and describes the documentation map.
+      status: todo
+      checks:
+      - docs_index_written
+    workflows_doc_complete:
+      text: Workflows technical doc covers schema, lifecycle, events, prototyping, verification, closeout, and API direction.
+      status: todo
+      checks:
+      - workflows_doc_done
+    rpc_doc_complete:
+      text: RPC technical doc covers mode flags, input commands, output events, runtime-json, and host integration.
+      status: todo
+      checks:
+      - rpc_doc_done
+    tools_doc_complete:
+      text: Tools technical doc covers native tools, mutability, policy interaction, and display behavior.
+      status: todo
+      checks:
+      - tools_doc_done
+    policy_doc_complete:
+      text: Policy technical doc covers modes, autonomy, tool allow/deny, write paths, hooks, and verify gates.
+      status: todo
+      checks:
+      - policy_doc_done
+    sessions_doc_complete:
+      text: Sessions technical doc covers durable records, branching, compaction, evidence, and recovery.
+      status: todo
+      checks:
+      - sessions_doc_done
+    extensions_doc_complete:
+      text: Lua extensions technical doc covers load paths, tools, slash commands, hooks, and capability policy.
+      status: todo
+      checks:
+      - extensions_doc_done
+    architecture_doc_complete:
+      text: Architecture technical doc covers crate responsibilities, runtime flow, provider layer, workflow core, TUI/CLI/RPC surfaces, and extension runtime.
+      status: todo
+      checks:
+      - architecture_doc_done
+    docs_verified:
+      text: Documentation links and markdown structure are verified.
+      status: todo
+      checks:
+      - docs_sanity_passed
+  approval_required_for:
+  - adding a docs build dependency
+  - creating generated HTML artifacts
+  - weakening or removing acceptance criteria
+context:
+  readme:
+    file: README.md
+    status: todo
+  project_instructions:
+    file: AGENTS.md
+    status: todo
+  workflow_docs:
+    file: .imp/workflows/docs-workflows/workflow.yaml
+    status: todo
+steps:
+  context:
+    kind: context
+    status: done
+    checks:
+    - readme_reviewed
+    - project_instructions_loaded
+  plan_docs_map:
+    kind: plan
+    status: done
+    depends_on:
+    - context
+    checks:
+    - docs_map_written
+  write_index:
+    kind: build
+    status: todo
+    depends_on:
+    - plan_docs_map
+    checks:
+    - docs_index_written
+  write_workflows_doc:
+    kind: workflow
+    status: todo
+    workflow: docs-workflows
+    depends_on:
+    - write_index
+    checks:
+    - workflows_doc_done
+  write_rpc_doc:
+    kind: workflow
+    status: todo
+    workflow: docs-rpc
+    depends_on:
+    - write_index
+    checks:
+    - rpc_doc_done
+  write_tools_doc:
+    kind: workflow
+    status: todo
+    workflow: docs-tools
+    depends_on:
+    - write_index
+    checks:
+    - tools_doc_done
+  write_policy_doc:
+    kind: workflow
+    status: todo
+    workflow: docs-policy
+    depends_on:
+    - write_index
+    checks:
+    - policy_doc_done
+  write_sessions_doc:
+    kind: workflow
+    status: todo
+    workflow: docs-sessions
+    depends_on:
+    - write_index
+    checks:
+    - sessions_doc_done
+  write_extensions_doc:
+    kind: workflow
+    status: todo
+    workflow: docs-extensions-lua
+    depends_on:
+    - write_index
+    checks:
+    - extensions_doc_done
+  write_architecture_doc:
+    kind: workflow
+    status: todo
+    workflow: docs-architecture
+    depends_on:
+    - write_index
+    checks:
+    - architecture_doc_done
+  update_readme_links:
+    kind: build
+    status: todo
+    depends_on:
+    - write_workflows_doc
+    - write_rpc_doc
+    - write_tools_doc
+    - write_policy_doc
+    - write_sessions_doc
+    - write_extensions_doc
+    - write_architecture_doc
+    checks:
+    - readme_links_verified
+  verify:
+    kind: verify
+    status: todo
+    depends_on:
+    - update_readme_links
+    checks:
+    - docs_sanity_passed
+  review:
+    kind: review
+    status: todo
+    depends_on:
+    - verify
+    checks:
+    - results_rendered
+    - final_claims_validated
+  closeout:
+    kind: closeout
+    status: todo
+    depends_on:
+    - review
+    checks:
+    - required_checks_passed
+prototypes: {}
+checks:
+  project_instructions_loaded:
+    kind: context
+    status: passed
+  readme_reviewed:
+    kind: context
+    status: passed
+    file: README.md
+  docs_map_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/technical-docs-suite/artifacts/docs-map.md
+  docs_index_written:
+    kind: artifact
+    status: pending
+    path: docs/index.md
+  workflows_doc_done:
+    kind: artifact
+    status: pending
+    path: docs/workflows.md
+  rpc_doc_done:
+    kind: artifact
+    status: pending
+    path: docs/rpc.md
+  tools_doc_done:
+    kind: artifact
+    status: pending
+    path: docs/tools.md
+  policy_doc_done:
+    kind: artifact
+    status: pending
+    path: docs/policy.md
+  sessions_doc_done:
+    kind: artifact
+    status: pending
+    path: docs/sessions.md
+  extensions_doc_done:
+    kind: artifact
+    status: pending
+    path: docs/extensions-lua.md
+  architecture_doc_done:
+    kind: artifact
+    status: pending
+    path: docs/architecture.md
+  readme_links_verified:
+    kind: artifact
+    status: pending
+    path: README.md
+  docs_sanity_passed:
+    kind: command
+    status: pending
+    command: python markdown/link sanity check over README.md and docs/*.md
+  results_rendered:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/technical-docs-suite/results.md
+  final_claims_validated:
+    kind: closeout
+    status: pending
+  required_checks_passed:
+    kind: aggregate
+    status: pending
+workers:
+  parent:
+    role: orchestrator
+    writes:
+    - workflow
+    - docs
+    - results
+    writes_code: false
+  writer:
+    role: docs_writer
+    writes:
+    - docs
+    - readme
+  reviewer:
+    role: reviewer
+    writes:
+    - review_artifacts
+results:
+  path: .imp/workflows/technical-docs-suite/results.md
+  required_claims:
+  - docs created
+  - README links updated
+  - verification performed
+  - concerns and follow-up work
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+    - final_claims_validated
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

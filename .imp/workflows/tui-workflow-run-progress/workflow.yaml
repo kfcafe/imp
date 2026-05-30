@@ -1,0 +1,254 @@
+schema: imp.workflow/v1
+id: tui-workflow-run-progress
+title: Display workflow run progress in the TUI
+status: done
+kind: feature
+settings:
+  worktree: current
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Make workflow orchestration visible in the TUI as a polished human-readable progress surface while agents use workflow run to drive work to completion.
+  user_value: |
+    Users can watch an agent-driven workflow progress, understand what is running, see recent step/check outcomes, and know when the workflow is blocked or done without manually issuing /workflow run.
+  non_goals:
+  - Render raw JSON to users.
+  - Require users to babysit workflows with /workflow run.
+  - Replace the workflow engine or persistence format.
+  - Build a full workflow API surface.
+  acceptance:
+    formatted_run_summary:
+      text: Workflow run results render as clear prose/cards with workflow id, status, step/check counts, current/next action, reconciled fields, and result path when available.
+      status: done
+      checks:
+      - run_summary_renderer_tested
+    agent_runtime_surface:
+      text: Agent-triggered workflow run output is surfaced in the TUI as workflow progress, not raw tool output or JSON.
+      status: done
+      checks:
+      - agent_workflow_output_wired
+    slash_command_consistency:
+      text: /workflow run remains available for debugging and uses the same human-readable formatter.
+      status: done
+      checks:
+      - slash_run_uses_formatter
+    blocked_and_done_states:
+      text: The TUI clearly distinguishes running, blocked, failed, worker-required, and completed workflow states.
+      status: done
+      checks:
+      - workflow_state_render_tests
+    verification:
+      text: The TUI changes compile and focused tests pass.
+      status: done
+      checks:
+      - imp_tui_tests_passed
+      - imp_tui_check_passed
+  approval_required_for:
+  - changing workflow engine persistence format
+  - removing slash workflow commands
+  - broad refactors of app.rs unrelated to workflow rendering
+context:
+  project_instructions:
+    file: AGENTS.md
+    status: done
+  workflow_tool:
+    file: crates/imp-core/src/tools/workflow.rs
+    status: done
+  tui_workflow_commands:
+    file: crates/imp-tui/src/app.rs
+    status: todo
+  orchestrator_change:
+    file: crates/imp-core/src/tools/workflow.rs
+    status: done
+steps:
+  inspect_current_tui_surface:
+    kind: context
+    status: done
+    checks:
+    - current_tui_workflow_surface_inspected
+    action:
+      kind: agent
+      role: coder
+      objective: Inspect current TUI workflow command and agent tool-output rendering paths.
+      instructions:
+      - Read crates/imp-tui/src/app.rs around workflow command handling and agent event/tool rendering.
+      - Read crates/imp-core/src/tools/workflow.rs run result formatting and details shape.
+      - Record the rendering seams and data needed for a human-readable workflow progress card.
+      write_scope:
+      - .imp/workflows/tui-workflow-run-progress/artifacts/view-model.md
+      completion:
+        checks:
+        - current_tui_workflow_surface_inspected
+        artifacts:
+        - .imp/workflows/tui-workflow-run-progress/artifacts/view-model.md
+  design_view_model:
+    kind: plan
+    status: done
+    depends_on:
+    - inspect_current_tui_surface
+    checks:
+    - workflow_progress_model_defined
+    action:
+      kind: agent
+      role: coder
+      objective: Design the TUI workflow progress view model and human-readable formatter inputs.
+      instructions:
+      - Define display states for running, blocked, failed, worker-required, agent-action-required, and done workflows.
+      - Keep the output polished prose/card text, not JSON.
+      - Write the view model plan to the required artifact.
+      write_scope:
+      - .imp/workflows/tui-workflow-run-progress/artifacts/view-model.md
+      completion:
+        checks:
+        - workflow_progress_model_defined
+        artifacts:
+        - .imp/workflows/tui-workflow-run-progress/artifacts/view-model.md
+  implement_formatter:
+    kind: build
+    status: done
+    depends_on:
+    - design_view_model
+    checks:
+    - run_summary_renderer_tested
+    action:
+      kind: agent
+      role: coder
+      objective: Implement and test the human-readable workflow run progress formatter for the TUI.
+      instructions:
+      - Add focused rendering helpers instead of raw JSON display.
+      - Cover command orchestration, agent action, missing contract, blocked, and done states.
+      - Preserve existing slash workflow behavior while sharing the formatter.
+      write_scope:
+      - crates/imp-tui/src/**
+      - crates/imp-core/src/**
+      completion:
+        checks:
+        - run_summary_renderer_tested
+  wire_agent_runtime:
+    kind: build
+    status: done
+    depends_on:
+    - implement_formatter
+    checks:
+    - agent_workflow_output_wired
+    action:
+      kind: agent
+      role: coder
+      objective: Wire agent-triggered workflow run output into the TUI workflow progress surface.
+      instructions:
+      - Find where tool results and runtime events are converted into TUI messages.
+      - Display workflow run results as a workflow progress card/prose block.
+      - Do not require users to invoke /workflow run for normal agent workflow progress.
+      write_scope:
+      - crates/imp-tui/src/**
+      - crates/imp-core/src/**
+      completion:
+        checks:
+        - agent_workflow_output_wired
+  update_slash_command:
+    kind: build
+    status: done
+    depends_on:
+    - implement_formatter
+    checks:
+    - slash_run_uses_formatter
+    action:
+      kind: agent
+      role: coder
+      objective: Keep /workflow run as a debug path using the same workflow progress formatter.
+      instructions:
+      - Update slash command rendering to match agent workflow run display.
+      - Preserve list, show, validate, and update behavior.
+      write_scope:
+      - crates/imp-tui/src/**
+      completion:
+        checks:
+        - slash_run_uses_formatter
+  cover_states:
+    kind: verify
+    status: done
+    depends_on:
+    - wire_agent_runtime
+    - update_slash_command
+    checks:
+    - workflow_state_render_tests
+  verify:
+    kind: verify
+    status: done
+    depends_on:
+    - cover_states
+    checks:
+    - imp_tui_tests_passed
+    - imp_tui_check_passed
+  closeout:
+    kind: closeout
+    status: done
+    depends_on:
+    - verify
+    checks:
+    - results_written
+checks:
+  current_tui_workflow_surface_inspected:
+    kind: review
+    status: passed
+    file: crates/imp-tui/src/app.rs
+  workflow_progress_model_defined:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/tui-workflow-run-progress/artifacts/view-model.md
+  run_summary_renderer_tested:
+    kind: command
+    status: passed
+    command: cargo test -p imp-tui workflow_run_progress
+  agent_workflow_output_wired:
+    kind: review
+    status: passed
+  slash_run_uses_formatter:
+    kind: review
+    status: passed
+  workflow_state_render_tests:
+    kind: command
+    status: passed
+    command: cargo test -p imp-tui workflow_run_progress
+  imp_tui_tests_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-tui workflow_run_progress
+  imp_tui_check_passed:
+    kind: command
+    status: passed
+    command: cargo check -p imp-tui
+  results_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/tui-workflow-run-progress/results.md
+workers:
+  parent:
+    role: orchestrator
+    writes:
+    - workflow
+    - results
+    - code
+    writes_code: true
+    responsibilities:
+    - keep workflow progress display human-readable
+    - avoid raw JSON in the TUI
+    - preserve /workflow run as a debug path
+    - verify with focused TUI tests and cargo check
+results:
+  path: .imp/workflows/tui-workflow-run-progress/results.md
+  required_claims:
+  - UI behavior changed
+  - agent workflow run path addressed
+  - slash command behavior addressed
+  - tests/checks run
+  - remaining concerns
+closeout:
+  done:
+    requires:
+    - imp_tui_tests_passed
+    - imp_tui_check_passed
+    - results_written

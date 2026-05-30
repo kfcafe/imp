@@ -1,0 +1,244 @@
+schema: imp.workflow/v1
+id: implement-executable-workflow-runner
+title: Implement executable workflow runner
+status: done_with_concerns
+kind: feature
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Extend the native workflow runner from advisory next-action selection into an executable runner that can perform build, verify, review, and closeout steps through bounded worker assignments, status updates, checks, and evidence capture.
+  user_value: |
+    Let users run a workflow and have imp actually advance it: execute runnable build steps, run verification commands, update workflow state, record events/results, and stop only on completion, blocker, or user decision. This makes workflows feel like durable executable plans rather than passive checklists.
+  non_goals:
+  - Replace normal TUI chat or one-shot execution.
+  - Add broad slash-command/task aliases.
+  - Implement ACP/editor adapters.
+  - Reintroduce mana/imp-work as the workflow execution backend.
+  - Hide destructive or approval-required actions from the user.
+  acceptance:
+    executable_build_steps:
+      text: workflow run can execute a build step by creating a bounded worker assignment and advancing workflow state when the worker completes.
+      status: todo
+      checks:
+      - build_step_execution_verified
+      - status_updates_verified
+    executable_verify_steps:
+      text: workflow run can execute command-backed verify checks and record pass/fail evidence.
+      status: todo
+      checks:
+      - verify_command_execution_verified
+      - failure_blocks_workflow_verified
+    orchestration_is_safe:
+      text: runner respects dependencies, approval gates, writable scope, destructive-action policy, and terminal statuses.
+      status: todo
+      checks:
+      - dependency_gating_verified
+      - approval_gate_verified
+      - policy_boundary_reviewed
+    events_and_results_recorded:
+      text: runner appends workflow events and writes/updates results artifacts without relying on chat memory.
+      status: todo
+      checks:
+      - event_append_verified
+      - results_artifact_verified
+    dogfooded:
+      text: runner is dogfooded against a small workflow and documented with limitations.
+      status: todo
+      checks:
+      - dogfood_run_recorded
+      - docs_updated
+      - verification_passed
+  approval_required_for:
+  - spawning background workers outside the active imp process
+  - destructive git operations
+  - removing existing advisory workflow run behavior
+  - broad changes to workflow schema semantics
+context:
+  advisory_runner:
+    file: .imp/workflows/implement-workflow-run-engine/results.md
+    status: done
+  worker_assignment_contract:
+    file: .imp/workflows/workflow-worker-orchestration/results.md
+    status: done_with_concerns
+  workflow_tool:
+    file: crates/imp-core/src/tools/workflow.rs
+    status: todo
+  workflow_schema:
+    file: crates/imp-core/src/workflow/schema.rs
+    status: todo
+  workflow_verification_runner:
+    file: crates/imp-core/src/workflow/verification_runner.rs
+    status: todo
+  cli_surface:
+    file: crates/imp-cli/src/lib.rs
+    status: todo
+steps:
+  inspect_current_runner:
+    kind: context
+    status: done
+    checks:
+    - current_runner_inspected
+    - worker_contract_inspected
+  design_execution_contract:
+    kind: plan
+    status: done
+    depends_on:
+    - inspect_current_runner
+    checks:
+    - execution_contract_written
+    - policy_boundary_reviewed
+  implement_verify_execution:
+    kind: build
+    status: done
+    depends_on:
+    - design_execution_contract
+    worker: builder
+    checks:
+    - verify_command_execution_verified
+    - failure_blocks_workflow_verified
+    - event_append_verified
+  implement_build_step_execution:
+    kind: build
+    status: done
+    depends_on:
+    - implement_verify_execution
+    worker: builder
+    checks:
+    - build_step_execution_verified
+    - status_updates_verified
+    - dependency_gating_verified
+    - approval_gate_verified
+  dogfood_small_workflow:
+    kind: verify
+    status: done
+    depends_on:
+    - implement_build_step_execution
+    checks:
+    - dogfood_run_recorded
+    - results_artifact_verified
+  update_docs:
+    kind: build
+    status: done
+    depends_on:
+    - dogfood_small_workflow
+    checks:
+    - docs_updated
+  final_verify:
+    kind: verify
+    status: done
+    depends_on:
+    - update_docs
+    checks:
+    - verification_passed
+  closeout:
+    kind: closeout
+    status: done
+    depends_on:
+    - final_verify
+    checks:
+    - required_checks_passed
+    - results_rendered
+checks:
+  current_runner_inspected:
+    kind: context
+    status: passed
+    path: crates/imp-core/src/tools/workflow.rs
+  worker_contract_inspected:
+    kind: context
+    status: passed
+    path: .imp/workflows/workflow-worker-orchestration/results.md
+  execution_contract_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/implement-executable-workflow-runner/artifacts/execution-contract.md
+  policy_boundary_reviewed:
+    kind: review
+    status: passed
+  verify_command_execution_verified:
+    kind: command
+    status: pending
+    command: cargo test -p imp-core workflow::verification_runner --lib
+  failure_blocks_workflow_verified:
+    kind: command
+    status: pending
+    command: cargo test -p imp-core workflow_run --lib
+  event_append_verified:
+    kind: command
+    status: pending
+    command: cargo test -p imp-core workflow_update_appends_event --lib
+  build_step_execution_verified:
+    kind: command
+    status: pending
+    command: cargo test -p imp-core workflow_run --lib
+  status_updates_verified:
+    kind: command
+    status: pending
+    command: cargo test -p imp-core workflow_run --lib
+  dependency_gating_verified:
+    kind: command
+    status: pending
+    command: cargo test -p imp-core workflow_run --lib
+  approval_gate_verified:
+    kind: review
+    status: pending
+  dogfood_run_recorded:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/implement-executable-workflow-runner/artifacts/dogfood-run.md
+  results_artifact_verified:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/implement-executable-workflow-runner/results.md
+  docs_updated:
+    kind: artifact
+    status: passed
+    file: docs/workflows.md
+  verification_passed:
+    kind: command
+    status: passed
+    command: cargo check -p imp-core -p imp-cli
+  required_checks_passed:
+    kind: aggregate
+    status: passed
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/implement-executable-workflow-runner/results.md
+workers:
+  parent:
+    role: orchestrator
+    writes:
+    - workflow
+    - results
+    - docs
+    writes_code: false
+  builder:
+    role: builder
+    writes:
+    - code
+    - tests
+    - docs
+    writes_code: true
+results:
+  path: .imp/workflows/implement-executable-workflow-runner/results.md
+  required_claims:
+  - work completed
+  - verification performed
+  - dogfood result
+  - limitations
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+    - results_rendered
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

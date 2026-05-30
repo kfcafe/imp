@@ -1,0 +1,353 @@
+schema: imp.workflow/v1
+id: prototype-imp-workflow-engine
+title: Prototype imp workflow engine
+status: active
+kind: design_prototype
+settings:
+  worktree: per_workflow
+  branch: imp/workflow/prototype-imp-workflow-engine
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Build imp-native workflows into a schema-first, tool-backed orchestration layer that can plan, enforce, run, verify, review, close, and delegate bounded worker workflows through the imp runtime.
+  user_value: |
+    Make complex agent work more accurate by giving imp a structured, enforceable workflow contract instead of relying on chat memory or advisory prompts.
+  non_goals:
+  - Preserve mana as a required execution dependency.
+  - Expose a large workflow command surface.
+  - Replace all mana/work/prototype behavior before workflow parity exists.
+  acceptance:
+    workflow_schema_represents_core_concepts:
+      text: workflow.yaml can represent spec, steps, checks, workers, prototypes, workflow calls, results, and closeout.
+      status: done
+      checks:
+      - workflow_artifact_created
+    schema_decisions_documented:
+      text: schema decisions are documented in results.md and child workflow artifacts.
+      status: done
+      checks:
+      - schema_child_results_ready
+    rust_prototype_can_parse:
+      text: Rust prototype can parse and validate dogfood workflow files.
+      status: done
+      checks:
+      - parser_child_results_ready
+    workflow_tool_available:
+      text: Native model-facing workflow tool can list, show, and validate workflows.
+      status: done
+      checks:
+      - workflow_tool_results_ready
+    workflow_update_available:
+      text: Workflow update path can safely mutate workflow artifacts and append events.
+      status: done
+      checks:
+      - workflow_update_results_ready
+    workflow_run_available:
+      text: Workflow run engine can choose/return next actions and enforce checks.
+      status: done
+      checks:
+      - workflow_run_results_ready
+    slash_commands_integrated:
+      text: /plan, /status, and /run are backed by the workflow tool/engine.
+      status: done
+      checks:
+      - slash_commands_results_ready
+    worker_orchestration_available:
+      text: Worker workflows can execute builder, verifier, and reviewer assignments with policy boundaries.
+      status: todo
+      checks:
+      - worker_orchestration_results_ready
+    legacy_systems_consolidated:
+      text: Existing workflow profiles and mana/work/prototype responsibilities are audited and consolidated around native workflows where appropriate.
+      status: todo
+      checks:
+      - legacy_consolidation_results_ready
+    imp_updated:
+      text: Local imp binary/install is rebuilt or updated from the completed workflow implementation.
+      status: todo
+      checks:
+      - imp_update_results_ready
+  approval_required_for:
+  - changing spec.goal
+  - removing or weakening spec.acceptance
+  - removing required checks
+context:
+  project_instructions:
+    file: AGENTS.md
+    status: done
+  workflow_design_notes:
+    artifact: .imp/workflows/prototype-imp-workflow-engine/results.md
+    status: done
+  existing_workflow_terms:
+    search: workflow
+    status: done
+steps:
+  context:
+    kind: context
+    status: done
+    checks:
+    - project_instructions_loaded
+    - existing_workflow_terms_audited
+  plan_workflow_roadmap:
+    kind: plan
+    status: done
+    checks:
+    - roadmap_written
+    - workflow_artifact_created
+  define_schema:
+    kind: workflow
+    status: done
+    workflow: define-workflow-schema
+    depends_on:
+    - plan_workflow_roadmap
+    checks:
+    - schema_style_selected
+    - schema_child_results_ready
+  prototype_parser:
+    kind: workflow
+    status: done
+    workflow: prototype-rust-workflow-schema-parser
+    depends_on:
+    - define_schema
+    checks:
+    - parser_child_results_ready
+  prototype_workflow_tool:
+    kind: workflow
+    status: done
+    workflow: prototype-workflow-tool
+    depends_on:
+    - prototype_parser
+    checks:
+    - workflow_tool_results_ready
+  implement_workflow_update:
+    kind: workflow
+    status: done
+    workflow: implement-workflow-update-events
+    depends_on:
+    - prototype_workflow_tool
+    checks:
+    - workflow_update_results_ready
+  implement_workflow_run:
+    kind: workflow
+    status: done
+    workflow: implement-workflow-run-engine
+    depends_on:
+    - implement_workflow_update
+    checks:
+    - workflow_run_results_ready
+  integrate_plan_status_run:
+    kind: workflow
+    status: done
+    workflow: integrate-workflow-slash-commands
+    depends_on:
+    - implement_workflow_run
+    checks:
+    - slash_commands_results_ready
+  orchestrate_workers:
+    kind: workflow
+    status: done_with_concerns
+    workflow: workflow-worker-orchestration
+    depends_on:
+    - integrate_plan_status_run
+    checks:
+    - worker_orchestration_results_ready
+  consolidate_legacy_systems:
+    kind: workflow
+    status: done_with_concerns
+    workflow: consolidate-mana-work-prototype
+    depends_on:
+    - orchestrate_workers
+    checks:
+    - legacy_consolidation_results_ready
+  update_imp:
+    kind: workflow
+    status: done
+    workflow: update-imp-after-workflow-engine
+    depends_on:
+    - consolidate_legacy_systems
+    checks:
+    - imp_update_results_ready
+  benchmark_e2e:
+    kind: workflow
+    status: todo
+    workflow: benchmark-workflow-e2e
+    depends_on:
+    - update_imp
+    checks:
+    - benchmark_e2e_passed
+  fix_status_reconciliation:
+    kind: workflow
+    status: todo
+    workflow: fix-workflow-status-reconciliation
+    depends_on:
+    - benchmark_e2e
+    checks:
+    - status_reconciliation_results_ready
+  verify:
+    kind: verify
+    status: done
+    checks:
+    - parser_tests_passed
+    - workflow_yaml_validation_passed
+  review:
+    kind: review
+    status: done
+    worker: reviewer
+    checks:
+    - terminology_review_complete
+    - results_rendered
+  closeout:
+    kind: closeout
+    status: done_with_concerns
+    depends_on:
+    - update_imp
+    checks:
+    - required_checks_passed
+    - results_rendered
+    - final_claims_validated
+prototypes:
+  concise_yaml:
+    question: Can concise map-based YAML represent workflows tastefully and enforceably?
+    hypothesis: Map-based IDs and compact defaults remove most verbosity while preserving YAML tooling and readability.
+    status: selected
+    criteria:
+    - taste
+    - minimal_structure
+    - git_diff_quality
+    - human_editability
+    - schema_validation
+    - agent_readability
+checks:
+  project_instructions_loaded:
+    kind: context
+    status: passed
+    file: AGENTS.md
+  existing_workflow_terms_audited:
+    kind: context
+    status: passed
+    artifact: .imp/workflows/prototype-imp-workflow-engine/results.md
+  roadmap_written:
+    kind: artifact
+    status: passed
+    artifact: .imp/workflows/prototype-imp-workflow-engine/workflow.yaml
+  workflow_artifact_created:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prototype-imp-workflow-engine/workflow.yaml
+  schema_style_selected:
+    kind: approval
+    status: passed
+    decision: Use concise map-based YAML as the v1 schema direction.
+  schema_child_results_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/define-workflow-schema/results.md
+  parser_child_results_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prototype-rust-workflow-schema-parser/results.md
+  workflow_tool_results_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prototype-workflow-tool/results.md
+  workflow_update_results_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/implement-workflow-update-events/results.md
+  workflow_run_results_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/implement-workflow-run-engine/results.md
+  slash_commands_results_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/integrate-workflow-slash-commands/results.md
+  worker_orchestration_results_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/workflow-worker-orchestration/results.md
+  legacy_consolidation_results_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/consolidate-mana-work-prototype/results.md
+  imp_update_results_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/update-imp-after-workflow-engine/results.md
+  status_reconciliation_results_ready:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/fix-workflow-status-reconciliation/results.md
+  parser_tests_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_schema
+  workflow_yaml_validation_passed:
+    kind: command
+    status: passed
+    command: ruby -ryaml -e 'validate .imp/workflows/*/workflow.yaml references'
+  terminology_review_complete:
+    kind: review
+    status: passed
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prototype-imp-workflow-engine/results.md
+  benchmark_e2e_passed:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/benchmark-workflow-e2e/results.md
+  required_checks_passed:
+    kind: aggregate
+    status: pending
+  final_claims_validated:
+    kind: closeout
+    status: passed
+workers:
+  parent:
+    role: orchestrator
+    writes:
+    - workflow
+    - results
+    - docs
+    writes_code: false
+    responsibilities:
+    - update workflow
+    - dispatch workers
+    - review outputs
+    - validate closeout
+  builder:
+    role: builder
+    writes:
+    - code
+    - tests
+    worktree: workflow
+  verifier:
+    role: verifier
+    writes: []
+  reviewer:
+    role: reviewer
+    writes:
+    - review_artifacts
+results:
+  path: .imp/workflows/prototype-imp-workflow-engine/results.md
+  required_claims:
+  - schema decisions
+  - parser verification
+  - remaining major workflow engine steps
+  - open concerns
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+    - no_unapproved_goal_or_acceptance_changes
+    - final_claims_validated
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

@@ -1,0 +1,212 @@
+schema: imp.workflow/v1
+id: prototype-rust-workflow-schema-parser
+title: Prototype Rust workflow schema parser
+status: done
+kind: implementation_prototype
+parent:
+  workflow: define-workflow-schema
+  step: prototype_rust_parser
+settings:
+  worktree: current
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Implement the first Rust parser and validator for the concise imp workflow YAML schema, using the dogfood workflows as fixtures.
+  user_value: |
+    Turn the workflow schema from a design artifact into executable runtime validation that can become the foundation of the native workflow tool.
+  non_goals:
+  - Integrate workflow validation into the agent loop.
+  - Add the model-facing workflow tool.
+  - Replace mana, work, or prototype tools.
+  - Change git ignore policy.
+  acceptance:
+    parser_considerations_recorded:
+      text: Parser design considerations are recorded before implementation.
+      status: done
+      checks:
+      - parser_considerations_written
+    parser_loads_dogfood_workflows:
+      text: Rust code can load the dogfood workflow YAML files.
+      status: done
+      checks:
+      - dogfood_parse_tests_pass
+    validator_rejects_bad_references:
+      text: Validator rejects missing step, check, prototype, worker, workflow, and closeout references.
+      status: done
+      checks:
+      - validator_reference_tests_pass
+    validator_checks_statuses_and_acceptance:
+      text: Validator rejects invalid statuses and malformed acceptance criteria.
+      status: done
+      checks:
+      - validator_shape_tests_pass
+    next_runnable_steps_exists:
+      text: A pure helper returns runnable step ids based on dependencies.
+      status: done
+      checks:
+      - next_runnable_tests_pass
+  approval_required_for:
+  - changing spec.goal
+  - removing or weakening spec.acceptance
+  - removing required checks
+context:
+  schema_reference:
+    file: .imp/workflows/define-workflow-schema/artifacts/schema-reference.md
+    status: done
+  validation_rules:
+    file: .imp/workflows/define-workflow-schema/artifacts/validation-rules.md
+    status: done
+  rust_plan:
+    file: .imp/workflows/define-workflow-schema/artifacts/rust-parser-plan.md
+    status: done
+  existing_workflow_module:
+    file: crates/imp-core/src/workflow/mod.rs
+    status: done
+  imp_core_cargo:
+    file: crates/imp-core/Cargo.toml
+    status: done
+steps:
+  inspect_existing:
+    kind: context
+    status: done
+    checks:
+    - workflow_module_inspected
+    - cargo_dependencies_inspected
+  record_parser_considerations:
+    kind: plan
+    status: done
+    depends_on:
+    - inspect_existing
+    checks:
+    - parser_considerations_written
+  add_schema_module:
+    kind: build
+    status: done
+    worker: builder
+    depends_on:
+    - record_parser_considerations
+    checks:
+    - serde_yaml_dependency_available
+    - schema_module_added
+  add_validation_tests:
+    kind: build
+    status: done
+    worker: builder
+    depends_on:
+    - add_schema_module
+    checks:
+    - dogfood_parse_tests_pass
+    - validator_reference_tests_pass
+    - validator_shape_tests_pass
+    - next_runnable_tests_pass
+  verify:
+    kind: verify
+    status: done
+    depends_on:
+    - add_validation_tests
+    checks:
+    - cargo_test_workflow_schema_passes
+  render_results:
+    kind: review
+    status: done
+    worker: reviewer
+    depends_on:
+    - verify
+    checks:
+    - results_rendered
+    - final_claims_validated
+  closeout:
+    kind: closeout
+    status: done
+    depends_on:
+    - render_results
+    checks:
+    - required_checks_passed
+prototypes: {}
+checks:
+  workflow_module_inspected:
+    kind: context
+    status: passed
+    file: crates/imp-core/src/workflow/mod.rs
+  cargo_dependencies_inspected:
+    kind: context
+    status: passed
+    file: crates/imp-core/Cargo.toml
+  parser_considerations_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prototype-rust-workflow-schema-parser/artifacts/parser-considerations.md
+  serde_yaml_dependency_available:
+    kind: context
+    status: passed
+  schema_module_added:
+    kind: artifact
+    status: passed
+    path: crates/imp-core/src/workflow/schema.rs
+  dogfood_parse_tests_pass:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_schema_dogfood
+  validator_reference_tests_pass:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_schema_reference_validation
+  validator_shape_tests_pass:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_schema_shape_validation
+  next_runnable_tests_pass:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_schema_next_runnable
+  cargo_test_workflow_schema_passes:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_schema
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prototype-rust-workflow-schema-parser/results.md
+  final_claims_validated:
+    kind: closeout
+    status: passed
+  required_checks_passed:
+    kind: aggregate
+    status: passed
+workers:
+  parent:
+    role: orchestrator
+    writes:
+    - workflow
+    - results
+    - docs
+    writes_code: false
+  builder:
+    role: builder
+    writes:
+    - code
+    - tests
+    worktree: current
+  reviewer:
+    role: reviewer
+    writes: []
+results:
+  path: .imp/workflows/prototype-rust-workflow-schema-parser/results.md
+  required_claims:
+  - code changes made
+  - tests added
+  - verification command result
+  - limitations and next steps
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+    - final_claims_validated
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

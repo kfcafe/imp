@@ -1,0 +1,84 @@
+schema: imp.workflow/v1
+id: docs-hn-readiness
+title: Prepare repository docs for Hacker News readers
+status: done
+kind: release
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: Make README and linked docs sufficient, accurate, and launch-ready for HN visitors.
+  user_value: Visitors should quickly understand what imp is, how to install it, how to try it, what data leaves the machine, and what is preview/internal.
+  non_goals:
+  - Write the HN post.
+  - Add new runtime features.
+  acceptance:
+    docs_ready:
+      text: README and docs cover install, quickstart, supported surface, privacy, limitations, and known preview/internal surfaces accurately.
+      status: done
+      checks:
+      - docs_gap_audit_written
+      - docs_updates_complete
+      - docs_grep_clean
+steps:
+  audit_docs_gaps:
+    kind: context
+    status: done
+    checks:
+    - docs_gap_audit_written
+  update_docs:
+    kind: build
+    status: done
+    depends_on:
+    - audit_docs_gaps
+    checks:
+    - docs_updates_complete
+  verify_docs:
+    kind: verify
+    status: done
+    depends_on:
+    - update_docs
+    checks:
+    - docs_grep_clean
+checks:
+  docs_gap_audit_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/docs-hn-readiness/artifacts/docs-gap-audit.md
+  docs_updates_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/docs-hn-readiness/artifacts/docs-updates.md
+  docs_grep_clean:
+    kind: command
+    status: passed
+    command: rg checks for stale product claims
+workers:
+  owner:
+    role: owner
+    writes_code: true
+    responsibilities:
+    - execute this workflow
+    - record evidence and blockers
+    - keep changes focused and verified
+results:
+  path: .imp/workflows/docs-hn-readiness/results.md
+  required_claims:
+  - docs gaps found
+  - docs changes made
+  - stale public claims checked
+closeout:
+  done:
+    requires:
+    - docs_gap_audit_written
+    - docs_updates_complete
+    - docs_grep_clean
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

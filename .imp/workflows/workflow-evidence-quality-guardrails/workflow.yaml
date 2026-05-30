@@ -1,0 +1,179 @@
+schema: imp.workflow/v1
+id: workflow-evidence-quality-guardrails
+title: Enforce workflow evidence quality guardrails
+status: done
+kind: implementation
+settings:
+  worktree: current
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Prevent implementation workflows from being falsely marked complete by broad pre-existing tests alone. Add schema/runner validation for change-sensitive evidence, dogfood it against the simplify-agent-runtime-policy workflow, and keep broad test commands as verification evidence rather than implementation proof.
+  user_value: |
+    Future agents should be guided by the workflow tool into writing checks that actually prove the requested change, reducing misleading workflow completion and improving autonomous execution reliability.
+  non_goals:
+  - Build a full policy language for every possible evidence type.
+  - Remove command checks; broad commands remain useful for verification.
+  - Require changed files for documentation-only or analysis-only workflows.
+  - Change runtime/tool safety policy.
+  acceptance:
+    weak_implementation_checks_rejected:
+      text: Implementation build steps with only broad command checks are rejected or diagnosed before auto-completion.
+      status: done
+      checks:
+      - weak_impl_fixture_rejected
+      - validation_test_passed
+    change_sensitive_checks_supported:
+      text: Workflow checks can express change-sensitive evidence such as changed files and presence/absence patterns.
+      status: done
+      checks:
+      - check_kind_impl_added
+      - check_kind_tests_passed
+    runner_requires_implementation_evidence:
+      text: Workflow run does not mark build steps done from broad verification checks unless implementation evidence also passes.
+      status: done
+      checks:
+      - runner_guard_test_passed
+    simplify_policy_workflow_hardened:
+      text: simplify-agent-runtime-policy uses change-sensitive evidence and can no longer pass without source/prompt changes.
+      status: done
+      checks:
+      - simplify_workflow_updated
+      - simplify_workflow_validates
+    regression_suite_passed:
+      text: Relevant workflow tests pass after the guardrail changes.
+      status: done
+      checks:
+      - workflow_tests_passed
+  approval_required_for:
+  - Weakening existing workflow schema validation guarantees.
+  - Marking implementation evidence optional for implementation build steps.
+  - Removing existing command check support.
+context:
+  workflow_schema:
+    file: crates/imp-core/src/workflow/schema.rs
+    status: todo
+  workflow_tool:
+    file: crates/imp-core/src/tools/workflow.rs
+    status: todo
+  dogfood_target:
+    file: .imp/workflows/simplify-agent-runtime-policy/workflow.yaml
+    status: todo
+  observed_failure:
+    artifact: .imp/workflows/workflow-evidence-quality-guardrails/artifacts/observed-failure.md
+    status: done
+steps:
+  inspect_workflow_validation:
+    kind: context
+    status: done
+    checks:
+    - workflow_validation_context_reviewed
+  design_evidence_contract:
+    kind: plan
+    status: done
+    depends_on:
+    - inspect_workflow_validation
+    checks:
+    - evidence_contract_recorded
+  implement_check_kinds:
+    kind: build
+    status: done
+    depends_on:
+    - design_evidence_contract
+    checks:
+    - check_kind_impl_added
+    - check_kind_tests_passed
+  enforce_build_step_evidence:
+    kind: build
+    status: done
+    depends_on:
+    - implement_check_kinds
+    checks:
+    - weak_impl_fixture_rejected
+    - validation_test_passed
+    - runner_guard_test_passed
+  harden_simplify_policy_workflow:
+    kind: build
+    status: done
+    depends_on:
+    - enforce_build_step_evidence
+    checks:
+    - simplify_workflow_updated
+    - simplify_workflow_validates
+  verify:
+    kind: verify
+    status: done
+    depends_on:
+    - harden_simplify_policy_workflow
+    checks:
+    - workflow_tests_passed
+  closeout:
+    kind: closeout
+    status: done
+    depends_on:
+    - verify
+    checks:
+    - required_checks_passed
+checks:
+  workflow_validation_context_reviewed:
+    kind: context
+    status: passed
+  evidence_contract_recorded:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/workflow-evidence-quality-guardrails/artifacts/evidence-contract.md
+  check_kind_impl_added:
+    kind: command
+    status: passed
+    command: sh -c 'rg "ChangedFiles|Presence|Absence|changed_files|presence|absence" crates/imp-core/src/workflow crates/imp-core/src/tools/workflow.rs 2>/dev/null || rg "ChangedFiles|Presence|Absence|changed_files|presence|absence" ../crates/imp-core/src/workflow ../crates/imp-core/src/tools/workflow.rs'
+  check_kind_tests_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core evidence_quality_check_kinds --lib
+  weak_impl_fixture_rejected:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core weak_implementation_checks_are_rejected --lib
+  validation_test_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core implementation_steps_require_change_sensitive_evidence --lib
+  runner_guard_test_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_run_does_not_complete_build_from_broad_checks_only --lib
+  simplify_workflow_updated:
+    kind: command
+    status: passed
+    command: sh -c 'rg "changed_files|absence|presence|diff_removes|classifier_removed|prompt_operating_rules_removed" .imp/workflows/simplify-agent-runtime-policy/workflow.yaml 2>/dev/null || rg "changed_files|absence|presence|diff_removes|classifier_removed|prompt_operating_rules_removed" ../.imp/workflows/simplify-agent-runtime-policy/workflow.yaml'
+  simplify_workflow_validates:
+    kind: command
+    status: passed
+    command: sh -c 'cargo run -p imp-cli --bin imp -- workflow validate simplify-agent-runtime-policy 2>/dev/null || (cd .. && cargo run -p imp-cli --bin imp -- workflow validate simplify-agent-runtime-policy)'
+  workflow_tests_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow --lib
+  required_checks_passed:
+    kind: aggregate
+    status: passed
+workers: {}
+results:
+  path: .imp/workflows/workflow-evidence-quality-guardrails/results.md
+  required_claims:
+  - validation/runner now distinguishes implementation evidence from broad verification
+  - weak implementation workflow fixture rejected
+  - simplify-agent-runtime-policy hardened with change-sensitive checks
+  - tests run and remaining concerns
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

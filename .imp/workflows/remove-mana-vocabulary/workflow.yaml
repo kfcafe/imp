@@ -1,0 +1,203 @@
+schema: imp.workflow/v1
+id: remove-mana-vocabulary
+title: Remove mana vocabulary from imp codebase
+status: done
+kind: cleanup
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Remove the obsolete mana product/config vocabulary from active imp code and replace it with workflow terminology, without preserving compatibility aliases or legacy config names.
+  user_value: |
+    Keep imp's product and code surface coherent: workflows are the durable orchestration primitive, and old mana references are bloat that make settings, config, docs, and runtime code harder to understand.
+  non_goals:
+  - Preserve compatibility for old `mana` config keys, type names, action names, or UI labels.
+  - Redesign workflow behavior beyond renaming/removing obsolete mana vocabulary.
+  - Rewrite historical archived artifacts unless they are compiled, advertised, or active documentation.
+  acceptance:
+    active_code_uses_workflow_vocabulary:
+      text: Active Rust code, config structs, settings UI, and tests use workflow terminology instead of mana terminology.
+      status: done
+      checks:
+      - mana_reference_inventory_complete
+      - rust_code_renamed
+      - settings_ui_renamed
+    config_surface_is_workflow_named:
+      text: User config uses workflow/workflows keys and types; old mana compatibility aliases are not retained.
+      status: done
+      checks:
+      - config_schema_renamed
+      - no_mana_serde_aliases
+    docs_and_help_are_clean:
+      text: Active docs/help stop presenting mana as a current product concept.
+      status: done
+      checks:
+      - active_docs_renamed
+    no_accidental_breakage:
+      text: Relevant cargo checks/tests pass for affected crates and broad grep confirms no active mana references remain except explicitly archived/historical artifacts.
+      status: done
+      checks:
+      - verification_passed
+      - final_mana_grep_reviewed
+  approval_required_for:
+  - deleting nontrivial historical design files instead of editing or archiving them
+  - changing workflow runtime behavior beyond vocabulary/config renames
+  - changing provider/auth/tool behavior unrelated to workflow vocabulary
+context:
+  project_instructions:
+    file: AGENTS.md
+    status: todo
+  prior_product_surface_cleanup:
+    artifact: .imp/workflows/tighten-imp-product-surface/results.md
+    status: done
+  config_root:
+    file: crates/imp-core/src/config.rs
+    status: todo
+  settings_view:
+    file: crates/imp-tui/src/views/settings.rs
+    status: todo
+  workflow_tool:
+    file: crates/imp-core/src/tools/workflow.rs
+    status: todo
+steps:
+  inventory_mana_references:
+    kind: context
+    status: done
+    checks:
+    - mana_reference_inventory_complete
+  classify_active_vs_historical:
+    kind: plan
+    status: done
+    depends_on:
+    - inventory_mana_references
+    checks:
+    - active_reference_scope_decided
+  rename_config_and_types:
+    kind: build
+    status: done
+    depends_on:
+    - classify_active_vs_historical
+    checks:
+    - config_schema_renamed
+    - no_mana_serde_aliases
+  rename_runtime_and_tools:
+    kind: build
+    status: done
+    depends_on:
+    - rename_config_and_types
+    checks:
+    - rust_code_renamed
+  rename_tui_settings_and_help:
+    kind: build
+    status: done
+    depends_on:
+    - rename_config_and_types
+    checks:
+    - settings_ui_renamed
+  update_active_docs:
+    kind: build
+    status: done
+    depends_on:
+    - rename_runtime_and_tools
+    - rename_tui_settings_and_help
+    checks:
+    - active_docs_renamed
+  verify:
+    kind: verify
+    status: done
+    depends_on:
+    - update_active_docs
+    checks:
+    - verification_passed
+    - final_mana_grep_reviewed
+  closeout:
+    kind: closeout
+    status: done
+    depends_on:
+    - verify
+    checks:
+    - results_rendered
+prototypes: {}
+checks:
+  mana_reference_inventory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/remove-mana-vocabulary/artifacts/mana-reference-inventory.md
+  active_reference_scope_decided:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/remove-mana-vocabulary/artifacts/active-reference-scope.md
+  config_schema_renamed:
+    kind: artifact
+    status: passed
+    file: crates/imp-core/src/config.rs
+  no_mana_serde_aliases:
+    kind: absence
+    status: passed
+    path: .
+    pattern: serde.*mana|alias.*mana
+  rust_code_renamed:
+    kind: command
+    status: passed
+    command: cargo check --workspace
+  settings_ui_renamed:
+    kind: artifact
+    status: passed
+    file: crates/imp-tui/src/views/settings.rs
+  active_docs_renamed:
+    kind: artifact
+    status: passed
+    path: README.md
+  verification_passed:
+    kind: command
+    status: passed
+    command: cargo check --workspace && cargo test -p imp-tui settings
+  final_mana_grep_reviewed:
+    kind: absence
+    status: passed
+    path: .
+    pattern: mana
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/remove-mana-vocabulary/results.md
+workers:
+  parent:
+    role: orchestrator
+    writes:
+    - workflow
+    - results
+    - docs
+    writes_code: false
+  builder:
+    role: builder
+    writes:
+    - code
+    - tests
+    worktree: current
+  reviewer:
+    role: reviewer
+    writes:
+    - review_artifacts
+results:
+  path: .imp/workflows/remove-mana-vocabulary/results.md
+  required_claims:
+  - work completed
+  - verification performed
+  - remaining references reviewed
+closeout:
+  done:
+    requires:
+    - verification_passed
+    - final_mana_grep_reviewed
+    - results_rendered
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

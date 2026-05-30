@@ -1,0 +1,70 @@
+schema: imp.workflow/v1
+id: install-smoke-release-candidate
+title: Smoke test 0.3.0 install path
+status: done
+kind: release
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: Verify the source install and basic first-run commands for the 0.3.0 release candidate.
+  user_value: A new HN visitor should be able to install imp and run basic commands without surprises.
+  non_goals:
+  - Publish to Homebrew or crates.io.
+  - Require live provider API calls.
+  acceptance:
+    install_smoke_passed:
+      text: Source install and basic CLI commands pass in an automated smoke test.
+      status: done
+      checks:
+      - install_commands_recorded
+      - install_smoke_passed
+steps:
+  write_install_plan:
+    kind: plan
+    status: done
+    checks:
+    - install_commands_recorded
+  run_install_smoke:
+    kind: verify
+    status: done
+    depends_on:
+    - write_install_plan
+    checks:
+    - install_smoke_passed
+checks:
+  install_commands_recorded:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/install-smoke-release-candidate/artifacts/install-plan.md
+  install_smoke_passed:
+    kind: command
+    status: passed
+    command: cargo install --path . --force && imp --version && imp --help
+workers:
+  owner:
+    role: owner
+    writes_code: true
+    responsibilities:
+    - execute this workflow
+    - record evidence and blockers
+    - keep changes focused and verified
+results:
+  path: .imp/workflows/install-smoke-release-candidate/results.md
+  required_claims:
+  - install command used
+  - smoke command results
+closeout:
+  done:
+    requires:
+    - install_commands_recorded
+    - install_smoke_passed
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

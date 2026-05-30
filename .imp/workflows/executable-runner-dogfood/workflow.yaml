@@ -1,0 +1,37 @@
+schema: imp.workflow/v1
+id: executable-runner-dogfood
+title: Executable runner dogfood
+status: done
+kind: verification
+settings:
+  worktree: none
+  strictness: medium
+  durable: true
+  disposable: true
+  commit_traces: false
+spec:
+  goal: Verify workflow run executes command checks and advances step status.
+  acceptance:
+    command_check_advances_step:
+      text: Running the workflow executes a command check and marks the step done.
+      status: done
+      checks:
+      - dogfood_command
+steps:
+  verify_runner:
+    kind: verify
+    status: done
+    checks:
+    - dogfood_command
+checks:
+  dogfood_command:
+    kind: command
+    status: passed
+    command: true
+results:
+  path: .imp/workflows/executable-runner-dogfood/results.md
+workers: {}
+closeout:
+  done:
+    requires:
+    - dogfood_command

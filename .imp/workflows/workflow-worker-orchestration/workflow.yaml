@@ -1,0 +1,135 @@
+schema: imp.workflow/v1
+id: workflow-worker-orchestration
+title: Workflow worker orchestration
+status: done_with_concerns
+kind: roadmap_child
+parent:
+  workflow: prototype-imp-workflow-engine
+  step: orchestrate_workers
+settings:
+  worktree: per_workflow
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Dispatch builder, verifier, and reviewer workers with workflow-backed assignments.
+  user_value: |
+    Advance the imp-native workflow engine roadmap while preserving a durable, inspectable workflow plan.
+  non_goals:
+  - Broaden scope beyond this workflow slice before planning it in detail.
+  acceptance:
+    plan_written:
+      text: This workflow has a concrete implementation plan before code changes begin.
+      status: done
+      checks:
+      - plan_ready
+    results_rendered:
+      text: Results and verification are summarized for the parent workflow.
+      status: done
+      checks:
+      - results_rendered
+  approval_required_for:
+  - changing spec.goal
+  - removing or weakening spec.acceptance
+  - removing required checks
+context:
+  parent_workflow:
+    file: .imp/workflows/prototype-imp-workflow-engine/workflow.yaml
+    status: todo
+steps:
+  plan:
+    kind: plan
+    status: done
+    checks:
+    - plan_ready
+  execute:
+    kind: build
+    status: done
+    worker: builder
+    depends_on:
+    - plan
+    checks:
+    - implementation_ready
+  verify:
+    kind: verify
+    status: done
+    depends_on:
+    - execute
+    checks:
+    - verification_passed
+  review:
+    kind: review
+    status: done_with_concerns
+    worker: reviewer
+    depends_on:
+    - verify
+    checks:
+    - results_rendered
+    - final_claims_validated
+  closeout:
+    kind: closeout
+    status: done_with_concerns
+    depends_on:
+    - review
+    checks:
+    - required_checks_passed
+prototypes: {}
+checks:
+  plan_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/workflow-worker-orchestration/artifacts/plan.md
+  implementation_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/workflow-worker-orchestration/results.md
+  verification_passed:
+    kind: command
+    status: passed
+    command: TBD
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/workflow-worker-orchestration/results.md
+  final_claims_validated:
+    kind: closeout
+    status: passed
+  required_checks_passed:
+    kind: aggregate
+    status: passed
+workers:
+  parent:
+    role: orchestrator
+    writes:
+    - workflow
+    - results
+    - docs
+    writes_code: false
+  builder:
+    role: builder
+    writes:
+    - code
+    - tests
+    worktree: workflow
+  reviewer:
+    role: reviewer
+    writes:
+    - review_artifacts
+results:
+  path: .imp/workflows/workflow-worker-orchestration/results.md
+  required_claims:
+  - work completed
+  - verification performed
+  - concerns and next steps
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+    - final_claims_validated
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

@@ -1,0 +1,240 @@
+schema: imp.workflow/v1
+id: fix-workflow-status-reconciliation
+title: Fix workflow status reconciliation
+status: done_with_concerns
+kind: bugfix
+parent:
+  workflow: prototype-imp-workflow-engine
+  step: fix_status_reconciliation
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Ensure imp detects and resolves stale workflow statuses when steps, checks, and acceptance criteria indicate the workflow should be terminal.
+  user_value: |
+    Keep workflow status trustworthy so users can tell what is actually active, planned, complete, blocked, or waiting without manual cleanup.
+  non_goals:
+  - Change the workflow schema shape beyond what reconciliation requires.
+  - Auto-close workflows that still have incomplete required checks, blockers, or unresolved user decisions.
+  - Weaken closeout requirements to make stale states disappear.
+  acceptance:
+    stale_terminal_status_detected:
+      text: Validation or run diagnostics detect contradictory states such as planned/active workflows with all required terminal evidence complete.
+      status: todo
+      checks:
+      - stale_status_fixture_verified
+      - validation_diagnostic_verified
+    closeout_status_reconciled:
+      text: Workflow closeout/run logic recommends or applies done/done_with_concerns when terminal conditions are satisfied.
+      status: todo
+      checks:
+      - closeout_reconciliation_verified
+      - event_append_verified
+    parent_child_reconciled:
+      text: Parent workflow steps and checks reconcile consistently when child workflows are terminal, including done_with_concerns cases.
+      status: todo
+      checks:
+      - parent_child_reconciliation_verified
+    regression_covers_found_cases:
+      text: Regression coverage includes the stale statuses found in define-workflow-schema, prototype-rust-workflow-schema-parser, and completed planned child workflows.
+      status: todo
+      checks:
+      - stale_status_fixture_verified
+      - regression_tests_passed
+    dogfooded_after_dependencies:
+      text: The fix is dogfooded after prototype-imp-workflow-engine and implement-executable-workflow-runner are both complete enough to exercise real closeout behavior.
+      status: todo
+      checks:
+      - prototype_engine_done_verified
+      - executable_runner_done_verified
+      - dogfood_reconciliation_recorded
+  approval_required_for:
+  - broad workflow schema semantics changes
+  - auto-updating workflow status without appending an event
+  - weakening validation or closeout requirements
+context:
+  discovered_stale_statuses:
+    artifact: .imp/workflows/fix-workflow-status-reconciliation/artifacts/stale-statuses.md
+    status: todo
+  primary_parent:
+    file: .imp/workflows/prototype-imp-workflow-engine/workflow.yaml
+    status: todo
+  secondary_parent:
+    file: .imp/workflows/implement-executable-workflow-runner/workflow.yaml
+    status: todo
+  workflow_tool:
+    file: crates/imp-core/src/tools/workflow.rs
+    status: todo
+  workflow_schema:
+    file: crates/imp-core/src/workflow/schema.rs
+    status: todo
+  workflow_controller:
+    file: crates/imp-core/src/workflow/controller.rs
+    status: todo
+steps:
+  wait_for_parents:
+    kind: verify
+    status: done
+    checks:
+    - prototype_engine_done_verified
+    - executable_runner_done_verified
+  inspect_reconciliation_paths:
+    kind: context
+    status: done
+    depends_on:
+    - wait_for_parents
+    checks:
+    - workflow_tool_inspected
+    - workflow_controller_inspected
+    - stale_status_fixture_recorded
+  design_reconciliation_rule:
+    kind: plan
+    status: done
+    depends_on:
+    - inspect_reconciliation_paths
+    checks:
+    - reconciliation_rule_written
+  implement_detection:
+    kind: build
+    status: done
+    depends_on:
+    - design_reconciliation_rule
+    checks:
+    - validation_diagnostic_verified
+    - stale_status_fixture_verified
+  implement_reconciliation:
+    kind: build
+    status: done
+    depends_on:
+    - implement_detection
+    checks:
+    - closeout_reconciliation_verified
+    - parent_child_reconciliation_verified
+    - event_append_verified
+  verify_regression:
+    kind: verify
+    status: done
+    depends_on:
+    - implement_reconciliation
+    checks:
+    - regression_tests_passed
+  dogfood:
+    kind: verify
+    status: done
+    depends_on:
+    - verify_regression
+    checks:
+    - dogfood_reconciliation_recorded
+  review:
+    kind: review
+    status: done
+    depends_on:
+    - dogfood
+    checks:
+    - final_claims_validated
+  closeout:
+    kind: closeout
+    status: done
+    depends_on:
+    - review
+    checks:
+    - required_checks_passed
+    - results_rendered
+prototypes: {}
+checks:
+  prototype_engine_done_verified:
+    kind: aggregate
+    status: passed
+  executable_runner_done_verified:
+    kind: aggregate
+    status: passed
+  workflow_tool_inspected:
+    kind: context
+    status: pending
+    path: crates/imp-core/src/tools/workflow.rs
+  workflow_controller_inspected:
+    kind: context
+    status: passed
+    path: crates/imp-core/src/workflow/controller.rs
+  stale_status_fixture_recorded:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/fix-workflow-status-reconciliation/artifacts/stale-statuses.md
+  reconciliation_rule_written:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/fix-workflow-status-reconciliation/artifacts/reconciliation-rule.md
+  stale_status_fixture_verified:
+    kind: command
+    status: pending
+    command: cargo test -p imp-core workflow_status_reconciliation --lib
+  validation_diagnostic_verified:
+    kind: command
+    status: pending
+    command: cargo test -p imp-core workflow_status_reconciliation --lib
+  closeout_reconciliation_verified:
+    kind: command
+    status: pending
+    command: cargo test -p imp-core workflow_status_reconciliation --lib
+  parent_child_reconciliation_verified:
+    kind: command
+    status: pending
+    command: cargo test -p imp-core workflow_status_reconciliation --lib
+  event_append_verified:
+    kind: command
+    status: pending
+    command: cargo test -p imp-core workflow_update_appends_event --lib
+  regression_tests_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core workflow_status_reconciliation --lib
+  dogfood_reconciliation_recorded:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/fix-workflow-status-reconciliation/artifacts/dogfood.md
+  final_claims_validated:
+    kind: closeout
+    status: passed
+  required_checks_passed:
+    kind: aggregate
+    status: passed
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/fix-workflow-status-reconciliation/results.md
+workers:
+  parent:
+    role: orchestrator
+    writes:
+    - workflow
+    - results
+    writes_code: false
+  builder:
+    role: builder
+    writes:
+    - code
+    - tests
+results:
+  path: .imp/workflows/fix-workflow-status-reconciliation/results.md
+  required_claims:
+  - stale statuses reproduced
+  - reconciliation rule implemented
+  - validation/run behavior verified
+  - parent/child behavior verified
+  - events appended for mutations
+  - dogfood result
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+    - final_claims_validated
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

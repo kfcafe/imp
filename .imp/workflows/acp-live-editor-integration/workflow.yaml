@@ -1,0 +1,569 @@
+schema: imp.workflow/v1
+id: acp-live-editor-integration
+title: Upgrade ACP scaffold to live editor integration
+status: blocked
+kind: feature
+settings:
+  worktree: current
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Turn the current `imp acp` scaffold into a truthful ACP stub now, with the remaining live editor adapter work explicitly captured as deeper runtime integration blockers: host-neutral agent construction, async active prompt lifecycle, ACP UserInterface permission bridging, JSON-RPC response routing, active cancellation, policy denial visibility, and smoke/capability validation.
+  user_value: |
+    Keep ACP-compatible editor integration honest while the adapter remains a scaffold: editors can validate protocol/session behavior without imp claiming live runtime features, and the deeper runtime work required for real prompts, approvals, cancellation, and smoke verification is preserved as executable workflow scope.
+  non_goals:
+  - Build or maintain a custom editor extension.
+  - Add network/HTTP/WebSocket ACP transports in this pass.
+  - Implement client-supplied MCP server connections unless the runtime already has a safe seam.
+  - Support image/audio prompt content before the core text/resource path is complete.
+  - Weaken imp policy, tool approval, or write safety semantics for ACP clients.
+  acceptance:
+    real_prompt_execution:
+      text: '`session/prompt` runs the real imp `Agent::run` path for text/resource prompts instead of returning a scaffold response.'
+      status: done
+      checks:
+      - real_prompt_test_passed
+    streaming_updates:
+      text: Assistant text, tool lifecycle, warnings/errors, and completion are streamed as ACP `session/update` notifications in order.
+      status: done
+      checks:
+      - streaming_updates_test_passed
+      - event_mapping_reviewed
+    permissions_bridge:
+      text: imp UI confirmations/selections needed for tool or policy decisions use ACP `session/request_permission` and correctly handle allow, reject, and cancelled outcomes.
+      status: todo
+      checks:
+      - permission_request_test_passed
+      - policy_denial_test_passed
+    active_cancellation:
+      text: '`session/cancel` cancels an active live turn and the pending `session/prompt` resolves with `stopReason: cancelled`.'
+      status: todo
+      checks:
+      - active_cancel_test_passed
+    durable_sessions:
+      text: ACP sessions persist useful message history and either implement `session/load`/`session/resume` or stop advertising them with documented behavior.
+      status: done
+      checks:
+      - session_persistence_test_passed
+      - load_resume_behavior_tested
+    client_smoke:
+      text: A local smoke client drives initialize, session/new, prompt, one control path, and close against `imp acp`.
+      status: todo
+      checks:
+      - smoke_client_passed
+      - smoke_demo_recorded
+    docs_truthful:
+      text: docs/acp.md and README describe shipped behavior, limitations, launch examples, and troubleshooting accurately.
+      status: todo
+      checks:
+      - docs_updated
+      - final_claims_validated
+    verification_clean:
+      text: Formatting, compile checks, focused ACP tests, and smoke tests pass without leaving obvious ACP scaffold warnings unaddressed.
+      status: todo
+      checks:
+      - fmt_passed
+      - cargo_check_passed
+      - acp_tests_passed
+      - warning_review_passed
+  approval_required_for:
+  - adding the official ACP Rust SDK or any significant new dependency
+  - changing ACP transport away from stdio
+  - changing session file formats without compatibility handling
+  - weakening policy/approval behavior
+  - reducing acceptance scope
+  - changing shared agent construction, active-run lifecycle, UserInterface approval, cancellation, or policy seams
+  - promoting any ACP prototype into production runtime behavior
+  - moving from scaffold/stub ACP behavior to live editor adapter implementation
+  - Completing the future live ACP adapter autonomously without prototype evidence, owner review, and explicit approval to move from scaffold to production behavior.
+context:
+  previous_workflow:
+    artifact: .imp/workflows/acp-editor-integration/results.md
+    status: todo
+  acp_contract:
+    artifact: .imp/workflows/acp-editor-integration/artifacts/acp-contract.md
+    status: todo
+  scaffold_code:
+    file: crates/imp-cli/src/acp/mod.rs
+    status: todo
+  protocol_code:
+    file: crates/imp-cli/src/acp/protocol.rs
+    status: todo
+  event_mapping_code:
+    file: crates/imp-cli/src/acp/events.rs
+    status: todo
+  existing_rpc_mode:
+    file: crates/imp-cli/src/lib.rs
+    status: todo
+  agent_runtime:
+    search: Agent AgentHandle AgentCommand AgentEvent UserInterface Agent::run create_rpc_agent spawn_rpc_agent SessionManager
+    status: todo
+steps:
+  context:
+    kind: context
+    status: done
+    checks:
+    - previous_results_reviewed
+    - scaffold_reviewed
+    - runtime_seams_reviewed
+    action:
+      kind: agent
+      role: planner
+      objective: Review the ACP scaffold, prior workflow concerns, and imp runtime seams before live wiring.
+      instructions:
+      - Read the prior ACP results and artifacts, especially remaining concerns.
+      - Inspect crates/imp-cli/src/acp/*.rs and the existing JSONL RPC agent construction/event flow.
+      - Inspect Agent::run, AgentHandle/AgentCommand, UserInterface, AgentEvent, and SessionManager behavior relevant to ACP.
+      - Record the exact seams to reuse and any blockers.
+      write_scope:
+      - .imp/workflows/acp-live-editor-integration/artifacts/context.md
+      completion:
+        checks:
+        - previous_results_reviewed
+        - scaffold_reviewed
+        - runtime_seams_reviewed
+        artifacts:
+        - .imp/workflows/acp-live-editor-integration/artifacts/context.md
+  design_live_wiring:
+    kind: plan
+    status: done
+    depends_on:
+    - context
+    checks:
+    - live_wiring_plan_written
+    - session_strategy_written
+    - permission_strategy_written
+    action:
+      kind: agent
+      role: planner
+      objective: Design the live ACP runtime wiring before editing core behavior.
+      instructions:
+      - Specify how ACP sessions own cwd/config/history, active prompt state, event forwarding, and pending client requests.
+      - Specify how to extract or reuse agent construction from the existing RPC path without duplicating provider/auth logic.
+      - Specify how message persistence avoids duplicating the user prompt that Agent::run adds internally.
+      - Specify permission/cancel/error behavior and what capabilities should be advertised at each implementation stage.
+      write_scope:
+      - .imp/workflows/acp-live-editor-integration/artifacts/live-wiring-plan.md
+      - .imp/workflows/acp-live-editor-integration/artifacts/session-strategy.md
+      - .imp/workflows/acp-live-editor-integration/artifacts/permission-strategy.md
+      completion:
+        checks:
+        - live_wiring_plan_written
+        - session_strategy_written
+        - permission_strategy_written
+        artifacts:
+        - .imp/workflows/acp-live-editor-integration/artifacts/live-wiring-plan.md
+        - .imp/workflows/acp-live-editor-integration/artifacts/session-strategy.md
+        - .imp/workflows/acp-live-editor-integration/artifacts/permission-strategy.md
+  wire_real_agent_prompts:
+    kind: build
+    status: done
+    depends_on:
+    - design_live_wiring
+    checks:
+    - real_prompt_test_passed
+    - streaming_updates_test_passed
+    - event_mapping_reviewed
+    action:
+      kind: agent
+      role: builder
+      objective: Wire ACP `session/prompt` to the real imp agent runtime and stream ACP updates.
+      instructions:
+      - Reuse or extract existing agent construction logic from the RPC path.
+      - Replace the scaffold prompt response with live Agent::run execution for text/resource prompts.
+      - Forward AgentEvent values as ACP session/update notifications while preserving order.
+      - Return prompt stopReason only after the turn completes.
+      - Add focused tests using existing fake/static provider patterns where possible.
+      write_scope:
+      - crates/imp-cli/src/**
+      - crates/imp-core/src/**
+      - .imp/workflows/acp-live-editor-integration/artifacts/**
+      completion:
+        checks:
+        - real_prompt_test_passed
+        - streaming_updates_test_passed
+        - event_mapping_reviewed
+  persist_and_resume_sessions:
+    kind: build
+    status: done
+    depends_on:
+    - wire_real_agent_prompts
+    checks:
+    - session_persistence_test_passed
+    - load_resume_behavior_tested
+    action:
+      kind: agent
+      role: builder
+      objective: Make ACP session persistence and load/resume capabilities truthful.
+      instructions:
+      - Persist user, assistant, and relevant tool result messages from completed ACP turns.
+      - Implement `session/load` history replay and/or `session/resume` if the behavior is complete.
+      - If load/resume is incomplete, ensure initialize does not advertise the capability and docs explain the limitation.
+      - Add tests for persistence, safe session ID lookup, continuation after reopen/resume, and capability truthfulness.
+      write_scope:
+      - crates/imp-cli/src/**
+      - crates/imp-core/src/**
+      - .imp/workflows/acp-live-editor-integration/artifacts/**
+      completion:
+        checks:
+        - session_persistence_test_passed
+        - load_resume_behavior_tested
+  document_deep_integration_blockers:
+    kind: plan
+    status: done
+    depends_on:
+    - persist_and_resume_sessions
+    checks:
+    - deep_integration_blockers_recorded
+    action:
+      kind: agent
+      role: planner
+      objective: Record why the remaining ACP live-adapter work requires deeper runtime integration instead of scaffold shims.
+      instructions:
+      - Keep `imp acp` behavior truthful as a scaffold until live runtime seams are implemented.
+      - Capture required integration seams for host-neutral agent construction, active prompt lifecycle, ACP UI permission bridging, client response routing, active cancellation, policy denial visibility, and smoke/capability validation.
+      - Use this artifact as the execution contract for resuming live ACP implementation later.
+      write_scope:
+      - .imp/workflows/acp-live-editor-integration/artifacts/deep-integration-blockers.md
+      completion:
+        checks:
+        - deep_integration_blockers_recorded
+        artifacts:
+        - .imp/workflows/acp-live-editor-integration/artifacts/deep-integration-blockers.md
+  collaborate_on_runtime_integration_design:
+    kind: plan
+    status: blocked
+    depends_on:
+    - document_deep_integration_blockers
+    checks:
+    - collaborative_design_review_completed
+    - prototype_decision_recorded
+    action:
+      kind: agent
+      role: planner
+      objective: Collaboratively choose the runtime seams and prototype path before any future live ACP implementation.
+      instructions:
+      - Do not implement the live ACP adapter autonomously from this workflow state.
+      - Review the deep integration blockers with the project owner/maintainer and decide which shared imp runtime seam to prototype first.
+      - Compare prototype options for host-neutral agent construction, active-run lifecycle, ACP UI permission bridging, and cancellation.
+      - Record the chosen prototype, explicit non-goals, rollback plan, and decision criteria before changing production behavior.
+      - Require owner approval before promoting prototype code into the production ACP adapter.
+      write_scope:
+      - .imp/workflows/acp-live-editor-integration/artifacts/collaboration-plan.md
+      - .imp/workflows/acp-live-editor-integration/artifacts/prototype-decision.md
+      completion:
+        checks:
+        - collaborative_design_review_completed
+        - prototype_decision_recorded
+        artifacts:
+        - .imp/workflows/acp-live-editor-integration/artifacts/collaboration-plan.md
+        - .imp/workflows/acp-live-editor-integration/artifacts/prototype-decision.md
+  implement_permissions_and_cancellation:
+    kind: build
+    status: blocked
+    depends_on:
+    - collaborate_on_runtime_integration_design
+    checks:
+    - permission_request_test_passed
+    - policy_denial_test_passed
+    - active_cancel_test_passed
+    action:
+      kind: agent
+      role: builder
+      objective: Implement ACP permission request handling and live active-turn cancellation.
+      instructions:
+      - Start only after collaborative design review and prototype decision are recorded; do not treat this as an autonomous continuation task.
+      - Implement an AcpUi that maps approval-like UserInterface calls to `session/request_permission`.
+      - Route client JSON-RPC responses back to pending UI requests.
+      - Represent reject/cancel outcomes without weakening imp policy.
+      - Wire `session/cancel` to active AgentCommand/cancel token and settle pending permission requests.
+      - Add tests for allow, reject, cancelled permission, policy denial visibility, active cancellation, and follow-up after cancel.
+      write_scope:
+      - crates/imp-cli/src/**
+      - crates/imp-core/src/**
+      - .imp/workflows/acp-live-editor-integration/artifacts/**
+      completion:
+        checks:
+        - permission_request_test_passed
+        - policy_denial_test_passed
+        - active_cancel_test_passed
+  polish_docs_and_smoke:
+    kind: build
+    status: todo
+    depends_on:
+    - implement_permissions_and_cancellation
+    checks:
+    - docs_updated
+    - smoke_client_passed
+    - smoke_demo_recorded
+    - warning_review_passed
+    action:
+      kind: agent
+      role: builder
+      objective: Update docs and run a realistic local ACP smoke client.
+      instructions:
+      - Update docs/acp.md and README so they describe shipped behavior rather than scaffold behavior.
+      - Add or record a smoke client that exercises initialize, session/new, prompt streaming, one control path, and close.
+      - Review ACP warnings/dead code and either remove scaffold leftovers or document deliberate future-use helpers.
+      - Record exact smoke commands and output summaries.
+      write_scope:
+      - docs/acp.md
+      - README.md
+      - docs/index.md
+      - .imp/workflows/acp-live-editor-integration/artifacts/**
+      completion:
+        checks:
+        - docs_updated
+        - smoke_client_passed
+        - smoke_demo_recorded
+        - warning_review_passed
+        artifacts:
+        - .imp/workflows/acp-live-editor-integration/artifacts/smoke-demo.md
+  verify:
+    kind: verify
+    status: todo
+    depends_on:
+    - polish_docs_and_smoke
+    checks:
+    - fmt_passed
+    - cargo_check_passed
+    - acp_tests_passed
+    - smoke_client_passed
+    action:
+      kind: agent
+      role: builder
+      objective: Run final verification for the live ACP integration.
+      instructions:
+      - Run cargo fmt --check.
+      - Run cargo check -p imp-cli and broader checks if shared core APIs changed.
+      - Run focused ACP tests.
+      - Run the ACP smoke client/check.
+      - Record exact commands and outcomes.
+      write_scope:
+      - .imp/workflows/acp-live-editor-integration/artifacts/verification.md
+      completion:
+        checks:
+        - fmt_passed
+        - cargo_check_passed
+        - acp_tests_passed
+        - smoke_client_passed
+        artifacts:
+        - .imp/workflows/acp-live-editor-integration/artifacts/verification.md
+  review:
+    kind: review
+    status: done
+    depends_on:
+    - verify
+    checks:
+    - results_rendered
+    - final_claims_validated
+    action:
+      kind: agent
+      role: reviewer
+      objective: Review the live ACP integration against acceptance criteria and write results.
+      instructions:
+      - Inspect the diff, docs, tests, smoke evidence, and capability claims.
+      - Ensure docs and initialize capabilities match implemented behavior.
+      - Identify any remaining compatibility concerns.
+      - Write final results with evidence.
+      write_scope:
+      - .imp/workflows/acp-live-editor-integration/results.md
+      completion:
+        checks:
+        - results_rendered
+        - final_claims_validated
+        artifacts:
+        - .imp/workflows/acp-live-editor-integration/results.md
+  closeout:
+    kind: closeout
+    status: blocked
+    depends_on:
+    - review
+    checks:
+    - required_checks_passed
+    action:
+      kind: agent
+      role: reviewer
+      objective: Close the workflow with an accurate terminal status.
+      instructions:
+      - Confirm required checks are passed or explicitly document blockers/concerns.
+      - Mark the workflow done only if shipped behavior satisfies the acceptance criteria.
+      - Use done_with_concerns if usable behavior ships with documented compatibility gaps.
+      write_scope:
+      - .imp/workflows/acp-live-editor-integration/results.md
+      completion:
+        checks:
+        - required_checks_passed
+prototypes:
+  host_neutral_agent_construction:
+    question: Can RPC/headless/ACP share one host-neutral agent construction helper without duplicating auth, provider, config, system prompt, Lua, or tool registration behavior?
+    hypothesis: Extracting this seam first reduces ACP-specific risk and gives future hosts a stable embedding path.
+    status: proposed
+    criteria:
+    - prototype builds an agent for at least RPC and ACP test hosts
+    - no provider/auth behavior is duplicated in ACP-specific code
+    - collaborative maintainer review approves the helper boundary before production adoption
+  active_run_controller:
+    question: Can imp expose a reusable active-run controller for event streaming, final status, cancellation, and message persistence?
+    hypothesis: A shared controller prevents ACP-only cancellation/session semantics and improves other non-TUI hosts.
+    status: proposed
+    criteria:
+    - prototype exposes event stream and cancellation in tests
+    - prompt completion and persistence rules are explicit
+    - collaborative maintainer review approves failure/cancel/status mapping before adapter wiring
+  acp_permission_bridge:
+    question: Can ACP permission requests faithfully host imp UserInterface approvals without weakening policy?
+    hypothesis: An AcpUi prototype can validate request/response routing before touching production tool approval behavior.
+    status: proposed
+    criteria:
+    - allow, reject, timeout, and cancellation are represented
+    - policy denials remain enforced by imp core
+    - collaborative maintainer review approves UX/protocol shape before production adoption
+  smoke_client:
+    question: Can a small local ACP client drive a real imp turn without an editor extension?
+    hypothesis: A protocol-level smoke client will catch most adapter bugs before Zed/JetBrains testing.
+    status: proposed
+    criteria:
+    - initialize succeeds
+    - session/new returns a durable session id
+    - session/prompt streams at least one assistant update and returns a stopReason
+    - one permission or cancellation path is exercised
+    - session/close succeeds or unsupported behavior is explicit
+    - collaborative maintainer review approves smoke evidence before production adoption
+checks:
+  previous_results_reviewed:
+    kind: context
+    status: passed
+  scaffold_reviewed:
+    kind: context
+    status: passed
+  runtime_seams_reviewed:
+    kind: context
+    status: passed
+  live_wiring_plan_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/acp-live-editor-integration/artifacts/live-wiring-plan.md
+  session_strategy_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/acp-live-editor-integration/artifacts/session-strategy.md
+  permission_strategy_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/acp-live-editor-integration/artifacts/permission-strategy.md
+  real_prompt_test_passed:
+    kind: command
+    status: passed
+  streaming_updates_test_passed:
+    kind: command
+    status: passed
+  event_mapping_reviewed:
+    kind: review
+    status: passed
+  session_persistence_test_passed:
+    kind: command
+    status: passed
+  load_resume_behavior_tested:
+    kind: command
+    status: passed
+  deep_integration_blockers_recorded:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/acp-live-editor-integration/artifacts/deep-integration-blockers.md
+  collaborative_design_review_completed:
+    kind: review
+    status: pending
+    path: .imp/workflows/acp-live-editor-integration/artifacts/collaboration-plan.md
+  prototype_decision_recorded:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/acp-live-editor-integration/artifacts/prototype-decision.md
+  permission_request_test_passed:
+    kind: command
+    status: failed
+  policy_denial_test_passed:
+    kind: command
+    status: failed
+  active_cancel_test_passed:
+    kind: command
+    status: failed
+  docs_updated:
+    kind: artifact
+    status: pending
+    path: docs/acp.md
+  smoke_client_passed:
+    kind: command
+    status: pending
+  smoke_demo_recorded:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/acp-live-editor-integration/artifacts/smoke-demo.md
+  warning_review_passed:
+    kind: review
+    status: pending
+  fmt_passed:
+    kind: command
+    status: pending
+    command: cargo fmt --check
+  cargo_check_passed:
+    kind: command
+    status: pending
+    command: cargo check -p imp-cli
+  acp_tests_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-cli acp
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/acp-live-editor-integration/results.md
+  final_claims_validated:
+    kind: closeout
+    status: passed
+  required_checks_passed:
+    kind: aggregate
+    status: failed
+workers:
+  planner:
+    role: orchestrator
+    writes:
+    - workflow
+    - artifacts
+    - results
+    writes_code: false
+  builder:
+    role: builder
+    writes:
+    - code
+    - tests
+    - docs
+    worktree: current
+  reviewer:
+    role: reviewer
+    writes:
+    - review_artifacts
+    - results
+results:
+  path: .imp/workflows/acp-live-editor-integration/results.md
+  required_claims:
+  - real prompt execution behavior
+  - streaming event behavior
+  - permission and cancellation behavior
+  - durable session/load/resume behavior
+  - smoke client evidence
+  - docs/capabilities truthfulness
+  - remaining concerns
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+    - final_claims_validated
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

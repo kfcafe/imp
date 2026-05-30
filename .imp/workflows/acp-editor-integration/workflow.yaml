@@ -1,0 +1,577 @@
+schema: imp.workflow/v1
+id: acp-editor-integration
+title: Add Agent Client Protocol editor integration
+status: done_with_concerns
+kind: feature
+settings:
+  worktree: per_workflow
+  branch: imp/workflow/acp-editor-integration
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Add a usable Agent Client Protocol (ACP) server/adapter to imp so editor and host clients can start imp, initialize a workspace session, send prompts, stream agent progress, answer permission/UI requests, cancel work, and resume useful state with enough quality-of-life polish for real daily use.
+  user_value: |
+    Let users run imp from ACP-compatible editors without losing imp's native runtime strengths: durable sessions, policy-aware tool execution, clear streaming status, cancellation, and helpful error behavior.
+  non_goals:
+  - Build a custom editor extension in this workflow; validate through protocol-level clients first.
+  - Replace the existing JSONL RPC mode or TUI.
+  - Expose a network service; the first version is local stdio/subprocess transport unless explicitly approved.
+  - Change imp's provider authentication model beyond surfacing clear ACP-facing setup errors.
+  - Claim broad ACP compatibility before checking against the protocol version and client behavior targeted by this workflow.
+  acceptance:
+    protocol_contract_documented:
+      text: ACP version, transport, capabilities, method/event mapping, errors, and unsupported features are documented before implementation.
+      status: done
+      checks:
+      - acp_spec_inspected
+      - contract_written
+    acp_server_starts:
+      text: imp exposes a documented ACP entrypoint that initializes over stdio and advertises truthful capabilities.
+      status: done
+      checks:
+      - server_start_verified
+      - init_handshake_verified
+    prompt_streaming_works:
+      text: An ACP client can send a prompt and receive ordered assistant text, progress/status, tool-call, and completion/error events.
+      status: done
+      checks:
+      - prompt_stream_test_passed
+      - event_mapping_reviewed
+    workspace_context_works:
+      text: ACP workspace roots, relevant file context, and client metadata are translated into imp session/runtime context without brittle cwd assumptions.
+      status: done
+      checks:
+      - workspace_context_test_passed
+    permissions_and_ui_work:
+      text: Tool approval, user-input requests, and policy denials are represented through ACP-compatible request/response or event flows.
+      status: done
+      checks:
+      - ui_request_test_passed
+      - policy_denial_test_passed
+    cancellation_and_followup_work:
+      text: Clients can cancel active turns and continue the same conversation/session with follow-up prompts afterward.
+      status: done
+      checks:
+      - cancel_test_passed
+      - followup_test_passed
+    sessions_are_durable:
+      text: ACP sessions map predictably to imp durable sessions and can be resumed or reported as non-resumable with clear behavior.
+      status: done
+      checks:
+      - session_mapping_test_passed
+      - resume_behavior_verified
+    qol_polish_done:
+      text: Common setup and failure cases produce actionable messages, logs are debuggable, and docs include a minimal client/editor configuration example.
+      status: done
+      checks:
+      - error_ux_reviewed
+      - docs_written
+      - smoke_client_demo_recorded
+    regression_checks_pass:
+      text: Relevant Rust formatting, compile checks, targeted tests, and protocol smoke tests pass.
+      status: todo
+      checks:
+      - fmt_passed
+      - cargo_check_passed
+      - acp_tests_passed
+      - smoke_test_passed
+  approval_required_for:
+  - changing the transport away from local stdio/subprocess for the first version
+  - adding a major dependency or async runtime beyond existing workspace choices
+  - changing durable session formats without compatibility handling
+  - weakening permission/policy behavior for ACP clients
+  - removing or weakening acceptance criteria
+context:
+  acp_spec:
+    search: Agent Client Protocol specification, current version, JSON-RPC methods, capabilities, cancellation, permission prompts
+    status: todo
+  existing_rpc_mode:
+    file: crates/imp-cli/src/lib.rs
+    status: todo
+  existing_rpc_symbols:
+    search: run_rpc_mode parse_rpc_command process_rpc_command create_rpc_agent forward_rpc_events RpcUi
+    status: todo
+  agent_runtime:
+    search: Agent AgentHandle AgentCommand AgentEvent StreamEvent UserInterface policy approval session
+    status: todo
+  session_storage:
+    search: SessionManager durable sessions transcript history resume
+    status: todo
+  editor_clients:
+    search: ACP-compatible editor clients and their launch/config expectations
+    status: todo
+steps:
+  context:
+    kind: context
+    status: done
+    checks:
+    - acp_spec_inspected
+    - existing_rpc_inspected
+    - agent_runtime_inspected
+    - session_model_inspected
+    - client_expectations_inspected
+    action:
+      kind: agent
+      role: planner
+      objective: Inspect the ACP protocol, target client expectations, and imp's existing RPC/runtime/session seams before designing the adapter.
+      instructions:
+      - Identify the current ACP specification/version and the minimum method, capability, cancellation, session, and permission semantics needed for editor use.
+      - Inspect imp's existing JSONL RPC mode and agent runtime seams in crates/imp-cli and crates/imp-core.
+      - Inspect durable session storage and resume behavior relevant to an ACP session mapping.
+      - Record target editor/client launch expectations and any compatibility risks.
+      - Write concise evidence notes with source links/files and open questions.
+      write_scope:
+      - .imp/workflows/acp-editor-integration/artifacts/context.md
+      completion:
+        checks:
+        - acp_spec_inspected
+        - existing_rpc_inspected
+        - agent_runtime_inspected
+        - session_model_inspected
+        - client_expectations_inspected
+        artifacts:
+        - .imp/workflows/acp-editor-integration/artifacts/context.md
+  design_contract:
+    kind: plan
+    status: done
+    depends_on:
+    - context
+    checks:
+    - contract_written
+    - event_mapping_reviewed
+    - session_mapping_written
+    - implementation_plan_written
+    action:
+      kind: agent
+      role: planner
+      objective: Design the ACP adapter contract and implementation plan for a usable editor integration.
+      instructions:
+      - Write the ACP contract artifact with transport, lifecycle, capabilities, request/response shapes, events, errors, and unsupported features.
+      - Write the session mapping artifact explaining ACP session IDs, imp session directories/history, resume behavior, and cleanup expectations.
+      - Write an implementation plan with phases, files likely touched, tests, smoke client approach, and risks.
+      - Review the event mapping from imp AgentEvent/StreamEvent/tool/UI events to ACP events and record any lossy conversions or follow-up decisions.
+      write_scope:
+      - .imp/workflows/acp-editor-integration/artifacts/acp-contract.md
+      - .imp/workflows/acp-editor-integration/artifacts/session-mapping.md
+      - .imp/workflows/acp-editor-integration/artifacts/implementation-plan.md
+      completion:
+        checks:
+        - contract_written
+        - event_mapping_reviewed
+        - session_mapping_written
+        - implementation_plan_written
+        artifacts:
+        - .imp/workflows/acp-editor-integration/artifacts/acp-contract.md
+        - .imp/workflows/acp-editor-integration/artifacts/session-mapping.md
+        - .imp/workflows/acp-editor-integration/artifacts/implementation-plan.md
+  choose_integration_boundary:
+    kind: plan
+    status: done
+    depends_on:
+    - design_contract
+    checks:
+    - cli_surface_decided
+    - module_boundary_reviewed
+    action:
+      kind: agent
+      role: planner
+      objective: Decide the CLI entrypoint and Rust module boundary for ACP support.
+      instructions:
+      - Choose the user-facing command/flags for launching ACP while preserving existing TUI, print, and JSONL RPC behavior.
+      - Decide whether ACP code lives in imp-cli only or a reusable module/crate, and justify the boundary.
+      - Record how the adapter will reuse existing Agent/RpcUi/session machinery without duplicating runtime logic.
+      write_scope:
+      - .imp/workflows/acp-editor-integration/artifacts/cli-surface-decision.md
+      - .imp/workflows/acp-editor-integration/artifacts/implementation-plan.md
+      completion:
+        checks:
+        - cli_surface_decided
+        - module_boundary_reviewed
+        artifacts:
+        - .imp/workflows/acp-editor-integration/artifacts/cli-surface-decision.md
+  implement_protocol_types:
+    kind: build
+    status: done
+    depends_on:
+    - choose_integration_boundary
+    checks:
+    - protocol_type_tests_passed
+    action:
+      kind: agent
+      role: builder
+      objective: Implement typed ACP protocol parsing/serialization and focused protocol unit tests.
+      instructions:
+      - Add typed request, response, notification, capability, error, and event models for the ACP subset selected in the contract.
+      - Prefer serde-based types over ad hoc JSON maps where method shapes are known.
+      - Keep unknown/unsupported method behavior explicit and protocol-compliant.
+      - Add focused tests for parsing, serialization, unsupported methods, and representative client messages.
+      write_scope:
+      - crates/imp-cli/src/**
+      - crates/imp-core/src/**
+      - .imp/workflows/acp-editor-integration/artifacts/**
+      completion:
+        checks:
+        - protocol_type_tests_passed
+  implement_stdio_server:
+    kind: build
+    status: done
+    depends_on:
+    - implement_protocol_types
+    checks:
+    - server_start_verified
+    - init_handshake_verified
+    action:
+      kind: agent
+      role: builder
+      objective: Add the ACP stdio server entrypoint and initialization handshake.
+      instructions:
+      - Add the chosen CLI command/flags.
+      - Implement stdio framing/JSON-RPC handling required by ACP.
+      - Advertise truthful capabilities from the contract.
+      - Add command-level tests or smoke verification for startup and initialize response.
+      write_scope:
+      - crates/imp-cli/src/**
+      - docs/**
+      - .imp/workflows/acp-editor-integration/artifacts/**
+      completion:
+        checks:
+        - server_start_verified
+        - init_handshake_verified
+  wire_agent_turns:
+    kind: build
+    status: done
+    depends_on:
+    - implement_stdio_server
+    checks:
+    - prompt_stream_test_passed
+    - completion_error_test_passed
+    action:
+      kind: agent
+      role: builder
+      objective: Wire ACP prompt requests to imp agent turns and stream mapped events back to the client.
+      instructions:
+      - Reuse existing Agent, AgentHandle, AgentCommand, and event-forwarding machinery rather than duplicating turn logic.
+      - Map assistant text, progress, tool calls/results, completion, and errors according to the contract.
+      - Preserve ordering and backpressure behavior.
+      - Add tests for successful prompt streaming and completion/error paths.
+      write_scope:
+      - crates/imp-cli/src/**
+      - crates/imp-core/src/**
+      - .imp/workflows/acp-editor-integration/artifacts/**
+      completion:
+        checks:
+        - prompt_stream_test_passed
+        - completion_error_test_passed
+  add_workspace_and_session_mapping:
+    kind: build
+    status: done
+    depends_on:
+    - wire_agent_turns
+    checks:
+    - workspace_context_test_passed
+    - session_mapping_test_passed
+    - resume_behavior_verified
+    action:
+      kind: agent
+      role: builder
+      objective: Implement ACP workspace and durable session mapping.
+      instructions:
+      - Translate ACP workspace roots and client metadata into imp cwd/session/runtime context as designed.
+      - Map ACP session/conversation IDs to imp durable sessions predictably.
+      - Implement supported resume behavior or explicit non-resumable responses with actionable errors.
+      - Add tests for workspace context, session mapping, and resume behavior.
+      write_scope:
+      - crates/imp-cli/src/**
+      - crates/imp-core/src/**
+      - .imp/workflows/acp-editor-integration/artifacts/**
+      completion:
+        checks:
+        - workspace_context_test_passed
+        - session_mapping_test_passed
+        - resume_behavior_verified
+  add_interaction_controls:
+    kind: build
+    status: done
+    depends_on:
+    - add_workspace_and_session_mapping
+    checks:
+    - ui_request_test_passed
+    - policy_denial_test_passed
+    - cancel_test_passed
+    - followup_test_passed
+    action:
+      kind: agent
+      role: builder
+      objective: Support ACP permission/UI requests, policy denials, cancellation, and follow-up turns.
+      instructions:
+      - Map imp UserInterface requests to ACP-compatible client request/response flows.
+      - Surface policy denials as useful ACP events/errors without weakening policy enforcement.
+      - Implement cancellation of active turns and verify a follow-up can continue the intended session.
+      - Add tests for UI request, policy denial, cancel, and follow-up paths.
+      write_scope:
+      - crates/imp-cli/src/**
+      - crates/imp-core/src/**
+      - .imp/workflows/acp-editor-integration/artifacts/**
+      completion:
+        checks:
+        - ui_request_test_passed
+        - policy_denial_test_passed
+        - cancel_test_passed
+        - followup_test_passed
+  polish_and_docs:
+    kind: build
+    status: done
+    depends_on:
+    - add_interaction_controls
+    checks:
+    - error_ux_reviewed
+    - docs_written
+    - smoke_client_demo_recorded
+    action:
+      kind: agent
+      role: builder
+      objective: Add quality-of-life polish, user docs, and a protocol smoke-client demo.
+      instructions:
+      - Improve setup/auth/model/workspace errors so ACP clients receive actionable messages.
+      - Document the ACP entrypoint, supported capabilities, editor/client configuration, limitations, and troubleshooting.
+      - Record a smoke-client transcript/demo that covers initialize, prompt, one interaction/control path, and shutdown.
+      write_scope:
+      - docs/acp.md
+      - README.md
+      - .imp/workflows/acp-editor-integration/artifacts/**
+      completion:
+        checks:
+        - error_ux_reviewed
+        - docs_written
+        - smoke_client_demo_recorded
+        artifacts:
+        - docs/acp.md
+        - .imp/workflows/acp-editor-integration/artifacts/smoke-client-demo.md
+  verify:
+    kind: verify
+    status: done
+    depends_on:
+    - polish_and_docs
+    checks:
+    - fmt_passed
+    - cargo_check_passed
+    - acp_tests_passed
+    - smoke_test_passed
+    action:
+      kind: agent
+      role: builder
+      objective: Run final formatting, compile, targeted ACP tests, and protocol smoke checks.
+      instructions:
+      - Run cargo fmt --check.
+      - Run cargo check -p imp-cli and broader checks if shared crates changed.
+      - Run targeted ACP tests.
+      - Run the protocol smoke client/check and record exact commands and outcomes.
+      write_scope:
+      - .imp/workflows/acp-editor-integration/results.md
+      - .imp/workflows/acp-editor-integration/artifacts/**
+      completion:
+        checks:
+        - fmt_passed
+        - cargo_check_passed
+        - acp_tests_passed
+        - smoke_test_passed
+  review:
+    kind: review
+    status: done
+    depends_on:
+    - verify
+    checks:
+    - results_rendered
+    - final_claims_validated
+    action:
+      kind: agent
+      role: reviewer
+      objective: Review the ACP integration against acceptance criteria and render final results.
+      instructions:
+      - Inspect the diff, tests, docs, and smoke evidence.
+      - Validate that claims match implemented behavior and that unsupported ACP/client features are clearly documented.
+      - Write results with evidence, remaining concerns, and follow-up work.
+      write_scope:
+      - .imp/workflows/acp-editor-integration/results.md
+      completion:
+        checks:
+        - results_rendered
+        - final_claims_validated
+        artifacts:
+        - .imp/workflows/acp-editor-integration/results.md
+  closeout:
+    kind: closeout
+    status: done
+    depends_on:
+    - review
+    checks:
+    - required_checks_passed
+prototypes:
+  protocol_smoke_client:
+    question: Can a tiny local ACP client drive initialize, prompt, stream, approve/deny, cancel, and follow-up without an editor extension?
+    hypothesis: A small checked-in or artifact-only smoke client will catch most adapter bugs before testing in a real editor.
+    status: proposed
+    criteria:
+    - exercises initialization and capability negotiation
+    - verifies ordered streaming events
+    - exercises one permission/UI request path
+    - verifies cancellation and follow-up reuse the intended session
+    - produces readable failure output for debugging
+  editor_config_probe:
+    question: What exact command/config shape do target ACP-compatible editors expect for launching imp?
+    hypothesis: Editor integration will be mostly launch metadata plus protocol correctness if the stdio server follows ACP closely.
+    status: proposed
+    criteria:
+    - records at least one target editor/client config
+    - notes unsupported or client-specific behavior
+    - does not require building a custom extension in this workflow
+checks:
+  acp_spec_inspected:
+    kind: context
+    status: passed
+  existing_rpc_inspected:
+    kind: context
+    status: passed
+  agent_runtime_inspected:
+    kind: context
+    status: passed
+  session_model_inspected:
+    kind: context
+    status: passed
+  client_expectations_inspected:
+    kind: context
+    status: passed
+  contract_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/acp-editor-integration/artifacts/acp-contract.md
+  event_mapping_reviewed:
+    kind: review
+    status: passed
+  session_mapping_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/acp-editor-integration/artifacts/session-mapping.md
+  implementation_plan_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/acp-editor-integration/artifacts/implementation-plan.md
+  cli_surface_decided:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/acp-editor-integration/artifacts/cli-surface-decision.md
+  module_boundary_reviewed:
+    kind: review
+    status: passed
+  protocol_type_tests_passed:
+    kind: command
+    status: passed
+  server_start_verified:
+    kind: command
+    status: passed
+  init_handshake_verified:
+    kind: command
+    status: passed
+  prompt_stream_test_passed:
+    kind: command
+    status: passed
+  completion_error_test_passed:
+    kind: command
+    status: passed
+  workspace_context_test_passed:
+    kind: command
+    status: passed
+  session_mapping_test_passed:
+    kind: command
+    status: passed
+  resume_behavior_verified:
+    kind: command
+    status: passed
+  ui_request_test_passed:
+    kind: command
+    status: passed
+  policy_denial_test_passed:
+    kind: command
+    status: passed
+  cancel_test_passed:
+    kind: command
+    status: passed
+  followup_test_passed:
+    kind: command
+    status: passed
+  error_ux_reviewed:
+    kind: review
+    status: passed
+  docs_written:
+    kind: artifact
+    status: passed
+    path: docs/acp.md
+  smoke_client_demo_recorded:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/acp-editor-integration/artifacts/smoke-client-demo.md
+  fmt_passed:
+    kind: command
+    status: passed
+    command: cargo fmt --check
+  cargo_check_passed:
+    kind: command
+    status: passed
+    command: cargo check -p imp-cli
+  acp_tests_passed:
+    kind: command
+    status: passed
+  smoke_test_passed:
+    kind: command
+    status: passed
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/acp-editor-integration/results.md
+  final_claims_validated:
+    kind: closeout
+    status: passed
+  required_checks_passed:
+    kind: aggregate
+    status: passed
+workers:
+  planner:
+    role: orchestrator
+    writes:
+    - workflow
+    - artifacts
+    - results
+    writes_code: false
+  builder:
+    role: builder
+    writes:
+    - code
+    - tests
+    - docs
+    worktree: workflow
+  reviewer:
+    role: reviewer
+    writes:
+    - review_artifacts
+    - results
+results:
+  path: .imp/workflows/acp-editor-integration/results.md
+  required_claims:
+  - ACP version and client target verified
+  - protocol/server entrypoint implemented
+  - event, session, workspace, permission, cancellation mappings verified
+  - docs and smoke-client evidence recorded
+  - remaining compatibility concerns
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+    - final_claims_validated
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context
