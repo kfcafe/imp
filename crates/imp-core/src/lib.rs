@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod builder;
+pub mod codeintel;
 pub mod compaction;
 pub mod config;
 pub mod context;
@@ -9,25 +10,33 @@ pub mod context_prefill;
 pub mod contracts;
 pub mod error;
 pub mod error_display;
+pub mod eval_candidate;
+pub mod eval_candidate_closeout;
 pub mod evidence;
 pub mod guardrails;
 pub mod hooks;
 pub mod imp_session;
 pub mod import;
 pub mod learning;
+#[cfg(feature = "mana-api")]
 pub mod mana_next;
+#[cfg(feature = "mana-api")]
 pub mod mana_prompt_context;
 pub mod mana_review;
+#[cfg(feature = "mana-api")]
 pub mod mana_run_state;
+#[cfg(feature = "mana-api")]
 pub mod mana_worker;
 pub mod memory;
 pub mod personality;
 pub mod policy;
 pub mod reference_monitor;
+pub mod repo_intelligence;
 pub mod resources;
 pub mod retry;
 pub mod roles;
 pub mod run_evidence;
+pub mod runtime;
 pub mod sdk;
 pub mod session;
 pub mod session_index;
@@ -36,10 +45,10 @@ pub mod system_prompt;
 pub mod tools;
 pub mod trace;
 pub mod trust;
-pub mod typescript_extensions;
 pub mod ui;
 pub mod usage;
 pub mod workflow;
+pub mod workflow_profiles;
 
 pub use agent::{RecoveryCheckpoint, RecoveryCheckpointKind, TimingEvent, TimingStage};
 pub use error::{Error, Result};
@@ -49,6 +58,7 @@ pub use imp_llm::{
     TransportCapabilities,
 };
 pub use mana_review::{ManaReviewState, ManaReviewUnitKind, ManaUnitRef, TurnManaReview};
+#[cfg(feature = "mana-api")]
 pub use mana_run_state::{mana_run_summary, stop_mana_run, ManaRunSummary};
 pub use sdk::*;
 

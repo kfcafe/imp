@@ -1,20 +1,55 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::hash::Hasher;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
-
+use imp_core::eval_candidate::{
+    redact_eval_candidate, EvalActualBehavior, EvalCandidate, EvalExpectedBehavior,
+    EvalFailureMode, EvalPrivacy, EvalRedactionStatus, EvalVerifier,
+};
 use imp_core::format_error_for_display;
 use imp_core::ui::WidgetContent;
-use imp_core::{mana_run_summary, stop_mana_run, ManaRunSummary, ManaUnitRef, TurnManaReview};
+use imp_core::ManaUnitRef;
+#[cfg(feature = "mana-ui")]
+use imp_core::{mana_run_summary, stop_mana_run, ManaRunSummary};
+#[cfg(not(feature = "mana-ui"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManaRunSummary {
+    run_id: String,
+    scope: String,
+    status: String,
+    total_units: u32,
+    total_closed: u32,
+    total_failed: u32,
+    total_awaiting_verify: u32,
+    latest: Option<String>,
+    logs: Vec<String>,
+    agents: Vec<ManaRunAgentSummary>,
+}
+#[cfg(not(feature = "mana-ui"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManaRunAgentSummary {
+    unit_id: String,
+    status: String,
+    action: String,
+    title: String,
+}
+#[cfg(not(feature = "mana-ui"))]
+#[allow(dead_code)]
+fn mana_run_summary(_id: &str) -> Result<Option<ManaRunSummary>, String> {
+    Ok(None)
+}
+#[cfg(not(feature = "mana-ui"))]
+fn stop_mana_run(_id: &str) -> Result<Option<ManaRunSummary>, String> {
+    Ok(None)
+}
+#[cfg(feature = "mana-ui")]
 use mana_core::api;
 
-use imp_lua::loader::discover_extensions;
 use imp_lua::LuaRuntime;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -26,13 +61,14 @@ use imp_core::compaction::{
     COMPACTION_SUMMARY_PREFIX, DEFAULT_KEEP_RECENT_GROUPS,
 };
 use imp_core::config::Config;
-use imp_core::personality::default_soul_markdown;
+use imp_core::runtime::{RuntimeStateAccumulator, RuntimeStateSnapshot};
 use imp_core::session::{SessionEntry, SessionInfo, SessionManager};
 use imp_core::tools::ToolRegistry;
 use imp_core::trust::{Provenance, RiskLabel, TrustLabel};
 use imp_core::workflow::{
     AutonomyMode, VerificationCloseoutEffect, VerificationGate, VerificationGateStatus,
 };
+use imp_core::workflow_profiles::{WorkflowProfile, WorkflowSuggest};
 use imp_core::Error as ImpCoreError;
 use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelMeta, ModelRegistry, ProviderRegistry};
@@ -47,7 +83,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
 use ratatui::Frame;
 
-use crate::animation::{title_spinner_frame, title_working_glyph, AnimationState};
+use crate::animation::{
+    title_loop_frame, title_loop_glyph, title_spinner_frame, title_working_glyph, AnimationState,
+};
 use crate::event_source::TerminalEventSource;
 use crate::highlight::Highlighter;
 use crate::keybindings::{self, Action};
@@ -60,18 +98,18 @@ use crate::turn_tracker::TurnTracker;
 use crate::views::ask_bar::AskState;
 use crate::views::chat::{
     build_chat_render_data, build_click_map_from_rendered_lines, build_text_surface_from_lines,
-    clamped_scroll_offset_for_total_lines, scroll_offset_for_message_at_top, DisplayMessage,
-    MessageRole, RenderedChatView,
+    clamped_scroll_offset_for_total_lines, scroll_offset_for_message_at_top, visible_line_window,
+    DisplayMessage, MessageRole, RenderedChatView,
 };
 use crate::views::command_palette::{
-    builtin_commands, merge_extension_commands, merge_skill_commands, CommandPaletteState,
-    CommandPaletteView,
+    builtin_commands, merge_extension_commands, merge_skill_commands, merge_workflow_commands,
+    CommandPaletteState, CommandPaletteView,
 };
 use crate::views::editor::{EditorState, EditorView, WorkflowMode};
 use crate::views::login_picker::{login_providers, LoginPickerState, LoginPickerView};
+#[cfg(feature = "mana-ui")]
 use crate::views::mana_navigator::{ManaNavigatorState, ManaNavigatorView};
 use crate::views::model_selector::{ModelSelection, ModelSelectorState, ModelSelectorView};
-use crate::views::personality::{PersonalityScope, PersonalityState, PersonalityView};
 use crate::views::secrets_picker::{secret_providers, SecretsPickerState, SecretsPickerView};
 use crate::views::session_picker::{SessionPickerState, SessionPickerView};
 use crate::views::settings::{SettingsState, SettingsView};
@@ -80,11 +118,11 @@ use crate::views::sidebar::{
     sidebar_sub_areas, thinking_detail_render_data, Sidebar, SidebarDetailRenderData, SidebarView,
 };
 use crate::views::startup::{
-    action_block_height, summarize_inline, visible_section_count, StartupAction, StartupPanelData,
-    StartupPanelView, StartupSection,
+    action_block_height, visible_section_count, StartupAction, StartupPanelData, StartupPanelView,
+    StartupSection,
 };
 use crate::views::status::StatusInfo;
-use crate::views::tools::DisplayToolCall;
+use crate::views::tools::{tool_display_icon, tool_display_name, DisplayToolCall};
 use crate::views::tree::{flatten_tree, TreeView, TreeViewState};
 use crate::views::welcome::{needs_welcome, WelcomeState, WelcomeStep, WelcomeView};
 
@@ -121,11 +159,11 @@ pub enum UiMode {
     ModelSelector(ModelSelectorState),
     CommandPalette(CommandPaletteState),
     LoginPicker(LoginPickerState),
+    #[cfg(feature = "mana-ui")]
     ManaNavigator(ManaNavigatorState),
     SecretsPicker(SecretsPickerState),
     TreeView(TreeViewState),
     Settings(SettingsState),
-    Personality(PersonalityState),
     SessionPicker(SessionPickerState),
     Welcome(WelcomeState),
 }
@@ -144,10 +182,15 @@ impl QueuedMessage {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum AskReply {
     Select(tokio::sync::oneshot::Sender<Option<usize>>),
     MultiSelect(tokio::sync::oneshot::Sender<Option<Vec<usize>>>),
     Input(tokio::sync::oneshot::Sender<Option<String>>),
+    WorkflowSuggestion {
+        profile: WorkflowProfile,
+        prompt: String,
+    },
 }
 
 #[derive(Debug)]
@@ -169,33 +212,15 @@ impl std::fmt::Debug for SessionOpenResult {
     }
 }
 
+const SESSION_LIST_PAGE_SIZE: usize = 24;
+const SESSION_LIST_PREFETCH_REMAINING: usize = 6;
+
 #[derive(Debug)]
 struct SessionListResult {
     sessions: Vec<SessionInfo>,
     preferred_cwd: PathBuf,
-}
-
-#[derive(Debug)]
-struct StatusCommandResult {
-    text: String,
-}
-
-struct StatusSnapshot {
-    cwd: PathBuf,
-    git_lines: Option<Vec<String>>,
-    sandbox_status: Option<Result<String, String>>,
-    stale_improve_metadata_message: Option<String>,
-}
-
-#[derive(Debug)]
-struct ImproveMergeCommandResult {
-    text: String,
-}
-
-#[derive(Debug)]
-struct CleanCommandResult {
-    text: String,
-    clear_improve_sandbox: bool,
+    offset: usize,
+    limit: usize,
 }
 
 fn open_url(url: &str) {
@@ -259,22 +284,21 @@ const ACTIVE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const IDLE_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 const SLOW_TUI_EVENT_THRESHOLD: Duration = Duration::from_millis(16);
 const SLOW_TUI_RENDER_THRESHOLD: Duration = Duration::from_millis(33);
+const AGENT_START_STATUS_DELAY: Duration = Duration::from_millis(500);
 
 struct AgentStartRequest {
     session: SessionManager,
     model_name: String,
     model_registry: ModelRegistry,
+    role_name: Option<String>,
     thinking_level: ThinkingLevel,
     config: Config,
-    workflow_mode: WorkflowMode,
     active_mana_scope: Option<ManaUnitRef>,
-    improve_sandbox: Option<ImproveSandbox>,
-    improve_safe_mode: bool,
     autonomy_mode: AutonomyMode,
     runtime_signal_tx: tokio::sync::mpsc::Sender<RuntimeSignal>,
     ui_tx: tokio::sync::mpsc::Sender<crate::tui_interface::UiRequest>,
     preloaded_lua_tools: Option<ToolRegistry>,
-    prompt_context: imp_core::mana_prompt_context::SessionPromptContext,
+    prompt_context: Option<imp_core::builder::PromptContext>,
     tui_trace: Option<TuiTrace>,
 }
 
@@ -324,17 +348,19 @@ enum RuntimeSignal {
     UserMessagePersistFailed(String),
     AgentStartCompleted(AgentStartResult),
     AgentStartFailed(String),
+    AgentStartStatus {
+        key: String,
+        text: Option<String>,
+    },
+    #[cfg(feature = "mana-ui")]
     ManaNavigatorLoaded(ManaNavigatorState),
+    #[cfg(feature = "mana-ui")]
     ManaNavigatorLoadFailed {
         mana_dir: Option<PathBuf>,
         message: String,
     },
-    StatusCommandFinished(StatusCommandResult),
-    StatusCommandFailed(String),
-    ImproveMergeCommandFinished(ImproveMergeCommandResult),
-    ImproveMergeCommandFailed(String),
-    CleanCommandFinished(CleanCommandResult),
-    CleanCommandFailed(String),
+    RepoStatsLoaded(Result<Option<crate::repo_stats::RepoStats>, String>),
+    RepoStatsSkipped(RepoStatsState),
     UiRequest(crate::tui_interface::UiRequest),
 }
 
@@ -419,10 +445,22 @@ struct SidebarDetailCache {
 #[derive(Debug, Clone, Default)]
 struct StartupSurfaceMetadata {
     skills: Vec<imp_core::resources::Skill>,
-    lua_extension_names: Vec<String>,
+    workflows: Vec<WorkflowProfile>,
+    recent_sessions: Vec<SessionInfo>,
+    repo_stats: Option<RepoStatsState>,
+    rule_files: Vec<PathBuf>,
     provider_id: String,
-    provider_auth_ready: bool,
     web_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RepoStatsState {
+    Scanning,
+    Ready(crate::repo_stats::RepoStats),
+    HomeDirectory,
+    NoRepo,
+    Empty,
+    Failed,
 }
 
 #[derive(Debug, Clone)]
@@ -436,6 +474,7 @@ struct StartupSkillHit {
     rect: Rect,
 }
 
+#[cfg(feature = "mana-ui")]
 fn mana_run_summary_cache_key(run: &ManaRunSummary) -> String {
     format!(
         "{}|{}|{}|{}|{}|{}|{}|{}|{}",
@@ -451,6 +490,24 @@ fn mana_run_summary_cache_key(run: &ManaRunSummary) -> String {
     )
 }
 
+#[cfg(not(feature = "mana-ui"))]
+fn mana_run_detail_render_data(run: &ManaRunSummary, theme: &Theme) -> SidebarDetailRenderData {
+    let lines = vec![Line::from(vec![
+        Span::styled("╭─", theme.muted_style()),
+        Span::styled(
+            " mana run ",
+            theme.accent_style().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("─╮", theme.muted_style()),
+    ])];
+    let plain_lines = vec![
+        format!("run: {}", run.run_id),
+        "Mana run details are unavailable in this standalone build.".to_string(),
+    ];
+    SidebarDetailRenderData { lines, plain_lines }
+}
+
+#[cfg(feature = "mana-ui")]
 fn mana_run_detail_render_data(run: &ManaRunSummary, theme: &Theme) -> SidebarDetailRenderData {
     let mut lines = vec![Line::from(vec![
         Span::styled("╭─", theme.muted_style()),
@@ -520,6 +577,340 @@ fn mana_run_detail_render_data(run: &ManaRunSummary, theme: &Theme) -> SidebarDe
         lines.push(Line::from(Span::styled(line.clone(), style)));
     }
     SidebarDetailRenderData { lines, plain_lines }
+}
+
+fn workflow_sort_key(workflow: &WorkflowProfile) -> std::time::SystemTime {
+    let root = PathBuf::from(".imp").join("workflows").join(&workflow.name);
+    std::fs::metadata(root.join("events.jsonl"))
+        .and_then(|metadata| metadata.modified())
+        .or_else(|_| {
+            std::fs::metadata(root.join("workflow.yaml")).and_then(|metadata| metadata.modified())
+        })
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+}
+
+fn workflow_age(workflow: &WorkflowProfile) -> String {
+    let modified = workflow_sort_key(workflow);
+    let updated_at = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    format_age(updated_at)
+}
+
+enum RepoStatsScanRoot {
+    Scan(PathBuf),
+    Skip(RepoStatsState),
+}
+
+fn repo_stats_scan_root(cwd: &Path) -> RepoStatsScanRoot {
+    if is_home_directory(cwd) {
+        return RepoStatsScanRoot::Skip(RepoStatsState::HomeDirectory);
+    }
+
+    match find_git_root(cwd) {
+        Some(root) if is_home_directory(&root) => {
+            RepoStatsScanRoot::Skip(RepoStatsState::HomeDirectory)
+        }
+        Some(root) => RepoStatsScanRoot::Scan(root),
+        None => RepoStatsScanRoot::Skip(RepoStatsState::NoRepo),
+    }
+}
+
+fn is_home_directory(path: &Path) -> bool {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return false;
+    };
+    canonicalize_for_compare(path) == canonicalize_for_compare(&home)
+}
+
+fn find_git_root(cwd: &Path) -> Option<PathBuf> {
+    let mut dir = Some(cwd);
+    while let Some(path) = dir {
+        if path.join(".git").exists() {
+            return Some(path.to_path_buf());
+        }
+        dir = path.parent();
+    }
+    None
+}
+
+fn canonicalize_for_compare(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn strip_status_suffix(summary: &str) -> String {
+    summary
+        .strip_suffix(" (ready)")
+        .or_else(|| summary.strip_suffix(" (needs key)"))
+        .unwrap_or(summary)
+        .to_string()
+}
+
+fn repo_stats_label(state: Option<&RepoStatsState>) -> String {
+    match state {
+        Some(RepoStatsState::Scanning) | None => "scanning…".to_string(),
+        Some(RepoStatsState::Ready(stats)) => {
+            let index_counts = match (stats.symbols, stats.tests) {
+                (Some(symbols), Some(tests)) if tests > 0 => {
+                    format!(
+                        " · {} symbols · {} tests",
+                        format_compact_count(symbols as u64),
+                        format_compact_count(tests as u64)
+                    )
+                }
+                (Some(symbols), _) => {
+                    format!(" · {} symbols", format_compact_count(symbols as u64))
+                }
+                _ => String::new(),
+            };
+            format!(
+                "{} · {} loc · {} files{}",
+                stats.primary_language,
+                format_compact_count(stats.code_lines),
+                format_compact_count(stats.files),
+                index_counts
+            )
+        }
+        Some(RepoStatsState::HomeDirectory) => "home directory".to_string(),
+        Some(RepoStatsState::NoRepo) => "none".to_string(),
+        Some(RepoStatsState::Empty) => "no source files".to_string(),
+        Some(RepoStatsState::Failed) => "unavailable".to_string(),
+    }
+}
+
+fn format_compact_count(count: u64) -> String {
+    if count >= 1_000_000 {
+        trim_trailing_decimal(format!("{:.1}", count as f64 / 1_000_000.0)) + "m"
+    } else if count >= 1_000 {
+        trim_trailing_decimal(format!("{:.1}", count as f64 / 1_000.0)) + "k"
+    } else {
+        count.to_string()
+    }
+}
+
+fn trim_trailing_decimal(value: String) -> String {
+    value.strip_suffix(".0").unwrap_or(&value).to_string()
+}
+
+fn discover_rule_files(cwd: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let global = PathBuf::from(home).join(".imp/AGENTS.md");
+        if global.exists() {
+            files.push(global);
+        }
+    }
+    for ancestor in cwd.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        let local = ancestor.join("AGENTS.md");
+        if local.exists() {
+            files.push(local);
+        }
+    }
+    files
+}
+
+fn rule_file_lines(files: &[PathBuf]) -> Vec<String> {
+    if files.is_empty() {
+        return vec!["• rules: none".to_string()];
+    }
+    let mut lines = Vec::new();
+    for (index, path) in files.iter().take(3).enumerate() {
+        let prefix = if index == 0 {
+            "• rules: "
+        } else {
+            "         "
+        };
+        lines.push(format!("{prefix}{}", display_rule_path(path)));
+    }
+    if files.len() > 3 {
+        lines.push(format!("         … +{} more", files.len() - 3));
+    }
+    lines
+}
+
+fn display_rule_path(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(home) = home.as_deref() {
+        if let Ok(rest) = path.strip_prefix(home) {
+            return format!("~/{}", rest.display());
+        }
+    }
+    path.display().to_string()
+}
+
+fn load_recent_sessions(cwd: &Path, limit: usize) -> Vec<SessionInfo> {
+    let session_dir = imp_core::storage::global_sessions_dir();
+    let Ok(entries) = std::fs::read_dir(&session_dir) else {
+        return Vec::new();
+    };
+
+    let cwd_string = cwd.display().to_string();
+    let mut sessions = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "jsonl")
+        {
+            continue;
+        }
+
+        let updated_at = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let reader = std::io::BufReader::new(file);
+        let mut created_at = 0;
+        let mut session_cwd = String::new();
+        let mut name = None;
+        let mut summary = None;
+        let mut first_message = None;
+        let mut message_count = 0;
+        let mut compaction_count = 0;
+
+        for line in reader.lines().map_while(Result::ok) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(entry) = serde_json::from_str::<SessionEntry>(&line) else {
+                continue;
+            };
+            match entry {
+                SessionEntry::Header {
+                    created_at: at,
+                    cwd,
+                    ..
+                } => {
+                    created_at = at;
+                    session_cwd = cwd;
+                    if session_cwd != cwd_string {
+                        break;
+                    }
+                }
+                SessionEntry::Message { message, .. } => {
+                    message_count += 1;
+                    if first_message.is_none() {
+                        first_message = message_text(&message);
+                    }
+                }
+                SessionEntry::Compaction { .. } => {
+                    compaction_count += 1;
+                }
+                SessionEntry::SessionMeta {
+                    name: meta_name,
+                    summary: meta_summary,
+                    ..
+                } => {
+                    name = meta_name;
+                    summary = meta_summary;
+                }
+                _ => {}
+            }
+        }
+
+        if session_cwd != cwd_string {
+            continue;
+        }
+
+        sessions.push(SessionInfo {
+            id: path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            path,
+            cwd: session_cwd,
+            created_at,
+            updated_at,
+            message_count: if message_count == 0 {
+                compaction_count
+            } else {
+                message_count
+            },
+            first_message,
+            last_message: None,
+            name,
+            summary,
+        });
+    }
+
+    sessions.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+    });
+    sessions.truncate(limit);
+    sessions
+}
+
+fn message_text(message: &Message) -> Option<String> {
+    let blocks = match message {
+        Message::User(user) => &user.content,
+        Message::Assistant(assistant) => &assistant.content,
+        Message::ToolResult(tool_result) => &tool_result.content,
+    };
+    blocks.iter().find_map(|block| match block {
+        ContentBlock::Text { text } => Some(text.clone()),
+        _ => None,
+    })
+}
+
+fn recent_session_lines(sessions: &[SessionInfo]) -> Vec<String> {
+    if sessions.is_empty() {
+        return vec!["• none yet".to_string()];
+    }
+    sessions
+        .iter()
+        .take(5)
+        .map(|session| {
+            let title = session
+                .name
+                .as_deref()
+                .or(session.summary.as_deref())
+                .or(session.first_message.as_deref())
+                .unwrap_or("unnamed session");
+            format!(
+                "• {} · {}",
+                truncate_text(title, 30),
+                format_age(session.updated_at)
+            )
+        })
+        .collect()
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+fn format_age(updated_at: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(updated_at);
+    let seconds = now.saturating_sub(updated_at);
+    if seconds < 60 {
+        "now".to_string()
+    } else if seconds < 3_600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h ago", seconds / 3_600)
+    } else {
+        format!("{}d ago", seconds / 86_400)
+    }
 }
 
 fn startup_skill_detail_render_data(
@@ -599,8 +990,8 @@ fn startup_skill_hits_in_sections(area: Rect, sections: &[StartupSection]) -> Ve
     let visible_sections = &sections[..visible_count];
 
     if area.width >= 96 {
-        let column_width = area.width / 4;
-        let remainder = area.width % 4;
+        let column_width = area.width / visible_sections.len() as u16;
+        let remainder = area.width % visible_sections.len() as u16;
         return visible_sections
             .iter()
             .enumerate()
@@ -667,7 +1058,7 @@ fn startup_skill_hits_in_sections(area: Rect, sections: &[StartupSection]) -> Ve
 }
 
 fn startup_skill_hits_in_section(area: Rect, section: &StartupSection) -> Vec<StartupSkillHit> {
-    if section.title != "skills" || area.height < 3 || area.width < 12 {
+    if !section.title.starts_with("skills") || area.height < 3 || area.width < 12 {
         return Vec::new();
     }
 
@@ -740,115 +1131,6 @@ fn split_vertical(area: Rect, percentages: &[u16]) -> Vec<Rect> {
         .collect()
 }
 
-const IMPROVE_CHANGELOG_PATH: &str = ".imp/improve-changelog.md";
-const IMPROVE_SANDBOX_METADATA_PATH: &str = ".imp/improve-sandbox.json";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ImproveSandboxMetadata {
-    branch: String,
-    base_branch: String,
-    worktree: PathBuf,
-    changelog_path: PathBuf,
-    updated_at_unix_secs: u64,
-}
-
-impl From<&ImproveSandbox> for ImproveSandboxMetadata {
-    fn from(sandbox: &ImproveSandbox) -> Self {
-        Self {
-            branch: sandbox.branch.clone(),
-            base_branch: sandbox.base_branch.clone(),
-            worktree: sandbox.worktree.clone(),
-            changelog_path: sandbox.worktree.join(IMPROVE_CHANGELOG_PATH),
-            updated_at_unix_secs: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_secs())
-                .unwrap_or_default(),
-        }
-    }
-}
-
-fn improve_safe_mode_prompt(scope: &ManaUnitRef, turn: u32, budget: u32) -> String {
-    let title = scope.title.trim();
-    let scope_label = if title.is_empty() {
-        scope.id.clone()
-    } else {
-        format!("{} — {title}", scope.id)
-    };
-    format!(
-        "Improve mode autoresearch turn {turn}/{budget} for active mana scope {scope_label}.\n\n\
-Goal: independently improve the work graph and project understanding without surprising the user. Favor research, inspection, evaluation, critique, benchmarks, risk discovery, and actionable recommendations.\n\n\
-Rules:\n\
-- Stay within the active mana scope. Do not expand scope unless you create/propose an explicit follow-up under that scope.\n\
-- Prefer read-only investigation and narrow verification commands. Do not make broad code changes, destructive changes, dependency additions, migrations, commits, or deployment changes.\n\
-- If you find concrete follow-up work, create or update mana units with enough context for a later Build-mode worker.\n\
-- If a consequential product/architecture decision is required, record a blocking mana decision or ask one concise question; otherwise keep researching.\n\
-- At the end of this turn, summarize what you inspected, what you learned, and the next best improvement action."
-    )
-}
-
-fn improve_code_mode_prompt(
-    scope: &ManaUnitRef,
-    turn: u32,
-    budget: u32,
-    sandbox: &ImproveSandbox,
-) -> String {
-    let title = scope.title.trim();
-    let scope_label = if title.is_empty() {
-        scope.id.clone()
-    } else {
-        format!("{} — {title}", scope.id)
-    };
-    format!(
-        "Improve mode code-changing turn {turn}/{budget} for active mana scope {scope_label}.\n\n\
-Sandbox:\n\
-- Branch: {branch}\n\
-- Worktree: {worktree}\n\
-- Base: {base}\n\
-- Changelog: {changelog}\n\n\
-Goal: improve the project within the active mana scope. Research as needed, then make coherent code changes only inside the sandbox worktree.\n\n\
-Rules:\n\
-- Work only in the sandbox worktree path above. Do not edit files in the original checkout.\n\
-- Maintain `{changelog}` in the sandbox. Keep it useful for the user to review before `/improve merge`: summary, changes made, verification, risks/concerns, files changed, and merge notes.\n\
-- Stay within the active mana scope; create/update mana follow-ups for anything outside it.\n\
-- Run the narrowest useful verification in the sandbox.\n\
-- Do not merge, rebase, force-push, deploy, or change production resources.\n\
-- Do not commit unless the user explicitly asks.\n\
-- At the end of this turn, summarize changes, verification, and review commands such as `git -C {worktree} status` and `git -C {worktree} diff {base}...HEAD`." ,
-        branch = sandbox.branch,
-        worktree = sandbox.worktree.display(),
-        base = sandbox.base_branch,
-        changelog = IMPROVE_CHANGELOG_PATH,
-    )
-}
-
-fn candidate_active_scope_from_review(review: &TurnManaReview) -> Option<ManaUnitRef> {
-    if let Some(anchor) = review.anchor_unit.as_ref() {
-        if is_scope_unit(&anchor.unit) {
-            return Some(anchor.unit.clone());
-        }
-    }
-
-    review
-        .touched_units
-        .iter()
-        .rev()
-        .find(|touched| is_scope_unit(&touched.unit))
-        .map(|touched| touched.unit.clone())
-}
-
-fn is_scope_unit(unit: &ManaUnitRef) -> bool {
-    unit.kind
-        .as_deref()
-        .is_some_and(|kind| matches!(kind.to_ascii_lowercase().as_str(), "epic"))
-}
-
-#[derive(Debug, Clone)]
-struct ImproveSandbox {
-    branch: String,
-    base_branch: String,
-    worktree: PathBuf,
-}
-
 #[derive(Debug, Clone)]
 struct LoopState {
     message: String,
@@ -918,6 +1200,7 @@ pub struct App {
     pub is_streaming: bool,
     pub message_queue: Vec<QueuedMessage>,
     pending_agent_prompt: Option<String>,
+    pending_agent_visible_text: Option<String>,
     pending_agent_cwd: Option<PathBuf>,
 
     // Session
@@ -926,6 +1209,7 @@ pub struct App {
     // Config
     pub config: Config,
     pub model_name: String,
+    pub role_name: Option<String>,
     pub thinking_level: ThinkingLevel,
     pub context_window: u32,
 
@@ -948,6 +1232,7 @@ pub struct App {
     pub last_esc: Option<Instant>,
     pub tick: u64,
     completed_turns_in_run: u32,
+    last_agent_error: Option<String>,
     suppress_completion_notification: bool,
     pub ui_rx: Option<tokio::sync::mpsc::Receiver<crate::tui_interface::UiRequest>>,
     lua_command_ui: Option<Arc<dyn imp_core::ui::UserInterface>>,
@@ -956,20 +1241,15 @@ pub struct App {
     pub workflow_mode: WorkflowMode,
     active_mana_scope: Option<ManaUnitRef>,
     active_mana_run: Option<ManaRunSummary>,
-    improve_auto_turns: u32,
-    improve_safe_mode: bool,
     autonomy_mode: AutonomyMode,
-    improve_sandbox: Option<ImproveSandbox>,
     loop_state: Option<LoopState>,
     secrets_flow: Option<SecretsFlowState>,
     login_task: Option<tokio::task::JoinHandle<LoginTaskExit>>,
     session_list_task: Option<tokio::task::JoinHandle<()>>,
     session_open_task: Option<tokio::task::JoinHandle<()>>,
     user_message_persist_task: Option<tokio::task::JoinHandle<()>>,
+    #[cfg(feature = "mana-ui")]
     mana_navigator_task: Option<tokio::task::JoinHandle<()>>,
-    status_command_task: Option<tokio::task::JoinHandle<()>>,
-    improve_merge_task: Option<tokio::task::JoinHandle<()>>,
-    clean_task: Option<tokio::task::JoinHandle<()>>,
     runtime_signal_tx: tokio::sync::mpsc::Sender<RuntimeSignal>,
     runtime_signal_rx: tokio::sync::mpsc::Receiver<RuntimeSignal>,
     tui_trace: Option<TuiTrace>,
@@ -992,6 +1272,9 @@ pub struct App {
     // Extension state
     pub status_items: HashMap<String, String>,
     verification_status_items: BTreeMap<String, String>,
+    runtime_state: RuntimeStateAccumulator,
+    runtime_event_sequence: u64,
+    pub runtime_snapshot: RuntimeStateSnapshot,
     pub widgets: HashMap<String, WidgetContent>,
 
     /// Lua extension runtime (for command dispatch and hot-reload).
@@ -1058,14 +1341,13 @@ fn runtime_signal_kind(signal: &RuntimeSignal) -> &'static str {
         RuntimeSignal::UserMessagePersistFailed(_) => "user_message_persist_failed",
         RuntimeSignal::AgentStartCompleted(_) => "agent_start_completed",
         RuntimeSignal::AgentStartFailed(_) => "agent_start_failed",
+        RuntimeSignal::AgentStartStatus { .. } => "agent_start_status",
+        #[cfg(feature = "mana-ui")]
         RuntimeSignal::ManaNavigatorLoaded(_) => "mana_navigator_loaded",
+        #[cfg(feature = "mana-ui")]
         RuntimeSignal::ManaNavigatorLoadFailed { .. } => "mana_navigator_load_failed",
-        RuntimeSignal::StatusCommandFinished(_) => "status_command_finished",
-        RuntimeSignal::StatusCommandFailed(_) => "status_command_failed",
-        RuntimeSignal::ImproveMergeCommandFinished(_) => "improve_merge_command_finished",
-        RuntimeSignal::ImproveMergeCommandFailed(_) => "improve_merge_command_failed",
-        RuntimeSignal::CleanCommandFinished(_) => "clean_command_finished",
-        RuntimeSignal::CleanCommandFailed(_) => "clean_command_failed",
+        RuntimeSignal::RepoStatsLoaded(_) => "repo_stats_loaded",
+        RuntimeSignal::RepoStatsSkipped(_) => "repo_stats_skipped",
         RuntimeSignal::UiRequest(_) => "ui_request",
     }
 }
@@ -1084,38 +1366,17 @@ fn agent_event_kind(event: &AgentEvent) -> &'static str {
         AgentEvent::AgentEnd { .. } => "agent_end",
         AgentEvent::Warning { .. } => "warning",
         AgentEvent::RecoveryCheckpoint { .. } => "recovery_checkpoint",
+        AgentEvent::WorktreeCreated { .. } => "worktree_created",
+        AgentEvent::WorktreeDiffCaptured { .. } => "worktree_diff_captured",
+        AgentEvent::WorktreeCloseout { .. } => "worktree_closeout",
         AgentEvent::EvidenceWritten { .. } => "evidence_written",
+        AgentEvent::WorkflowControllerSnapshot { .. } => "workflow_controller_snapshot",
         AgentEvent::VerificationStarted { .. } => "verification_started",
         AgentEvent::VerificationCompleted { .. } => "verification_completed",
         AgentEvent::PolicyChecked { .. } => "policy_checked",
         AgentEvent::Timing { .. } => "timing",
         AgentEvent::TurnEnd { .. } => "turn_end",
         AgentEvent::Error { .. } => "error",
-    }
-}
-
-fn slug_fragment(input: &str) -> String {
-    let mut slug = String::new();
-    let mut last_dash = false;
-    for ch in input.chars().flat_map(|ch| ch.to_lowercase()) {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch);
-            last_dash = false;
-        } else if !last_dash && !slug.is_empty() {
-            slug.push('-');
-            last_dash = true;
-        }
-        if slug.len() >= 40 {
-            break;
-        }
-    }
-    while slug.ends_with('-') {
-        slug.pop();
-    }
-    if slug.is_empty() {
-        "scope".to_string()
-    } else {
-        slug
     }
 }
 
@@ -1132,107 +1393,6 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
         return Err(format!("git {} failed: {detail}", args.join(" ")));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn create_improve_sandbox(cwd: &Path, scope: &ManaUnitRef) -> Result<ImproveSandbox, String> {
-    let repo_root = run_git(cwd, &["rev-parse", "--show-toplevel"])?;
-    let repo_root = PathBuf::from(repo_root);
-    let base_branch = run_git(&repo_root, &["branch", "--show-current"]).map(|branch| {
-        if branch.is_empty() {
-            "HEAD".to_string()
-        } else {
-            branch
-        }
-    })?;
-    let repo_name = repo_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("repo");
-    let slug = slug_fragment(&format!("{}-{}", scope.id, scope.title));
-    let branch = format!("imp/improve/{slug}");
-    let mut worktree = repo_root
-        .parent()
-        .unwrap_or(repo_root.as_path())
-        .join(format!("{repo_name}-improve-{slug}"));
-
-    let existing_worktrees = run_git(&repo_root, &["worktree", "list", "--porcelain"])?;
-    if existing_worktrees
-        .lines()
-        .any(|line| line == format!("branch refs/heads/{branch}"))
-    {
-        if let Some(path_line) = existing_worktrees
-            .lines()
-            .collect::<Vec<_>>()
-            .windows(2)
-            .find(|window| window[1] == format!("branch refs/heads/{branch}"))
-            .and_then(|window| window[0].strip_prefix("worktree "))
-        {
-            return Ok(ImproveSandbox {
-                branch,
-                base_branch,
-                worktree: PathBuf::from(path_line),
-            });
-        }
-    }
-
-    if worktree.exists() {
-        for index in 2..100 {
-            let candidate = repo_root
-                .parent()
-                .unwrap_or(repo_root.as_path())
-                .join(format!("{repo_name}-improve-{slug}-{index}"));
-            if !candidate.exists() {
-                worktree = candidate;
-                break;
-            }
-        }
-    }
-
-    let branch_exists = Command::new("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ])
-        .current_dir(&repo_root)
-        .status()
-        .map_err(|err| format!("failed to check branch {branch}: {err}"))?
-        .success();
-
-    if branch_exists {
-        run_git(
-            &repo_root,
-            &[
-                "worktree",
-                "add",
-                worktree
-                    .to_str()
-                    .ok_or_else(|| "worktree path is not valid UTF-8".to_string())?,
-                &branch,
-            ],
-        )?;
-    } else {
-        run_git(
-            &repo_root,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                &branch,
-                worktree
-                    .to_str()
-                    .ok_or_else(|| "worktree path is not valid UTF-8".to_string())?,
-                "HEAD",
-            ],
-        )?;
-    }
-
-    Ok(ImproveSandbox {
-        branch,
-        base_branch,
-        worktree,
-    })
 }
 
 fn trust_policy_warning(record: &imp_core::reference_monitor::PolicyTraceRecord) -> Option<String> {
@@ -1252,6 +1412,31 @@ fn trust_policy_warning(record: &imp_core::reference_monitor::PolicyTraceRecord)
 
     Some(format!(
         "Trust warning: {} ({})",
+        reason.message, reason.code
+    ))
+}
+
+fn extension_policy_warning(
+    record: &imp_core::reference_monitor::PolicyTraceRecord,
+) -> Option<String> {
+    let reason = match &record.decision {
+        imp_core::reference_monitor::ToolPolicyDecision::Allow { reasons } => {
+            reasons.iter().find(|reason| {
+                reason.source == imp_core::reference_monitor::PolicySource::ToolManifest
+            })
+        }
+        imp_core::reference_monitor::ToolPolicyDecision::Deny { reason }
+        | imp_core::reference_monitor::ToolPolicyDecision::AskUser { reason }
+        | imp_core::reference_monitor::ToolPolicyDecision::DryRunOnly { reason }
+        | imp_core::reference_monitor::ToolPolicyDecision::SandboxOnly { reason }
+        | imp_core::reference_monitor::ToolPolicyDecision::RequireVerification { reason } => {
+            (reason.source == imp_core::reference_monitor::PolicySource::ToolManifest)
+                .then_some(reason)
+        }
+    }?;
+
+    Some(format!(
+        "Extension policy: {} ({})",
         reason.message, reason.code
     ))
 }
@@ -1337,88 +1522,6 @@ fn compact_git_label(cwd: &Path) -> Option<String> {
     Some(label)
 }
 
-fn concise_git_status(cwd: &Path) -> Option<Vec<String>> {
-    let branch = run_git(cwd, &["branch", "--show-current"]).ok()?;
-    let branch = if branch.trim().is_empty() {
-        run_git(cwd, &["rev-parse", "--short", "HEAD"]).ok()?
-    } else {
-        branch
-    };
-    let mut lines = vec![format!("git: {branch}")];
-    if let Ok(upstream) = run_git(
-        cwd,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-    ) {
-        if let Ok(counts) = run_git(cwd, &["rev-list", "--left-right", "--count", "HEAD...@{u}"]) {
-            let mut parts = counts.split_whitespace();
-            if let (Some(ahead), Some(behind)) = (parts.next(), parts.next()) {
-                lines.push(format!(
-                    "upstream: {upstream} (ahead {ahead}, behind {behind})"
-                ));
-            }
-        }
-    }
-    let status = run_git(cwd, &["status", "--short"]).unwrap_or_default();
-    if status.trim().is_empty() {
-        lines.push("working tree: clean".to_string());
-    } else {
-        let entries: Vec<&str> = status.lines().collect();
-        lines.push(format!("working tree: dirty ({} paths)", entries.len()));
-        lines.extend(entries.iter().take(8).map(|line| format!("  {line}")));
-        if entries.len() > 8 {
-            lines.push(format!("  … {} more", entries.len() - 8));
-        }
-    }
-    Some(lines)
-}
-
-fn improve_metadata_file(cwd: &Path) -> Option<PathBuf> {
-    let repo_root = run_git(cwd, &["rev-parse", "--show-toplevel"]).ok()?;
-    Some(PathBuf::from(repo_root).join(IMPROVE_SANDBOX_METADATA_PATH))
-}
-
-fn write_improve_sandbox_metadata(cwd: &Path, sandbox: &ImproveSandbox) -> Result<(), String> {
-    let Some(path) = improve_metadata_file(cwd) else {
-        return Ok(());
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            format!(
-                "failed to create Improve metadata directory {}: {err}",
-                parent.display()
-            )
-        })?;
-    }
-    let metadata = ImproveSandboxMetadata::from(sandbox);
-    let json = serde_json::to_string_pretty(&metadata)
-        .map_err(|err| format!("failed to encode Improve metadata: {err}"))?;
-    std::fs::write(&path, json)
-        .map_err(|err| format!("failed to write Improve metadata {}: {err}", path.display()))
-}
-
-fn read_improve_sandbox_metadata(cwd: &Path) -> Result<Option<ImproveSandbox>, String> {
-    let Some(metadata) = read_improve_sandbox_metadata_file(cwd)? else {
-        return Ok(None);
-    };
-    validate_improve_sandbox_metadata(metadata)
-}
-
-fn read_improve_sandbox_metadata_file(
-    cwd: &Path,
-) -> Result<Option<ImproveSandboxMetadata>, String> {
-    let Some(path) = improve_metadata_file(cwd) else {
-        return Ok(None);
-    };
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|err| format!("failed to read Improve metadata {}: {err}", path.display()))?;
-    let metadata: ImproveSandboxMetadata = serde_json::from_str(&raw)
-        .map_err(|err| format!("failed to parse Improve metadata {}: {err}", path.display()))?;
-    Ok(Some(metadata))
-}
-
 fn trace_tui_to(trace: Option<&TuiTrace>, message: impl AsRef<str>) {
     if let Some(trace) = trace {
         trace.log(message);
@@ -1441,6 +1544,30 @@ fn start_agent_from_request(
         .resolve_meta(&request.model_name, None)
         .ok_or_else(|| format!("Unknown model: {}", request.model_name))?;
     let mut provider_name = meta.provider.clone();
+    let role_registry = request
+        .config
+        .role_registry()
+        .map_err(|err| format!("Role registry error: {err}"))?;
+    let selected_role = request
+        .role_name
+        .as_deref()
+        .map(|role_name| {
+            role_registry
+                .resolve(role_name)
+                .ok_or_else(|| format!("Unknown role: {role_name}"))
+        })
+        .transpose()?;
+    let cli_model_selected = request.config.model.as_deref() != Some(request.model_name.as_str());
+    if !cli_model_selected {
+        if let Some(role_name) = request.role_name.as_deref() {
+            if let Some(model) =
+                role_registry.resolve_model_for_role(role_name, &request.model_registry)
+            {
+                meta = model.clone();
+                provider_name = meta.provider.clone();
+            }
+        }
+    }
     if should_use_chatgpt_provider(&auth_store, &request.model_registry, &meta) {
         provider_name = "openai-codex".to_string();
         meta = request
@@ -1477,14 +1604,18 @@ fn start_agent_from_request(
     };
 
     let workflow_context = workflow_context_prompt_for_request(&request);
-    let phase_started = Instant::now();
     let mut config = request.config.clone();
     config.thinking = Some(request.thinking_level);
     let requested_max_tokens = request.config.max_tokens;
     let builder_cwd_for_lua = agent_cwd.clone();
-    let mut builder = AgentBuilder::new(config, agent_cwd, model, api_key)
-        .autonomy_mode(request.autonomy_mode)
-        .preloaded_prompt_context(request.prompt_context.clone());
+    let mut builder =
+        AgentBuilder::new(config, agent_cwd, model, api_key).autonomy_mode(request.autonomy_mode);
+    if let Some(role) = selected_role {
+        builder = builder.role(role);
+    }
+    if let Some(prompt_context) = request.prompt_context.clone() {
+        builder = builder.preloaded_prompt_context(prompt_context);
+    }
     if let Some(preloaded_lua_tools) = request.preloaded_lua_tools {
         builder = builder.preloaded_lua_tools(preloaded_lua_tools);
     } else {
@@ -1494,14 +1625,15 @@ fn start_agent_from_request(
             imp_lua::init_lua_extensions(&user_config_dir, Some(&lua_cwd), tools, policy);
         });
     }
+    let start = Instant::now();
     let (mut agent, handle) = builder
         .build()
         .map_err(|e: imp_core::error::Error| e.to_string())?;
     trace_tui_to(
         trace,
         format!(
-            "agent_start_phase phase=builder_lua duration_ms={}",
-            phase_started.elapsed().as_millis()
+            "agent_start_phase phase=builder_build duration_ms={}",
+            start.elapsed().as_millis()
         ),
     );
 
@@ -1595,21 +1727,18 @@ fn start_agent_from_request(
     })
 }
 
+fn agent_start_join_result_to_signal(
+    result: Result<Result<AgentStartResult, String>, tokio::task::JoinError>,
+) -> RuntimeSignal {
+    match result {
+        Ok(Ok(result)) => RuntimeSignal::AgentStartCompleted(result),
+        Ok(Err(error)) => RuntimeSignal::AgentStartFailed(error),
+        Err(error) => RuntimeSignal::AgentStartFailed(format!("Agent start task failure: {error}")),
+    }
+}
+
 fn workflow_context_prompt_for_request(request: &AgentStartRequest) -> Option<String> {
     let mut context = String::new();
-    if request.workflow_mode == WorkflowMode::Improve {
-        if request.improve_safe_mode {
-            context.push_str(" Improve safe mode is bounded autoresearch, evaluation, critique, and mana follow-up creation; avoid code edits.");
-        } else if let Some(sandbox) = request.improve_sandbox.as_ref() {
-            context.push_str(&format!(
-                " Improve mode may make code changes only in sandbox branch {} at {}. Do not edit the original checkout, commit, or merge without explicit approval.",
-                sandbox.branch,
-                sandbox.worktree.display()
-            ));
-        } else {
-            context.push_str(" Improve mode may create a sandbox branch/worktree for code changes; do not edit the original checkout, commit, or merge without explicit approval.");
-        }
-    }
     if let Some(scope) = request.active_mana_scope.as_ref() {
         if !context.is_empty() {
             context.push(' ');
@@ -1626,250 +1755,6 @@ fn workflow_context_prompt_for_request(request: &AgentStartRequest) -> Option<St
     } else {
         Some(context)
     }
-}
-
-fn validate_improve_sandbox_metadata(
-    metadata: ImproveSandboxMetadata,
-) -> Result<Option<ImproveSandbox>, String> {
-    if !metadata.worktree.exists() {
-        return Err(format!(
-            "Improve metadata points to missing worktree {}",
-            metadata.worktree.display()
-        ));
-    }
-    if run_git(&metadata.worktree, &["rev-parse", "--is-inside-work-tree"]).is_err() {
-        return Err(format!(
-            "Improve metadata worktree is not a git worktree: {}",
-            metadata.worktree.display()
-        ));
-    }
-    Ok(Some(ImproveSandbox {
-        branch: metadata.branch,
-        base_branch: metadata.base_branch,
-        worktree: metadata.worktree,
-    }))
-}
-
-fn build_status_snapshot(cwd: &Path, sandbox: Option<&ImproveSandbox>) -> StatusSnapshot {
-    StatusSnapshot {
-        cwd: cwd.to_path_buf(),
-        git_lines: concise_git_status(cwd),
-        sandbox_status: sandbox.map(|sandbox| run_git(&sandbox.worktree, &["status", "--short"])),
-        stale_improve_metadata_message: stale_improve_metadata_message_for_cwd(cwd),
-    }
-}
-
-fn stale_improve_metadata_message_for_cwd(cwd: &Path) -> Option<String> {
-    match read_improve_sandbox_metadata(cwd) {
-        Ok(Some(_)) | Ok(None) => None,
-        Err(err) => Some(format!("Stale Improve sandbox metadata: {err}")),
-    }
-}
-
-fn run_improve_merge_command(
-    cwd: &Path,
-    sandbox: &ImproveSandbox,
-    confirmed: bool,
-) -> ImproveMergeCommandResult {
-    let changelog = sandbox.worktree.join(IMPROVE_CHANGELOG_PATH);
-    if !changelog.exists() {
-        return ImproveMergeCommandResult {
-            text: format!(
-                "Refusing to merge: missing Improve changelog at {}. Review/complete the changelog first.",
-                changelog.display()
-            ),
-        };
-    }
-    match run_git(cwd, &["status", "--short"]) {
-        Ok(status) if !status.trim().is_empty() => {
-            return ImproveMergeCommandResult {
-                text: format!(
-                    "Refusing to merge: current checkout is dirty. Commit/stash/revert first.\n{}",
-                    status
-                ),
-            };
-        }
-        Err(err) => {
-            return ImproveMergeCommandResult {
-                text: format!("Could not inspect current checkout: {err}"),
-            };
-        }
-        _ => {}
-    }
-    match run_git(&sandbox.worktree, &["status", "--short"]) {
-        Ok(status) if !status.trim().is_empty() => {
-            return ImproveMergeCommandResult {
-                text: format!(
-                    "Refusing to merge: Improve sandbox has uncommitted changes. Commit them in {} or clean/discard.\n{}",
-                    sandbox.worktree.display(),
-                    status
-                ),
-            };
-        }
-        Err(err) => {
-            return ImproveMergeCommandResult {
-                text: format!("Could not inspect Improve sandbox: {err}"),
-            };
-        }
-        _ => {}
-    }
-    if !confirmed {
-        return ImproveMergeCommandResult {
-            text: format!(
-                "Improve merge plan:\n- Branch: {}\n- Worktree: {}\n- Changelog: {}\n- Target checkout: {}\n- Operation: git merge --no-ff {}\n\nReview the changelog, then run `/improve merge --confirm` to merge. No merge has been performed.",
-                sandbox.branch,
-                sandbox.worktree.display(),
-                changelog.display(),
-                cwd.display(),
-                sandbox.branch
-            ),
-        };
-    }
-    match run_git(cwd, &["merge", "--no-ff", &sandbox.branch]) {
-        Ok(output) => ImproveMergeCommandResult {
-            text: format!(
-                "Merged Improve branch {}. Changelog reviewed from {}.\n{}",
-                sandbox.branch,
-                changelog.display(),
-                output
-            ),
-        },
-        Err(err) => ImproveMergeCommandResult {
-            text: format!("Improve merge failed: {err}"),
-        },
-    }
-}
-
-fn run_clean_command(cwd: &Path, sandbox: &ImproveSandbox, force: bool) -> CleanCommandResult {
-    let status = run_git(&sandbox.worktree, &["status", "--short"]).unwrap_or_default();
-    if !status.trim().is_empty() && !force {
-        return CleanCommandResult {
-            text: format!(
-                "Improve sandbox is dirty; not cleaning without confirmation. Review `{}` then run `/clean --force` to remove worktree {}.\n{}",
-                sandbox.branch,
-                sandbox.worktree.display(),
-                status
-            ),
-            clear_improve_sandbox: false,
-        };
-    }
-
-    let mut command = Command::new("git");
-    command.arg("worktree").arg("remove");
-    if force {
-        command.arg("--force");
-    }
-    command.arg(&sandbox.worktree).current_dir(cwd);
-    match command.output() {
-        Ok(output) if output.status.success() => {
-            if let Some(path) = improve_metadata_file(cwd) {
-                let _ = std::fs::remove_file(path);
-            }
-            CleanCommandResult {
-                text: format!(
-                    "Removed Improve worktree {}. Branch {} was kept.",
-                    sandbox.worktree.display(),
-                    sandbox.branch
-                ),
-                clear_improve_sandbox: true,
-            }
-        }
-        Ok(output) => {
-            let err = String::from_utf8_lossy(&output.stderr);
-            CleanCommandResult {
-                text: format!("Clean failed: {}", err.trim()),
-                clear_improve_sandbox: false,
-            }
-        }
-        Err(err) => CleanCommandResult {
-            text: format!("Clean failed: {err}"),
-            clear_improve_sandbox: false,
-        },
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_status_text(
-    snapshot: &StatusSnapshot,
-    workflow_mode: WorkflowMode,
-    agent_status: &str,
-    active_mana_scope: Option<&ManaUnitRef>,
-    active_mana_run: Option<&ManaRunSummary>,
-    improve_auto_turns: u32,
-    improve_auto_turn_budget: u32,
-    improve_safe_mode: bool,
-    sandbox: Option<&ImproveSandbox>,
-    loop_state: Option<&LoopState>,
-) -> String {
-    let mut lines = Vec::new();
-    lines.push("Status:".to_string());
-    lines.push(format!("cwd: {}", snapshot.cwd.display()));
-    if let Some(git_lines) = snapshot.git_lines.as_ref() {
-        lines.extend(git_lines.iter().cloned());
-    }
-    lines.push(format!("mode: {}", workflow_mode.display_name()));
-    lines.push(format!("agent: {agent_status}"));
-    if let Some(scope) = active_mana_scope {
-        lines.push(format!("scope: {} — {}", scope.id, scope.title.trim()));
-    }
-    if let Some(run) = active_mana_run {
-        lines.push(format!(
-            "mana run: {} {} ({}/{}, failed {})",
-            run.run_id, run.status, run.total_closed, run.total_units, run.total_failed
-        ));
-    }
-    if workflow_mode == WorkflowMode::Improve {
-        let budget = improve_auto_turn_budget.max(1);
-        lines.push(format!("improve loop: {improve_auto_turns}/{budget}"));
-        lines.push(format!(
-            "improve mode: {}",
-            if improve_safe_mode { "safe" } else { "sandbox" }
-        ));
-    }
-    if let Some(sandbox) = sandbox {
-        lines.push(format!("improve branch: {}", sandbox.branch));
-        lines.push(format!("improve worktree: {}", sandbox.worktree.display()));
-        lines.push(format!("improve base: {}", sandbox.base_branch));
-        lines.push(format!(
-            "improve changelog: {}",
-            sandbox.worktree.join(IMPROVE_CHANGELOG_PATH).display()
-        ));
-        lines.push(
-            "next: review changelog, run /improve merge, then /improve merge --confirm (or /clean to discard)"
-                .to_string(),
-        );
-        if let Some(status) = snapshot.sandbox_status.as_ref() {
-            match status {
-                Ok(status) => {
-                    lines.push(format!(
-                        "worktree status: {}",
-                        if status.trim().is_empty() {
-                            "clean"
-                        } else {
-                            "dirty"
-                        }
-                    ));
-                    if !status.trim().is_empty() {
-                        lines.extend(status.lines().take(10).map(|line| format!("  {line}")));
-                    }
-                }
-                Err(err) => lines.push(format!("worktree status: unavailable ({err})")),
-            }
-        }
-    } else if let Some(message) = snapshot.stale_improve_metadata_message.as_ref() {
-        lines.extend(message.lines().map(str::to_string));
-    }
-    if let Some(state) = loop_state {
-        match state.budget {
-            Some(budget) => lines.push(format!("loop: {}/{}", state.completed_turns, budget)),
-            None => lines.push(format!("loop: {}", state.completed_turns)),
-        }
-        lines.push(format!(
-            "loop message: {}",
-            single_line_preview(&state.message)
-        ));
-    }
-    lines.join("\n")
 }
 
 fn selected_read_file_path_from_tool(tc: Option<&DisplayToolCall>, cwd: &Path) -> Option<PathBuf> {
@@ -2087,6 +1972,244 @@ fn include_current_model_option(
     (models, canonical_id)
 }
 
+fn render_tui_workflow_list(workflows_root: &Path) -> Result<String, String> {
+    let mut workflows = Vec::new();
+    for (_, workflow) in load_tui_workflows(workflows_root)? {
+        let id = workflow
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let status = workflow
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let title = workflow
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        workflows.push(format!("- {id} [{status}] {title}"));
+    }
+    if workflows.is_empty() {
+        Ok("No workflows found under .imp/workflows.".to_string())
+    } else {
+        workflows.sort();
+        Ok(format!("Workflows:\n{}", workflows.join("\n")))
+    }
+}
+
+fn render_tui_workflow_show(workflow: &serde_yaml::Value) -> Result<String, String> {
+    let id = yaml_str(workflow, "id");
+    let status = yaml_str(workflow, "status");
+    let title = yaml_str(workflow, "title");
+    let goal = workflow
+        .get("spec")
+        .and_then(|spec| spec.get("goal"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim();
+    let acceptance = workflow
+        .get("spec")
+        .and_then(|spec| spec.get("acceptance"))
+        .and_then(|value| value.as_mapping());
+    let acceptance_total = acceptance.map(|map| map.len()).unwrap_or(0);
+    let acceptance_done = acceptance
+        .map(|map| {
+            map.values()
+                .filter(|item| item.get("status").and_then(|value| value.as_str()) == Some("done"))
+                .count()
+        })
+        .unwrap_or(0);
+    let mut text = format!(
+        "Workflow: {id} [{status}]\nTitle: {title}\nGoal: {goal}\nAcceptance: {acceptance_done}/{acceptance_total} done"
+    );
+    if let Some(steps) = workflow.get("steps").and_then(|value| value.as_mapping()) {
+        text.push_str("\nSteps:");
+        for (key, step) in steps {
+            let step_id = key.as_str().unwrap_or("unknown");
+            let step_status = step
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let step_kind = step
+                .get("kind")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            text.push_str(&format!("\n- {step_id} [{step_status}] {step_kind}"));
+        }
+    }
+    Ok(text)
+}
+
+fn render_tui_workflow_validate(workflows_root: &Path, id: Option<&str>) -> Result<String, String> {
+    let paths = if let Some(id) = id {
+        vec![workflows_root.join(id).join("workflow.yaml")]
+    } else {
+        load_tui_workflows(workflows_root)?
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>()
+    };
+    if paths.is_empty() {
+        return Ok("No workflows found under .imp/workflows.".to_string());
+    }
+
+    let mut ok_count = 0usize;
+    let mut lines = Vec::new();
+    for path in paths {
+        let workflow = imp_core::workflow::load_workflow(&path)
+            .map_err(|err| format!("failed to load {}: {err}", path.display()))?;
+        let root = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| workflows_root.to_path_buf());
+        let diagnostics = imp_core::workflow::validate_workflow(
+            &workflow,
+            &imp_core::workflow::ValidateOptions::strict(root),
+        );
+        if diagnostics.is_empty() {
+            ok_count += 1;
+            lines.push(format!("- {}: ok", workflow.id));
+        } else {
+            lines.push(format!("- {}: diagnostics", workflow.id));
+            for diagnostic in diagnostics {
+                lines.push(format!("  - {}: {}", diagnostic.path, diagnostic.message));
+            }
+        }
+    }
+
+    Ok(format!(
+        "Validated {} workflow(s): {} ok, {} with diagnostics.\n{}",
+        lines.iter().filter(|line| line.starts_with("- ")).count(),
+        ok_count,
+        lines
+            .iter()
+            .filter(|line| line.ends_with(": diagnostics"))
+            .count(),
+        lines.join("\n")
+    ))
+}
+
+fn render_tui_workflow_run(workflow: &serde_yaml::Value) -> Result<String, String> {
+    let id = yaml_str(workflow, "id");
+    let Some(steps) = workflow.get("steps").and_then(|value| value.as_mapping()) else {
+        return Ok(format!("Workflow `{id}` has no steps."));
+    };
+    for (key, step) in steps {
+        let step_id = key.as_str().unwrap_or("unknown");
+        let status = step
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        if status != "todo" && status != "ready" {
+            continue;
+        }
+        if !step_dependencies_done(workflow, step) {
+            continue;
+        }
+        let kind = step
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let mut text = format!("Next workflow action: run step {step_id} [{kind}]");
+        if let Some(worker) = step.get("worker").and_then(|value| value.as_str()) {
+            text.push_str(&format!("\nWorker: {worker}"));
+        }
+        if let Some(child) = step.get("workflow").and_then(|value| value.as_str()) {
+            text.push_str(&format!("\nWorkflow: {child}"));
+        }
+        return Ok(text);
+    }
+    Ok(format!("No runnable workflow steps for `{id}`."))
+}
+
+fn step_dependencies_done(workflow: &serde_yaml::Value, step: &serde_yaml::Value) -> bool {
+    let Some(deps) = step.get("depends_on").and_then(|value| value.as_sequence()) else {
+        return true;
+    };
+    let Some(steps) = workflow.get("steps").and_then(|value| value.as_mapping()) else {
+        return false;
+    };
+    deps.iter().all(|dep| {
+        let Some(dep_id) = dep.as_str() else {
+            return false;
+        };
+        let key = serde_yaml::Value::String(dep_id.to_string());
+        let Some(dep_step) = steps.get(&key) else {
+            return false;
+        };
+        matches!(
+            dep_step.get("status").and_then(|value| value.as_str()),
+            Some("done") | Some("done_with_concerns")
+        )
+    })
+}
+
+fn load_tui_workflow(
+    workflows_root: &Path,
+    id: Option<&str>,
+) -> Result<(PathBuf, serde_yaml::Value), String> {
+    let workflows = load_tui_workflows(workflows_root)?;
+    if let Some(id) = id {
+        workflows
+            .into_iter()
+            .find(|(_, workflow)| workflow.get("id").and_then(|value| value.as_str()) == Some(id))
+            .ok_or_else(|| format!("workflow `{id}` not found"))
+    } else {
+        let active = workflows
+            .iter()
+            .filter(|(_, workflow)| {
+                workflow.get("status").and_then(|value| value.as_str()) == Some("active")
+            })
+            .count();
+        if active == 1 {
+            workflows
+                .into_iter()
+                .find(|(_, workflow)| {
+                    workflow.get("status").and_then(|value| value.as_str()) == Some("active")
+                })
+                .ok_or_else(|| "active workflow not found".to_string())
+        } else if workflows.len() == 1 {
+            workflows
+                .into_iter()
+                .next()
+                .ok_or_else(|| "workflow not found".to_string())
+        } else if workflows.is_empty() {
+            Err("no workflows found under .imp/workflows".to_string())
+        } else {
+            Err("multiple workflows found; pass a workflow id".to_string())
+        }
+    }
+}
+
+fn load_tui_workflows(workflows_root: &Path) -> Result<Vec<(PathBuf, serde_yaml::Value)>, String> {
+    if !workflows_root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut workflows = Vec::new();
+    let entries = std::fs::read_dir(workflows_root).map_err(|err| err.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path().join("workflow.yaml");
+        if !path.exists() {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        let workflow = serde_yaml::from_str(&raw)
+            .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
+        workflows.push((path, workflow));
+    }
+    workflows.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(workflows)
+}
+
+fn yaml_str<'a>(workflow: &'a serde_yaml::Value, key: &str) -> &'a str {
+    workflow
+        .get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+}
+
 impl App {
     pub fn new(
         config: Config,
@@ -2104,6 +2227,30 @@ impl App {
         let (runtime_signal_tx, runtime_signal_rx) = tokio::sync::mpsc::channel(256);
         let startup_surface_metadata =
             Self::load_startup_surface_metadata(&cwd, &config, &model_registry, &model_name);
+        let repo_stats_tx = runtime_signal_tx.clone();
+        let repo_stats_cwd = cwd.clone();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                match repo_stats_scan_root(&repo_stats_cwd) {
+                    RepoStatsScanRoot::Scan(root) => {
+                        let result = tokio::task::spawn_blocking(move || {
+                            crate::repo_stats::scan_repo(&root)
+                        })
+                        .await
+                        .map_err(|error| format!("repo stats task failed: {error}"))
+                        .and_then(|result| result.map_err(|error| error.to_string()));
+                        let _ = repo_stats_tx
+                            .send(RuntimeSignal::RepoStatsLoaded(result))
+                            .await;
+                    }
+                    RepoStatsScanRoot::Skip(state) => {
+                        let _ = repo_stats_tx
+                            .send(RuntimeSignal::RepoStatsSkipped(state))
+                            .await;
+                    }
+                }
+            });
+        }
 
         Self {
             running: true,
@@ -2111,6 +2258,7 @@ impl App {
             editor: EditorState::new(),
             ask_editor_backup: None,
             cwd,
+            workflow_mode: WorkflowMode::Normal,
             agent_handle: None,
             agent_event_task: None,
             agent_task: None,
@@ -2120,10 +2268,12 @@ impl App {
             is_streaming: false,
             message_queue: Vec::new(),
             pending_agent_prompt: None,
+            pending_agent_visible_text: None,
             pending_agent_cwd: None,
             session,
             config,
             model_name,
+            role_name: None,
             thinking_level,
             context_window,
             mode: UiMode::Normal,
@@ -2141,28 +2291,23 @@ impl App {
             last_esc: None,
             tick: 0,
             completed_turns_in_run: 0,
+            last_agent_error: None,
             suppress_completion_notification: false,
             ui_rx: None,
             lua_command_ui: None,
             ask_state: None,
             ask_reply: None,
-            workflow_mode: WorkflowMode::Normal,
             active_mana_scope: None,
             active_mana_run: None,
-            improve_auto_turns: 0,
-            improve_safe_mode: false,
             autonomy_mode: AutonomyMode::Safe,
-            improve_sandbox: None,
             loop_state: None,
             secrets_flow: None,
             login_task: None,
             session_list_task: None,
             session_open_task: None,
             user_message_persist_task: None,
+            #[cfg(feature = "mana-ui")]
             mana_navigator_task: None,
-            status_command_task: None,
-            improve_merge_task: None,
-            clean_task: None,
             runtime_signal_tx,
             runtime_signal_rx,
             tui_trace: TuiTrace::from_env(),
@@ -2179,6 +2324,9 @@ impl App {
             startup_surface_metadata,
             status_items: HashMap::new(),
             verification_status_items: BTreeMap::new(),
+            runtime_state: RuntimeStateAccumulator::new("tui"),
+            runtime_event_sequence: 0,
+            runtime_snapshot: RuntimeStateSnapshot::default(),
             widgets: HashMap::new(),
             lua_runtime: None,
             selected_startup_skill: None,
@@ -2277,7 +2425,13 @@ impl App {
             .or_else(|| self.session.title(48))
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| "chat".to_string());
-        let identity = if self.is_streaming
+        let identity = if self.loop_state.is_some() {
+            if self.config.ui.animations == imp_core::config::AnimationLevel::None {
+                title_loop_glyph()
+            } else {
+                title_loop_frame(self.tick)
+            }
+        } else if self.is_streaming
             || self.agent_start_task.is_some()
             || self.compaction_task.is_some()
         {
@@ -2451,7 +2605,7 @@ impl App {
 
     fn handle_terminal_event(&mut self, event: Event) -> Result<(), Box<dyn std::error::Error>> {
         match event {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
+            Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 self.handle_key(key)?;
             }
             Event::Paste(text) => {
@@ -2680,36 +2834,30 @@ impl App {
             RuntimeSignal::UserMessagePersistFailed(error) => self.push_error_msg(&error),
             RuntimeSignal::AgentStartCompleted(result) => self.finish_agent_start(result),
             RuntimeSignal::AgentStartFailed(error) => self.fail_agent_start(error),
+            RuntimeSignal::AgentStartStatus { key, text } => {
+                if let Some(text) = text {
+                    self.status_items.insert(key, text);
+                } else {
+                    self.status_items.remove(&key);
+                }
+            }
+            #[cfg(feature = "mana-ui")]
             RuntimeSignal::ManaNavigatorLoaded(state) => self.finish_mana_navigator_load(state),
+            #[cfg(feature = "mana-ui")]
             RuntimeSignal::ManaNavigatorLoadFailed { mana_dir, message } => {
                 self.fail_mana_navigator_load(mana_dir, message);
             }
-            RuntimeSignal::StatusCommandFinished(result) => {
-                self.status_command_task = None;
-                self.push_system_msg(&result.text);
+            RuntimeSignal::RepoStatsLoaded(result) => {
+                self.startup_surface_metadata.repo_stats = Some(match result {
+                    Ok(Some(stats)) => RepoStatsState::Ready(stats),
+                    Ok(None) => RepoStatsState::Empty,
+                    Err(_) => RepoStatsState::Failed,
+                });
+                self.needs_redraw = true;
             }
-            RuntimeSignal::StatusCommandFailed(error) => {
-                self.status_command_task = None;
-                self.push_error_msg(&error);
-            }
-            RuntimeSignal::ImproveMergeCommandFinished(result) => {
-                self.improve_merge_task = None;
-                self.push_system_msg(&result.text);
-            }
-            RuntimeSignal::ImproveMergeCommandFailed(error) => {
-                self.improve_merge_task = None;
-                self.push_error_msg(&error);
-            }
-            RuntimeSignal::CleanCommandFinished(result) => {
-                self.clean_task = None;
-                if result.clear_improve_sandbox {
-                    self.improve_sandbox = None;
-                }
-                self.push_system_msg(&result.text);
-            }
-            RuntimeSignal::CleanCommandFailed(error) => {
-                self.clean_task = None;
-                self.push_error_msg(&error);
+            RuntimeSignal::RepoStatsSkipped(state) => {
+                self.startup_surface_metadata.repo_stats = Some(state);
+                self.needs_redraw = true;
             }
             RuntimeSignal::UiRequest(req) => self.handle_ui_request(req),
         }
@@ -2723,7 +2871,12 @@ impl App {
         if let Some(last) = self.latest_streaming_message_mut() {
             last.is_streaming = false;
         }
-        self.push_error_msg(&format_error_for_display(&error));
+
+        let display_error = format_error_for_display(&error);
+        if self.last_agent_error.as_deref() != Some(display_error.as_str()) {
+            self.push_error_msg(&display_error);
+            self.last_agent_error = Some(display_error);
+        }
     }
 
     fn maybe_notify_agent_completion(&mut self) {
@@ -3043,14 +3196,23 @@ impl App {
         width: u16,
         selected_tc: Option<&DisplayToolCall>,
         thinking: Option<&str>,
-        run: Option<&ManaRunSummary>,
+        _run: Option<&ManaRunSummary>,
     ) -> SidebarDetailCacheKey {
         SidebarDetailCacheKey {
             width,
             messages_epoch: self.chat_render_epoch,
             selected_tool_id_hash: stable_hash(&selected_tc.map(|tc| &tc.id)),
             thinking_hash: stable_hash(&thinking),
-            run_hash: stable_hash(&run.map(mana_run_summary_cache_key)),
+            run_hash: {
+                #[cfg(feature = "mana-ui")]
+                {
+                    stable_hash(&_run.map(mana_run_summary_cache_key))
+                }
+                #[cfg(not(feature = "mana-ui"))]
+                {
+                    0
+                }
+            },
             word_wrap: self.config.ui.word_wrap,
             tool_output_lines: self.config.ui.tool_output_lines,
             animation_level: self.config.ui.animations,
@@ -3191,7 +3353,6 @@ impl App {
             .as_ref()
             .map(|meta| meta.provider.clone())
             .unwrap_or_else(|| "unknown".to_string());
-        let provider_auth_ready = auth_store.has_credentials(&provider_id);
         let web_summary = config
             .web
             .search_provider
@@ -3207,13 +3368,15 @@ impl App {
 
         StartupSurfaceMetadata {
             skills: imp_core::resources::discover_skills(cwd, &user_config_dir),
-            lua_extension_names: discover_extensions(&user_config_dir, Some(cwd))
-                .into_iter()
-                .map(|ext| ext.name)
-                .collect(),
+            workflows: config
+                .workflow_registry()
+                .map(|registry| registry.iter().cloned().collect())
+                .unwrap_or_default(),
             provider_id,
-            provider_auth_ready,
             web_summary,
+            recent_sessions: load_recent_sessions(cwd, 5),
+            repo_stats: Some(RepoStatsState::Scanning),
+            rule_files: discover_rule_files(cwd),
         }
     }
 
@@ -3227,15 +3390,8 @@ impl App {
             .unwrap_or("this project")
             .to_string();
 
-        let lua_extension_summary =
-            summarize_inline(self.startup_surface_metadata.lua_extension_names.clone(), 3);
         let provider_id = self.startup_surface_metadata.provider_id.as_str();
-        let provider_auth = if self.startup_surface_metadata.provider_auth_ready {
-            "ready"
-        } else {
-            "needs auth"
-        };
-        let web_summary = self.startup_surface_metadata.web_summary.clone();
+        let web_summary = strip_status_suffix(&self.startup_surface_metadata.web_summary);
         let mode = format!("{:?}", self.config.mode).to_lowercase();
         let session_name = self
             .session
@@ -3244,14 +3400,17 @@ impl App {
             .or_else(|| self.session.title(48))
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| "new chat".to_string());
-        let session_lines = vec![
+        let mut session_lines = vec![
             format!("• project: {repo_label}"),
             format!("• session: {session_name}"),
-            format!("• model: {}", self.model_name),
-            format!("• provider: {provider_id} ({provider_auth})"),
-            format!("• thinking: {:?}", self.thinking_level),
+            format!("• provider: {provider_id}"),
             format!("• web: {web_summary}"),
+            format!(
+                "• repo: {}",
+                repo_stats_label(self.startup_surface_metadata.repo_stats.as_ref())
+            ),
         ];
+        session_lines.extend(rule_file_lines(&self.startup_surface_metadata.rule_files));
 
         let visible_prompt_tools = {
             let mut registry = imp_core::tools::ToolRegistry::new();
@@ -3267,9 +3426,9 @@ impl App {
 
         let actions = vec![
             StartupAction {
-                trigger: "type".to_string(),
-                label: "start".to_string(),
-                description: "question, goal, sketch, or task".to_string(),
+                trigger: "input".to_string(),
+                label: String::new(),
+                description: "prompt, request, bug, or goal".to_string(),
             },
             StartupAction {
                 trigger: "/resume".to_string(),
@@ -3279,18 +3438,18 @@ impl App {
             StartupAction {
                 trigger: "/settings".to_string(),
                 label: "runtime".to_string(),
-                description: format!("{mode}; thinking {:?}", self.thinking_level),
+                description: format!("model, provider, runtime, thinking ({mode})"),
             },
             StartupAction {
                 trigger: "Ctrl+L".to_string(),
                 label: "model".to_string(),
-                description: self.model_name.to_string(),
+                description: "switch model".to_string(),
             },
         ];
 
         let tool_lines = visible_prompt_tools
             .iter()
-            .map(|name| format!("• {name}"))
+            .map(|name| format!("{} {}", tool_display_icon(name), tool_display_name(name)))
             .collect::<Vec<_>>();
 
         let skill_lines = if skills.is_empty() {
@@ -3302,12 +3461,17 @@ impl App {
                 .collect::<Vec<_>>()
         };
 
-        let extension_lines = vec![
-            format!("• lua: {lua_extension_summary}"),
-            "• commands: /command".to_string(),
-            "• shell: /new, /model, /mana, /resume, /settings, /personality, /setup".to_string(),
-            format!("• mode: {mode}"),
-        ];
+        let workflow_lines = if self.startup_surface_metadata.workflows.is_empty() {
+            vec!["• none configured".to_string()]
+        } else {
+            let mut workflows = self.startup_surface_metadata.workflows.clone();
+            workflows.sort_by_key(|workflow| std::cmp::Reverse(workflow_sort_key(workflow)));
+            workflows
+                .iter()
+                .take(5)
+                .map(|workflow| format!("• {} · {}", workflow.name, workflow_age(workflow)))
+                .collect::<Vec<_>>()
+        };
 
         let sections = vec![
             StartupSection {
@@ -3319,12 +3483,16 @@ impl App {
                 lines: tool_lines,
             },
             StartupSection {
-                title: "skills".to_string(),
+                title: format!("skills · {} installed", skills.len()),
                 lines: skill_lines,
             },
             StartupSection {
-                title: "extensions".to_string(),
-                lines: extension_lines,
+                title: "workflows".to_string(),
+                lines: workflow_lines,
+            },
+            StartupSection {
+                title: "recent sessions".to_string(),
+                lines: recent_session_lines(&self.startup_surface_metadata.recent_sessions),
             },
         ];
 
@@ -3513,7 +3681,16 @@ impl App {
             ) {
                 let selected_tc_owned = self.selected_tool_call();
                 let run = if selected_tc_owned.is_none() {
-                    self.active_mana_run.clone()
+                    {
+                        #[cfg(feature = "mana-ui")]
+                        {
+                            self.active_mana_run.clone()
+                        }
+                        #[cfg(not(feature = "mana-ui"))]
+                        {
+                            None
+                        }
+                    }
                 } else {
                     None
                 };
@@ -3572,10 +3749,10 @@ impl App {
             self.sidebar.list_height = sub.0.height;
             let detail_plain_lines = detail_render
                 .as_ref()
-                .map(|render| render.plain_lines.clone())
-                .unwrap_or_default();
+                .map(|render| render.plain_lines.as_slice())
+                .unwrap_or(&[]);
             self.sidebar_detail_surface = Some(build_detail_text_surface_from_plain_lines(
-                &detail_plain_lines,
+                detail_plain_lines,
                 sub.1,
                 self.sidebar.detail_scroll,
             ));
@@ -3611,7 +3788,6 @@ impl App {
                 .workflow_mode(self.workflow_mode)
                 .mana_scope_label(self.active_mana_scope_label())
                 .mana_run_label(self.active_mana_run_label())
-                .improve_status_label(self.improve_status_label())
                 .loop_label(self.loop_label())
                 .git_label(git_label);
             frame.render_widget(editor, editor_area);
@@ -3658,6 +3834,7 @@ impl App {
                 let view = SecretsPickerView::new(state, &self.theme);
                 frame.render_widget(view, overlay_area);
             }
+            #[cfg(feature = "mana-ui")]
             UiMode::ManaNavigator(state) => {
                 let mana_area = centered_rect(88, 86, area);
                 let view = ManaNavigatorView::new(state, &self.theme);
@@ -3671,11 +3848,6 @@ impl App {
             UiMode::Settings(state) => {
                 let overlay_area = centered_rect(80, 90, area);
                 let view = SettingsView::new(state, &self.theme);
-                frame.render_widget(view, overlay_area);
-            }
-            UiMode::Personality(state) => {
-                let overlay_area = centered_rect(80, 80, area);
-                let view = PersonalityView::new(state, &self.theme);
                 frame.render_widget(view, overlay_area);
             }
             UiMode::SessionPicker(state) => {
@@ -3853,10 +4025,7 @@ impl App {
         }
 
         // Reset ctrl+c counter on non-ctrl+c keypress
-        if !(key.code == KeyCode::Char('c')
-            && (key.modifiers.contains(KeyModifiers::CONTROL)
-                || key.modifiers.contains(KeyModifiers::SUPER)))
-        {
+        if !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
             self.ctrl_c_count = 0;
         }
 
@@ -3873,8 +4042,8 @@ impl App {
             | UiMode::CommandPalette(_)
             | UiMode::LoginPicker(_)
             | UiMode::SecretsPicker(_) => self.handle_overlay_key(key),
+            #[cfg(feature = "mana-ui")]
             UiMode::ManaNavigator(_) => self.handle_mana_navigator_key(key),
-            UiMode::Personality(_) => self.handle_personality_key(key),
             UiMode::TreeView(_) => self.handle_tree_key(key),
             UiMode::Settings(_) => self.handle_settings_key(key),
             UiMode::SessionPicker(_) => self.handle_session_picker_key(key),
@@ -4158,6 +4327,16 @@ impl App {
                 }
                 _ => {}
             },
+            Some(Action::OverlayLeft) => {
+                if let UiMode::CommandPalette(s) = &mut self.mode {
+                    s.prev_page();
+                }
+            }
+            Some(Action::OverlayRight) => {
+                if let UiMode::CommandPalette(s) = &mut self.mode {
+                    s.next_page();
+                }
+            }
             Some(Action::OverlaySelect) => {
                 self.handle_overlay_select();
             }
@@ -4209,6 +4388,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "mana-ui")]
     fn handle_mana_navigator_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Tab => {
@@ -4386,6 +4566,12 @@ impl App {
         self.focus_tool_with_pin(index, true);
     }
 
+    /// Focus a tool call from an inline chat hit and show its details immediately.
+    fn focus_tool_in_inspector(&mut self, index: usize) {
+        self.focus_tool_with_pin(index, true);
+        self.active_pane = Pane::SidebarDetail;
+    }
+
     fn focus_latest_tool_with_pin(&mut self, pinned: bool) -> bool {
         let total = self.total_tool_calls();
         if total == 0 {
@@ -4456,9 +4642,28 @@ impl App {
         if row < chat_area.y || row >= chat_area.y.saturating_add(chat_area.height) {
             return None;
         }
-        self.chat_tool_click_map
+
+        if let Some(tool_id) = self
+            .chat_tool_click_map
             .iter()
             .find_map(|(tool_row, tool_id)| (*tool_row == row).then(|| tool_id.clone()))
+        {
+            return Some(tool_id);
+        }
+
+        // Fall back to the render data's tool-line indices. The cached click map is
+        // derived from rendered text for selection support, but styling/format
+        // changes can make text parsing miss valid tool headers. The render data is
+        // the authoritative source of which visual chat lines belong to tool calls.
+        let render = self.chat_render_cache.as_ref().map(|cache| &cache.render)?;
+        let total_lines = render.lines.len();
+        let window =
+            visible_line_window(total_lines, chat_area.height as usize, self.scroll_offset);
+        let line_index = window.start + (row - chat_area.y) as usize;
+        render
+            .tool_line_indices
+            .iter()
+            .find_map(|(tool_line, tool_id)| (*tool_line == line_index).then(|| tool_id.clone()))
     }
 
     /// Total number of tool calls across all display messages.
@@ -4496,6 +4701,10 @@ impl App {
         if self.scroll_offset == 0 {
             self.auto_scroll = true;
         }
+    }
+
+    fn sidebar_mouse_scroll_lines(&self) -> usize {
+        1
     }
 
     fn scroll_active_pane_up(&mut self, lines: usize) {
@@ -4592,8 +4801,7 @@ impl App {
 
     fn is_copy_shortcut(&self, key: KeyEvent) -> bool {
         key.code == KeyCode::Char('c')
-            && (key.modifiers.contains(KeyModifiers::CONTROL)
-                || key.modifiers.contains(KeyModifiers::SUPER))
+            && key.modifiers.contains(KeyModifiers::SUPER)
             && self.selection.is_some()
     }
 
@@ -4779,6 +4987,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "mana-ui")]
     fn handle_mana_navigator_mouse(&mut self, mouse: &crossterm::event::MouseEvent) -> bool {
         let UiMode::ManaNavigator(ref mut state) = self.mode else {
             return false;
@@ -4845,6 +5054,7 @@ impl App {
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         self.needs_redraw = true;
 
+        #[cfg(feature = "mana-ui")]
         if self.handle_mana_navigator_mouse(&mouse) {
             return;
         }
@@ -4861,6 +5071,7 @@ impl App {
                     if let UiMode::SessionPicker(ref mut state) = self.mode {
                         state.move_down();
                     }
+                    self.maybe_load_more_sessions();
                 }
                 _ => {}
             }
@@ -4882,12 +5093,12 @@ impl App {
                 if in_list && !is_inspector {
                     self.active_pane = Pane::SidebarList;
                     self.sidebar
-                        .scroll_list_up(self.config.ui.mouse_scroll_lines);
+                        .scroll_list_up(self.sidebar_mouse_scroll_lines());
                 } else if in_detail || (in_sidebar && (is_stream || is_inspector)) {
                     self.active_pane = Pane::SidebarDetail;
                     self.sidebar_auto_follow = false;
                     self.sidebar
-                        .scroll_detail_up(self.config.ui.mouse_scroll_lines);
+                        .scroll_detail_up(self.sidebar_mouse_scroll_lines());
                 } else {
                     self.active_pane = Pane::Chat;
                     self.scroll_chat_up(self.config.ui.mouse_scroll_lines);
@@ -4897,12 +5108,12 @@ impl App {
                 if in_list && !is_inspector {
                     self.active_pane = Pane::SidebarList;
                     self.sidebar
-                        .scroll_list_down(self.config.ui.mouse_scroll_lines);
+                        .scroll_list_down(self.sidebar_mouse_scroll_lines());
                 } else if in_detail || (in_sidebar && (is_stream || is_inspector)) {
                     self.active_pane = Pane::SidebarDetail;
                     self.sidebar_auto_follow = false;
                     self.sidebar
-                        .scroll_detail_down(self.config.ui.mouse_scroll_lines);
+                        .scroll_detail_down(self.sidebar_mouse_scroll_lines());
                 } else {
                     self.active_pane = Pane::Chat;
                     self.scroll_chat_down(self.config.ui.mouse_scroll_lines);
@@ -4952,7 +5163,7 @@ impl App {
                     if let Some(tool_id) = self.tool_id_at_chat_row(row, chat_area) {
                         self.clear_selection();
                         if let Some(index) = self.find_tool_call_index(&tool_id) {
-                            self.focus_tool(index);
+                            self.focus_tool_in_inspector(index);
                         }
                         return;
                     }
@@ -5020,11 +5231,9 @@ impl App {
             }
         }
 
-        self.pending_agent_prompt = None;
-        self.pending_agent_cwd = None;
+        self.clear_pending_agent_turn();
+        self.message_queue.clear();
         self.loop_state = None;
-        self.improve_auto_turns = 0;
-        self.improve_sandbox = None;
         self.suppress_completion_notification = true;
         if let Some(run_id) = self.active_mana_run.as_ref().map(|run| run.run_id.clone()) {
             match stop_mana_run(&run_id) {
@@ -5044,6 +5253,31 @@ impl App {
         }
 
         self.push_system_msg("Stopped active imp work.");
+    }
+
+    fn cancel_pending_work(&mut self) -> bool {
+        let had_pending = self.pending_agent_prompt.is_some();
+        let had_queued = !self.message_queue.is_empty();
+        let had_loop = self.loop_state.is_some();
+        if !(had_pending || had_queued || had_loop) {
+            return false;
+        }
+
+        self.clear_pending_agent_turn();
+        self.message_queue.clear();
+        self.loop_state = None;
+        let mut parts = Vec::new();
+        if had_pending {
+            parts.push("pending prompt");
+        }
+        if had_queued {
+            parts.push("queued follow-up");
+        }
+        if had_loop {
+            parts.push("loop");
+        }
+        self.push_system_msg(&format!("Cleared {}.", parts.join(", ")));
+        true
     }
 
     fn handle_cancel(&mut self) {
@@ -5078,6 +5312,8 @@ impl App {
                 last.is_streaming = false;
             }
             self.ctrl_c_count = 0;
+        } else if self.cancel_pending_work() {
+            self.ctrl_c_count = 0;
         } else {
             // Third: quit
             self.ctrl_c_count += 1;
@@ -5108,7 +5344,7 @@ impl App {
                 self.autonomy_status_label()
             )),
             AutonomyMode::WorktreeAuto => self.push_system_msg(
-                "Autonomy mode: worktree-auto — requires an existing worktree until 394.9 worktree creation lands.",
+                "Autonomy mode: worktree-auto — isolated worktree runs show worktree path, diff artifact, and closeout choices in status/evidence.",
             ),
             _ => self.push_system_msg(&format!("Autonomy mode: {mode}")),
         }
@@ -5131,24 +5367,6 @@ impl App {
         }
     }
 
-    fn improve_status_label(&self) -> Option<String> {
-        if self.workflow_mode != WorkflowMode::Improve || self.improve_safe_mode {
-            return None;
-        }
-        let sandbox = self.improve_sandbox.as_ref()?;
-        let dir = sandbox
-            .worktree
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_else(|| sandbox.worktree.to_str().unwrap_or("sandbox"));
-        let budget = self.config.ui.improve_auto_turn_budget.max(1);
-        Some(format!(
-            "imp is improving {dir} · turn {}/{} · /improve-help for review",
-            self.improve_auto_turns.min(budget),
-            budget
-        ))
-    }
-
     fn loop_label(&self) -> Option<String> {
         let state = self.loop_state.as_ref()?;
         Some(match state.budget {
@@ -5157,62 +5375,52 @@ impl App {
         })
     }
 
-    fn queue_improve_mode_continuation_if_ready(&mut self) {
-        if self.workflow_mode != WorkflowMode::Improve
-            || self.is_streaming
-            || self.pending_agent_prompt.is_some()
-        {
-            return;
+    fn loop_continue_message(&self) -> String {
+        if let Some(visible) = self.pending_agent_visible_text.as_ref() {
+            return visible.clone();
         }
-        let Some(scope) = self.active_mana_scope.clone() else {
-            self.push_system_msg("Improve mode needs an active mana scope. Use /scope <id> or read/create a mana epic first.");
-            return;
-        };
-        let budget = self.config.ui.improve_auto_turn_budget.max(1);
-        if self.improve_auto_turns >= budget {
-            self.push_system_msg(&format!(
-                "Improve mode paused after {budget} automatic turns. Send a message or switch modes to continue."
-            ));
-            return;
+        if let Some(scope) = self.active_mana_scope.as_ref() {
+            return format!(
+                "Continue working on active mana scope {} until the requested outcome is complete, blocked, or no runnable work remains.",
+                scope.id
+            );
         }
+        #[cfg(feature = "mana-ui")]
+        if let Some(run) = self.active_mana_run.as_ref() {
+            return format!(
+                "Continue supervising active mana run {} until it is complete, blocked, or no runnable work remains.",
+                run.run_id
+            );
+        }
+        "continue".to_string()
+    }
 
-        let prompt = if self.improve_safe_mode {
-            improve_safe_mode_prompt(&scope, self.improve_auto_turns + 1, budget)
+    fn start_loop_command(&mut self, message: &str) {
+        let message = message.trim();
+        let message = if message.is_empty() || message.eq_ignore_ascii_case("continue") {
+            self.loop_continue_message()
         } else {
-            let Some(sandbox) = self.ensure_improve_sandbox(&scope) else {
-                return;
-            };
-            improve_code_mode_prompt(&scope, self.improve_auto_turns + 1, budget, &sandbox)
+            message.to_string()
         };
-
-        self.improve_auto_turns += 1;
-        if self.improve_safe_mode {
-            self.push_system_msg(&format!(
-                "Improve safe: research turn {}/{} for scope {}",
-                self.improve_auto_turns, budget, scope.id
-            ));
-        } else if let Some(sandbox) = self.improve_sandbox.as_ref() {
-            self.push_system_msg(&format!(
-                "Improve mode: code turn {}/{} in branch {} at {}",
-                self.improve_auto_turns,
-                budget,
-                sandbox.branch,
-                sandbox.worktree.display()
-            ));
+        let budget =
+            (self.config.ui.loop_turn_budget > 0).then_some(self.config.ui.loop_turn_budget);
+        self.loop_state = Some(LoopState {
+            message,
+            completed_turns: 0,
+            budget,
+        });
+        match budget {
+            Some(budget) => self.push_system_msg(&format!("Loop started: {budget} turn budget.")),
+            None => self.push_system_msg("Loop started: no turn budget."),
         }
-        self.pending_agent_prompt = Some(prompt);
-        self.pending_agent_cwd = if self.improve_safe_mode {
-            None
-        } else {
-            self.improve_sandbox
-                .as_ref()
-                .map(|sandbox| sandbox.worktree.clone())
-        };
-        self.needs_redraw = true;
+        self.queue_loop_continuation_if_ready();
     }
 
     fn queue_loop_continuation_if_ready(&mut self) {
-        if self.is_streaming || self.pending_agent_prompt.is_some() {
+        if self.is_streaming
+            || self.pending_agent_prompt.is_some()
+            || !self.message_queue.is_empty()
+        {
             return;
         }
         let Some(state) = self.loop_state.as_mut() else {
@@ -5239,245 +5447,6 @@ impl App {
         self.needs_redraw = true;
     }
 
-    fn stale_improve_metadata_message(&self) -> Option<String> {
-        let metadata = match read_improve_sandbox_metadata_file(&self.cwd) {
-            Ok(Some(metadata)) => metadata,
-            Ok(None) => return None,
-            Err(err) => {
-                return Some(format!(
-                    "stale improve metadata: {err}\nnext: fix/remove {} or run /clean --force to forget stale metadata",
-                    improve_metadata_file(&self.cwd)
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| IMPROVE_SANDBOX_METADATA_PATH.to_string())
-                ));
-            }
-        };
-        match validate_improve_sandbox_metadata(metadata.clone()) {
-            Ok(Some(_)) => None,
-            Ok(None) => None,
-            Err(err) => Some(format!(
-                "stale improve metadata: {err}\nmetadata: {}\nbranch: {}\nworktree: {}\nnext: run /clean --force to forget stale metadata; no branch/worktree will be deleted",
-                improve_metadata_file(&self.cwd)
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| IMPROVE_SANDBOX_METADATA_PATH.to_string()),
-                metadata.branch,
-                metadata.worktree.display()
-            )),
-        }
-    }
-
-    fn current_improve_sandbox(&mut self) -> Option<ImproveSandbox> {
-        if let Some(sandbox) = self.improve_sandbox.clone() {
-            return Some(sandbox);
-        }
-        match read_improve_sandbox_metadata(&self.cwd) {
-            Ok(Some(sandbox)) => {
-                self.improve_sandbox = Some(sandbox.clone());
-                Some(sandbox)
-            }
-            Ok(None) => None,
-            Err(err) => {
-                self.push_system_msg(&format!("Stale Improve sandbox metadata: {err}"));
-                None
-            }
-        }
-    }
-
-    fn agent_status_label(&self) -> &'static str {
-        if self.is_streaming || self.agent_task.is_some() {
-            "running"
-        } else if self.pending_agent_prompt.is_some() {
-            "queued"
-        } else {
-            "idle"
-        }
-    }
-
-    fn show_status_command(&mut self) {
-        if self.status_command_task.is_some() {
-            self.push_system_msg("Status is already loading…");
-            return;
-        }
-        let cwd = self.cwd.clone();
-        let sandbox = self.improve_sandbox.clone();
-        let workflow_mode = self.workflow_mode;
-        let agent_status = self.agent_status_label().to_string();
-        let active_mana_scope = self.active_mana_scope.clone();
-        let active_mana_run = self.active_mana_run.clone();
-        let improve_auto_turns = self.improve_auto_turns;
-        let improve_auto_turn_budget = self.config.ui.improve_auto_turn_budget;
-        let improve_safe_mode = self.improve_safe_mode;
-        let loop_state = self.loop_state.clone();
-        let signal_tx = self.runtime_signal_tx.clone();
-        self.push_system_msg("Loading status…");
-        self.status_command_task = Some(tokio::spawn(async move {
-            let signal = match tokio::task::spawn_blocking(move || {
-                let snapshot = build_status_snapshot(&cwd, sandbox.as_ref());
-                StatusCommandResult {
-                    text: render_status_text(
-                        &snapshot,
-                        workflow_mode,
-                        &agent_status,
-                        active_mana_scope.as_ref(),
-                        active_mana_run.as_ref(),
-                        improve_auto_turns,
-                        improve_auto_turn_budget,
-                        improve_safe_mode,
-                        sandbox.as_ref(),
-                        loop_state.as_ref(),
-                    ),
-                }
-            })
-            .await
-            {
-                Ok(result) => RuntimeSignal::StatusCommandFinished(result),
-                Err(error) => {
-                    RuntimeSignal::StatusCommandFailed(format!("Status task failure: {error}"))
-                }
-            };
-            let _ = signal_tx.send(signal).await;
-        }));
-    }
-
-    fn improve_merge_command(&mut self, args: &str) {
-        if self.improve_merge_task.is_some() {
-            self.push_system_msg("Improve merge is already running…");
-            return;
-        }
-        let confirmed = args
-            .split_whitespace()
-            .any(|arg| arg == "--confirm" || arg == "confirm");
-        let Some(sandbox) = self.current_improve_sandbox() else {
-            self.push_system_msg("No active Improve sandbox to merge.");
-            return;
-        };
-        let cwd = self.cwd.clone();
-        let signal_tx = self.runtime_signal_tx.clone();
-        self.push_system_msg(if confirmed {
-            "Running Improve merge…"
-        } else {
-            "Loading Improve merge plan…"
-        });
-        self.improve_merge_task = Some(tokio::spawn(async move {
-            let signal = match tokio::task::spawn_blocking(move || {
-                run_improve_merge_command(&cwd, &sandbox, confirmed)
-            })
-            .await
-            {
-                Ok(result) => RuntimeSignal::ImproveMergeCommandFinished(result),
-                Err(error) => RuntimeSignal::ImproveMergeCommandFailed(format!(
-                    "Improve merge task failure: {error}"
-                )),
-            };
-            let _ = signal_tx.send(signal).await;
-        }));
-    }
-
-    fn clean_command(&mut self, args: &str) {
-        let force = args
-            .split_whitespace()
-            .any(|arg| arg == "--force" || arg == "force");
-        if self.clean_task.is_some() {
-            self.push_system_msg("Clean is already running…");
-            return;
-        }
-        let Some(sandbox) = self.current_improve_sandbox() else {
-            if force {
-                if let Some(path) = improve_metadata_file(&self.cwd) {
-                    if path.exists() {
-                        match std::fs::remove_file(&path) {
-                            Ok(()) => self.push_system_msg(&format!(
-                                "Removed stale Improve metadata {}. No branch or worktree was deleted.",
-                                path.display()
-                            )),
-                            Err(err) => self.push_system_msg(&format!(
-                                "Failed to remove stale Improve metadata {}: {err}",
-                                path.display()
-                            )),
-                        }
-                    } else {
-                        self.push_system_msg("Nothing to clean yet.");
-                    }
-                } else {
-                    self.push_system_msg("Nothing to clean yet.");
-                }
-            } else if let Some(message) = self.stale_improve_metadata_message() {
-                self.push_system_msg(&format!(
-                    "{message}\nRun /clean --force to remove only the stale metadata file."
-                ));
-            } else {
-                self.push_system_msg("Nothing to clean yet.");
-            }
-            return;
-        };
-        let cwd = self.cwd.clone();
-        let signal_tx = self.runtime_signal_tx.clone();
-        let initial_message = if force {
-            "Checking and cleaning Improve sandbox…"
-        } else {
-            "Checking Improve sandbox cleanliness…"
-        };
-        self.push_system_msg(initial_message);
-        self.clean_task = Some(tokio::spawn(async move {
-            let signal =
-                match tokio::task::spawn_blocking(move || run_clean_command(&cwd, &sandbox, force))
-                    .await
-                {
-                    Ok(result) => RuntimeSignal::CleanCommandFinished(result),
-                    Err(error) => {
-                        RuntimeSignal::CleanCommandFailed(format!("Clean task failure: {error}"))
-                    }
-                };
-            let _ = signal_tx.send(signal).await;
-        }));
-    }
-
-    fn start_loop_command(&mut self, message: &str) {
-        let message = message.trim();
-        if message.is_empty() {
-            self.push_system_msg("Usage: /loop <message>");
-            return;
-        }
-        let budget =
-            (self.config.ui.loop_turn_budget > 0).then_some(self.config.ui.loop_turn_budget);
-        self.loop_state = Some(LoopState {
-            message: message.to_string(),
-            completed_turns: 0,
-            budget,
-        });
-        match budget {
-            Some(budget) => self.push_system_msg(&format!("Loop started: {budget} turn budget.")),
-            None => self.push_system_msg("Loop started: no turn budget."),
-        }
-        self.queue_loop_continuation_if_ready();
-    }
-
-    fn ensure_improve_sandbox(&mut self, scope: &ManaUnitRef) -> Option<ImproveSandbox> {
-        if let Some(sandbox) = self.improve_sandbox.clone() {
-            return Some(sandbox);
-        }
-        match create_improve_sandbox(&self.cwd, scope) {
-            Ok(sandbox) => {
-                if let Err(err) = write_improve_sandbox_metadata(&self.cwd, &sandbox) {
-                    self.push_system_msg(&format!("Improve sandbox metadata warning: {err}"));
-                }
-                self.push_system_msg(&format!(
-                    "Improve sandbox ready: branch {} at {}. Review with `git -C {} diff {}...HEAD`.",
-                    sandbox.branch,
-                    sandbox.worktree.display(),
-                    sandbox.worktree.display(),
-                    sandbox.base_branch
-                ));
-                self.improve_sandbox = Some(sandbox.clone());
-                Some(sandbox)
-            }
-            Err(err) => {
-                self.push_system_msg(&format!("Could not create Improve sandbox: {err}"));
-                None
-            }
-        }
-    }
-
     fn preloaded_lua_tools(&self) -> Option<ToolRegistry> {
         let policy = self.config.lua.resolve_policy(self.config.mode);
         let mut tools = ToolRegistry::new();
@@ -5485,7 +5454,6 @@ impl App {
         imp_lua::init_lua_extensions(&user_config_dir, Some(&self.cwd), &mut tools, &policy);
         Some(tools)
     }
-
     fn agent_start_request(&mut self) -> AgentStartRequest {
         let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(16);
         let tui_ui = crate::tui_interface::TuiInterface::new(ui_tx.clone());
@@ -5496,17 +5464,15 @@ impl App {
             session: self.session.clone(),
             model_name: self.model_name.clone(),
             model_registry: self.model_registry.clone(),
+            role_name: self.role_name.clone(),
             thinking_level: self.thinking_level,
             config: self.config.clone(),
-            workflow_mode: self.workflow_mode,
             active_mana_scope: self.active_mana_scope.clone(),
-            improve_sandbox: self.improve_sandbox.clone(),
-            improve_safe_mode: self.improve_safe_mode,
             autonomy_mode: self.autonomy_mode,
             runtime_signal_tx: self.runtime_signal_tx.clone(),
             ui_tx,
             preloaded_lua_tools: self.preloaded_lua_tools(),
-            prompt_context: imp_core::mana_prompt_context::load_session_prompt_context(&self.cwd),
+            prompt_context: Some(imp_core::builder::PromptContext::from_facts(Vec::new())),
             tui_trace: self.tui_trace.clone(),
         }
     }
@@ -5516,17 +5482,32 @@ impl App {
         let signal_tx = self.runtime_signal_tx.clone();
         self.trace_tui("agent_start_task queued");
         let start_task = tokio::spawn(async move {
-            let signal = match tokio::task::spawn_blocking(move || {
+            let mut build_task = tokio::task::spawn_blocking(move || {
                 start_agent_from_request(request, &text, agent_cwd)
-            })
-            .await
-            {
-                Ok(Ok(result)) => RuntimeSignal::AgentStartCompleted(result),
-                Ok(Err(error)) => RuntimeSignal::AgentStartFailed(error),
-                Err(error) => {
-                    RuntimeSignal::AgentStartFailed(format!("Agent start task failure: {error}"))
+            });
+            tokio::select! {
+                _ = tokio::time::sleep(AGENT_START_STATUS_DELAY) => {
+                    let _ = signal_tx
+                        .send(RuntimeSignal::AgentStartStatus {
+                            key: "startup".into(),
+                            text: Some("indexing repo…".into()),
+                        })
+                        .await;
                 }
-            };
+                result = &mut build_task => {
+                    let signal = agent_start_join_result_to_signal(result);
+                    let _ = signal_tx.send(signal).await;
+                    return;
+                }
+            }
+
+            let signal = agent_start_join_result_to_signal(build_task.await);
+            let _ = signal_tx
+                .send(RuntimeSignal::AgentStartStatus {
+                    key: "startup".into(),
+                    text: None,
+                })
+                .await;
             let _ = signal_tx.send(signal).await;
         });
         self.agent_start_task = Some(start_task);
@@ -5534,6 +5515,7 @@ impl App {
 
     fn finish_agent_start(&mut self, result: AgentStartResult) {
         self.agent_start_task = None;
+        self.status_items.remove("startup");
         self.agent_handle = Some(AgentHandle {
             event_rx: tokio::sync::mpsc::channel(1).1,
             command_tx: result.command_tx,
@@ -5545,6 +5527,7 @@ impl App {
 
     fn fail_agent_start(&mut self, error: String) {
         self.agent_start_task = None;
+        self.status_items.remove("startup");
         self.is_streaming = false;
         self.streaming_anchor_user_index = None;
         if self
@@ -5689,11 +5672,19 @@ impl App {
     }
 
     fn enqueue_visible_agent_turn(&mut self, text: String) {
+        self.enqueue_visible_agent_turn_with_prompt(text.clone(), text);
+    }
+
+    fn enqueue_visible_agent_turn_with_prompt(
+        &mut self,
+        visible_text: String,
+        agent_prompt: String,
+    ) {
         let user_message_index = self.messages.len();
         let timestamp = imp_llm::now();
         self.messages.push(DisplayMessage {
             role: MessageRole::User,
-            content: text.clone(),
+            content: visible_text.clone(),
             thinking: None,
             tool_calls: Vec::new(),
             assistant_blocks: Vec::new(),
@@ -5715,21 +5706,39 @@ impl App {
         let agent_session = self.session.snapshot_with_pending_user_message(
             entry_id.clone(),
             timestamp,
-            text.clone(),
+            visible_text.clone(),
         );
-        self.start_user_message_persist(persist_session, entry_id, text.clone(), timestamp);
+        self.start_user_message_persist(persist_session, entry_id, visible_text.clone(), timestamp);
         self.session = agent_session;
 
         self.is_streaming = true;
         self.streaming_anchor_user_index = Some(user_message_index);
         self.completed_turns_in_run = 0;
+        self.last_agent_error = None;
         self.suppress_completion_notification = false;
         self.auto_scroll = true;
         self.scroll_offset = 0;
         self.tool_focus = None;
         self.tool_focus_pinned = false;
         self.sidebar_auto_follow = true;
-        self.pending_agent_prompt = Some(text);
+        self.set_pending_agent_turn(agent_prompt, Some(visible_text), None);
+    }
+
+    fn set_pending_agent_turn(
+        &mut self,
+        agent_prompt: String,
+        visible_text: Option<String>,
+        cwd: Option<PathBuf>,
+    ) {
+        self.pending_agent_prompt = Some(agent_prompt);
+        self.pending_agent_visible_text = visible_text;
+        self.pending_agent_cwd = cwd;
+        self.needs_redraw = true;
+    }
+
+    fn clear_pending_agent_turn(&mut self) {
+        self.pending_agent_prompt = None;
+        self.pending_agent_visible_text = None;
         self.pending_agent_cwd = None;
     }
 
@@ -5809,6 +5818,11 @@ impl App {
         if !text.contains('\n') {
             if let Some(cmd_text) = text.strip_prefix('/') {
                 let typed = cmd_text.trim();
+                if self.try_workflow_command(typed) {
+                    self.editor.push_history();
+                    self.editor.clear();
+                    return;
+                }
                 let canonical_typed = if typed.eq_ignore_ascii_case("improve safe") {
                     "improve safe"
                 } else {
@@ -5821,16 +5835,20 @@ impl App {
                     if canonical_typed == "improve safe" || canonical_typed.starts_with("skill:") {
                         canonical_typed.to_string()
                     } else {
-                        commands
+                        let mut typed_parts = canonical_typed.splitn(2, char::is_whitespace);
+                        let typed_command = typed_parts.next().unwrap_or_default();
+                        let typed_args = typed_parts.next().unwrap_or_default().trim();
+                        let resolved_command = commands
                             .iter()
-                            .find(|c| c.name == canonical_typed)
-                            .or_else(|| {
-                                commands
-                                    .iter()
-                                    .find(|c| c.name.starts_with(canonical_typed))
-                            })
-                            .map(|c| c.name.clone())
-                            .unwrap_or_else(|| canonical_typed.to_string())
+                            .find(|c| c.name == typed_command)
+                            .or_else(|| commands.iter().find(|c| c.name.starts_with(typed_command)))
+                            .map(|c| c.name.as_str())
+                            .unwrap_or(typed_command);
+                        if typed_args.is_empty() {
+                            resolved_command.to_string()
+                        } else {
+                            format!("{resolved_command} {typed_args}")
+                        }
                     };
                 self.execute_command(&cmd);
                 self.editor.push_history();
@@ -5846,6 +5864,13 @@ impl App {
             return;
         }
 
+        if let Some(suggestion) = self.workflow_suggestion_for_prompt(&text) {
+            self.editor.push_history();
+            self.editor.clear();
+            self.ask_workflow_suggestion(suggestion, text.clone());
+            self.needs_redraw = true;
+            return;
+        }
         // Add user message, assistant placeholder, and session entry before deferring agent start.
         self.enqueue_visible_agent_turn(text.clone());
         self.editor.push_history();
@@ -5857,6 +5882,7 @@ impl App {
         let Some(text) = self.pending_agent_prompt.take() else {
             return;
         };
+        self.pending_agent_visible_text = None;
         let agent_cwd = self
             .pending_agent_cwd
             .take()
@@ -5866,6 +5892,24 @@ impl App {
         self.agent_turn_started_at = Some(Instant::now());
         self.first_agent_event_seen = false;
         self.start_agent_for_prompt_in_background(text, agent_cwd);
+    }
+
+    fn checkpoints_command(&mut self) {
+        let records = self.session.checkpoint_records();
+        if records.is_empty() {
+            self.push_system_msg("No checkpoints recorded for this session.");
+            return;
+        }
+        let mut lines = vec!["Recorded checkpoints:".to_string()];
+        for record in records {
+            let label = record
+                .label
+                .as_deref()
+                .filter(|label| !label.trim().is_empty())
+                .unwrap_or("unlabeled");
+            lines.push(format!("- {} — {}", record.checkpoint_id, label));
+        }
+        self.push_system_msg(&lines.join("\n"));
     }
 
     fn restore_checkpoint_command(&mut self, needle: &str) {
@@ -5912,6 +5956,8 @@ impl App {
         })
     }
 
+    #[cfg(feature = "mana-ui")]
+    #[allow(dead_code)]
     fn set_active_mana_run(&mut self, id: &str) {
         let id = id.trim();
         if id.is_empty() {
@@ -5932,6 +5978,8 @@ impl App {
         self.refresh_active_mana_run(id);
     }
 
+    #[cfg(feature = "mana-ui")]
+    #[allow(dead_code)]
     fn refresh_active_mana_run(&mut self, id: &str) {
         match mana_run_summary(id) {
             Ok(Some(summary)) => {
@@ -5950,84 +5998,314 @@ impl App {
         }
     }
 
-    fn set_active_mana_scope(&mut self, id: &str) {
-        let id = id.trim();
-        if id.is_empty() {
-            self.push_system_msg("Usage: /scope <mana-id> or /scope clear");
-            return;
-        }
-        if id.eq_ignore_ascii_case("clear") || id.eq_ignore_ascii_case("none") {
-            self.active_mana_scope = None;
-            self.improve_auto_turns = 0;
-            self.improve_sandbox = None;
-            self.push_system_msg("Active mana scope cleared");
-            return;
-        }
-
-        match self.resolve_mana_scope(id) {
-            Ok(scope) => {
-                let label = if scope.title.trim().is_empty() {
-                    scope.id.clone()
-                } else {
-                    format!("{} {}", scope.id, scope.title.trim())
-                };
-                self.active_mana_scope = Some(scope);
-                self.improve_auto_turns = 0;
-                self.improve_sandbox = None;
-                self.push_system_msg(&format!("Active mana scope: {label}"));
-                self.queue_improve_mode_continuation_if_ready();
-            }
-            Err(err) => {
-                self.push_system_msg(&format!("Could not set mana scope {id}: {err}"));
-            }
-        }
-    }
-
-    fn resolve_mana_scope(&self, id: &str) -> std::result::Result<ManaUnitRef, String> {
-        let mana_dir = api::find_mana_dir(&self.cwd).map_err(|err| err.to_string())?;
-        let unit = api::get_unit(&mana_dir, id).map_err(|err| err.to_string())?;
-        Ok(ManaUnitRef::new(
-            &unit.id,
-            &unit.title,
-            Some(format!("{:?}", unit.kind)),
-        ))
-    }
-
-    fn maybe_update_active_mana_scope_from_review(&mut self, review: &TurnManaReview) {
-        let Some(scope) = candidate_active_scope_from_review(review) else {
+    fn eval_candidate_command(&mut self, args: &str) {
+        let Some(evidence_path) = self.status_items.get("evidence").map(PathBuf::from) else {
+            self.push_warning_msg("No run evidence is available yet; run something before /eval.");
             return;
         };
-
-        if self
-            .active_mana_scope
-            .as_ref()
-            .is_some_and(|active| active.id == scope.id)
-        {
+        let Some(run_root) = evidence_path.parent().map(Path::to_path_buf) else {
+            self.push_warning_msg("Could not infer run artifact directory from evidence path.");
+            return;
+        };
+        let expected = command_option_value(args, "note")
+            .map(|_| args.split("--note").next().unwrap_or(args).trim())
+            .unwrap_or(args)
+            .split("--verifier")
+            .next()
+            .unwrap_or(args)
+            .trim();
+        if expected.is_empty() {
+            self.push_system_msg(
+                "Usage: /eval <expected behavior> [--note correction] [--verifier command]",
+            );
             return;
         }
-
-        self.active_mana_scope = Some(scope);
-        self.improve_auto_turns = 0;
-        self.improve_sandbox = None;
+        let note = command_option_value(args, "note");
+        let verifier = command_option_value(args, "verifier");
+        let run_id = run_root
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "run".into());
+        let candidate_id = format!("{run_id}-manual");
+        let mut candidate =
+            EvalCandidate::new(candidate_id.clone(), EvalFailureMode::UserCorrection);
+        candidate.source.run_id = Some(run_id.clone());
+        candidate.expected_behavior = EvalExpectedBehavior {
+            summary: expected.to_string(),
+            assertions: verifier
+                .as_ref()
+                .map(|command| vec![format!("{command} passes")])
+                .unwrap_or_default(),
+        };
+        candidate.actual_behavior = note.map(|summary| EvalActualBehavior {
+            summary,
+            error_excerpt: None,
+        });
+        if let Some(command) = verifier {
+            candidate.verifiers.push(EvalVerifier {
+                name: "manual verifier".into(),
+                command: Some(command),
+                required: true,
+                ..EvalVerifier::default()
+            });
+        }
+        candidate.artifact_refs = vec![
+            imp_core::eval_candidate::EvalArtifactRef {
+                kind: "evidence".into(),
+                path: evidence_path,
+                summary: Some("Run evidence packet".into()),
+                sha256: None,
+            },
+            imp_core::eval_candidate::EvalArtifactRef {
+                kind: "trace".into(),
+                path: run_root.join("trace.jsonl"),
+                summary: Some("Structured runtime event trace".into()),
+                sha256: None,
+            },
+        ];
+        candidate.privacy = EvalPrivacy {
+            redaction_status: EvalRedactionStatus::Unreviewed,
+            redaction_rules: Vec::new(),
+            contains_sensitive_data: false,
+        };
+        let candidate = redact_eval_candidate(candidate);
+        let path = run_root
+            .join("eval-candidates")
+            .join(&candidate_id)
+            .join("candidate.json");
+        if let Some(parent) = path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                self.push_error_msg(&format!("Could not create eval candidate directory: {err}"));
+                return;
+            }
+        }
+        match serde_json::to_string_pretty(&candidate)
+            .map_err(std::io::Error::other)
+            .and_then(|json| std::fs::write(&path, json))
+        {
+            Ok(()) => {
+                self.status_items
+                    .insert("eval-candidate".into(), path.display().to_string());
+                self.push_system_msg(&format!("Saved eval candidate: {}", path.display()));
+            }
+            Err(err) => self.push_error_msg(&format!("Could not save eval candidate: {err}")),
+        }
     }
 
-    fn set_improve_mode(&mut self, safe: bool) {
-        self.workflow_mode = WorkflowMode::Improve;
-        self.improve_auto_turns = 0;
-        self.improve_sandbox = None;
-        self.improve_safe_mode = safe;
-        if safe {
-            self.push_system_msg("Workflow mode: Improve safe (research-only)");
-        } else {
-            self.push_system_msg("Workflow mode: Improve (sandbox branch/worktree)");
+    fn workflow_plan_command(&mut self, goal: &str) {
+        let goal = goal.trim();
+        if goal.is_empty() {
+            self.push_system_msg("Usage: /plan <goal>");
+            return;
         }
-        self.queue_improve_mode_continuation_if_ready();
+        let prompt = format!(
+            "Plan this as an imp-native workflow. Use the `workflow` tool and `.imp/workflows` schema as the source of truth. Goal: {goal}"
+        );
+        self.push_system_msg("Planning with native workflow tool. The agent should create or update a workflow artifact before implementation.");
+        self.enqueue_visible_agent_turn_with_prompt(format!("/plan {goal}"), prompt);
+    }
+
+    fn workflow_run_command(&mut self, id: &str) {
+        let mut params = serde_json::json!({ "action": "run" });
+        let id = id.trim();
+        if !id.is_empty() {
+            params["id"] = serde_json::Value::String(id.to_string());
+        }
+        match self.execute_workflow_tool(params) {
+            Ok(text) => self.push_system_msg(&text),
+            Err(err) => self.push_error_msg(&format!("Workflow run failed: {err}")),
+        }
+    }
+
+    fn workflow_inspect_command(&mut self, args: &str) {
+        let mut parts = args.split_whitespace();
+        let action = parts.next().unwrap_or("show");
+        let id = parts.next();
+        let action = match action {
+            "list" | "show" | "validate" | "run" | "update" => action,
+            other => {
+                self.push_system_msg(&format!(
+                    "Usage: /workflow [list|show|validate|run|update] [id] (unknown action `{other}`)"
+                ));
+                return;
+            }
+        };
+        let mut params = serde_json::json!({ "action": action });
+        if let Some(id) = id {
+            params["id"] = serde_json::Value::String(id.to_string());
+        }
+        match self.execute_workflow_tool(params) {
+            Ok(text) => self.push_system_msg(&text),
+            Err(err) => self.push_error_msg(&format!("Workflow command failed: {err}")),
+        }
+    }
+
+    fn execute_workflow_tool(&self, params: serde_json::Value) -> Result<String, String> {
+        let action = params
+            .get("action")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "workflow command missing action".to_string())?;
+        let id = params.get("id").and_then(|value| value.as_str());
+        let workflows_root = self.cwd.join(".imp/workflows");
+        match action {
+            "list" => render_tui_workflow_list(&workflows_root),
+            "show" => {
+                let (_, workflow) = load_tui_workflow(&workflows_root, id)?;
+                render_tui_workflow_show(&workflow)
+            }
+            "validate" => render_tui_workflow_validate(&workflows_root, id),
+            "run" => {
+                let (_, workflow) = load_tui_workflow(&workflows_root, id)?;
+                render_tui_workflow_run(&workflow)
+            }
+            other => Err(format!("unsupported workflow action `{other}`")),
+        }
+    }
+
+    fn workflow_registry(&mut self) -> Option<imp_core::workflow_profiles::WorkflowRegistry> {
+        match self.config.workflow_registry() {
+            Ok(registry) => Some(registry),
+            Err(err) => {
+                self.push_warning_msg(&format!("Workflow config error: {err}"));
+                None
+            }
+        }
+    }
+
+    fn try_workflow_command(&mut self, typed: &str) -> bool {
+        let mut parts = typed.splitn(2, char::is_whitespace);
+        let Some(name) = parts.next().filter(|name| !name.is_empty()) else {
+            return false;
+        };
+        if matches!(name, "workflow" | "workflows") {
+            return false;
+        }
+        let Some(registry) = self.workflow_registry() else {
+            return false;
+        };
+        let Some(profile) = registry.get(name).cloned() else {
+            return false;
+        };
+        let prompt = parts.next().unwrap_or_default().trim();
+        if prompt.is_empty() {
+            self.show_workflow_profile(&profile.name);
+            return true;
+        }
+        self.enqueue_workflow_turn(profile, prompt.to_string());
+        true
+    }
+
+    fn enqueue_workflow_turn(&mut self, profile: WorkflowProfile, prompt: String) {
+        let wrapped = profile.wrap_prompt(&prompt);
+        self.push_system_msg(&format!(
+            "Using /{} · {}",
+            profile.name, profile.confirm_body
+        ));
+        self.enqueue_visible_agent_turn_with_prompt(
+            format!("/{} {}", profile.name, prompt),
+            wrapped,
+        );
+    }
+
+    fn workflow_suggestion_for_prompt(&mut self, prompt: &str) -> Option<WorkflowProfile> {
+        let registry = self.workflow_registry()?;
+        let suggestion = registry.infer(prompt)?;
+        match suggestion.profile.suggest {
+            WorkflowSuggest::Never => None,
+            WorkflowSuggest::Auto => Some(suggestion.profile),
+            WorkflowSuggest::Ask => Some(suggestion.profile),
+        }
+    }
+
+    fn ask_workflow_suggestion(&mut self, profile: WorkflowProfile, prompt: String) {
+        let title = if profile.confirm_title.trim().is_empty() {
+            format!("Use /{}?", profile.name)
+        } else {
+            profile.confirm_title.clone()
+        };
+        let mut choices = vec![format!("Use /{}", profile.name), "Normal".to_string()];
+        if !profile.confirm_body.trim().is_empty() {
+            choices[0] = format!("{} · {}", choices[0], profile.confirm_body.trim());
+        }
+        let options = choices
+            .into_iter()
+            .map(|label| crate::views::ask_bar::AskOption {
+                label,
+                description: None,
+                checked: false,
+            })
+            .collect();
+        self.begin_ask(
+            AskState::new(title, String::new(), options, false),
+            AskReply::WorkflowSuggestion { profile, prompt },
+        );
+    }
+
+    fn show_workflows(&mut self) {
+        let Some(registry) = self.workflow_registry() else {
+            return;
+        };
+        let profiles = registry.iter().collect::<Vec<_>>();
+        if profiles.is_empty() {
+            self.push_system_msg("No workflows configured.");
+            return;
+        }
+        let mut lines = vec!["Workflows:".to_string()];
+        for profile in profiles {
+            lines.push(format!("/{} — {}", profile.name, profile.description));
+        }
+        self.push_system_msg(&lines.join("\n"));
+    }
+
+    fn show_workflow_profile(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.push_system_msg("Usage: /workflow <name>");
+            return;
+        }
+        let Some(registry) = self.workflow_registry() else {
+            return;
+        };
+        match registry.resolve(name) {
+            Ok(profile) => {
+                let aliases = if profile.aliases.is_empty() {
+                    "none".to_string()
+                } else {
+                    profile
+                        .aliases
+                        .iter()
+                        .map(|alias| format!("/{alias}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let triggers = if profile.triggers.is_empty() {
+                    "none".to_string()
+                } else {
+                    profile.triggers.join(", ")
+                };
+                self.push_system_msg(&format!(
+                    "/{}\n{}\naliases: {}\nsuggest: {:?}\nreadonly: {}\naction: {}\ntriggers: {}",
+                    profile.name,
+                    profile.description,
+                    aliases,
+                    profile.suggest,
+                    profile.readonly,
+                    profile.confirm_body,
+                    triggers
+                ));
+            }
+            Err(err) => self.push_warning_msg(&err.to_string()),
+        }
     }
 
     fn execute_command(&mut self, cmd: &str) {
         let mut parts = cmd.splitn(2, char::is_whitespace);
         let command = parts.next().unwrap_or("");
         let args = parts.next().unwrap_or("").trim();
+
+        if self.try_workflow_command(cmd) {
+            return;
+        }
 
         match command {
             "quit" | "q" => {
@@ -6038,9 +6316,6 @@ impl App {
             }
             "tree" => {
                 self.open_tree_view();
-            }
-            "mana" => {
-                self.open_mana_navigator(if args.is_empty() { None } else { Some(args) });
             }
             "new" => {
                 self.messages.clear();
@@ -6064,7 +6339,7 @@ impl App {
   Shift+Enter   New line\n\
   Alt+Enter     Queue follow-up while streaming\n\
   Ctrl+C        Clear / Abort / Quit\n\
-  Ctrl+C/Cmd+C  Copy selection\n\
+  Cmd+C         Copy selection\n\
   Ctrl+V/Cmd+V  Paste clipboard\n\
   Ctrl+L        Model selector\n\
   Ctrl+P        Next chosen model\n\
@@ -6080,38 +6355,18 @@ impl App {
   :cd <path>    Change working directory\n\
   :pwd          Show working directory\n\
   : <cmd>       Run shell command\n\
+  Esc           Cancel current turn; when idle, clear pending prompt/loop
+  /stop         Stop active work and clear pending prompt/loop
   PageUp/Down   Scroll",
                 );
             }
-            "improve" => match args {
-                "merge" | "adopt" | "approve" => {
-                    self.improve_merge_command(args)
-                }
-                arg => self.set_improve_mode(arg.eq_ignore_ascii_case("safe")),
-            },
-            "improve-safe" => self.set_improve_mode(true),
-            "improve-merge" => self.improve_merge_command("merge"),
-            "improve-help" => self.push_system_msg(
-                "Improve uses a new branch checked out in a separate worktree before making code changes. It never commits or merges without explicit approval. Use /improve safe for research-only evaluation and mana follow-ups.",
-            ),
-            "status" => self.show_status_command(),
-            "autonomy" => self.autonomy_command(args),
-            "clean" => self.clean_command(args),
             "loop" => self.start_loop_command(args),
-            "scope" | "mana-scope" => self.set_active_mana_scope(args),
-            "run" => self.set_active_mana_run(args),
             "stop" => self.stop_active_work(),
             "settings" => {
                 self.open_settings();
             }
-            "personality" => {
-                self.open_personality();
-            }
             "resume" => {
                 self.start_session_list_load();
-            }
-            "session" => {
-                self.push_system_msg("/session is defunct. Use /resume to browse/search sessions.");
             }
             "name" => {
                 let new_name = cmd.strip_prefix("name").unwrap_or("").trim();
@@ -6120,19 +6375,6 @@ impl App {
                 } else {
                     self.session.set_name(new_name);
                     self.push_system_msg(&format!("Session renamed to: {new_name}"));
-                }
-            }
-            "export" => {
-                let dest = cmd.strip_prefix("export").unwrap_or("").trim();
-                let path = if dest.is_empty() {
-                    let name = self.session.name().unwrap_or("conversation");
-                    std::path::PathBuf::from(format!("{name}.md"))
-                } else {
-                    std::path::PathBuf::from(dest)
-                };
-                match self.export_conversation(&path) {
-                    Ok(_) => self.push_system_msg(&format!("Exported to {}", path.display())),
-                    Err(e) => self.push_system_msg(&format!("Export failed: {e}")),
                 }
             }
             "reload" => {
@@ -6149,92 +6391,30 @@ impl App {
                     Err(e) => self.push_system_msg(&format!("Reload failed: {e}")),
                 }
             }
-            "fork" => {
-                let leaf = self.session.leaf_id().unwrap_or_default().to_string();
-                let path = imp_core::storage::global_sessions_dir()
-                    .join(format!("{}.jsonl", uuid::Uuid::new_v4()));
-                match self.session.fork(&leaf, &path) {
-                    Ok(forked) => {
-                        self.session = forked;
-                        self.push_system_msg("Forked. You're on a new branch.");
-                    }
-                    Err(e) => self.push_system_msg(&format!("Fork failed: {e}")),
-                }
-            }
-            "memory" | "mem" => {
-                self.handle_memory_command(cmd);
-            }
-            "checkpoints" => {
-                let checkpoints = self.session.checkpoint_records();
-                if checkpoints.is_empty() {
-                    self.push_system_msg("No checkpoints recorded in this session.");
-                } else {
-                    let mut lines = vec![format!("{} checkpoint(s):", checkpoints.len())];
-                    for checkpoint in checkpoints {
-                        let label = checkpoint
-                            .label
-                            .as_deref()
-                            .map(|label| format!(" — {label}"))
-                            .unwrap_or_default();
-                        lines.push(format!(
-                            "- {}{} ({} file{})",
-                            checkpoint.checkpoint_id,
-                            label,
-                            checkpoint.files.len(),
-                            if checkpoint.files.len() == 1 { "" } else { "s" }
-                        ));
-                    }
-                    self.push_system_msg(&lines.join("\n"));
-                }
-            }
-            "restore-checkpoint" => {
-                let needle = cmd.strip_prefix("restore-checkpoint").unwrap_or("").trim();
-                if needle.is_empty() {
-                    self.push_system_msg("Usage: /restore-checkpoint <checkpoint id or label>");
-                } else {
-                    self.restore_checkpoint_command(needle);
-                }
-            }
             "help" => {
                 self.push_system_msg(concat!(
                     "Commands:\n",
                     "  /new        — start fresh session\n",
-                    "  /model      — switch model\n",
-                    "  /mana [id]  — browse mana work graph\n",
-                    "  /scope <id> — set active mana scope\n",
-
-                    "  /improve    — improve in a sandbox branch/worktree\n",
-                    "  /improve safe — research-only Improve mode\n",
-                    "  /improve merge — show Improve merge plan\n",
-                    "  /improve merge --confirm — merge active Improve branch\n",
-                    "  /status    — show active work status\n",
-                    "  /autonomy <mode> — set autonomy mode\n",
-                    "  /loop <msg> — repeat a prompt until stopped/budgeted\n",
-                    "  /clean     — clean active sandbox/artifacts safely\n",
-                    "  /stop       — stop active imp work\n",
-                    "  /compact    — compress context\n",
                     "  /resume     — resume/search sessions\n",
-                    "  /session    — legacy alias (defunct)\n",
-                    "  /fork       — branch conversation\n",
-                    "  /name <n>   — rename session\n",
-                    "  /export [f] — export to markdown\n",
-                    "  /copy       — copy selection or last response\n",
-                    "  /memory     — view/edit agent memory\n",
-                    "  /checkpoints — list recorded file checkpoints\n",
-                    "  /restore-checkpoint <id> — inspect restore target for a checkpoint\n",
-                    "  /reload     — reload config\n",
-                    "  /settings   — edit settings\n",
-                    "  /personality — customize imp personality\n",
-                    "  /login [provider]   — OAuth login (Anthropic/OpenAI/Kimi Code)\n",
+                    "  /model      — switch model\n",
+                    "  /compact    — compress context\n",
+                    "  /quit       — exit\n",
+                    "  /loop [msg] — continue or auto-loop current intent\n",
+                    "  /stop       — stop active work/loop\n",
+                    "  /reload     — reload config and Lua extensions\n",
+                    "  /setup      — run setup wizard\n",
                     "  /secrets [provider] — save/list API keys & service secrets\n",
+                    "  /login [provider]   — OAuth login (Anthropic/OpenAI/Kimi Code)\n",
+                    "  /name <n>   — rename session\n",
+                    "  /tree       — session tree\n",
+                    "  /settings   — edit settings\n",
                     "  /help       — this message\n",
                     "  :cd <path>  — change working directory\n",
                     "  :pwd        — show working directory\n",
                     "  : <cmd>     — run shell command\n",
                     "  ! <cmd>     — run shell command\n",
                     "  !! <cmd>    — run shell command without adding output to agent context\n",
-                    "\nTools: web.read supports web pages and public YouTube URLs (metadata + captions when available).\n",
-                    "  /quit       — exit",
+                    "\nTools: web.read supports web pages and public YouTube URLs (metadata + captions when available).",
                 ));
             }
             "login" => {
@@ -6255,30 +6435,24 @@ impl App {
                 let all_models = self.model_registry.list().to_vec();
                 self.mode = UiMode::Welcome(WelcomeState::new(&all_models));
             }
-            "copy" => {
-                if self.copy_selection() {
-                    return;
-                }
-                // Copy last assistant message to clipboard
-                if let Some(last) = self.messages.iter().rev().find(|m| {
-                    matches!(
-                        m.role,
-                        MessageRole::Assistant | MessageRole::Warning | MessageRole::Error
-                    )
-                }) {
-                    let text = last.content.clone();
-                    self.copy_to_clipboard(&text);
-                    self.messages.push(DisplayMessage {
-                        role: MessageRole::System,
-                        content: "Copied to clipboard.".into(),
-                        thinking: None,
-                        tool_calls: Vec::new(),
-                        assistant_blocks: Vec::new(),
-                        is_streaming: false,
-                        timestamp: imp_llm::now(),
-                    });
+            "autonomy" => self.autonomy_command(args),
+            "memory" | "mem" => self.handle_memory_command(cmd),
+            "checkpoints" => self.checkpoints_command(),
+            "restore" | "restore-checkpoint" => self.restore_checkpoint_command(args),
+            "eval" => self.eval_candidate_command(args),
+            "plan" => self.workflow_plan_command(args),
+            "run" => self.workflow_run_command(args),
+            "workflow" => {
+                let first = args.split_whitespace().next().unwrap_or_default();
+                if matches!(first, "list" | "show" | "validate" | "run" | "update") {
+                    self.workflow_inspect_command(args);
+                } else if args.trim().is_empty() {
+                    self.show_workflows();
+                } else {
+                    self.show_workflow_profile(args.trim());
                 }
             }
+            "workflows" => self.show_workflows(),
             _ => {
                 // Try Lua extension commands before reporting unknown
                 if !self.try_lua_command(cmd) && !self.try_skill_command(cmd) {
@@ -6504,6 +6678,16 @@ impl App {
             .and_then(|runtime| runtime.lock().ok().map(|guard| guard.command_summaries()))
             .unwrap_or_default();
         let commands = merge_extension_commands(builtin_commands(), extension_commands);
+        let commands = match self.config.workflow_registry() {
+            Ok(registry) => merge_workflow_commands(
+                commands,
+                registry
+                    .iter()
+                    .map(|profile| (profile.name.clone(), profile.description.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+            Err(_) => commands,
+        };
         merge_skill_commands(commands, self.skill_summaries())
     }
 
@@ -6871,23 +7055,6 @@ impl App {
         self.mode = UiMode::Settings(state);
     }
 
-    fn open_personality(&mut self) {
-        let user_config_dir = Config::user_config_dir();
-        let global_path = user_config_dir.join("soul.md");
-        let project_soul = imp_core::resources::discover_project_soul(&self.cwd);
-        let project_path = project_soul
-            .as_ref()
-            .map(|soul| soul.path.clone())
-            .unwrap_or_else(|| imp_core::resources::suggested_project_soul_path(&self.cwd));
-        let scope = if project_soul.is_some() {
-            PersonalityScope::Project
-        } else {
-            PersonalityScope::Global
-        };
-        let state = PersonalityState::from_paths(global_path, project_path, scope);
-        self.mode = UiMode::Personality(state);
-    }
-
     fn start_session_list_load(&mut self) {
         self.mode = UiMode::SessionPicker(SessionPickerState::loading(Some(&self.cwd)));
         if self.session_list_task.is_some() {
@@ -6898,10 +7065,12 @@ impl App {
         let signal_tx = self.runtime_signal_tx.clone();
         self.session_list_task = Some(tokio::spawn(async move {
             let signal = match tokio::task::spawn_blocking(move || {
-                SessionManager::list(&session_dir)
+                SessionManager::list_page(&session_dir, 0, SESSION_LIST_PAGE_SIZE, None)
                     .map(|sessions| SessionListResult {
                         sessions,
                         preferred_cwd,
+                        offset: 0,
+                        limit: SESSION_LIST_PAGE_SIZE,
                     })
                     .map_err(|error| format!("Failed to list sessions: {error}"))
             })
@@ -6917,8 +7086,59 @@ impl App {
         }));
     }
 
+    fn start_session_list_page_load(&mut self, offset: usize, query: Option<String>) {
+        if self.session_list_task.is_some() {
+            return;
+        }
+        let session_dir = imp_core::storage::global_sessions_dir();
+        let preferred_cwd = self.cwd.clone();
+        let signal_tx = self.runtime_signal_tx.clone();
+        let query_for_task = query.clone();
+        self.session_list_task = Some(tokio::spawn(async move {
+            let signal = match tokio::task::spawn_blocking(move || {
+                SessionManager::list_page(
+                    &session_dir,
+                    offset,
+                    SESSION_LIST_PAGE_SIZE,
+                    query_for_task.as_deref(),
+                )
+                .map(|sessions| SessionListResult {
+                    sessions,
+                    preferred_cwd,
+                    offset,
+                    limit: SESSION_LIST_PAGE_SIZE,
+                })
+                .map_err(|error| format!("Failed to list sessions: {error}"))
+            })
+            .await
+            {
+                Ok(Ok(result)) => RuntimeSignal::SessionListLoaded(result),
+                Ok(Err(error)) => RuntimeSignal::SessionListFailed(error),
+                Err(error) => {
+                    RuntimeSignal::SessionListFailed(format!("Session list task failure: {error}"))
+                }
+            };
+            let _ = signal_tx.send(signal).await;
+        }));
+    }
+
+    fn maybe_load_more_sessions(&mut self) {
+        let next_offset = match &mut self.mode {
+            UiMode::SessionPicker(state)
+                if state.should_load_more(SESSION_LIST_PREFETCH_REMAINING) =>
+            {
+                let next_offset = state.next_offset();
+                state.set_loading_more(true);
+                next_offset
+            }
+            _ => return,
+        };
+        self.start_session_list_page_load(next_offset, None);
+    }
+
     fn finish_session_list_load(&mut self, result: SessionListResult) {
-        if result.sessions.is_empty() {
+        let has_more = result.sessions.len() >= result.limit;
+        if result.sessions.is_empty() && result.offset == 0 {
             self.mode = UiMode::Normal;
             self.push_system_msg("No saved sessions found.");
             return;
@@ -6926,16 +7146,20 @@ impl App {
 
         let preferred_cwd = result.preferred_cwd;
         if let UiMode::SessionPicker(state) = &mut self.mode {
-            state.finish_loading(result.sessions);
-            if state.filtered_indices.is_empty() {
-                self.mode = UiMode::Normal;
-                self.push_system_msg("No saved sessions found.");
+            if result.offset == 0 {
+                state.finish_loading(result.sessions);
+                state.has_more = has_more;
+                if state.filtered_indices.is_empty() {
+                    self.mode = UiMode::Normal;
+                    self.push_system_msg("No saved sessions found.");
+                }
+            } else {
+                state.append_sessions(result.sessions, has_more);
             }
         } else {
-            self.mode = UiMode::SessionPicker(SessionPickerState::new(
-                result.sessions,
-                Some(&preferred_cwd),
-            ));
+            let mut state = SessionPickerState::new(result.sessions, Some(&preferred_cwd));
+            state.has_more = has_more;
+            self.mode = UiMode::SessionPicker(state);
         }
     }
 
@@ -6997,6 +7221,7 @@ impl App {
                 if let UiMode::SessionPicker(ref mut state) = self.mode {
                     state.move_down();
                 }
+                self.maybe_load_more_sessions();
             }
             KeyCode::Backspace => {
                 if let UiMode::SessionPicker(ref mut state) = self.mode {
@@ -7141,6 +7366,51 @@ impl App {
         });
 
         match (&result, reply) {
+            (
+                AskResult::Selected(indices),
+                Some(AskReply::WorkflowSuggestion { profile, prompt }),
+            ) => {
+                let labels: Vec<String> = indices
+                    .iter()
+                    .filter_map(|&i| state.options.get(i).map(|o| o.label.clone()))
+                    .collect();
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::User,
+                    content: labels.join(", "),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+                self.invalidate_chat_render_cache();
+                if indices.first().copied() == Some(0) {
+                    self.enqueue_workflow_turn(profile, prompt);
+                } else {
+                    self.enqueue_visible_agent_turn(prompt);
+                }
+            }
+            (AskResult::Text(text), Some(AskReply::WorkflowSuggestion { profile, prompt })) => {
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::User,
+                    content: text.clone(),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+                self.invalidate_chat_render_cache();
+                if text
+                    .trim()
+                    .eq_ignore_ascii_case(&format!("Use /{}", profile.name))
+                    || text.trim().starts_with(&format!("Use /{} ·", profile.name))
+                {
+                    self.enqueue_workflow_turn(profile, prompt);
+                } else {
+                    self.enqueue_visible_agent_turn(prompt);
+                }
+            }
             (AskResult::Text(text), Some(AskReply::Input(tx))) => {
                 self.messages.push(DisplayMessage {
                     role: MessageRole::User,
@@ -7192,8 +7462,30 @@ impl App {
                     });
                     self.invalidate_chat_render_cache();
                     let _ = tx.send(Some(idx));
+                } else if let Some(other_idx) = state
+                    .options
+                    .iter()
+                    .position(|o| o.label.eq_ignore_ascii_case("Other..."))
+                {
+                    // Select-style UI replies can only send an index back to the
+                    // tool. Preserve the user's typed custom answer visually, then
+                    // select the explicit Other option so the ask_user tool can
+                    // collect and return free text instead of treating the answer
+                    // as skipped.
+                    self.messages.push(DisplayMessage {
+                        role: MessageRole::User,
+                        content: text.clone(),
+                        thinking: None,
+                        tool_calls: Vec::new(),
+                        assistant_blocks: Vec::new(),
+                        is_streaming: false,
+                        timestamp: imp_llm::now(),
+                    });
+                    self.invalidate_chat_render_cache();
+                    let _ = tx.send(Some(other_idx));
                 } else {
-                    // No match — send None. The ask tool will get "User cancelled".
+                    // No match and no explicit Other option — send None. The ask
+                    // tool will report the question as skipped.
                     self.messages.push(DisplayMessage {
                         role: MessageRole::User,
                         content: text.clone(),
@@ -7346,6 +7638,7 @@ impl App {
                 AskReply::Input(tx) => {
                     let _ = tx.send(None);
                 }
+                AskReply::WorkflowSuggestion { .. } => {}
             }
         }
         // Stop the agent — user wants control back
@@ -7416,128 +7709,6 @@ impl App {
             KeyCode::Char(c) => {
                 if let UiMode::Settings(ref mut state) = self.mode {
                     state.push_char(c);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_personality_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    if state.pending_overwrite.is_some() {
-                        state.cancel_overwrite();
-                    } else {
-                        self.mode = UiMode::Normal;
-                    }
-                }
-            }
-            KeyCode::Tab => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    state.switch_tab();
-                }
-            }
-            KeyCode::Up => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    match state.tab {
-                        crate::views::personality::PersonalityTab::Builder => state.move_up(),
-                        crate::views::personality::PersonalityTab::Source => {
-                            state.editor.move_up();
-                        }
-                    }
-                }
-            }
-            KeyCode::Down => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    match state.tab {
-                        crate::views::personality::PersonalityTab::Builder => state.move_down(),
-                        crate::views::personality::PersonalityTab::Source => {
-                            state.editor.move_down();
-                        }
-                    }
-                }
-            }
-            KeyCode::Left => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    match state.tab {
-                        crate::views::personality::PersonalityTab::Builder => {
-                            state.cycle_backward()
-                        }
-                        crate::views::personality::PersonalityTab::Source => state.move_left(),
-                    }
-                }
-            }
-            KeyCode::Right => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    match state.tab {
-                        crate::views::personality::PersonalityTab::Builder => state.cycle_forward(),
-                        crate::views::personality::PersonalityTab::Source => state.move_right(),
-                    }
-                }
-            }
-            KeyCode::Enter => {
-                let should_save = matches!(&self.mode, UiMode::Personality(s) if s.pending_overwrite.is_none() && matches!(s.tab, crate::views::personality::PersonalityTab::Builder) && matches!(s.current_field(), crate::views::personality::PersonalityField::Save));
-                if should_save {
-                    self.save_personality();
-                } else if let UiMode::Personality(ref mut state) = self.mode {
-                    if state.pending_overwrite.is_some() {
-                        state.confirm_overwrite();
-                    } else {
-                        match state.tab {
-                            crate::views::personality::PersonalityTab::Builder => {
-                                state.cycle_forward()
-                            }
-                            crate::views::personality::PersonalityTab::Source => {
-                                state.insert_newline()
-                            }
-                        }
-                    }
-                }
-            }
-            KeyCode::Backspace => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    if state.pending_overwrite.is_none()
-                        && matches!(state.tab, crate::views::personality::PersonalityTab::Source)
-                    {
-                        state.pop_char();
-                    }
-                }
-            }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    if state.pending_overwrite.is_some() {
-                        state.confirm_overwrite();
-                    } else if matches!(state.tab, crate::views::personality::PersonalityTab::Source)
-                    {
-                        if let KeyCode::Char(c) = key.code {
-                            state.insert_char(c);
-                        }
-                    }
-                }
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    if state.pending_overwrite.is_some() {
-                        state.cancel_overwrite();
-                    } else if matches!(state.tab, crate::views::personality::PersonalityTab::Source)
-                    {
-                        if let KeyCode::Char(c) = key.code {
-                            state.insert_char(c);
-                        }
-                    }
-                }
-            }
-            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.save_personality();
-            }
-            KeyCode::Char(c) => {
-                if let UiMode::Personality(ref mut state) = self.mode {
-                    if state.pending_overwrite.is_none()
-                        && matches!(state.tab, crate::views::personality::PersonalityTab::Source)
-                    {
-                        state.insert_char(c);
-                    }
                 }
             }
             _ => {}
@@ -7835,37 +8006,6 @@ impl App {
         }
     }
 
-    fn save_personality(&mut self) {
-        let state = match &self.mode {
-            UiMode::Personality(state) => state.clone(),
-            _ => return,
-        };
-
-        let path = state.current_path().clone();
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                self.push_error_msg(&format!("Failed to create soul directory: {e}"));
-                return;
-            }
-        }
-
-        let content = if state.editor.is_empty() {
-            default_soul_markdown()
-        } else {
-            state.editor.content().to_string()
-        };
-
-        match std::fs::write(&path, content) {
-            Ok(()) => {
-                if let UiMode::Personality(ref mut current) = self.mode {
-                    current.save_success();
-                }
-                self.push_system_msg(&format!("Soul saved to {}", path.display()));
-            }
-            Err(e) => self.push_error_msg(&format!("Failed to save soul: {e}")),
-        }
-    }
-
     fn save_settings(&mut self) {
         // Extract state before mutating self
         let state = match &self.mode {
@@ -7973,6 +8113,7 @@ impl App {
         self.mode = UiMode::ModelSelector(ModelSelectorState::new(models, current_model));
     }
 
+    #[cfg(feature = "mana-ui")]
     fn open_mana_navigator(&mut self, initial_id: Option<&str>) {
         self.mode = UiMode::ManaNavigator(ManaNavigatorState::loading(&self.cwd));
         if self.mana_navigator_task.is_some() {
@@ -8000,6 +8141,7 @@ impl App {
         }));
     }
 
+    #[cfg(feature = "mana-ui")]
     fn finish_mana_navigator_load(&mut self, state: ManaNavigatorState) {
         self.mana_navigator_task = None;
         if matches!(self.mode, UiMode::ManaNavigator(_)) {
@@ -8007,6 +8149,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "mana-ui")]
     fn fail_mana_navigator_load(&mut self, mana_dir: Option<PathBuf>, message: String) {
         self.mana_navigator_task = None;
         if matches!(self.mode, UiMode::ManaNavigator(_)) {
@@ -8222,6 +8365,12 @@ impl App {
                     let system_prompt = system_prompt.clone();
                     let prompt = prompt.to_string();
                     let retry_policy = retry_policy.clone();
+                    let prompt_tokens = imp_core::context::estimate_tokens(&prompt);
+                    let prompt_limit =
+                        ((model_meta.context_window as f64) * 0.6).floor().max(1.0) as u32;
+                    if prompt_tokens > prompt_limit {
+                        return Ok(None);
+                    }
 
                     futures::executor::block_on(async move {
                         let mut summary = String::new();
@@ -8232,10 +8381,15 @@ impl App {
                         };
                         let context = LlmContext {
                             messages: vec![Message::user(prompt)],
+                            session_id: None,
+                            thread_id: None,
                         };
+                        let compaction_max_tokens = requested_max_tokens
+                            .map(|tokens| tokens.min(4096))
+                            .or(Some(2048));
                         let options = RequestOptions {
                             thinking_level,
-                            max_tokens: requested_max_tokens.or(Some(2048)),
+                            max_tokens: compaction_max_tokens,
                             temperature: Some(0.2),
                             system_prompt,
                             tools: Vec::new(),
@@ -8255,27 +8409,42 @@ impl App {
                             retry_policy,
                         );
 
-                        while let Some(item) = stream.next().await {
-                            match item {
-                                Ok(StreamEvent::TextDelta { text }) => summary.push_str(&text),
-                                Ok(StreamEvent::MessageEnd { message }) => {
-                                    let body = message
-                                        .content
-                                        .iter()
-                                        .filter_map(|block| match block {
-                                            imp_llm::ContentBlock::Text { text } => {
-                                                Some(text.as_str())
+                        let stream_result =
+                            tokio::time::timeout(std::time::Duration::from_secs(180), async {
+                                while let Some(item) = stream.next().await {
+                                    match item {
+                                        Ok(StreamEvent::TextDelta { text }) => {
+                                            summary.push_str(&text)
+                                        }
+                                        Ok(StreamEvent::MessageEnd { message }) => {
+                                            let body = message
+                                                .content
+                                                .iter()
+                                                .filter_map(|block| match block {
+                                                    imp_llm::ContentBlock::Text { text } => {
+                                                        Some(text.as_str())
+                                                    }
+                                                    _ => None,
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join("");
+                                            if !body.is_empty() {
+                                                message_end_text = Some(body);
                                             }
-                                            _ => None,
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("");
-                                    if !body.is_empty() {
-                                        message_end_text = Some(body);
+                                        }
+                                        Ok(_) => {}
+                                        Err(error) => return Err(error.to_string()),
                                     }
                                 }
-                                Ok(_) => {}
-                                Err(error) => return Err(error.to_string()),
+                                Ok::<(), String>(())
+                            })
+                            .await;
+
+                        match stream_result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => return Err(error),
+                            Err(_) => {
+                                return Err("Compaction timed out after 180 seconds".to_string())
                             }
                         }
 
@@ -8290,7 +8459,8 @@ impl App {
                             Ok(final_text)
                         }
                     })
-                    .ok()
+                    .map(Some)
+                    .map_err(|error| ImpCoreError::Llm(imp_llm::Error::Provider(error)))
                 },
             )
             .map_err(|e| e.to_string())?
@@ -8335,7 +8505,7 @@ impl App {
     fn finish_manual_compaction(&mut self, summary: String) {
         let result =
             execute_manual_compaction(&mut self.session, DEFAULT_KEEP_RECENT_GROUPS, |_| {
-                Some(summary.clone())
+                Ok(Some(summary.clone()))
             });
 
         match result {
@@ -8369,32 +8539,34 @@ impl App {
         }
     }
 
-    fn export_conversation(&self, path: &std::path::Path) -> std::io::Result<()> {
-        use std::io::Write;
-        let mut f = std::fs::File::create(path)?;
-        for msg in &self.messages {
-            let role = match msg.role {
-                MessageRole::User => "**You:**",
-                MessageRole::Assistant => "**Assistant:**",
-                MessageRole::System | MessageRole::Compaction => "*System:*",
-                MessageRole::Warning => "*Warning:*",
-                MessageRole::Error => "**Error:**",
-            };
-            writeln!(f, "{role}\n{}\n", msg.content)?;
-            for tc in &msg.tool_calls {
-                writeln!(f, "> `{}`: {}", tc.name, tc.args_summary)?;
-                if let Some(ref output) = tc.output {
-                    let preview = truncate_chars_with_suffix(output, 200, "");
-                    writeln!(f, "> {preview}\n")?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     // ── Agent event handling ────────────────────────────────────
 
+    fn apply_runtime_snapshot_projection(&mut self) {
+        self.runtime_snapshot = self.runtime_state.snapshot();
+
+        for (key, value) in &self.runtime_snapshot.status_items {
+            self.status_items.insert(key.clone(), value.clone());
+        }
+
+        self.verification_status_items.clear();
+        for gate in &self.runtime_snapshot.verification_gates {
+            let status = format!("{:?}", gate.status).to_lowercase();
+            self.verification_status_items.insert(
+                gate.id.clone(),
+                verification_status_text(gate, Some(&status), None),
+            );
+        }
+    }
+
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
+        self.runtime_event_sequence += 1;
+        let runtime_event = event.to_runtime_event("tui", self.runtime_event_sequence);
+        self.runtime_state.apply(&runtime_event);
+        self.apply_runtime_snapshot_projection();
+        self.handle_agent_event_legacy(event)
+    }
+
+    fn handle_agent_event_legacy(&mut self, event: AgentEvent) {
         if !self.first_agent_event_seen {
             self.first_agent_event_seen = true;
             if let Some(started_at) = self.agent_turn_started_at {
@@ -8440,7 +8612,6 @@ impl App {
                     self.send_message();
                 }
                 self.llm_thought_segment_started_at = None;
-                self.queue_improve_mode_continuation_if_ready();
                 self.queue_loop_continuation_if_ready();
                 self.maybe_notify_agent_completion();
             }
@@ -8608,6 +8779,38 @@ impl App {
                 self.push_warning_msg(&message);
             }
             AgentEvent::RecoveryCheckpoint { .. } => {}
+            AgentEvent::WorktreeCreated { metadata } => {
+                self.status_items.insert(
+                    "worktree".to_string(),
+                    format!("{} @ {}", metadata.branch, metadata.worktree_path.display()),
+                );
+                self.push_system_msg(&format!(
+                    "Worktree-auto active: editing {} on branch {} (original checkout: {}).",
+                    metadata.worktree_path.display(),
+                    metadata.branch,
+                    metadata.main_worktree.display()
+                ));
+                self.invalidate_chat_render_cache();
+            }
+            AgentEvent::WorktreeDiffCaptured { metadata } => {
+                self.status_items.insert(
+                    "worktree-diff".to_string(),
+                    metadata.patch_path.display().to_string(),
+                );
+                self.push_system_msg(&format!(
+                    "Worktree diff captured: {}. Closeout choices: keep worktree, apply patch, or discard worktree.",
+                    metadata.patch_path.display()
+                ));
+                self.invalidate_chat_render_cache();
+            }
+            AgentEvent::WorktreeCloseout { result } => {
+                self.status_items.insert(
+                    "worktree-closeout".to_string(),
+                    format!("{:?}: {}", result.action, result.message),
+                );
+                self.push_system_msg(&format!("Worktree closeout: {}", result.message));
+                self.invalidate_chat_render_cache();
+            }
             AgentEvent::EvidenceWritten { path } => {
                 self.status_items
                     .insert("evidence".to_string(), path.display().to_string());
@@ -8642,6 +8845,9 @@ impl App {
                 if let Some(message) = trust_policy_warning(&record) {
                     self.push_warning_msg(&message);
                 }
+                if let Some(message) = extension_policy_warning(&record) {
+                    self.push_warning_msg(&message);
+                }
             }
             AgentEvent::Timing { timing } => {
                 self.status_items.insert("timing".to_string(), {
@@ -8664,9 +8870,8 @@ impl App {
             AgentEvent::TurnEnd {
                 index,
                 message,
-                mana_review,
+                mana_review: _,
             } => {
-                self.maybe_update_active_mana_scope_from_review(&mana_review);
                 self.completed_turns_in_run += 1;
                 // Update context tracking from this turn's usage
                 if let Some(ref usage) = message.usage {
@@ -8702,6 +8907,10 @@ impl App {
 
                 // Parse the error for a cleaner display
                 let display_error = format_error_for_display(&error);
+                if self.last_agent_error.as_deref() == Some(display_error.as_str()) {
+                    return;
+                }
+                self.last_agent_error = Some(display_error.clone());
 
                 self.messages.push(DisplayMessage {
                     role: MessageRole::Error,
@@ -8767,6 +8976,17 @@ fn command_arg(rest: &str) -> Option<&str> {
     } else {
         rest.strip_prefix(char::is_whitespace).map(str::trim)
     }
+}
+
+fn command_option_value(args: &str, option: &str) -> Option<String> {
+    let needle = format!("--{option}");
+    let (_, tail) = args.split_once(&needle)?;
+    let value = tail.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let next_option = value.find(" --").unwrap_or(value.len());
+    Some(value[..next_option].trim().to_string()).filter(|value| !value.is_empty())
 }
 
 fn expand_prompt_path(path: &str, cwd: &Path) -> PathBuf {
@@ -8865,6 +9085,15 @@ mod session_lifecycle {
         assert_eq!(app.messages[last_user].content, "keep going");
         assert_eq!(app.messages[last_assistant].role, MessageRole::Assistant);
         assert!(app.messages[last_assistant].is_streaming);
+    }
+
+    #[test]
+    fn agent_start_request_keeps_expensive_startup_work_deferred() {
+        let mut app = make_app();
+        let request = app.agent_start_request();
+
+        assert_eq!(request.model_name, app.model_name);
+        assert_eq!(request.config.model, app.config.model);
     }
 
     #[test]
@@ -8998,6 +9227,39 @@ mod session_lifecycle {
     }
 
     #[test]
+    fn terminal_title_uses_loop_icon_when_loop_is_active() {
+        let mut app = make_app();
+        app.session.set_name("my chat");
+        app.loop_state = Some(LoopState {
+            message: "keep going".into(),
+            completed_turns: 1,
+            budget: Some(3),
+        });
+        app.is_streaming = true;
+
+        app.tick = 0;
+        assert_eq!(app.terminal_title(), "↻ — my chat");
+        app.tick = 8;
+        assert_eq!(app.terminal_title(), "↻ — my chat");
+    }
+
+    #[test]
+    fn terminal_title_uses_static_loop_glyph_when_animations_are_off() {
+        let mut app = make_app();
+        app.config.ui.animations = imp_core::config::AnimationLevel::None;
+        app.session.set_name("my chat");
+        app.loop_state = Some(LoopState {
+            message: "keep going".into(),
+            completed_turns: 1,
+            budget: Some(3),
+        });
+        app.is_streaming = true;
+        app.tick = 8;
+
+        assert_eq!(app.terminal_title(), "↻ — my chat");
+    }
+
+    #[test]
     fn terminal_title_defaults_to_chat_when_empty() {
         let app = make_app();
         assert_eq!(app.terminal_title(), "imp — chat");
@@ -9075,6 +9337,46 @@ mod session_lifecycle {
     }
 
     #[test]
+    fn ask_select_typed_custom_text_with_other_returns_other_index() {
+        use crate::views::ask_bar::{AskOption, AskState};
+        use tokio::sync::oneshot;
+
+        let mut app = make_app();
+        let (tx, mut rx) = oneshot::channel();
+        app.begin_ask(
+            AskState::with_placeholder(
+                "Choose".to_string(),
+                String::new(),
+                vec![
+                    AskOption {
+                        label: "Red".to_string(),
+                        description: None,
+                        checked: false,
+                    },
+                    AskOption {
+                        label: "Other...".to_string(),
+                        description: None,
+                        checked: false,
+                    },
+                ],
+                false,
+                String::new(),
+            ),
+            AskReply::Select(tx),
+        );
+        app.editor.insert_paste("purple");
+        app.sync_ask_from_editor();
+
+        app.finish_ask();
+
+        assert_eq!(rx.try_recv().unwrap(), Some(1));
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content == "purple"));
+    }
+
+    #[test]
     fn tui_integration_app_new_persistent_session() {
         let tmp = TempDir::new().unwrap();
         let app = make_persistent_app(&tmp);
@@ -9118,6 +9420,72 @@ mod session_lifecycle {
         assert_eq!(app.session.leaf_id(), Some("entry-1"));
     }
 
+    #[test]
+    fn eval_candidate_command_saves_manual_candidate_from_latest_evidence() {
+        let tmp = TempDir::new().unwrap();
+        let mut app = make_persistent_app(&tmp);
+        let run_root = app.cwd.join(".imp/runs/run_tui");
+        std::fs::create_dir_all(&run_root).unwrap();
+        std::fs::write(run_root.join("trace.jsonl"), "{}\n").unwrap();
+        std::fs::write(run_root.join("evidence.md"), "# Evidence\n").unwrap();
+        app.status_items.insert(
+            "evidence".into(),
+            run_root.join("evidence.md").display().to_string(),
+        );
+
+        app.execute_command(
+            "eval Expected corrected behavior --note Human correction --verifier cargo test tui",
+        );
+
+        let path = run_root
+            .join("eval-candidates")
+            .join("run_tui-manual")
+            .join("candidate.json");
+        let json = std::fs::read_to_string(&path).unwrap();
+        let candidate: EvalCandidate = serde_json::from_str(&json).unwrap();
+        assert_eq!(candidate.failure_mode, EvalFailureMode::UserCorrection);
+        assert_eq!(candidate.source.run_id.as_deref(), Some("run_tui"));
+        assert_eq!(
+            candidate.expected_behavior.summary,
+            "Expected corrected behavior"
+        );
+        assert_eq!(
+            candidate.expected_behavior.assertions,
+            vec!["cargo test tui passes"]
+        );
+        assert_eq!(
+            candidate
+                .actual_behavior
+                .as_ref()
+                .map(|actual| actual.summary.as_str()),
+            Some("Human correction")
+        );
+        assert_eq!(
+            candidate.verifiers[0].command.as_deref(),
+            Some("cargo test tui")
+        );
+        let saved_path = app.status_items.get("eval-candidate").cloned();
+        assert_eq!(
+            saved_path.as_deref(),
+            Some(path.display().to_string().as_str())
+        );
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Saved eval candidate")));
+    }
+
+    #[test]
+    fn eval_candidate_command_requires_evidence() {
+        let mut app = make_app();
+        app.execute_command("eval Expected behavior");
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.role == MessageRole::Warning
+                && message.content.contains("No run evidence")));
+    }
+
     #[tokio::test]
     async fn send_message_defers_agent_start_until_after_echo_redraw() {
         let tmp = TempDir::new().unwrap();
@@ -9156,6 +9524,7 @@ mod session_lifecycle {
         }
 
         assert!(app.pending_agent_prompt.is_none());
+        assert!(app.agent_start_task.is_none());
         assert!(app
             .messages
             .iter()
@@ -9322,6 +9691,7 @@ mod session_lifecycle {
         assert!(msgs[0].is_user());
     }
 
+    #[cfg(feature = "mana-ui")]
     #[tokio::test]
     async fn tui_integration_slash_mana_opens_navigator() {
         let mut app = make_app();
@@ -9330,9 +9700,9 @@ mod session_lifecycle {
     }
 
     #[test]
-    fn command_palette_includes_mana_command() {
+    fn command_palette_omits_mana_command() {
         let commands = builtin_commands();
-        assert!(commands.iter().any(|cmd| cmd.name == "mana"));
+        assert!(!commands.iter().any(|cmd| cmd.name == "mana"));
     }
 
     // ── 3. Slash commands ───────────────────────────────────────
@@ -9429,6 +9799,7 @@ mod session_lifecycle {
             updated_at: 2,
             message_count: 1,
             first_message: Some("hello".into()),
+            last_message: Some("hello".into()),
             name: None,
             summary: None,
         };
@@ -9436,6 +9807,8 @@ mod session_lifecycle {
         app.finish_session_list_load(SessionListResult {
             sessions: vec![info],
             preferred_cwd: temp.path().to_path_buf(),
+            offset: 0,
+            limit: SESSION_LIST_PAGE_SIZE,
         });
 
         match &app.mode {
@@ -9640,10 +10013,10 @@ mod session_lifecycle {
     }
 
     #[test]
-    fn command_palette_includes_checkpoint_commands() {
+    fn command_palette_omits_checkpoint_commands() {
         let commands = builtin_commands();
-        assert!(commands.iter().any(|cmd| cmd.name == "checkpoints"));
-        assert!(commands.iter().any(|cmd| cmd.name == "restore-checkpoint"));
+        assert!(!commands.iter().any(|cmd| cmd.name == "checkpoints"));
+        assert!(!commands.iter().any(|cmd| cmd.name == "restore-checkpoint"));
     }
 
     #[test]
@@ -9961,40 +10334,6 @@ mod session_lifecycle {
         assert_eq!(system.content, "transient note");
     }
     #[test]
-    fn tui_integration_slash_personality_opens_overlay() {
-        let mut app = make_app();
-        app.execute_command("personality");
-        assert!(matches!(app.mode, UiMode::Personality(_)));
-    }
-
-    #[test]
-    fn tui_personality_prefers_ancestor_project_soul_when_opening() {
-        let tmp = TempDir::new().unwrap();
-        let project = tmp.path().join("project");
-        let nested = project.join("src").join("deep");
-        let session_dir = tmp.path().join("sessions");
-        std::fs::create_dir_all(project.join(".imp")).unwrap();
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(
-            project.join(".imp").join("soul.md"),
-            "# Soul\n\nproject soul\n",
-        )
-        .unwrap();
-
-        let session = SessionManager::new(&nested, &session_dir).unwrap();
-        let mut app = make_app_with_session(session, nested.clone());
-        app.execute_command("personality");
-
-        match &app.mode {
-            UiMode::Personality(state) => {
-                assert_eq!(state.current_path(), &project.join(".imp").join("soul.md"));
-                assert!(matches!(state.scope, PersonalityScope::Project));
-            }
-            _ => panic!("expected personality mode"),
-        }
-    }
-
-    #[test]
     fn tui_integration_slash_memory_shows_stores() {
         let mut app = make_app();
 
@@ -10004,6 +10343,105 @@ mod session_lifecycle {
         assert_eq!(app.messages[0].role, MessageRole::System);
         assert!(app.messages[0].content.contains("Memory ("));
         assert!(app.messages[0].content.contains("User profile ("));
+    }
+
+    #[tokio::test]
+    async fn workflow_command_wraps_prompt_for_one_turn() {
+        let mut app = make_app();
+        app.execute_command("plan add billing");
+        assert!(app
+            .pending_agent_prompt
+            .as_ref()
+            .unwrap()
+            .contains("Task workflow: plan"));
+        assert!(app
+            .pending_agent_prompt
+            .as_ref()
+            .unwrap()
+            .contains("add billing"));
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Using /plan")));
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content == "/plan add billing"));
+    }
+
+    #[tokio::test]
+    async fn workflow_alias_resolves_to_profile() {
+        let mut app = make_app();
+        app.execute_command("spec add billing");
+        assert!(app
+            .pending_agent_prompt
+            .as_ref()
+            .unwrap()
+            .contains("Task workflow: plan"));
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content == "/plan add billing"));
+    }
+
+    #[test]
+    fn workflows_command_lists_profiles() {
+        let mut app = make_app();
+        app.execute_command("workflows");
+        let content = &app.messages.last().unwrap().content;
+        assert!(content.contains("/plan"));
+        assert!(content.contains("/review"));
+    }
+
+    #[test]
+    fn workflow_command_shows_profile_details() {
+        let mut app = make_app();
+        app.execute_command("workflow plan");
+        let content = &app.messages.last().unwrap().content;
+        assert!(content.contains("/plan"));
+        assert!(content.contains("aliases:"));
+        assert!(content.contains("action: Save plan"));
+    }
+
+    #[test]
+    fn natural_prompt_suggests_workflow_without_starting_agent() {
+        let mut app = make_app();
+        app.editor.set_content("please plan this feature");
+        app.send_message();
+        assert!(app.pending_agent_prompt.is_none());
+        assert!(matches!(
+            app.ask_reply,
+            Some(AskReply::WorkflowSuggestion { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn accepting_workflow_suggestion_wraps_prompt() {
+        let mut app = make_app();
+        app.editor.set_content("please plan this feature");
+        app.send_message();
+        app.finish_ask();
+        assert!(app
+            .pending_agent_prompt
+            .as_ref()
+            .unwrap()
+            .contains("Task workflow: plan"));
+    }
+
+    #[tokio::test]
+    async fn declining_workflow_suggestion_sends_original_prompt() {
+        let mut app = make_app();
+        app.editor.set_content("please plan this feature");
+        app.send_message();
+        if let Some(state) = app.ask_state.as_mut() {
+            state.cursor = 1;
+        }
+        app.finish_ask();
+        assert_eq!(
+            app.pending_agent_prompt.as_deref(),
+            Some("please plan this feature")
+        );
+        assert!(app.editor.content().is_empty());
     }
 
     #[test]
@@ -10060,19 +10498,6 @@ mod session_lifecycle {
         let content = &app.messages.last().unwrap().content;
         assert!(content.contains("Unknown memory subcommand"));
         assert!(content.contains("frobnicate"));
-    }
-
-    #[test]
-    fn personality_state_default_sentence_is_visible() {
-        let tmp = TempDir::new().unwrap();
-        let state = crate::views::personality::PersonalityState::new(
-            tmp.path().to_path_buf(),
-            crate::views::personality::PersonalityScope::Global,
-        );
-        assert_eq!(
-            state.sentence(),
-            "You are imp, a practical, concise, coding agent."
-        );
     }
 
     #[test]
@@ -10309,6 +10734,22 @@ mod session_lifecycle {
         assert!(!app.sidebar.open);
         assert_eq!(app.active_pane, Pane::Chat);
         assert!(app.selection.is_some());
+    }
+
+    #[test]
+    fn startup_surface_uses_tool_icons() {
+        let app = make_app();
+        let startup = app.build_startup_surface();
+        let tools = startup
+            .panel
+            .sections
+            .iter()
+            .find(|section| section.title == "tools")
+            .expect("tools section present");
+
+        assert!(tools.lines.iter().any(|line| line == "⚑ Workflow"));
+        assert!(tools.lines.iter().any(|line| line == "$ Terminal"));
+        assert!(!tools.lines.iter().any(|line| line.starts_with("• work")));
     }
 
     #[test]
@@ -10557,7 +10998,7 @@ mod session_lifecycle {
             modifiers: KeyModifiers::empty(),
         };
         app.handle_mouse(mouse_detail);
-        assert_eq!(app.sidebar.detail_scroll, 3);
+        assert_eq!(app.sidebar.detail_scroll, 1);
         // Chat scroll should be unchanged
         assert_eq!(app.scroll_offset, 3);
 
@@ -10571,7 +11012,7 @@ mod session_lifecycle {
             modifiers: KeyModifiers::empty(),
         };
         app.handle_mouse(mouse_list);
-        assert_eq!(app.sidebar.list_scroll, 3);
+        assert_eq!(app.sidebar.list_scroll, 1);
     }
 
     #[test]
@@ -10736,7 +11177,107 @@ mod session_lifecycle {
     }
 
     #[test]
-    fn shift_down_extends_selection_and_copy_shortcut_copies_it() {
+    fn mouse_click_on_chat_tool_header_opens_inspector_detail() {
+        let mut app = make_app();
+        app.config.ui.sidebar_style = imp_core::config::SidebarStyle::Split;
+        app.chat_surface = Some(TextSurface::new(
+            SelectablePane::Chat,
+            Rect::new(0, 0, 80, 5),
+            vec!["  ▸ #tc-42 bash $ ls".into()],
+            0,
+        ));
+        app.chat_tool_click_map = vec![(0, "tc-42".into())];
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "checking...".into(),
+            thinking: None,
+            tool_calls: vec![crate::views::tools::DisplayToolCall {
+                id: "tc-42".into(),
+                name: "bash".into(),
+                args_summary: "$ ls".into(),
+                output: Some("file1\nfile2".into()),
+                details: serde_json::Value::Null,
+                is_error: false,
+                expanded: false,
+                streaming_lines: Vec::new(),
+                streaming_output: String::new(),
+            }],
+            assistant_blocks: Vec::new(),
+            is_streaming: false,
+            timestamp: 0,
+        });
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 4,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        });
+
+        assert!(app.sidebar.open);
+        assert_eq!(app.tool_focus, Some(0));
+        assert_eq!(app.active_pane, Pane::SidebarDetail);
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn mouse_click_on_chat_tool_line_uses_render_indices_when_click_map_misses() {
+        let mut app = make_app();
+        app.config.ui.sidebar_style = imp_core::config::SidebarStyle::Inspector;
+        app.chat_surface = Some(TextSurface::new(
+            SelectablePane::Chat,
+            Rect::new(0, 0, 80, 5),
+            vec!["  ✓ bash $ ls".into()],
+            0,
+        ));
+        app.chat_tool_click_map.clear();
+        app.chat_render_cache = Some(ChatRenderCache {
+            key: app.chat_render_cache_key(
+                80,
+                None,
+                app.config.ui.effective_chat_tool_display(),
+                AnimationState::Idle,
+            ),
+            render: crate::views::chat::ChatRenderData {
+                lines: vec![ratatui::text::Line::raw("  ✓ bash $ ls")],
+                tool_line_indices: vec![(0, "tc-42".into())],
+            },
+        });
+        app.messages.push(DisplayMessage {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            thinking: None,
+            tool_calls: vec![crate::views::tools::DisplayToolCall {
+                id: "tc-42".into(),
+                name: "bash".into(),
+                args_summary: "$ ls".into(),
+                output: Some("file1\nfile2".into()),
+                details: serde_json::Value::Null,
+                is_error: false,
+                expanded: false,
+                streaming_lines: Vec::new(),
+                streaming_output: String::new(),
+            }],
+            assistant_blocks: Vec::new(),
+            is_streaming: false,
+            timestamp: 0,
+        });
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 4,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        });
+
+        assert!(app.sidebar.open);
+        assert_eq!(app.tool_focus, Some(0));
+        assert_eq!(app.active_pane, Pane::SidebarDetail);
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn shift_down_extends_selection_and_cmd_c_copies_it() {
         let mut app = make_app();
         app.selection = Some(SelectionState::new(
             SelectablePane::Chat,
@@ -10756,6 +11297,13 @@ mod session_lifecycle {
         assert_eq!(selection.focus.line, 1);
 
         app.handle_normal_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(!app
+            .messages
+            .last()
+            .is_some_and(|message| message.content.contains("Copied selection")));
+
+        app.handle_normal_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER))
             .unwrap();
         assert!(app
             .messages
@@ -11176,6 +11724,109 @@ mod session_lifecycle {
     }
 
     #[test]
+    fn agent_start_status_updates_and_clears_startup_status_item() {
+        let mut app = make_app();
+
+        app.handle_runtime_signal(RuntimeSignal::AgentStartStatus {
+            key: "startup".into(),
+            text: Some("indexing repo…".into()),
+        });
+        assert_eq!(
+            app.status_items.get("startup").map(String::as_str),
+            Some("indexing repo…")
+        );
+
+        app.handle_runtime_signal(RuntimeSignal::AgentStartStatus {
+            key: "startup".into(),
+            text: None,
+        });
+        assert!(!app.status_items.contains_key("startup"));
+    }
+
+    #[test]
+    fn worktree_events_update_status_and_surface_closeout_choices() {
+        let mut app = make_app();
+        let metadata = imp_core::workflow::WorktreeRunMetadata {
+            main_worktree: "/repo".into(),
+            worktree_path: "/tmp/imp-worktree".into(),
+            branch: "imp/run/worktree-auto".into(),
+            patch_path: "/repo/.imp/runs/run-1/worktree/diff.patch".into(),
+            ..imp_core::workflow::WorktreeRunMetadata::default()
+        };
+
+        app.handle_agent_event(AgentEvent::WorktreeCreated {
+            metadata: metadata.clone(),
+        });
+        assert_eq!(
+            app.status_items.get("worktree").map(String::as_str),
+            Some("imp/run/worktree-auto @ /tmp/imp-worktree")
+        );
+        assert_eq!(
+            app.runtime_snapshot
+                .workspace
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.metadata.branch.as_str()),
+            Some("imp/run/worktree-auto")
+        );
+        assert!(app.messages.iter().any(|message| {
+            message.content.contains("Worktree-auto active")
+                && message.content.contains("original checkout: /repo")
+        }));
+
+        app.handle_agent_event(AgentEvent::WorktreeDiffCaptured { metadata });
+        assert_eq!(
+            app.status_items.get("worktree-diff").map(String::as_str),
+            Some("/repo/.imp/runs/run-1/worktree/diff.patch")
+        );
+        assert_eq!(
+            app.runtime_snapshot
+                .status_items
+                .get("worktree-diff")
+                .map(String::as_str),
+            Some("/repo/.imp/runs/run-1/worktree/diff.patch")
+        );
+        assert!(app.messages.iter().any(|message| {
+            message.content.contains("Closeout choices")
+                && message.content.contains("apply patch")
+                && message.content.contains("discard worktree")
+        }));
+
+        app.handle_agent_event(AgentEvent::WorktreeCloseout {
+            result: imp_core::workflow::WorktreeCloseoutResult {
+                action: imp_core::workflow::WorktreeCloseoutAction::Keep,
+                message: "kept worktree".into(),
+                ..imp_core::workflow::WorktreeCloseoutResult::default()
+            },
+        });
+        assert!(app
+            .status_items
+            .get("worktree-closeout")
+            .is_some_and(|value| value.contains("kept worktree")));
+    }
+
+    #[test]
+    fn extension_policy_event_surfaces_manifest_warning() {
+        let mut app = make_app();
+        let mut context = imp_core::reference_monitor::ToolPolicyContext::new(
+            "example_network",
+            imp_core::reference_monitor::ToolActionKind::Extension,
+        );
+        context.metadata.extension = true;
+        context.metadata.network = true;
+        context.autonomy_mode = imp_core::workflow::AutonomyMode::Safe;
+        let record = imp_core::reference_monitor::ReferenceMonitor
+            .evaluate(&context, &imp_core::policy::RunPolicy::new());
+
+        app.handle_agent_event(AgentEvent::PolicyChecked { record });
+
+        assert!(app.messages.iter().any(|message| {
+            message.content.contains("Extension policy:")
+                && message.content.contains("extension_network_denied")
+        }));
+    }
+
+    #[test]
     fn trust_policy_event_surfaces_concise_warning() {
         let mut app = make_app();
         let context = imp_core::reference_monitor::ToolPolicyContext::new(
@@ -11242,88 +11893,6 @@ mod session_lifecycle {
     }
 
     #[test]
-    fn improve_mode_prompt_sets_research_guardrails() {
-        let scope = ManaUnitRef::new("364", "Improve imp", Some("epic".into()));
-
-        let prompt = improve_safe_mode_prompt(&scope, 2, 5);
-
-        assert!(prompt.contains("Improve mode autoresearch turn 2/5"));
-        assert!(prompt.contains("active mana scope 364"));
-        assert!(prompt.contains("Prefer read-only investigation"));
-        assert!(prompt.contains("create or update mana units"));
-        assert!(prompt.contains("Do not make broad code changes"));
-    }
-
-    #[test]
-    fn improve_mode_queues_bounded_autoresearch_turns() {
-        let mut app = make_app();
-        app.config.ui.improve_auto_turn_budget = 1;
-        app.workflow_mode = WorkflowMode::Improve;
-        app.improve_safe_mode = true;
-        app.active_mana_scope = Some(ManaUnitRef::new("364", "Improve imp", Some("epic".into())));
-
-        app.queue_improve_mode_continuation_if_ready();
-
-        assert_eq!(app.improve_auto_turns, 1);
-        let prompt = app.pending_agent_prompt.as_deref().unwrap();
-        assert!(prompt.contains("Improve mode autoresearch turn 1/1"));
-
-        app.pending_agent_prompt = None;
-        app.pending_agent_cwd = None;
-        app.queue_improve_mode_continuation_if_ready();
-
-        assert_eq!(app.improve_auto_turns, 1);
-        assert!(app.pending_agent_prompt.is_none());
-        assert!(app
-            .messages
-            .iter()
-            .any(|message| message.content.contains("Improve mode paused after 1")));
-    }
-
-    #[test]
-    fn improve_mode_queues_sandbox_cwd_for_code_turns() {
-        let mut app = make_app();
-        app.config.ui.improve_auto_turn_budget = 1;
-        app.workflow_mode = WorkflowMode::Improve;
-        app.active_mana_scope = Some(ManaUnitRef::new("364", "Improve imp", Some("epic".into())));
-        app.improve_sandbox = Some(ImproveSandbox {
-            branch: "imp/improve/364-improve-imp".into(),
-            base_branch: "nightly".into(),
-            worktree: PathBuf::from("/tmp/imp-improve-364"),
-        });
-
-        app.queue_improve_mode_continuation_if_ready();
-
-        assert_eq!(
-            app.pending_agent_cwd.as_deref(),
-            Some(Path::new("/tmp/imp-improve-364"))
-        );
-        assert!(app
-            .pending_agent_prompt
-            .as_deref()
-            .unwrap()
-            .contains("Improve mode code-changing turn 1/1"));
-    }
-
-    #[test]
-    fn improve_safe_mode_keeps_original_cwd_for_agent_turns() {
-        let mut app = make_app();
-        app.config.ui.improve_auto_turn_budget = 1;
-        app.workflow_mode = WorkflowMode::Improve;
-        app.improve_safe_mode = true;
-        app.active_mana_scope = Some(ManaUnitRef::new("364", "Improve imp", Some("epic".into())));
-
-        app.queue_improve_mode_continuation_if_ready();
-
-        assert!(app.pending_agent_cwd.is_none());
-        assert!(app
-            .pending_agent_prompt
-            .as_deref()
-            .unwrap()
-            .contains("Improve mode autoresearch turn 1/1"));
-    }
-
-    #[test]
     fn compact_git_label_shows_branch_and_dirty_count() {
         let temp = tempfile::tempdir().unwrap();
         std::process::Command::new("git")
@@ -11337,67 +11906,6 @@ mod session_lifecycle {
 
         assert!(label.starts_with("git "));
         assert!(label.contains("±1"));
-    }
-
-    #[tokio::test]
-    async fn improve_merge_command_opens_background_task() {
-        let temp = TempDir::new().unwrap();
-        let worktree = temp.path().join("worktree");
-        std::fs::create_dir_all(worktree.join(".imp")).unwrap();
-        std::fs::write(worktree.join(IMPROVE_CHANGELOG_PATH), "changelog").unwrap();
-        let mut app = make_app_with_session(SessionManager::in_memory(), temp.path().to_path_buf());
-        app.improve_sandbox = Some(ImproveSandbox {
-            branch: "imp/improve/test".into(),
-            base_branch: "nightly".into(),
-            worktree,
-        });
-
-        app.improve_merge_command("");
-
-        assert!(app.improve_merge_task.is_some());
-        assert_eq!(
-            app.messages.last().unwrap().content,
-            "Loading Improve merge plan…"
-        );
-    }
-
-    #[tokio::test]
-    async fn clean_command_opens_background_task() {
-        let temp = TempDir::new().unwrap();
-        let worktree = temp.path().join("worktree");
-        std::fs::create_dir_all(&worktree).unwrap();
-        let mut app = make_app_with_session(SessionManager::in_memory(), temp.path().to_path_buf());
-        app.improve_sandbox = Some(ImproveSandbox {
-            branch: "imp/improve/test".into(),
-            base_branch: "nightly".into(),
-            worktree,
-        });
-
-        app.clean_command("");
-
-        assert!(app.clean_task.is_some());
-        assert_eq!(
-            app.messages.last().unwrap().content,
-            "Checking Improve sandbox cleanliness…"
-        );
-    }
-
-    #[test]
-    fn clean_signal_clears_improve_sandbox_when_requested() {
-        let mut app = make_app();
-        app.improve_sandbox = Some(ImproveSandbox {
-            branch: "imp/improve/test".into(),
-            base_branch: "nightly".into(),
-            worktree: PathBuf::from("/tmp/imp-improve-test"),
-        });
-
-        app.handle_runtime_signal(RuntimeSignal::CleanCommandFinished(CleanCommandResult {
-            text: "cleaned".into(),
-            clear_improve_sandbox: true,
-        }));
-
-        assert!(app.improve_sandbox.is_none());
-        assert_eq!(app.messages.last().unwrap().content, "cleaned");
     }
 
     #[tokio::test]
@@ -11415,83 +11923,6 @@ mod session_lifecycle {
         assert_eq!(app.messages[last_user].content, "keep going");
         assert_eq!(app.messages[last_assistant].role, MessageRole::Assistant);
         assert!(app.messages[last_assistant].is_streaming);
-    }
-
-    #[test]
-    fn status_text_includes_active_loop() {
-        let mut app = make_app();
-        app.loop_state = Some(LoopState {
-            message: "keep going".into(),
-            completed_turns: 2,
-            budget: Some(3),
-        });
-
-        let snapshot = StatusSnapshot {
-            cwd: app.cwd.clone(),
-            git_lines: None,
-            sandbox_status: None,
-            stale_improve_metadata_message: None,
-        };
-        let status = render_status_text(
-            &snapshot,
-            app.workflow_mode,
-            app.agent_status_label(),
-            app.active_mana_scope.as_ref(),
-            app.active_mana_run.as_ref(),
-            app.improve_auto_turns,
-            app.config.ui.improve_auto_turn_budget,
-            app.improve_safe_mode,
-            app.improve_sandbox.as_ref(),
-            app.loop_state.as_ref(),
-        );
-
-        assert!(status.contains("loop: 2/3"));
-        assert!(status.contains("loop message: keep going"));
-    }
-
-    #[tokio::test]
-    async fn status_command_opens_background_task() {
-        let mut app = make_app();
-
-        app.show_status_command();
-
-        assert!(app.status_command_task.is_some());
-        assert_eq!(app.messages.last().unwrap().content, "Loading status…");
-    }
-
-    #[tokio::test]
-    async fn status_signal_clears_background_task() {
-        let mut app = make_app();
-        app.status_command_task = Some(tokio::spawn(async {}));
-
-        app.handle_runtime_signal(RuntimeSignal::StatusCommandFinished(StatusCommandResult {
-            text: "Status:\nagent: idle".into(),
-        }));
-
-        assert!(app.status_command_task.is_none());
-        assert_eq!(app.messages.last().unwrap().content, "Status:\nagent: idle");
-    }
-
-    #[test]
-    fn improve_status_label_shows_sandbox_without_safe_mode() {
-        let mut app = make_app();
-        app.workflow_mode = WorkflowMode::Improve;
-        app.config.ui.improve_auto_turn_budget = 5;
-        app.improve_auto_turns = 2;
-        app.improve_sandbox = Some(ImproveSandbox {
-            branch: "imp/improve/364-improve-imp".into(),
-            base_branch: "nightly".into(),
-            worktree: PathBuf::from("/tmp/imp-improve-364"),
-        });
-
-        let label = app.improve_status_label().unwrap();
-
-        assert!(label.contains("imp is improving imp-improve-364"));
-        assert!(label.contains("turn 2/5"));
-        assert!(label.contains("/improve-help"));
-
-        app.improve_safe_mode = true;
-        assert!(app.improve_status_label().is_none());
     }
 
     #[test]

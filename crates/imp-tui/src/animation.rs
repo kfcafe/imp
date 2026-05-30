@@ -61,6 +61,16 @@ pub fn title_spinner_frame(tick: u64) -> &'static str {
     FRAMES[(tick / 4) as usize % FRAMES.len()]
 }
 
+/// Loop indicator for the terminal title while an agent loop is active.
+pub fn title_loop_frame(_tick: u64) -> &'static str {
+    "↻"
+}
+
+/// Static title glyph for active loops when animated motion is disabled.
+pub fn title_loop_glyph() -> &'static str {
+    "↻"
+}
+
 /// Static title glyph for active work when animated motion is disabled.
 pub fn title_working_glyph() -> &'static str {
     "•"
@@ -76,9 +86,10 @@ pub fn responding_frame(tick: u64) -> &'static str {
     spinner_frame(tick)
 }
 
-/// Main working/thinking spinner used for concrete tool execution.
+/// Main working spinner used for concrete tool execution.
 pub fn tool_frame(tick: u64) -> &'static str {
-    spinner_frame(tick)
+    const FRAMES: &[&str] = &["◐", "◓", "◑", "◒"];
+    FRAMES[(tick / 6) as usize % FRAMES.len()]
 }
 
 /// Static glyph for running states when animated motion is disabled.
@@ -134,7 +145,7 @@ pub fn activity_label(
         }
         AnimationState::ExecutingTools { active_tools } => {
             let glyph = if animated {
-                tool_frame(tick)
+                spinner_frame(tick)
             } else {
                 static_working_glyph()
             };
@@ -186,6 +197,13 @@ mod tests {
         assert_eq!(title_spinner_frame(16), "⠼");
         assert_eq!(title_spinner_frame(36), "⠏");
         assert_eq!(title_spinner_frame(40), "⠋");
+    }
+
+    #[test]
+    fn title_loop_frame_uses_clockwise_loop_icon() {
+        assert_eq!(title_loop_frame(0), "↻");
+        assert_eq!(title_loop_frame(8), "↻");
+        assert_eq!(title_loop_frame(16), "↻");
     }
 
     #[test]

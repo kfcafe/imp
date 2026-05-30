@@ -109,6 +109,10 @@ pub enum ResumabilityMode {
 #[derive(Debug, Clone, Default)]
 pub struct Context {
     pub messages: Vec<Message>,
+    /// Stable session identifier for provider-side request grouping and prompt caching.
+    pub session_id: Option<String>,
+    /// Stable thread identifier for provider-side prompt cache namespacing.
+    pub thread_id: Option<String>,
 }
 
 /// Tuning knobs for a single LLM request.

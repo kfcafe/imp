@@ -5,6 +5,7 @@ use serde_json::json;
 
 use super::{suggest_similar_files, truncate_head, Tool, ToolContext, ToolOutput};
 use crate::error::Result;
+use crate::tools::code_intel;
 
 const MAX_BYTES: usize = 50_000;
 const MAX_TEXT_BYTES: u64 = 5 * 1024 * 1024;
@@ -43,6 +44,19 @@ impl Tool for ReadTool {
                 "anchors": {
                     "type": "boolean",
                     "description": "When true, include opaque per-line anchors for stale-safe anchored edits. Anchors are session-local integrity markers, not security tokens."
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Optional semantic read target. Supports file#symbol or file:line syntax. When set, read expands to the target symbol or enclosing syntax block for parseable source files."
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "Optional symbol name to read from a parseable source file. Equivalent to path#symbol."
+                },
+                "expand": {
+                    "type": "string",
+                    "enum": ["enclosing_symbol"],
+                    "description": "When set with target file:line or start_line, expand the read to the enclosing syntax block."
                 }
             },
             "required": ["path"]
@@ -58,17 +72,31 @@ impl Tool for ReadTool {
         params: serde_json::Value,
         ctx: ToolContext,
     ) -> Result<ToolOutput> {
-        let raw_path = params["path"]
-            .as_str()
-            .unwrap_or("")
-            .trim_start_matches('@');
+        let target = params["target"].as_str().unwrap_or("").trim();
+        let mut raw_path_string = params["path"].as_str().unwrap_or("").trim().to_string();
+        let mut semantic_symbol = params["symbol"].as_str().map(str::to_string);
+        let mut semantic_line = None;
+        if !target.is_empty() {
+            if let Some((target_path, target_symbol)) = target.split_once('#') {
+                raw_path_string = target_path.to_string();
+                if !target_symbol.trim().is_empty() {
+                    semantic_symbol = Some(target_symbol.trim().to_string());
+                }
+            } else if let Some((target_path, line)) = parse_line_target(target) {
+                raw_path_string = target_path.to_string();
+                semantic_line = Some(line);
+            } else {
+                raw_path_string = target.to_string();
+            }
+        }
+        let raw_path = raw_path_string.trim_start_matches('@');
 
         if raw_path.is_empty() {
             return Ok(ToolOutput::error("Missing required parameter: path"));
         }
 
         let path = super::resolve_path(&ctx.cwd, raw_path);
-        let range = parse_line_range(&params)?;
+        let mut range = parse_line_range(&params)?;
 
         if !path.exists() {
             let suggestions = suggest_similar_files(&ctx.cwd, raw_path);
@@ -116,6 +144,34 @@ impl Tool for ReadTool {
         }
 
         let content = String::from_utf8_lossy(&bytes).into_owned();
+
+        let expand_enclosing = params["expand"].as_str() == Some("enclosing_symbol");
+        let mut semantic_details = serde_json::Value::Null;
+        if let Some(symbol) = semantic_symbol.as_deref() {
+            if let Some(mut block) = code_intel::extract_symbol(&content, &path, symbol) {
+                block.file = path.clone();
+                range = Some(LineRange {
+                    start: block.start_line,
+                    end: Some(block.end_line),
+                });
+                semantic_details = code_intel::block_details(&block);
+            }
+        } else if let Some(line) =
+            semantic_line.or_else(|| expand_enclosing.then(|| range.map(|r| r.start)).flatten())
+        {
+            if let Some(mut blocks) =
+                code_intel::extract_blocks_at_lines(&content, &path, &[line.saturating_sub(1)])
+            {
+                if let Some(mut block) = blocks.pop() {
+                    block.file = path.clone();
+                    range = Some(LineRange {
+                        start: block.start_line,
+                        end: Some(block.end_line),
+                    });
+                    semantic_details = code_intel::block_details(&block);
+                }
+            }
+        }
 
         // Apply line range.
         let include_anchors = params["anchors"].as_bool().unwrap_or(false);
@@ -196,6 +252,12 @@ impl Tool for ReadTool {
                 "lines": result.output_lines,
                 "total_lines": total_file_lines,
                 "range_total_lines": result.total_lines,
+                "lines_read": result.output_lines,
+                "files": [{
+                    "path": path.display().to_string(),
+                    "status": "read",
+                    "lines_read": result.output_lines,
+                }],
                 "bytes": result.output_bytes,
                 "total_bytes": metadata.len(),
                 "range_total_bytes": result.total_bytes,
@@ -204,6 +266,7 @@ impl Tool for ReadTool {
                 "line_ending": line_ending,
                 "anchors": anchors_json,
                 "anchor_count": anchors_json.as_array().map(|anchors| anchors.len()).unwrap_or(0),
+                "semantic_target": semantic_details,
             }),
             is_error: false,
         })
@@ -214,6 +277,15 @@ impl Tool for ReadTool {
 struct LineRange {
     start: usize,
     end: Option<usize>,
+}
+
+fn parse_line_target(target: &str) -> Option<(&str, usize)> {
+    let (path, line) = target.rsplit_once(':')?;
+    if path.is_empty() || line.is_empty() {
+        return None;
+    }
+    let line = line.parse::<usize>().ok()?;
+    (line > 0).then_some((path, line))
 }
 
 fn parse_line_range(params: &serde_json::Value) -> Result<Option<LineRange>> {
@@ -476,6 +548,10 @@ mod tests {
         assert!(!text.contains("d"));
         assert_eq!(result.details["start_line"], 2);
         assert_eq!(result.details["end_line"], 3);
+        assert_eq!(result.details["lines"], 2);
+        assert_eq!(result.details["lines_read"], 2);
+        assert_eq!(result.details["files"][0]["status"], "read");
+        assert_eq!(result.details["files"][0]["lines_read"], 2);
     }
 
     #[tokio::test]
@@ -665,6 +741,62 @@ mod tests {
         let anchor = anchors[0]["anchor"].as_str().unwrap();
         let path = dir.path().join("anchored.txt");
         assert!(ctx.anchor_store.get(&path, anchor).is_some());
+    }
+
+    #[tokio::test]
+    async fn read_symbol_target_expands_rust_function() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "struct User;\n\nfn greet(name: &str) {\n    println!(\"hi {name}\");\n}\n\nfn other() {}\n",
+        )
+        .unwrap();
+
+        let tool = ReadTool;
+        let result = tool
+            .execute(
+                "c-symbol-rs",
+                json!({"path": "lib.rs", "target": "lib.rs#greet"}),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let text = extract_text(&result);
+        assert!(text.contains("fn greet"));
+        assert!(text.contains("println!"));
+        assert!(!text.contains("fn other"));
+        assert_eq!(result.details["start_line"], 3);
+        assert_eq!(result.details["semantic_target"]["symbol"], "greet");
+    }
+
+    #[tokio::test]
+    async fn read_line_target_expands_typescript_enclosing_function() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.ts"),
+            "export function greet(name: string) {\n  console.log(name);\n}\n\nexport function other() {}\n",
+        )
+        .unwrap();
+
+        let tool = ReadTool;
+        let result = tool
+            .execute(
+                "c-line-ts",
+                json!({"path": "main.ts", "target": "main.ts:2"}),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let text = extract_text(&result);
+        assert!(text.contains("function greet"));
+        assert!(text.contains("console.log"));
+        assert!(!text.contains("function other"));
+        assert_eq!(result.details["start_line"], 1);
+        assert_eq!(result.details["semantic_target"]["symbol"], "greet");
     }
 
     fn extract_text(output: &ToolOutput) -> String {

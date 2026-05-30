@@ -4,6 +4,48 @@ use std::path::{Path, PathBuf};
 
 const IMP_DIR_NAME: &str = ".imp";
 const LEGACY_APP_NAME: &str = "imp";
+const WORK_DIR_NAME: &str = "work";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkStoreSource {
+    ProjectLocal,
+    GlobalProjectScoped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WorkScope {
+    pub project_root: PathBuf,
+    pub local_store_root: PathBuf,
+    pub global_store_root: PathBuf,
+    pub active_source: WorkStoreSource,
+    pub writes_target: WorkStoreSource,
+}
+
+impl WorkScope {
+    pub fn for_project_dir(project_dir: &Path) -> Self {
+        Self::with_global_root(project_dir, global_root())
+    }
+
+    pub fn with_global_root(project_dir: &Path, global_root: PathBuf) -> Self {
+        let project_root = canonicalize_lossy(project_dir);
+        Self {
+            local_store_root: project_root.join(IMP_DIR_NAME).join(WORK_DIR_NAME),
+            global_store_root: global_root.join(WORK_DIR_NAME),
+            project_root,
+            active_source: WorkStoreSource::GlobalProjectScoped,
+            writes_target: WorkStoreSource::GlobalProjectScoped,
+        }
+    }
+
+    pub fn migration_status(&self) -> &'static str {
+        "global project-scoped store is the normal imp-work backend; project-local stores are migration input only"
+    }
+}
+
+fn canonicalize_lossy(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
 
 pub fn global_root() -> PathBuf {
     global_root_from_env(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
@@ -130,6 +172,10 @@ impl RunArtifacts {
         &self.root
     }
 
+    pub fn workflow_controller_path(&self) -> PathBuf {
+        self.root.join("workflow-controller.json")
+    }
+
     pub fn workflow_contract_path(&self) -> PathBuf {
         self.root.join("workflow-contract.json")
     }
@@ -152,6 +198,13 @@ impl RunArtifacts {
 
     pub fn policy_log_path(&self) -> PathBuf {
         self.root.join("policy.jsonl")
+    }
+
+    pub fn eval_candidate_path(&self, candidate_id: &str) -> PathBuf {
+        self.root
+            .join("eval-candidates")
+            .join(candidate_id)
+            .join("candidate.json")
     }
 }
 
@@ -176,6 +229,27 @@ pub fn run_artifacts_under(base: PathBuf, run_id: &str) -> io::Result<RunArtifac
     let root = base.join(safe_run_id);
     ensure_child_path(&base, &root)?;
     RunArtifacts::create(root)
+}
+
+pub fn existing_project_run_artifacts(
+    project_dir: &Path,
+    run_id: &str,
+) -> io::Result<RunArtifacts> {
+    existing_run_artifacts_under(project_runs_dir(project_dir), run_id)
+}
+
+pub fn existing_run_artifacts_under(base: PathBuf, run_id: &str) -> io::Result<RunArtifacts> {
+    let safe_run_id = sanitize_run_id(run_id)?;
+    let root = base.join(safe_run_id);
+    ensure_child_path(&base, &root)?;
+    if root.is_dir() {
+        Ok(RunArtifacts::new(root))
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "run artifact directory does not exist",
+        ))
+    }
 }
 
 fn sanitize_run_id(run_id: &str) -> io::Result<&str> {
@@ -513,9 +587,24 @@ mod tests {
             artifacts.root().join("policy.jsonl")
         );
         assert_eq!(
+            artifacts.workflow_controller_path(),
+            artifacts.root().join("workflow-controller.json")
+        );
+        assert_eq!(
             artifacts.workflow_contract_path(),
             artifacts.root().join("workflow-contract.json")
         );
+    }
+
+    #[test]
+    fn existing_run_artifacts_reopens_without_creating_missing_directory() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path().join("runs");
+        assert!(existing_run_artifacts_under(base.clone(), "run_1").is_err());
+
+        let created = run_artifacts_under(base.clone(), "run_1").unwrap();
+        let reopened = existing_run_artifacts_under(base, "run_1").unwrap();
+        assert_eq!(reopened.root(), created.root());
     }
 
     #[test]
@@ -532,6 +621,26 @@ mod tests {
         let base = temp.path().join("runs");
         let artifacts = run_artifacts_under(base.clone(), "run-abc_123").unwrap();
         assert!(artifacts.root().starts_with(&base));
+    }
+
+    #[test]
+    fn work_scope_uses_project_local_store_and_global_work_root() {
+        let temp = TempDir::new().unwrap();
+        let global = temp.path().join("home").join(".imp");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+
+        let scope = WorkScope::with_global_root(&project, global.clone());
+
+        assert_eq!(scope.project_root, project.canonicalize().unwrap());
+        assert_eq!(
+            scope.local_store_root,
+            project.canonicalize().unwrap().join(".imp").join("work")
+        );
+        assert_eq!(scope.global_store_root, global.join("work"));
+        assert_eq!(scope.active_source, WorkStoreSource::GlobalProjectScoped);
+        assert_eq!(scope.writes_target, WorkStoreSource::GlobalProjectScoped);
+        assert!(scope.migration_status().contains("migration input only"));
     }
 
     #[test]

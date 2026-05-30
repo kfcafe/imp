@@ -20,6 +20,7 @@ pub(super) struct RuntimeEvidence {
     pub(super) execution_debt: bool,
     pub(super) execution_evidence: bool,
     pub(super) planning_only_progress: bool,
+    pub(super) orchestration_started: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +57,7 @@ pub struct NextActionRuntimeEvidence {
     pub execution_debt: bool,
     pub execution_evidence: bool,
     pub planning_only_progress: bool,
+    pub orchestration_started: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +103,7 @@ impl PostTurnAssessment {
             return NextAction::Stop { reason };
         }
 
-        if self.runtime.work_completed {
+        if self.runtime.work_completed && !self.runtime.orchestration_started {
             return NextAction::Stop {
                 reason: NextActionStopReason::WorkCompleted,
             };
@@ -123,6 +125,13 @@ impl PostTurnAssessment {
             return NextAction::Continue {
                 prompt: continue_recommendation.prompt,
                 reason: continue_recommendation.reason,
+            };
+        }
+
+        if self.runtime.orchestration_started {
+            return NextAction::Continue {
+                prompt: super::orchestration_follow_up_text(None),
+                reason: ContinueReason::OrchestrationProgress,
             };
         }
 
@@ -159,6 +168,7 @@ impl PostTurnAssessment {
                 execution_debt: self.runtime.execution_debt,
                 execution_evidence: self.runtime.execution_evidence,
                 planning_only_progress: self.runtime.planning_only_progress,
+                orchestration_started: self.runtime.orchestration_started,
             },
             mana: NextActionManaEvidence {
                 stop_reason: self

@@ -8,11 +8,82 @@ use ratatui::widgets::{Block, Borders, Clear, Widget};
 
 use crate::theme::Theme;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SlashCommandKind {
+    Builtin,
+    Extension,
+    Workflow,
+    Skill,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandPalettePage {
+    Commands,
+    Skills,
+    Workflows,
+}
+
+impl CommandPalettePage {
+    const ALL: [Self; 3] = [Self::Commands, Self::Skills, Self::Workflows];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Commands => "Commands",
+            Self::Skills => "Skills",
+            Self::Workflows => "Workflows",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Commands => "commands",
+            Self::Skills => "skills",
+            Self::Workflows => "workflows",
+        }
+    }
+
+    fn includes(self, kind: SlashCommandKind) -> bool {
+        match self {
+            Self::Commands => matches!(
+                kind,
+                SlashCommandKind::Builtin | SlashCommandKind::Extension
+            ),
+            Self::Skills => kind == SlashCommandKind::Skill,
+            Self::Workflows => kind == SlashCommandKind::Workflow,
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|page| *page == self).unwrap_or(0)
+    }
+
+    fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    fn prev(self) -> Self {
+        let index = self.index();
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
+impl SlashCommandKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Builtin => "commands",
+            Self::Extension => "extensions",
+            Self::Workflow => "workflows",
+            Self::Skill => "skills",
+        }
+    }
+}
+
 /// A slash command definition.
 #[derive(Debug, Clone)]
 pub struct SlashCommand {
     pub name: String,
     pub description: String,
+    pub kind: SlashCommandKind,
 }
 
 /// Merge built-in and extension-provided slash commands for discovery menus.
@@ -28,6 +99,7 @@ pub fn merge_extension_commands(
     for (name, description) in extension_commands {
         by_name.entry(name.clone()).or_insert_with(|| SlashCommand {
             name,
+            kind: SlashCommandKind::Extension,
             description: if description.trim().is_empty() {
                 "Extension command".into()
             } else {
@@ -52,6 +124,7 @@ pub fn merge_skill_commands(
     for (name, description) in skills {
         by_name.entry(name.clone()).or_insert_with(|| SlashCommand {
             name,
+            kind: SlashCommandKind::Skill,
             description: if description.trim().is_empty() {
                 "Skill".into()
             } else {
@@ -63,137 +136,55 @@ pub fn merge_skill_commands(
     by_name.into_values().collect()
 }
 
+/// Merge workflow commands into the slash menu without overriding real commands.
+pub fn merge_workflow_commands(
+    mut commands: Vec<SlashCommand>,
+    workflows: impl IntoIterator<Item = (String, String)>,
+) -> Vec<SlashCommand> {
+    let mut by_name: BTreeMap<String, SlashCommand> = commands
+        .drain(..)
+        .map(|command| (command.name.clone(), command))
+        .collect();
+
+    for (name, description) in workflows {
+        by_name.entry(name.clone()).or_insert_with(|| SlashCommand {
+            name,
+            kind: SlashCommandKind::Workflow,
+            description: if description.trim().is_empty() {
+                "Workflow".into()
+            } else {
+                format!("Workflow: {description}")
+            },
+        });
+    }
+
+    by_name.into_values().collect()
+}
+
 pub fn builtin_commands() -> Vec<SlashCommand> {
-    vec![
-        SlashCommand {
-            name: "improve".into(),
-            description: "Switch workflow mode to Improve in a sandbox branch/worktree".into(),
-        },
-        SlashCommand {
-            name: "improve-safe".into(),
-            description: "Switch workflow mode to research-only Improve".into(),
-        },
-        SlashCommand {
-            name: "improve-merge".into(),
-            description: "Merge active Improve branch after reviewing changelog".into(),
-        },
-        SlashCommand {
-            name: "improve-help".into(),
-            description: "Explain Improve autoresearch guardrails".into(),
-        },
-        SlashCommand {
-            name: "status".into(),
-            description: "Show active imp work status".into(),
-        },
-        SlashCommand {
-            name: "autonomy".into(),
-            description: "Set autonomy mode (/autonomy safe|local-auto|allow-all-local)".into(),
-        },
-        SlashCommand {
-            name: "clean".into(),
-            description: "Clean active sandbox/artifacts safely".into(),
-        },
-        SlashCommand {
-            name: "loop".into(),
-            description: "Loop a prompt (/loop <message>)".into(),
-        },
-        SlashCommand {
-            name: "run".into(),
-            description: "Set active mana run (/run <id>, /run clear)".into(),
-        },
-        SlashCommand {
-            name: "stop".into(),
-            description: "Stop active imp work".into(),
-        },
-        SlashCommand {
-            name: "scope".into(),
-            description: "Set active mana scope (/scope <id>, /scope clear)".into(),
-        },
-        SlashCommand {
-            name: "model".into(),
-            description: "Select model".into(),
-        },
-        SlashCommand {
-            name: "settings".into(),
-            description: "Open settings".into(),
-        },
-        SlashCommand {
-            name: "mana".into(),
-            description: "Open mana work graph navigator".into(),
-        },
-        SlashCommand {
-            name: "tree".into(),
-            description: "Session tree view".into(),
-        },
-        SlashCommand {
-            name: "fork".into(),
-            description: "Fork session at current point".into(),
-        },
-        SlashCommand {
-            name: "compact".into(),
-            description: "Compact context".into(),
-        },
-        SlashCommand {
-            name: "new".into(),
-            description: "New session".into(),
-        },
-        SlashCommand {
-            name: "resume".into(),
-            description: "Resume/search sessions".into(),
-        },
-        SlashCommand {
-            name: "name".into(),
-            description: "Name current session".into(),
-        },
-        SlashCommand {
-            name: "copy".into(),
-            description: "Copy last response".into(),
-        },
-        SlashCommand {
-            name: "export".into(),
-            description: "Export session".into(),
-        },
-        SlashCommand {
-            name: "personality".into(),
-            description: "Customize imp personality".into(),
-        },
-        SlashCommand {
-            name: "memory".into(),
-            description: "View/edit agent memory".into(),
-        },
-        SlashCommand {
-            name: "checkpoints".into(),
-            description: "List recorded file checkpoints".into(),
-        },
-        SlashCommand {
-            name: "restore-checkpoint".into(),
-            description: "Restore files from a checkpoint by id or label".into(),
-        },
-        SlashCommand {
-            name: "reload".into(),
-            description: "Reload extensions".into(),
-        },
-        SlashCommand {
-            name: "hotkeys".into(),
-            description: "Show keyboard shortcuts".into(),
-        },
-        SlashCommand {
-            name: "login".into(),
-            description: "OAuth login for Anthropic or OpenAI/ChatGPT".into(),
-        },
-        SlashCommand {
-            name: "secrets".into(),
-            description: "Configure API keys / multi-field service secrets".into(),
-        },
-        SlashCommand {
-            name: "setup".into(),
-            description: "Run setup wizard".into(),
-        },
-        SlashCommand {
-            name: "quit".into(),
-            description: "Quit".into(),
-        },
+    [
+        ("new", "Start a new session"),
+        ("resume", "Resume/search sessions"),
+        ("model", "Select model"),
+        ("compact", "Compact context"),
+        ("quit", "Quit"),
+        ("loop", "Continue or auto-loop current intent"),
+        ("stop", "Stop active work/loop"),
+        ("reload", "Reload config and Lua extensions"),
+        ("setup", "Run setup wizard"),
+        ("secrets", "Configure API keys / service secrets"),
+        ("login", "OAuth login for Anthropic, OpenAI, or Kimi Code"),
+        ("name", "Name current session"),
+        ("tree", "Session tree view"),
+        ("settings", "Open settings"),
     ]
+    .into_iter()
+    .map(|(name, description)| SlashCommand {
+        kind: SlashCommandKind::Builtin,
+        name: name.into(),
+        description: description.into(),
+    })
+    .collect()
 }
 
 /// State for the command palette.
@@ -202,6 +193,7 @@ pub struct CommandPaletteState {
     pub commands: Vec<SlashCommand>,
     pub filter: String,
     pub selected: usize,
+    pub page: CommandPalettePage,
 }
 
 impl CommandPaletteState {
@@ -210,17 +202,18 @@ impl CommandPaletteState {
             commands,
             filter: String::new(),
             selected: 0,
+            page: CommandPalettePage::Commands,
         }
     }
 
     pub fn filtered(&self) -> Vec<&SlashCommand> {
+        let page_commands = self.commands.iter().filter(|c| self.page.includes(c.kind));
+
         if self.filter.is_empty() {
-            self.commands.iter().collect()
+            page_commands.collect()
         } else {
             let lower = self.filter.to_lowercase();
-            let mut results: Vec<(usize, &SlashCommand)> = self
-                .commands
-                .iter()
+            let mut results: Vec<(usize, &SlashCommand)> = page_commands
                 .filter_map(|c| {
                     let name = c.name.to_lowercase();
                     let desc = c.description.to_lowercase();
@@ -264,6 +257,16 @@ impl CommandPaletteState {
         self.selected = 0;
     }
 
+    pub fn prev_page(&mut self) {
+        self.page = self.page.prev();
+        self.selected = 0;
+    }
+
+    pub fn next_page(&mut self) {
+        self.page = self.page.next();
+        self.selected = 0;
+    }
+
     pub fn selected_command(&self) -> Option<&SlashCommand> {
         let filtered = self.filtered();
         filtered.get(self.selected).copied()
@@ -291,9 +294,9 @@ impl Widget for CommandPaletteView<'_> {
         Clear.render(area, buf);
 
         let title = if self.state.filter.is_empty() {
-            " Commands ".to_string()
+            format!(" {} ", self.state.page.title())
         } else {
-            format!(" /{} ", self.state.filter)
+            format!(" {} /{} ", self.state.page.title(), self.state.filter)
         };
 
         let block = Block::default()
@@ -308,7 +311,7 @@ impl Widget for CommandPaletteView<'_> {
 
         if total == 0 {
             let line = Line::from(Span::styled(
-                "  No matching commands",
+                format!("  No matching {}", self.state.page.label()),
                 self.theme.muted_style(),
             ));
             buf.set_line(inner.x, inner.y, &line, inner.width);
@@ -325,6 +328,7 @@ impl Widget for CommandPaletteView<'_> {
         } else {
             0
         };
+        let show_kind_labels = false;
 
         for (i, cmd) in filtered.iter().skip(scroll_offset).enumerate() {
             if i >= visible {
@@ -359,9 +363,16 @@ impl Widget for CommandPaletteView<'_> {
                 self.theme.muted_style()
             };
 
+            let kind_text = if show_kind_labels {
+                format!(" [{:<10}]", cmd.kind.label())
+            } else {
+                String::new()
+            };
+
             let line = Line::from(vec![
                 Span::styled(indicator, row_style),
                 Span::styled(name_text, name_style),
+                Span::styled(kind_text, desc_style),
                 Span::styled("  ", row_style),
                 Span::styled(&cmd.description, desc_style),
             ]);
@@ -394,10 +405,80 @@ impl Widget for CommandPaletteView<'_> {
         // Footer hint
         if inner.height > 1 && total > 0 {
             let hint_y = area.y + area.height - 1;
-            let hint_text = " ↑↓/Tab  Enter  Esc ";
+            let hint_text = " ←→ page  ↑↓ item  Enter  Esc ";
             let hint_x = area.x + area.width.saturating_sub(hint_text.len() as u16 + 1);
             let hint_line = Line::from(Span::styled(hint_text, self.theme.muted_style()));
             buf.set_line(hint_x, hint_y, &hint_line, hint_text.len() as u16);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command(name: &str, kind: SlashCommandKind) -> SlashCommand {
+        SlashCommand {
+            name: name.into(),
+            description: format!("{name} description"),
+            kind,
+        }
+    }
+
+    #[test]
+    fn palette_pages_partition_commands_skills_and_workflows() {
+        let mut state = CommandPaletteState::new(vec![
+            command("new", SlashCommandKind::Builtin),
+            command("greet", SlashCommandKind::Extension),
+            command("rust", SlashCommandKind::Skill),
+            command("ship", SlashCommandKind::Workflow),
+        ]);
+
+        let names: Vec<&str> = state
+            .filtered()
+            .iter()
+            .map(|cmd| cmd.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["new", "greet"]);
+
+        state.next_page();
+        let names: Vec<&str> = state
+            .filtered()
+            .iter()
+            .map(|cmd| cmd.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["rust"]);
+
+        state.next_page();
+        let names: Vec<&str> = state
+            .filtered()
+            .iter()
+            .map(|cmd| cmd.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["ship"]);
+    }
+
+    #[test]
+    fn palette_filter_applies_to_active_page_only() {
+        let mut state = CommandPaletteState::new(vec![
+            command("review", SlashCommandKind::Builtin),
+            command("review", SlashCommandKind::Skill),
+            command("review-flow", SlashCommandKind::Workflow),
+        ]);
+        state.push_filter('r');
+        state.push_filter('e');
+
+        assert_eq!(state.filtered().len(), 1);
+        assert_eq!(
+            state.selected_command().unwrap().kind,
+            SlashCommandKind::Builtin
+        );
+
+        state.next_page();
+        assert_eq!(state.filtered().len(), 1);
+        assert_eq!(
+            state.selected_command().unwrap().kind,
+            SlashCommandKind::Skill
+        );
     }
 }

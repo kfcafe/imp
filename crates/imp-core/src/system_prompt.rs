@@ -77,6 +77,7 @@ pub struct AssembleParams<'a> {
     pub memory: Option<&'a str>,
     pub user_profile: Option<&'a str>,
     pub cwd: Option<&'a std::path::Path>,
+    pub repo_context: Option<&'a crate::repo_intelligence::RepoContextSummary>,
     /// Whether to include learning instructions in the system prompt.
     pub learning_enabled: bool,
     /// Resolved guardrail profile (None = guardrails disabled).
@@ -119,6 +120,11 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
 
     // Layer 1.5: Environment context
     parts.push(environment_layer(p.cwd));
+
+    // Layer 1.75: Repo intelligence context
+    if let Some(repo_context) = p.repo_context {
+        parts.push(repo_context.render_prompt_layer());
+    }
 
     // Layer 2: Project context from AGENTS.md
     if !p.agents_md.is_empty() {
@@ -222,25 +228,10 @@ fn identity_layer(
     if defs.iter().any(|def| def.name == "git") {
         s.push_str("- Use `git` for local repo/worktree operations; use `bash` for uncovered git commands.\n");
     }
-    if defs.iter().any(|def| def.name == "mana") {
-        s.push_str("- Prefer native `mana` actions over shell for mana work.\n");
+    if defs.iter().any(|def| def.name == "workflow") {
+        s.push_str("- Use `workflow` for durable project plans, schema-checked status updates, validation, and orchestrated workflow steps.\n");
     }
     s.push_str("- Use `read` before explaining or editing specific files; use `edit`/`write` for file changes.\n");
-
-    s.push_str("\nOperating rules:\n");
-    s.push_str("- Re-check the user's intent each turn; distinguish discussion, planning, implementation, review, and orchestration.\n");
-    s.push_str("- Ground repository claims in files or tool output inspected in this session; inspect named files, symbols, commands, and errors before acting on them.\n");
-    s.push_str("- For analysis-only requests, stay read-only. For implementation, make small reversible changes and verify with the narrowest useful check.\n");
-    s.push_str("- Treat failed commands, compiler errors, and missing evidence as blockers to resolve or report; never claim unverified success.\n");
-    s.push_str("- Ask one focused question when uncertainty changes scope, risk, architecture, destructive action, or user-visible behavior; otherwise proceed on low-risk local assumptions.\n");
-    s.push_str("- Keep replies concise and evidence-oriented: what changed or was found, how it was verified, and what remains.\n");
-    s.push_str("- Use mana when durable work structure, verification, dependencies, retries, decisions, handoff, or recovery matter; make units detailed enough for another agent to execute cold.\n");
-    s.push_str("- During planning/design, externalize real durable structure only when it changes project/work state the user is actively developing: concrete goals, decompositions, decisions, dependencies, follow-ups, blockers, or handoff context.\n");
-    s.push_str("- Do not create mana artifacts from explanation-only answers, hypotheticals, commentary about external content, brainstorming with no adopted next step, or conversational asides. When unsure whether discussion became durable work, ask or just answer in chat.\n");
-    s.push_str("- For real durable structure, use epics/tasks/notes/decisions deliberately, reserve facts for verifiable claims, and avoid noisy mana writes for small one-pass work.\n");
-    s.push_str("- Update mana after failures or material planning changes before relying on chat memory.\n");
-    s.push_str("- When working from a mana unit, treat its scope, dependencies, acceptance criteria, and verify command as the execution contract; do not broaden into unrelated cleanup.\n");
-    s.push_str("- Stop only on verified completion, a real blocker, or a user-facing decision point; mana writes are checkpoints, not proof of completion.\n");
 
     // Append role instructions after identity layer
     if let Some(role) = role {
@@ -248,6 +239,48 @@ fn identity_layer(
             s.push('\n');
             s.push_str(instructions);
             s.push('\n');
+        }
+        for instruction in &role.instruction_set {
+            if role.instructions.as_ref() == Some(instruction) {
+                continue;
+            }
+            s.push('\n');
+            s.push_str(instruction);
+            s.push('\n');
+        }
+        if let Some(schema) = &role.output_schema {
+            s.push_str("\nRole output schema metadata:\n");
+            if !schema.name.is_empty() {
+                s.push_str("- schema: `");
+                s.push_str(&schema.name);
+                s.push_str("`\n");
+            }
+            if !schema.description.is_empty() {
+                s.push_str("- description: ");
+                s.push_str(&schema.description);
+                s.push('\n');
+            }
+            if let Some(reference) = &schema.json_schema_ref {
+                s.push_str("- json_schema_ref: ");
+                s.push_str(reference);
+                s.push('\n');
+            }
+            if !schema.required_sections.is_empty() {
+                s.push_str("- required sections: ");
+                s.push_str(&schema.required_sections.join(", "));
+                s.push('\n');
+            }
+            if let Some(contract) = &schema.output_contract {
+                s.push_str("- output contract: ");
+                s.push_str(contract);
+                s.push('\n');
+            }
+            if let Some(example) = &schema.example {
+                s.push_str("- example:\n");
+                s.push_str(example);
+                s.push('\n');
+            }
+            s.push_str("These schema hints guide the response shape; they are metadata, not enforced validation.\n");
         }
     }
 
@@ -542,21 +575,21 @@ fn task_layer(task: &TaskContext) -> String {
 
 fn headless_execution_layer(task: &TaskContext) -> String {
     let mut s = String::from("## Headless execution contract\n");
-    s.push_str("- You are executing an explicit mana unit, not exploring broadly.\n");
-    s.push_str("- Treat the unit title, description, notes, acceptance criteria, and verify gate as the source of truth for scope and success.\n");
+    s.push_str("- You are executing an explicit workflow task, not exploring broadly.\n");
+    s.push_str("- Treat the task title, description, notes, acceptance criteria, and verify gate as the source of truth for scope and success.\n");
     s.push_str("- Execute the assigned outcome before expanding into adjacent cleanup, refactors, or unrelated improvements.\n");
     s.push_str("- Use explicit file references and prefilled context first before searching more broadly.\n");
     s.push_str(
-        "- If the unit includes prior failed attempts, do not retry the same plan unchanged.\n",
+        "- If the task includes prior failed attempts, do not retry the same plan unchanged.\n",
     );
     s.push_str("- If dependency state or prerequisite decisions are unresolved, treat that as a blocker rather than improvising around it.\n");
-    s.push_str("- Keep progress updates concise and useful. Record meaningful discoveries, blockers, and revised plans with `mana update`.\n");
+    s.push_str("- Keep progress updates concise and useful. Record meaningful discoveries, blockers, and revised plans with native workflow updates.\n");
     if task.verify.is_some() {
         s.push_str("- If the verify command fails, either fix the issue or report the exact blocker. Do not claim completion anyway.\n");
     }
-    s.push_str("- In batch-verify flows, treat your goal as leaving the unit ready for verify rather than assuming verify already passed.\n");
+    s.push_str("- In batch-verify flows, treat your goal as leaving the task ready for verify rather than assuming verify already passed.\n");
     s.push_str(
-        "- Respect parent/child structure: finish this unit's outcome, not the whole feature.\n",
+        "- Respect parent/child structure: finish this task's outcome, not the whole feature.\n",
     );
     s
 }
@@ -651,27 +684,18 @@ mod tests {
     }
 
     fn make_readonly_role() -> Role {
-        use crate::roles::ToolSet;
-        Role {
-            name: "reviewer".into(),
-            model: None,
-            thinking_level: None,
-            tool_set: ToolSet::All,
-            readonly: true,
-            instructions: Some("Review code carefully. Do not modify files.".into()),
-        }
+        Role::from_def(
+            "reviewer",
+            &crate::roles::RoleDef {
+                readonly: true,
+                instructions: Some("Review code carefully. Do not modify files.".into()),
+                ..crate::roles::RoleDef::default()
+            },
+        )
     }
 
     fn make_worker_role() -> Role {
-        use crate::roles::ToolSet;
-        Role {
-            name: "worker".into(),
-            model: None,
-            thinking_level: None,
-            tool_set: ToolSet::All,
-            readonly: false,
-            instructions: None,
-        }
+        Role::from_def("worker", &crate::roles::RoleDef::default())
     }
 
     fn make_personality() -> PersonalityProfile {
@@ -717,6 +741,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         })
@@ -725,45 +750,50 @@ mod tests {
     // -- Layer 1: Identity --
 
     #[test]
-    fn system_prompt_includes_operating_rules() {
+    fn system_prompt_omits_generated_operating_rules() {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
-        assert!(result.text.contains("Operating rules:"));
-        assert!(result.text.contains(
+        assert!(!result.text.contains("Operating rules:"));
+        assert!(!result.text.contains(
             "Ground repository claims in files or tool output inspected in this session"
         ));
-        assert!(result.text.contains(
+        assert!(!result.text.contains(
             "For analysis-only requests, stay read-only. For implementation, make small reversible changes"
         ));
     }
 
     #[test]
-    fn system_prompt_includes_conversation_time_mana_planning_doctrine() {
+    fn system_prompt_omits_clarification_and_natural_closeout_guidance() {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
-        assert!(result.text.contains(
-            "During planning/design, externalize real durable structure only when it changes project/work state the user is actively developing"
+        assert!(!result.text.contains(
+            "Ask a focused clarification before continuing when the user asks to continue a plan"
         ));
-        assert!(result
+        assert!(!result
             .text
-            .contains("Do not create mana artifacts from explanation-only answers"));
-        assert!(result.text.contains("epics/tasks/notes/decisions"));
-        assert!(result.text.contains("reserve facts for verifiable claims"));
-        assert!(result.text.contains(
-            "Update mana after failures or material planning changes before relying on chat memory"
+            .contains("internal closeout semantics, not mandatory response headings"));
+        assert!(!result
+            .text
+            .contains("Use natural conversational replies unless the user explicitly asks"));
+    }
+
+    #[test]
+    fn system_prompt_omits_conversation_time_workflow_planning_doctrine() {
+        let reg = make_registry();
+        let result = test_assemble(&reg, &[], &[], &[], None, None, None);
+        assert!(!result.text.contains("For durable project work"));
+        assert!(!result.text.contains("tied to an adopted goal"));
+        assert!(!result
+            .text
+            .contains("workflow steps/checks/acceptance/decisions"));
+        assert!(!result.text.contains(
+            "Record progress after failures or material planning changes before relying on chat memory"
         ));
-        assert!(result
+        assert!(!result
             .text
-            .contains("mana writes are checkpoints, not proof of completion"));
-        assert_eq!(
-            result
-                .text
-                .matches("mana writes are checkpoints, not proof of completion")
-                .count(),
-            1,
-            "mana checkpoint guidance should appear once"
-        );
-        assert!(!result.text.contains("Mana doctrine:"));
+            .contains("workflow updates are checkpoints, not proof of completion"));
+        assert!(!result.text.contains("explanation-only answers"));
+        assert!(!result.text.contains("Imp-work doctrine:"));
         assert!(!result
             .text
             .contains("between-turn mana update before the substantive reply"));
@@ -786,32 +816,36 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_mana_guidance_prefers_native_tool_when_available() {
+    fn system_prompt_workflow_guidance_prefers_native_tool_when_available() {
         let mut reg = make_registry();
         reg.register(Arc::new(FakeTool {
-            name: "mana",
-            description: "Manage mana work natively",
+            name: "workflow",
+            description: "Manage imp-native workflows",
             readonly: false,
         }));
 
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(result
             .text
-            .contains("Prefer native `mana` actions over shell for mana work."));
+            .contains("Use `workflow` for durable project plans"));
+        assert!(!result
+            .text
+            .contains("Use native workflows when durable work"));
+        assert!(!result.text.contains("Use mana when durable work"));
     }
 
     #[test]
-    fn system_prompt_mana_guidance_omitted_without_mana_tool() {
+    fn system_prompt_workflow_guidance_omitted_without_workflow_tool() {
         let reg = make_registry();
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(!result
             .text
-            .contains("Prefer native `mana` actions over shell for mana work."));
+            .contains("Use `workflow` for durable project plans"));
     }
 
     #[test]
-    fn system_prompt_no_mana_guidance_or_delegation_in_prompt() {
-        // Extended mana guidance lives in native `mana guide`/`mana template` affordances.
+    fn system_prompt_no_legacy_mana_guidance_or_delegation_in_prompt() {
+        // Extended workflow guidance lives in native workflow affordances.
         // Verify large legacy prompt blocks no longer appear regardless of tool availability.
         let mut reg = make_registry();
         reg.register(Arc::new(FakeTool {
@@ -903,6 +937,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1005,6 +1040,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1035,6 +1071,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1072,6 +1109,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1102,6 +1140,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1131,6 +1170,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1196,6 +1236,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1221,6 +1262,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1250,6 +1292,7 @@ mod tests {
             memory: None,
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1470,6 +1513,28 @@ mod tests {
     }
 
     #[test]
+    fn system_prompt_role_output_schema_metadata_appended_as_guidance() {
+        let reg = make_registry();
+        let mut role = make_worker_role();
+        role.output_schema = Some(crate::roles::RoleOutputSchema {
+            name: "verification-result".into(),
+            description: "Structured verifier result".into(),
+            required_sections: vec!["status".into(), "commands".into()],
+            output_contract: Some("Return status and commands.".into()),
+            example: Some("status: passed\ncommands: ...".into()),
+            ..crate::roles::RoleOutputSchema::default()
+        });
+        let result = test_assemble(&reg, &[], &[], &[], None, None, Some(&role));
+        assert!(result.text.contains("Role output schema metadata:"));
+        assert!(result.text.contains("- schema: `verification-result`"));
+        assert!(result
+            .text
+            .contains("- required sections: status, commands"));
+        assert!(result.text.contains("Return status and commands."));
+        assert!(result.text.contains("metadata, not enforced validation"));
+    }
+
+    #[test]
     fn system_prompt_worker_role_includes_all_tools() {
         let reg = make_registry();
         let role = make_worker_role();
@@ -1578,14 +1643,12 @@ mod tests {
 
         // All layers present in order
         let identity_pos = result.text.find("You are imp").unwrap();
-        let policy_pos = result.text.find("Operating rules").unwrap();
         let context_pos = result.text.find("# Project Context").unwrap();
         let skills_pos = result.text.find("Available skills").unwrap();
         let facts_pos = result.text.find("Project facts").unwrap();
         let task_pos = result.text.find("## Task").unwrap();
 
-        assert!(identity_pos < policy_pos, "identity before policy");
-        assert!(policy_pos < context_pos, "policy before context");
+        assert!(identity_pos < context_pos, "identity before context");
         assert!(context_pos < skills_pos, "context before skills");
         assert!(skills_pos < facts_pos, "skills before facts");
         assert!(facts_pos < task_pos, "facts before task");
@@ -1619,6 +1682,7 @@ mod tests {
             memory: Some(mem),
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1645,6 +1709,7 @@ mod tests {
             memory: None,
             user_profile: Some(user),
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1669,6 +1734,7 @@ mod tests {
             memory: Some(""),
             user_profile: Some(""),
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });
@@ -1715,6 +1781,7 @@ mod tests {
             memory: Some(mem),
             user_profile: None,
             cwd: None,
+            repo_context: None,
             learning_enabled: false,
             guardrail_profile: None,
         });

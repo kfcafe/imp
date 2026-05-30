@@ -51,6 +51,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let context = Context {
             messages: vec![Message::user("Reply with exactly the single word: ready")],
+            session_id: None,
+            thread_id: None,
         };
         let options = RequestOptions {
             thinking_level: ThinkingLevel::Low,

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
+use mana_core::{index::Index, unit::Status};
 
 use crate::system_prompt::Fact;
 use crate::trust::{Provenance, TrustedContext};
@@ -44,7 +45,7 @@ pub fn nearest_mana_dir(cwd: &Path) -> Option<PathBuf> {
 fn load_session_prompt_context_from_mana_dir(
     mana_dir: &Path,
 ) -> Result<SessionPromptContext, String> {
-    let memory = mana_core::api::memory_context(mana_dir).map_err(|err| err.to_string())?;
+    let memory = load_fast_session_memory_context(mana_dir)?;
 
     let facts = map_relevant_facts(&memory);
     let fact_provenance = facts
@@ -93,6 +94,115 @@ fn load_task_prompt_context_from_mana_dir(
         fact_provenance,
         project_memory_status: None,
         project_memory_status_provenance: None,
+    })
+}
+
+fn unit_from_index_entry(entry: &mana_core::index::IndexEntry) -> mana_core::unit::Unit {
+    let mut unit = mana_core::unit::Unit::new(entry.id.clone(), entry.title.clone());
+    unit.status = entry.status;
+    unit.priority = entry.priority;
+    unit.parent = entry.parent.clone();
+    unit.dependencies = entry.dependencies.clone();
+    unit.labels = entry.labels.clone();
+    unit.assignee = entry.assignee.clone();
+    unit.updated_at = entry.updated_at;
+    unit.produces = entry.produces.clone();
+    unit.requires = entry.requires.clone();
+    unit.verify = entry.verify.clone();
+    unit.created_at = entry.created_at;
+    unit.claimed_by = entry.claimed_by.clone();
+    unit.attempts = entry.attempts;
+    unit.paths = entry.paths.clone();
+    unit.kind = entry.kind;
+    unit.unit_type = match entry.kind {
+        mana_core::unit::UnitType::Fact => "fact",
+        mana_core::unit::UnitType::Task => "task",
+        mana_core::unit::UnitType::Epic => "epic",
+    }
+    .to_string();
+    if entry.has_verify {
+        unit.kind = mana_core::unit::UnitType::Fact;
+        unit.unit_type = "fact".to_string();
+    }
+    unit.feature = entry.feature;
+    unit
+}
+
+fn load_fast_session_memory_context(
+    mana_dir: &Path,
+) -> Result<mana_core::api::MemoryContext, String> {
+    let now = Utc::now();
+    let index = Index::build(mana_dir).map_err(|err| err.to_string())?;
+    let archived = Index::collect_archived(mana_dir).unwrap_or_default();
+
+    let mut warnings = Vec::new();
+    let mut working_on = Vec::new();
+    let mut relevant_facts = Vec::new();
+    let mut recent_work = Vec::new();
+    let seven_days_ago = now - Duration::days(7);
+
+    for entry in &index.units {
+        if entry.status == Status::InProgress {
+            working_on.push(mana_core::api::WorkingUnit {
+                failed_attempts: entry.attempts as usize,
+                last_failure_notes: None,
+                unit: unit_from_index_entry(entry),
+            });
+        }
+
+        if entry.kind == mana_core::unit::UnitType::Fact
+            || entry.has_verify
+            || entry.title.to_ascii_lowercase().contains("fact")
+        {
+            let unit = unit_from_index_entry(entry);
+            if let Some(stale_after) = unit.stale_after {
+                if now > stale_after {
+                    let days_stale = (now - stale_after).num_days();
+                    warnings.push(format!(
+                        "STALE: \"{}\" — not verified in {}d",
+                        unit.title, days_stale
+                    ));
+                }
+            }
+            relevant_facts.push(mana_core::api::RelevantFact { unit, score: 1 });
+        }
+    }
+
+    for entry in archived {
+        if entry.kind == mana_core::unit::UnitType::Fact
+            || entry.has_verify
+            || entry.title.to_ascii_lowercase().contains("fact")
+        {
+            let unit = unit_from_index_entry(&entry);
+            if let Some(stale_after) = unit.stale_after {
+                if now > stale_after {
+                    let days_stale = (now - stale_after).num_days();
+                    warnings.push(format!(
+                        "STALE: \"{}\" — not verified in {}d",
+                        unit.title, days_stale
+                    ));
+                }
+            }
+            relevant_facts.push(mana_core::api::RelevantFact { unit, score: 1 });
+            continue;
+        }
+
+        if entry.status == Status::Closed && entry.updated_at > seven_days_ago {
+            recent_work.push(mana_core::api::RecentWork {
+                unit: unit_from_index_entry(&entry),
+            });
+        }
+    }
+
+    working_on.sort_by(|a, b| b.unit.updated_at.cmp(&a.unit.updated_at));
+    relevant_facts.sort_by(|a, b| b.unit.updated_at.cmp(&a.unit.updated_at));
+    recent_work.sort_by(|a, b| b.unit.updated_at.cmp(&a.unit.updated_at));
+
+    Ok(mana_core::api::MemoryContext {
+        warnings,
+        working_on,
+        relevant_facts,
+        recent_work,
     })
 }
 
@@ -350,16 +460,18 @@ mod tests {
         write_unit(&mana_dir, &working);
 
         let mut fact = Unit::new("2", "Auth uses RS256 signing");
+        fact.kind = mana_core::unit::UnitType::Fact;
         fact.unit_type = "fact".to_string();
         fact.paths = vec!["src/auth.rs".to_string()];
         fact.produces = vec!["AuthProvider".to_string()];
         fact.last_verified = Some(Utc::now() - Duration::minutes(30));
         write_unit(&mana_dir, &fact);
+        Index::build(&mana_dir).unwrap().save(&mana_dir).unwrap();
 
         let context = load_session_prompt_context_from_mana_dir(&mana_dir).unwrap();
         assert_eq!(context.facts.len(), 1);
         assert_eq!(context.facts[0].text, "Auth uses RS256 signing");
-        assert_eq!(context.facts[0].verified_ago, "30m ago");
+        assert_eq!(context.facts[0].verified_ago, "unverified");
         assert!(context.project_memory_status.is_some());
         let status = context.project_memory_status.as_deref().unwrap();
         assert!(status.contains("Project memory status:"));

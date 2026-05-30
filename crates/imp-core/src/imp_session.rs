@@ -89,6 +89,9 @@ pub struct SessionOptions {
     /// Runtime API key override (not persisted).
     pub api_key: Option<String>,
 
+    /// Role to apply to this session. Alias or role id from the role registry.
+    pub role: Option<String>,
+
     /// Thinking level override.
     pub thinking: Option<ThinkingLevel>,
 
@@ -103,6 +106,9 @@ pub struct SessionOptions {
 
     /// Maximum turns before the agent stops.
     pub max_turns: Option<u32>,
+
+    /// Resume workflow controller state from `.imp/runs/<run_id>/workflow-controller.json`.
+    pub resume_run_id: Option<String>,
 
     /// Max output tokens per response.
     pub max_tokens: Option<u32>,
@@ -150,11 +156,13 @@ impl Default for SessionOptions {
             model: None,
             provider: None,
             api_key: None,
+            role: None,
             thinking: None,
             mode: None,
             autonomy_mode: None,
             verification_gates: Vec::new(),
             max_turns: None,
+            resume_run_id: None,
             max_tokens: None,
             system_prompt: None,
             no_tools: false,
@@ -283,6 +291,27 @@ impl ImpSession {
 
         // 3. Resolve model + provider route
         let model_registry = ModelRegistry::with_builtins();
+        let role_registry = config
+            .role_registry()
+            .map_err(|err| Error::Config(err.to_string()))?;
+        let selected_role = options
+            .role
+            .as_deref()
+            .map(|role_name| {
+                role_registry
+                    .resolve(role_name)
+                    .ok_or_else(|| Error::Config(format!("Unknown role: {role_name}")))
+            })
+            .transpose()?;
+        let role_model_id = selected_role.as_ref().and_then(|role| {
+            if options.model.is_some() {
+                None
+            } else {
+                role_registry
+                    .resolve_model_for_role(&role.name, &model_registry)
+                    .map(|model| model.id.clone())
+            }
+        });
         let (model, _provider_name, api_key) = if let Some(model) = options.model_override.as_ref()
         {
             (
@@ -293,7 +322,7 @@ impl ImpSession {
         } else {
             let runtime_connection = resolve_runtime_connection(
                 RuntimeConnectionIntent {
-                    model_hint: options.model.as_deref(),
+                    model_hint: options.model.as_deref().or(role_model_id.as_deref()),
                     config_model: config.model.as_deref(),
                     provider_override: options.provider.as_deref(),
                     api_key_override_present: options.api_key.is_some(),
@@ -339,6 +368,9 @@ impl ImpSession {
         let mut builder =
             AgentBuilder::new(config.clone(), cwd.clone(), clone_model(&model), api_key);
 
+        if let Some(role) = selected_role {
+            builder = builder.role(role);
+        }
         if let Some(task) = &options.task {
             builder = builder.task(task.clone());
         }
@@ -358,6 +390,10 @@ impl ImpSession {
         builder = builder.run_policy(options.run_policy.clone());
 
         let (mut agent, handle) = builder.build()?;
+
+        if let Some(resume_run_id) = &options.resume_run_id {
+            agent.resume_workflow_controller_from_project_run(resume_run_id)?;
+        }
 
         if options.no_tools {
             agent.tools.retain(|_| false);
@@ -384,6 +420,11 @@ impl ImpSession {
                 .unwrap_or_else(|| SessionManager::new(&cwd, &session_dir).unwrap()),
             SessionChoice::Open(ref path) => SessionManager::open(path)?,
         };
+
+        let mut agent = agent;
+        let stable_session_id = session_mgr.session_id();
+        agent.session_id = stable_session_id.clone();
+        agent.thread_id = stable_session_id;
 
         Ok(Self {
             agent: Some(agent),
@@ -618,6 +659,9 @@ impl ImpSession {
         if let Some(ref mut agent) = self.agent {
             agent.model = clone_model(&self.model);
             agent.api_key = api_key;
+            let stable_session_id = self.session_mgr.session_id();
+            agent.session_id = stable_session_id.clone();
+            agent.thread_id = stable_session_id;
         }
 
         Ok(())

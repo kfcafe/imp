@@ -611,6 +611,10 @@ async fn run_command(
         .and_then(|r| r.ok());
     let exit_code = status.and_then(|s| s.code()).unwrap_or(-1);
 
+    // Keep only redacted command output after streaming so any truncation temp
+    // file cannot persist injected secret values to disk.
+    output = redact_injected_secrets(&output, &resolved_secret_env);
+
     // Truncate from the tail (end matters more for command output).
     let TruncationResult {
         content: truncated_output,
@@ -810,6 +814,43 @@ mod tests {
             Some("TEST_SERVICE_API_KEY")
         );
         assert!(!result.details.to_string().contains("native-secret-value"));
+    }
+
+    #[tokio::test]
+    async fn with_secrets_redacts_truncation_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("TEST_SERVICE_API_KEY", "native-secret-value");
+        let (mut ctx, mut rx) = test_ctx(tmp.path());
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        allow_test_secret(&mut ctx);
+
+        let result = run_command(
+            "for i in $(seq 1 2105); do printf '%s line-%s\\n' \"$TEST_SERVICE_API_KEY\" \"$i\"; done",
+            DEFAULT_TIMEOUT_SECS,
+            &ctx,
+            vec![RequestedSecret {
+                name: "test-service".to_string(),
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.details["truncated"].as_bool().unwrap_or(false));
+        let text = result.text_content().unwrap();
+        assert!(!text.contains("native-secret-value"));
+        let temp_path = text
+            .split("Full output saved to ")
+            .nth(1)
+            .and_then(|tail| tail.lines().next())
+            .expect("truncation note should include temp file path")
+            .trim_end_matches(']');
+        let temp_content = std::fs::read_to_string(temp_path).unwrap();
+        assert!(temp_content.contains(SECRET_REDACTION));
+        assert!(!temp_content.contains("native-secret-value"));
+        drop(result);
+        drop(ctx);
+        drain.abort();
     }
 
     #[tokio::test]

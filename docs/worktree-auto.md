@@ -4,13 +4,21 @@
 imp perform local implementation work without touching the main checkout until the
 user chooses what to do with the result.
 
+Current implementation status: the core runtime has worktree planning/creation,
+worktree-scoped agent setup, diff/evidence capture, conservative apply, keep, and
+discard helpers, CLI closeout commands, and TUI-visible worktree status/events.
+Some higher-level orchestration paths are still being integrated, so the safety
+model below remains the contract: do not silently edit the main checkout when a
+worktree run cannot be established.
+
 The key invariant is simple:
 
 > `worktree-auto` must never silently fall back to editing the main workspace.
 
-Until automatic worktree creation is fully implemented, `worktree-auto` fails
-closed with `autonomy_worktree_required` unless the runtime is already executing
-inside an explicit `WorkspaceScope::Worktree` context.
+`worktree-auto` now has runtime helpers for planning, creating, capturing, and
+closing out isolated git worktree runs. If the runtime cannot create or use an
+isolated worktree, it still fails closed with `autonomy_worktree_required`; it
+never silently falls back to editing the main checkout.
 
 ## Scope
 
@@ -54,11 +62,11 @@ on the agent calling the tool manually. Worktree lifecycle helpers should live i
 runtime/workflow code and may share lower-level parsing/detection helpers with the
 tool later.
 
-### Autonomy placeholder
+### Runtime isolation
 
-394.6 already made `worktree-auto` fail closed unless the monitor sees
+394.6 made `worktree-auto` fail closed unless the monitor sees
 `WorkspaceScope::Worktree`. 394.9 replaces that placeholder with runtime-created
-worktree execution. After creation, the child run context should carry:
+worktree execution where the child run context carries:
 
 ```rust
 WorkspaceScope::Worktree {
@@ -171,11 +179,14 @@ Artifacts:
 
 ```text
 .imp/runs/<run-id>/worktree/
-  metadata.json
+  worktree-metadata.json
   status.txt
   diff.stat
   diff.patch
 ```
+
+`worktree-metadata.json` is the handoff file for later status/apply/keep/discard
+commands.
 
 Evidence should link these artifacts and summarize:
 
@@ -193,12 +204,13 @@ At closeout, user should choose one:
 
 Apply means bring the worktree result into the main workspace.
 
-Initial safe implementation should prefer patch application rather than merge:
+Current implementation uses conservative patch application:
 
-1. ensure main workspace is clean or ask user
-2. apply captured patch to main workspace (`git apply --index` later optional)
-3. preserve worktree until successful apply is confirmed
-4. if apply fails, keep worktree and report conflict/manual next steps
+1. ensure main workspace is clean
+2. generate a binary-safe patch from the worktree
+3. run `git apply --check --binary -` in the main workspace
+4. run `git apply --binary -` only if the check succeeds
+5. preserve the worktree if apply fails so the user can inspect or recover
 
 No automatic conflict resolution in 394.9.
 
@@ -257,16 +269,20 @@ imp --autonomy worktree-auto "make the parser refactor"
 imp --autonomy worktree-auto --verify "cargo test -p imp-core" "fix the bug"
 ```
 
-Future lifecycle commands may be:
+Closeout commands operate on the saved worktree metadata file:
 
 ```sh
-imp worktree apply <run-id>
-imp worktree keep <run-id>
-imp worktree discard <run-id>
+imp worktree status .imp/runs/<run-id>/worktree/worktree-metadata.json
+imp worktree keep .imp/runs/<run-id>/worktree/worktree-metadata.json
+imp worktree apply .imp/runs/<run-id>/worktree/worktree-metadata.json
+imp worktree discard .imp/runs/<run-id>/worktree/worktree-metadata.json
 ```
 
-or integrated into a broader workflow-run command surface. Until lifecycle
-commands exist, evidence should print explicit git/manual commands.
+`status` prints the worktree path, branch, original checkout, patch path, and
+current `git status --short`. `keep`, `apply`, and `discard` print a JSON closeout
+result. `apply` refuses dirty main workspaces and reports conflicts instead of
+resolving them. `discard` removes the worktree and deletes the branch through the
+runtime closeout helper; use it only when the worktree result is no longer needed.
 
 ## Mana/evidence refs
 
@@ -321,5 +337,7 @@ Hard requirements:
 - 394.9.7: trace/evidence/mana metadata refs
 - 394.9.8: final user docs and limitations
 
-The initial implementation may keep lifecycle actions internal and only expose
-manual cleanup/apply guidance if full interactive lifecycle UX is too large.
+Current implementation exposes lifecycle actions through `imp worktree` metadata
+commands and emits worktree events/artifacts for TUI, trace, and evidence. Future
+work may integrate the same actions into a broader workflow-run closeout command
+surface.

@@ -20,11 +20,15 @@ pub struct SessionPickerState {
     pub selected: usize,
     pub scroll_offset: usize,
     pub loading: bool,
+    pub loading_more: bool,
+    pub has_more: bool,
+    pub loaded_count: usize,
     preferred_cwd: Option<String>,
 }
 
 impl SessionPickerState {
     pub fn new(sessions: Vec<SessionInfo>, preferred_cwd: Option<&Path>) -> Self {
+        let loaded_count = sessions.len();
         let mut state = Self {
             sessions,
             filtered_indices: Vec::new(),
@@ -32,6 +36,9 @@ impl SessionPickerState {
             selected: 0,
             scroll_offset: 0,
             loading: false,
+            loading_more: false,
+            has_more: false,
+            loaded_count,
             preferred_cwd: preferred_cwd.map(|path| path.to_string_lossy().to_string()),
         };
         state.refresh_filter();
@@ -46,8 +53,39 @@ impl SessionPickerState {
             selected: 0,
             scroll_offset: 0,
             loading: true,
+            loading_more: false,
+            has_more: true,
+            loaded_count: 0,
             preferred_cwd: preferred_cwd.map(|path| path.to_string_lossy().to_string()),
         }
+    }
+
+    pub fn append_sessions(&mut self, sessions: Vec<SessionInfo>, has_more: bool) {
+        self.sessions.extend(sessions);
+        self.loading_more = false;
+        self.has_more = has_more;
+        self.loaded_count = self.sessions.len();
+        self.refresh_filter();
+    }
+
+    pub fn set_loading_more(&mut self, loading_more: bool) {
+        self.loading_more = loading_more;
+    }
+
+    pub fn should_load_more(&self, remaining_threshold: usize) -> bool {
+        !self.loading
+            && !self.loading_more
+            && self.has_more
+            && self.filter.trim().is_empty()
+            && self
+                .filtered_indices
+                .len()
+                .saturating_sub(self.selected + 1)
+                <= remaining_threshold
+    }
+
+    pub fn next_offset(&self) -> usize {
+        self.loaded_count
     }
 
     pub fn finish_loading(&mut self, sessions: Vec<SessionInfo>) {
@@ -55,6 +93,8 @@ impl SessionPickerState {
         self.selected = 0;
         self.scroll_offset = 0;
         self.loading = false;
+        self.loading_more = false;
+        self.loaded_count = self.sessions.len();
         self.refresh_filter();
     }
 
@@ -372,19 +412,27 @@ fn render_session_preview(
         .as_deref()
         .filter(|text| !text.trim().is_empty())
         .unwrap_or("(no prompt captured)");
+    let last_message = session
+        .last_message
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or("(no message captured)");
 
     let lines = [
         format!("Title: {title}"),
-        format!("Project: {}", project_name(&session.cwd)),
+        format!("CWD: {}", session.cwd),
         format!("Updated: {}", format_age(session.updated_at)),
         format!("Messages: {}", session.message_count),
         format!("ID: {}", session.id),
         String::new(),
-        "Summary:".to_string(),
-        summary.to_string(),
-        String::new(),
         "First prompt:".to_string(),
         prompt.to_string(),
+        String::new(),
+        "Last message:".to_string(),
+        last_message.to_string(),
+        String::new(),
+        "Summary:".to_string(),
+        summary.to_string(),
         String::new(),
         "Enter opens • type filters • Esc cancels".to_string(),
     ];
@@ -396,7 +444,10 @@ fn render_session_preview(
         }
         let style = if line.is_empty() {
             theme.muted_style()
-        } else if matches!(line.as_str(), "Summary:" | "First prompt:") {
+        } else if matches!(
+            line.as_str(),
+            "Summary:" | "First prompt:" | "Last message:"
+        ) {
             theme.accent_style()
         } else {
             theme.muted_style()
@@ -638,6 +689,7 @@ mod tests {
             updated_at,
             message_count: 3,
             first_message: Some(first_message.to_string()),
+            last_message: Some(first_message.to_string()),
             name: title.map(str::to_string),
             summary: summary.map(str::to_string),
         }
@@ -748,5 +800,30 @@ mod tests {
             state.push_filter(c);
         }
         assert_eq!(state.selected_session().unwrap().id, "old-local");
+    }
+
+    #[test]
+    fn should_load_more_when_selection_nears_loaded_end() {
+        let sessions = (0..8)
+            .map(|idx| {
+                make_session(
+                    &format!("session-{idx}"),
+                    None,
+                    None,
+                    "/tmp/tower/imp",
+                    "prompt",
+                    idx,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut state = SessionPickerState::new(sessions, Some(Path::new("/tmp/tower/imp")));
+        state.has_more = true;
+
+        assert!(!state.should_load_more(2));
+        state.selected = 6;
+        assert!(state.should_load_more(2));
+
+        state.set_loading_more(true);
+        assert!(!state.should_load_more(2));
     }
 }

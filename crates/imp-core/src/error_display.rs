@@ -5,7 +5,16 @@ pub fn format_error_for_display(raw: &str) -> String {
     }
 
     if let Some(message) = extract_json_message(trimmed) {
+        let lower_message = message.to_ascii_lowercase();
+        if is_context_full_error(&lower_message) {
+            return normalize_context_full_message(&message);
+        }
         return with_auth_hint(&message);
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if is_context_full_error(&lower) {
+        return normalize_context_full_message(trimmed);
     }
 
     if looks_like_html_error(trimmed) {
@@ -44,6 +53,25 @@ fn extract_json_message(raw: &str) -> Option<String> {
                 .and_then(|message| message.as_str())
                 .map(ToOwned::to_owned)
         })
+}
+
+fn is_context_full_error(lower: &str) -> bool {
+    lower.contains("context full")
+        || lower.contains("context too long")
+        || lower.contains("exceeds the") && lower.contains("token window")
+        || lower.contains("maximum context")
+        || lower.contains("context_length_exceeded")
+}
+
+fn normalize_context_full_message(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if message.contains("Run /compact") || message.contains("run /compact") {
+        message.to_string()
+    } else if lower.contains("context full") {
+        format!("{message} Run /compact or start a new chat to continue.")
+    } else {
+        format!("Context full: {message}. Run /compact or start a new chat to continue.")
+    }
 }
 
 fn with_auth_hint(message: &str) -> String {
@@ -113,6 +141,30 @@ mod tests {
         assert_eq!(
             format_error_for_display(raw),
             "Provider returned an HTML error page (HTTP 403 Forbidden: Attention Required! | Cloudflare). This usually means an auth, gateway, proxy, or rate-limit issue."
+        );
+    }
+
+    #[test]
+    fn normalizes_context_full_errors() {
+        let raw = "Context too long: 210000 tokens exceeds 200000";
+        assert_eq!(
+            format_error_for_display(raw),
+            "Context full: Context too long: 210000 tokens exceeds 200000. Run /compact or start a new chat to continue."
+        );
+    }
+
+    #[test]
+    fn context_full_message_does_not_duplicate_compact_hint() {
+        let raw = "Context full: estimated 210000 tokens exceeds the 200000 token window for claude. Run /compact or start a new chat to continue.";
+        assert_eq!(format_error_for_display(raw), raw);
+    }
+
+    #[test]
+    fn normalizes_provider_context_length_json_errors() {
+        let raw = "Provider error: HTTP 400 Bad Request: {\"error\":{\"type\":\"context_length_exceeded\",\"message\":\"maximum context length is 200000 tokens\"}}";
+        assert_eq!(
+            format_error_for_display(raw),
+            "Context full: maximum context length is 200000 tokens. Run /compact or start a new chat to continue."
         );
     }
 

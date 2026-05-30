@@ -471,8 +471,8 @@ fn render_visible_lines(lines: &[Line<'_>], area: Rect, buf: &mut Buffer, scroll
     let visible = &lines[window.start..window.end];
 
     for (i, line) in visible.iter().enumerate() {
-        let y = area.y + i as u16;
-        if y >= area.y + area.height {
+        let y = area.y.saturating_add(i as u16);
+        if y >= area.y.saturating_add(area.height) {
             break;
         }
         buf.set_line(area.x, y, line, area.width);
@@ -480,10 +480,10 @@ fn render_visible_lines(lines: &[Line<'_>], area: Rect, buf: &mut Buffer, scroll
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct VisibleLineWindow {
-    scroll_offset: usize,
-    start: usize,
-    end: usize,
+pub(crate) struct VisibleLineWindow {
+    pub(crate) scroll_offset: usize,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
 }
 
 fn clamp_scroll_offset_to_view(
@@ -494,14 +494,15 @@ fn clamp_scroll_offset_to_view(
     scroll_offset.min(total_lines.saturating_sub(visible_height))
 }
 
-fn visible_line_window(
+pub(crate) fn visible_line_window(
     total_lines: usize,
     visible_height: usize,
     scroll_offset: usize,
 ) -> VisibleLineWindow {
     let scroll_offset = clamp_scroll_offset_to_view(total_lines, visible_height, scroll_offset);
-    let start = total_lines.saturating_sub(visible_height + scroll_offset);
-    let end = total_lines.min(start + visible_height);
+    let requested = visible_height.saturating_add(scroll_offset);
+    let start = total_lines.saturating_sub(requested);
+    let end = total_lines.min(start.saturating_add(visible_height));
 
     VisibleLineWindow {
         scroll_offset,
@@ -572,7 +573,8 @@ pub fn scroll_offset_for_message_at_top(
     .len();
 
     let visible_height = chat_area.height as usize;
-    let offset = total_lines.saturating_sub(visible_height + anchor_line);
+    let requested = visible_height.saturating_add(anchor_line);
+    let offset = total_lines.saturating_sub(requested);
     clamp_scroll_offset_to_view(total_lines, visible_height, offset)
 }
 
@@ -928,6 +930,17 @@ fn push_tool_call_chat_lines(
         tool_line_indices.push((header_start + offset, tc.id.clone()));
     }
     all_lines.extend(header_lines);
+    let detail_lines = tc.summary_detail_lines(theme);
+    if chat_tool_display == ChatToolDisplay::Summary && !detail_lines.is_empty() {
+        for line in detail_lines {
+            let line_start = all_lines.len();
+            let wrapped = wrap_line_with_prefix(&line, &rail, &rail, width, word_wrap);
+            for offset in 0..wrapped.len() {
+                tool_line_indices.push((line_start + offset, tc.id.clone()));
+            }
+            all_lines.extend(wrapped);
+        }
+    }
 
     if chat_tool_display == ChatToolDisplay::Summary {
         return;
@@ -1190,9 +1203,10 @@ pub fn build_click_map_from_rendered_lines(
 
     for (line_index, line) in lines.iter().enumerate().take(window.end).skip(window.start) {
         let plain = line_to_plain_text(line);
-        let Some(rest) = plain
+        let header = plain.trim_start();
+        let Some(rest) = header
             .strip_prefix("▸ ")
-            .or_else(|| plain.strip_prefix("▾ "))
+            .or_else(|| header.strip_prefix("▾ "))
         else {
             continue;
         };
@@ -1382,7 +1396,7 @@ mod tests {
     fn build_click_map_from_rendered_lines_finds_visible_tool_headers() {
         let lines = vec![
             Line::from("hello"),
-            Line::from("▸ #tool-1 read src/main.rs"),
+            Line::from("  ▸ #tool-1 read src/main.rs"),
             Line::from("world"),
         ];
         let map = build_click_map_from_rendered_lines(&lines, Rect::new(0, 10, 80, 3), 0);
@@ -1442,7 +1456,7 @@ mod tests {
             .unwrap();
         let tool_idx = rendered
             .iter()
-            .position(|line| line.contains("read") && line.contains("src/main.rs"))
+            .position(|line| line.contains("Read") && line.contains("src/main.rs"))
             .unwrap();
         let second_thought_idx = rendered
             .iter()
@@ -1530,7 +1544,7 @@ mod tests {
             .unwrap();
         let tool_idx = rendered
             .iter()
-            .position(|line| line.contains("read") && line.contains("src/main.rs"))
+            .position(|line| line.contains("Read") && line.contains("src/main.rs"))
             .unwrap();
         let after_idx = rendered
             .iter()
@@ -1575,7 +1589,7 @@ mod tests {
         assert_eq!(visible_tools.len(), 1);
         assert!(rendered
             .iter()
-            .any(|line| line.contains("read") && line.contains("src/main.rs")));
+            .any(|line| line.contains("Read") && line.contains("src/main.rs")));
         assert!(!rendered.iter().any(|line| line.contains("fn main() {}")));
     }
 
@@ -1611,7 +1625,7 @@ mod tests {
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
         assert_eq!(visible_tools.len(), 1);
         assert!(rendered.iter().any(|line| line.contains("▸")
-            && line.contains("read")
+            && line.contains("Read")
             && line.contains("src/main.rs")));
     }
 

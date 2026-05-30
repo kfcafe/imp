@@ -11,12 +11,15 @@ use async_trait::async_trait;
 use crate::error::{Error, Result};
 use crate::tools::{Tool, ToolContext, ToolOutput, ToolRegistry};
 
-use bun_runner::run_bun_bridge;
+use bun_runner::{execute_manifest_tool, run_bun_bridge, TypeScriptExtensionCallRequest};
 pub use discovery::{
     discover_typescript_extensions, discover_typescript_extensions_in, TypeScriptExtension,
     TypeScriptExtensionSource,
 };
-use schema::{normalize_parameters, RegisteredTool, TypeScriptExtensionCompatibility};
+use schema::{
+    normalize_parameters, RegisteredTool, TypeScriptExtensionCompatibility,
+    TypeScriptExtensionManifest, TypeScriptExtensionToolManifest,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeScriptExtensionStatus {
@@ -127,10 +130,15 @@ fn load_typescript_extension(
     extension: &TypeScriptExtension,
     registry: &mut ToolRegistry,
 ) -> Result<()> {
+    if extension.manifest_path.is_some() {
+        return load_manifest_typescript_extension(extension, registry);
+    }
+
     let tools = inspect_registered_tools(extension)?;
     for tool in tools {
         registry.register(Arc::new(TypeScriptExtensionTool {
             extension: extension.clone(),
+            manifest: None,
             name: tool.name,
             label: tool.label,
             description: describe_tool_with_compatibility(
@@ -138,6 +146,37 @@ fn load_typescript_extension(
                 &tool.compatibility,
             ),
             parameters: normalize_parameters(tool.parameters),
+            manifest_tool: None,
+            manifest_tool_metadata: None,
+        }));
+    }
+    Ok(())
+}
+
+fn load_manifest_typescript_extension(
+    extension: &TypeScriptExtension,
+    registry: &mut ToolRegistry,
+) -> Result<()> {
+    let manifest_path = extension
+        .manifest_path
+        .as_ref()
+        .ok_or_else(|| Error::Tool("missing TypeScript extension manifest path".into()))?;
+    let manifest_text = std::fs::read_to_string(manifest_path).map_err(Error::from)?;
+    let manifest: TypeScriptExtensionManifest = serde_json::from_str(&manifest_text)?;
+    manifest
+        .validate()
+        .map_err(|err| Error::Tool(err.to_string()))?;
+
+    for tool in manifest.tools.iter().cloned() {
+        registry.register(Arc::new(TypeScriptExtensionTool {
+            extension: extension.clone(),
+            manifest: Some(manifest.clone()),
+            name: tool.name.clone(),
+            label: tool.label.clone(),
+            description: tool.description.clone(),
+            parameters: tool.input_schema.clone(),
+            manifest_tool: Some(tool.clone()),
+            manifest_tool_metadata: Some(manifest.policy_metadata_for_tool(&tool)),
         }));
     }
     Ok(())
@@ -190,6 +229,13 @@ fn describe_tool_with_compatibility(
     }
 }
 
+fn mediated_extension_env(tool: &TypeScriptExtensionToolManifest) -> Vec<(String, String)> {
+    tool.env
+        .iter()
+        .filter_map(|key| std::env::var(key).ok().map(|value| (key.clone(), value)))
+        .collect()
+}
+
 fn execute_registered_tool(
     extension: &TypeScriptExtension,
     tool_name: &str,
@@ -218,10 +264,13 @@ fn execute_registered_tool(
 
 struct TypeScriptExtensionTool {
     extension: TypeScriptExtension,
+    manifest: Option<TypeScriptExtensionManifest>,
     name: String,
     label: Option<String>,
     description: String,
     parameters: serde_json::Value,
+    manifest_tool: Option<TypeScriptExtensionToolManifest>,
+    manifest_tool_metadata: Option<crate::reference_monitor::ToolMetadata>,
 }
 
 #[async_trait]
@@ -243,15 +292,53 @@ impl Tool for TypeScriptExtensionTool {
     }
 
     fn is_readonly(&self) -> bool {
-        false
+        self.manifest_tool.as_ref().is_some_and(|tool| {
+            matches!(
+                tool.side_effect,
+                schema::TypeScriptExtensionSideEffect::ReadOnly
+            )
+        })
+    }
+
+    fn policy_metadata(&self) -> crate::reference_monitor::ToolMetadata {
+        let mut metadata = self.manifest_tool_metadata.clone().unwrap_or_else(|| {
+            let mut metadata = crate::reference_monitor::ToolMetadata::new(
+                self.name(),
+                crate::reference_monitor::ToolActionKind::Extension,
+            );
+            metadata.extension = true;
+            metadata.extension_id = Some(self.extension.name.clone());
+            metadata.requires_approval = true;
+            metadata
+        });
+        metadata.name = self.name().to_string();
+        metadata
     }
 
     async fn execute(
         &self,
         _call_id: &str,
         params: serde_json::Value,
-        _ctx: ToolContext,
+        ctx: ToolContext,
     ) -> Result<ToolOutput> {
+        if let (Some(manifest), Some(tool)) = (&self.manifest, &self.manifest_tool) {
+            let result = execute_manifest_tool(TypeScriptExtensionCallRequest {
+                extension: &self.extension,
+                manifest,
+                tool,
+                arguments: params,
+                env: mediated_extension_env(tool),
+                cwd: ctx.cwd,
+                run_id: None,
+            })?;
+            let output = ToolOutput {
+                content: result.content,
+                details: result.details.unwrap_or(serde_json::Value::Null),
+                is_error: result.is_error,
+            };
+            return Ok(output);
+        }
+
         execute_registered_tool(&self.extension, &self.name, params)
     }
 }
@@ -261,6 +348,186 @@ mod tests {
     use super::*;
     use std::process::Command;
     use tempfile::TempDir;
+
+    #[test]
+    fn discovers_manifest_extension_packages() {
+        let temp = TempDir::new().unwrap();
+        let extension_dir = temp.path().join(".imp").join("extensions").join("example");
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        std::fs::write(
+            extension_dir.join("imp.extension.json"),
+            r#"{
+                "schemaVersion": 1,
+                "id": "example.echo",
+                "name": "Example Echo",
+                "version": "0.1.0",
+                "runtime": {
+                    "kind": "typescript-subprocess",
+                    "command": "bun",
+                    "protocol": "one-shot-json"
+                },
+                "tools": [{
+                    "name": "example_echo",
+                    "description": "Echo text.",
+                    "inputSchema": { "type": "object", "properties": {} },
+                    "sideEffect": "read-only",
+                    "resourceScope": { "kind": "none" },
+                    "network": "none"
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let extensions = discover_typescript_extensions(temp.path());
+        let extension = extensions
+            .iter()
+            .find(|extension| extension.name == "example")
+            .expect("manifest extension discovered");
+        assert_eq!(
+            extension.manifest_path.as_deref(),
+            Some(extension_dir.join("imp.extension.json").as_path())
+        );
+    }
+
+    #[tokio::test]
+    async fn executes_manifest_one_shot_json_tool() {
+        let temp = TempDir::new().unwrap();
+        let extension_dir = temp.path().join(".imp").join("extensions").join("example");
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        let script = extension_dir.join("tool.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"id":"call-1","type":"tool_result","content":[{"type":"text","text":"hello from ts"}],"details":{"ok":true}}'
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&script, permissions).unwrap();
+        }
+        std::fs::write(
+            extension_dir.join("imp.extension.json"),
+            format!(
+                r#"{{
+                    "schemaVersion": 1,
+                    "id": "example.echo",
+                    "name": "Example Echo",
+                    "version": "0.1.0",
+                    "runtime": {{
+                        "kind": "typescript-subprocess",
+                        "command": "{}",
+                        "protocol": "one-shot-json"
+                    }},
+                    "tools": [{{
+                        "name": "example_echo",
+                        "description": "Echo text.",
+                        "inputSchema": {{ "type": "object", "properties": {{}} }},
+                        "sideEffect": "read-only",
+                        "resourceScope": {{ "kind": "none" }},
+                        "network": "none"
+                    }}]
+                }}"#,
+                script.display()
+            ),
+        )
+        .unwrap();
+
+        let mut registry = ToolRegistry::new();
+        load_typescript_extensions(temp.path(), &mut registry).unwrap();
+        let tool = registry
+            .get("example_echo")
+            .expect("manifest tool registered");
+        let output = tool
+            .execute(
+                "call-1",
+                serde_json::json!({}),
+                test_tool_context(temp.path()),
+            )
+            .await
+            .unwrap();
+        assert!(!output.is_error);
+        let Some(imp_llm::ContentBlock::Text { text }) = output.content.first() else {
+            panic!("expected text content block: {:?}", output.content);
+        };
+        assert_eq!(text, "hello from ts");
+        assert_eq!(output.details["ok"], true);
+        assert!(tool.is_readonly());
+        assert!(tool.policy_metadata().extension);
+    }
+
+    #[test]
+    fn discovers_repository_example_typescript_extension_manifest() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("workspace root");
+        let manifest_path = repo_root.join("extensions/example/imp.extension.json");
+        let manifest_text = std::fs::read_to_string(&manifest_path).unwrap();
+        let manifest: TypeScriptExtensionManifest = serde_json::from_str(&manifest_text).unwrap();
+        manifest.validate().unwrap();
+        assert_eq!(manifest.id, "example.typescript");
+        assert!(manifest
+            .tools
+            .iter()
+            .any(|tool| tool.name == "example_echo"));
+        let write_tool = manifest
+            .tools
+            .iter()
+            .find(|tool| tool.name == "example_write_demo")
+            .expect("workspace-write demo tool");
+        let metadata = manifest.policy_metadata_for_tool(write_tool);
+        assert!(metadata.workspace_write);
+        assert!(metadata.requires_approval);
+    }
+
+    #[test]
+    fn manifest_extension_tool_policy_metadata_uses_registered_tool_name() {
+        let temp = TempDir::new().unwrap();
+        let extension_dir = temp.path().join(".imp").join("extensions").join("example");
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        std::fs::write(
+            extension_dir.join("imp.extension.json"),
+            r#"{
+                "schemaVersion": 1,
+                "id": "example.echo",
+                "name": "Example Echo",
+                "version": "0.1.0",
+                "runtime": {
+                    "kind": "typescript-subprocess",
+                    "command": "python3",
+                    "protocol": "one-shot-json"
+                },
+                "tools": [{
+                    "name": "example_echo",
+                    "description": "Echo text.",
+                    "inputSchema": { "type": "object", "properties": {} },
+                    "sideEffect": "read-only",
+                    "resourceScope": { "kind": "none" },
+                    "network": "none"
+                }]
+            }"#,
+        )
+        .unwrap();
+        let mut registry = ToolRegistry::new();
+        load_typescript_extensions(temp.path(), &mut registry).unwrap();
+        let tool = registry.get("example_echo").expect("tool registered");
+        let metadata = tool.policy_metadata();
+        assert_eq!(metadata.name, "example_echo");
+        assert_eq!(
+            metadata.action_kind,
+            crate::reference_monitor::ToolActionKind::Read
+        );
+        assert!(metadata.readonly);
+        assert!(metadata.extension);
+        assert_eq!(metadata.extension_id.as_deref(), Some("example.echo"));
+        assert_eq!(metadata.manifest_version.as_deref(), Some("0.1.0"));
+        assert!(!metadata.requires_approval);
+    }
 
     #[test]
     fn discovers_local_and_imported_extensions() {
@@ -479,6 +746,42 @@ export default function dynamicToolsExtension(pi: ExtensionAPI) {
         ))
         .unwrap();
         assert_eq!(output.text_content(), Some("[session] hello"));
+    }
+
+    #[tokio::test]
+    async fn loads_example_manifest_extension_fixture() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("extensions")
+            .join("example");
+        if !source.exists() || Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+
+        let temp = TempDir::new().unwrap();
+        let extension_dir = temp.path().join(".imp").join("extensions").join("example");
+        copy_dir_for_test(&source, &extension_dir).unwrap();
+
+        let mut registry = ToolRegistry::new();
+        load_typescript_extensions(temp.path(), &mut registry).unwrap();
+        let tool = registry
+            .get("example_echo")
+            .expect("example_echo registered");
+        assert!(tool.is_readonly());
+        assert_eq!(
+            tool.policy_metadata().extension_id.as_deref(),
+            Some("example.typescript")
+        );
+
+        let output = futures::executor::block_on(tool.execute(
+            "call_example_echo",
+            serde_json::json!({ "text": "hello example" }),
+            test_tool_context(temp.path()),
+        ))
+        .unwrap();
+        assert_eq!(output.text_content(), Some("hello example"));
+        assert_eq!(output.details["tool"], "example_echo");
     }
 
     #[test]

@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::highlight::Highlighter;
 use crate::selection::TextSurface;
 use crate::theme::Theme;
-use crate::views::tool_output::{styled_tool_output_lines, wrap_styled_lines};
+use crate::views::tool_output::{styled_sidebar_tool_output_lines, wrap_styled_lines};
 use crate::views::tools::DisplayToolCall;
 
 #[derive(Debug, Clone)]
@@ -684,15 +684,17 @@ fn styled_detail_lines(
         ))];
     };
 
-    let header = tc.header_line_animated_focused(theme, 0, true, ui_config.animations);
     let full_config = UiConfig {
         tool_output: ToolOutputDisplay::Full,
         word_wrap: ui_config.word_wrap,
         ..*ui_config
     };
-    let mut lines = vec![header];
-    let input_lines = tool_input_detail_lines(tc, theme, content_w.saturating_sub(2));
-    lines.extend(input_lines);
+    let mut lines = Vec::new();
+    if !uses_tool_card_detail(&tc.name) {
+        lines.push(tc.header_line_animated_focused(theme, 0, true, ui_config.animations));
+        let input_lines = tool_input_detail_lines(tc, theme, content_w.saturating_sub(2));
+        lines.extend(input_lines);
+    }
     lines.extend(styled_output_lines(
         tc,
         &full_config,
@@ -701,6 +703,23 @@ fn styled_detail_lines(
         content_w.saturating_sub(2),
     ));
     lines
+}
+
+fn uses_tool_card_detail(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "work"
+            | "prototype"
+            | "bash"
+            | "shell"
+            | "git"
+            | "scan"
+            | "web"
+            | "read"
+            | "write"
+            | "edit"
+            | "multi_edit"
+    )
 }
 
 fn tool_input_detail_lines(
@@ -753,6 +772,19 @@ fn tool_input_summary_rows(tc: &DisplayToolCall) -> Vec<String> {
         "web" => {
             summarize_named_fields(args, &["action", "query", "url", "provider", "maxResults"])
         }
+        "work" => summarize_named_fields(
+            args,
+            &[
+                "action",
+                "kind",
+                "id",
+                "title",
+                "status",
+                "parent_work",
+                "outcome",
+                "summary",
+            ],
+        ),
         _ => summarize_object_fields(args),
     }
 }
@@ -819,7 +851,7 @@ fn summarize_field_value(value: &Value) -> Option<String> {
         Value::Null => None,
         Value::String(text) => Some(summarize_text(text)),
         Value::Array(items) => Some(summarize_array(items)),
-        Value::Object(obj) => Some(format!("{{{} fields}}", obj.len())),
+        Value::Object(obj) => Some(summarize_object(obj)),
         Value::Bool(_) | Value::Number(_) => Some(summarize_value(value)),
     }
 }
@@ -828,11 +860,26 @@ fn summarize_value(value: &Value) -> String {
     match value {
         Value::String(text) => summarize_text(text),
         Value::Array(items) => summarize_array(items),
-        Value::Object(obj) => format!("{{{} fields}}", obj.len()),
+        Value::Object(obj) => summarize_object(obj),
         Value::Null => "null".to_string(),
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
     }
+}
+
+fn summarize_object(obj: &serde_json::Map<String, Value>) -> String {
+    if obj.is_empty() {
+        return "{}".to_string();
+    }
+
+    let mut fields = obj
+        .iter()
+        .filter_map(|(key, value)| {
+            summarize_field_value(value).map(|summary| format!("{key}: {summary}"))
+        })
+        .collect::<Vec<_>>();
+    fields.sort();
+    format!("{{{}}}", fields.join(", "))
 }
 
 fn summarize_array(items: &[Value]) -> String {
@@ -918,7 +965,7 @@ fn styled_output_lines(
         );
     }
 
-    let styled = styled_tool_output_lines(tc, highlighter, theme, tc.name == "read");
+    let styled = styled_sidebar_tool_output_lines(tc, highlighter, theme, tc.name == "read");
     let styled = apply_styled_tool_output_limit(styled, config, theme);
     if config.word_wrap && width > 0 {
         wrap_styled_lines(&styled, width.saturating_sub(2))
@@ -1326,6 +1373,68 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_summary_expands_nested_details() {
+        let mut tc = make_tc("work", "", None, false);
+        tc.details = serde_json::json!({
+            "action": "list",
+            "items": [{
+                "id": "T-improve-sidebar-detail",
+                "title": "Improve sidebar detail",
+                "status": "ready"
+            }],
+            "policy": { "decision": "allowed", "tool_name": "work" }
+        });
+
+        let rows = tool_input_summary_rows(&tc);
+        assert!(rows.iter().any(|row| row.contains("action: list")));
+        assert!(!rows.iter().any(|row| row.contains("policy")));
+        assert!(!rows.iter().any(|row| row.contains("{3 fields}")));
+    }
+
+    #[test]
+    fn card_tool_sidebar_detail_skips_raw_header_and_input_dump() {
+        for (name, expected_header) in [
+            ("work", "▣Work · create"),
+            ("read", "◧Read"),
+            ("edit", "◇Edit"),
+        ] {
+            let mut tc = make_tc(name, "", Some("output"), false);
+            tc.details = match name {
+                "work" => serde_json::json!({
+                    "action": "create",
+                    "kind": "task",
+                    "id": "T-test-work-unit",
+                    "item": {
+                        "id": "T-test-work-unit",
+                        "title": "Test work unit",
+                        "status": "todo"
+                    }
+                }),
+                "read" => serde_json::json!({"path": "/tmp/example.txt"}),
+                "edit" => serde_json::json!({"path": "/tmp/example.txt"}),
+                _ => serde_json::Value::Null,
+            };
+
+            let lines = styled_detail_lines(
+                Some(&tc),
+                &UiConfig::default(),
+                &Highlighter::new(),
+                &Theme::default(),
+                80,
+            );
+            let plain = lines
+                .iter()
+                .map(|line| line_to_plain_text(line))
+                .collect::<Vec<_>>();
+
+            assert_eq!(plain.first().map(String::as_str), Some(expected_header));
+            assert!(!plain.iter().any(|line| line == "input"));
+            assert!(!plain.iter().any(|line| line.starts_with("path:")));
+            assert!(!plain.iter().any(|line| line.starts_with("action:")));
+        }
+    }
+
+    #[test]
     fn sidebar_scroll_list() {
         let mut sidebar = Sidebar::default();
         sidebar.scroll_list_down(5);
@@ -1600,11 +1709,10 @@ mod tests {
             80,
         );
 
-        assert!(render.plain_lines.iter().any(|line| line.contains("bash")));
         assert!(render
             .plain_lines
             .iter()
-            .any(|line| line.contains("$ printf")));
+            .any(|line| line.contains("Terminal")));
         assert!(render.plain_lines.iter().any(|line| line == "line1"));
         assert!(render.plain_lines.iter().any(|line| line == "line2"));
         assert!(!render.plain_lines.iter().any(|line| line == "…"));
@@ -1633,15 +1741,10 @@ mod tests {
             120,
         );
 
-        assert!(render.plain_lines.iter().any(|line| line == "input"));
         assert!(render
             .plain_lines
             .iter()
-            .any(|line| line.contains("cargo test -p imp-tui inspector")));
-        assert!(render
-            .plain_lines
-            .iter()
-            .any(|line| line.contains("timeout")));
+            .any(|line| line.contains("command: cargo test -p imp-tui inspector")));
         assert!(render.plain_lines.iter().any(|line| line == "done"));
     }
 
@@ -1667,7 +1770,6 @@ mod tests {
             40,
         );
 
-        assert!(render.plain_lines.iter().any(|line| line == "input"));
         assert!(render
             .plain_lines
             .iter()
@@ -1699,8 +1801,8 @@ mod tests {
             .into_iter()
             .map(|line| line.spans.into_iter().map(|span| span.content).collect())
             .collect();
-        assert!(plain[0].starts_with("  1│"));
-        assert!(plain[0].contains("fn main()"));
+        assert!(plain.iter().any(|line| line.starts_with("  1│")));
+        assert!(plain.iter().any(|line| line.contains("fn main()")));
     }
 
     #[test]

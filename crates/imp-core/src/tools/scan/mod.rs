@@ -3,12 +3,26 @@
 //! Dispatches to language-specific parsers based on file extension.
 //! Produces rich output: visibility, signatures, fields, variants, trait impls.
 
+pub mod c;
+pub mod cpp;
+pub mod csharp;
+pub mod elixir;
+pub mod generic;
 pub mod go;
+pub mod java;
 pub mod kotlin;
+pub mod lua;
+pub mod ocaml;
+pub mod odin;
+pub mod perl;
 pub mod python;
+pub mod ruby;
 pub mod rust;
+pub mod shell;
+pub mod swift;
 pub mod types;
 pub mod typescript;
+pub mod zig;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -18,6 +32,7 @@ use serde_json::json;
 
 use super::{truncate_head, truncate_line, Tool, ToolContext, ToolOutput, TruncationResult};
 use crate::error::{Error, Result};
+use crate::tools::code_intel::CodeBlock;
 use types::*;
 
 const MAX_OUTPUT_LINES: usize = 2000;
@@ -25,43 +40,30 @@ const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const MAX_LINE_CHARS: usize = 500;
 
 /// Node kinds that represent enclosing blocks we want to extract around a line or symbol.
-const BLOCK_KINDS: &[&str] = &[
-    // Rust
-    "function_item",
-    "impl_item",
-    "struct_item",
-    "enum_item",
-    "trait_item",
-    "mod_item",
-    "const_item",
-    "static_item",
-    "type_item",
-    "macro_definition",
-    // TypeScript / JavaScript
-    "function_declaration",
-    "method_definition",
-    "class_declaration",
-    "interface_declaration",
-    "type_alias_declaration",
-    "enum_declaration",
-    "export_statement",
-    "lexical_declaration",
-    "variable_declaration",
-    "arrow_function",
-    // Python
-    "function_definition",
-    "class_definition",
-    "decorated_definition",
-    // Kotlin
-    "class_declaration",
-    "object_declaration",
-    "function_declaration",
-    "property_declaration",
-    // Go
-    "function_declaration",
-    "method_declaration",
-    "type_declaration",
-    "type_spec",
+const SUPPORTED_LANGUAGES: &[&str] = &[
+    "shell",
+    "python",
+    "rust",
+    "javascript",
+    "typescript",
+    "go",
+    "elixir",
+    "ruby",
+    "perl",
+    "lua",
+    "luajit",
+    "zig",
+    "odin",
+    "swift",
+    "kotlin",
+    "java",
+    "c",
+    "csharp",
+    "cpp",
+    "php",
+    "scala",
+    "dart",
+    "ocaml",
 ];
 
 pub struct ScanTool;
@@ -270,7 +272,7 @@ impl Tool for ScanTool {
             details: json!({
                 "action": action_name,
                 "files_analyzed": files.len(),
-                "supported_languages": ["rust", "typescript", "javascript", "python", "go", "kotlin"],
+                "supported_languages": SUPPORTED_LANGUAGES,
                 "types_count": result.types.len(),
                 "functions_count": result.functions.len(),
             }),
@@ -332,7 +334,7 @@ fn files_from_params_or_directory(
 
 // ── extraction dispatch ─────────────────────────────────────────────
 
-fn extract_files(files: &[PathBuf], cwd: &Path) -> ScanResult {
+pub fn extract_files(files: &[PathBuf], cwd: &Path) -> ScanResult {
     let mut result = ScanResult::default();
 
     for file in files {
@@ -368,18 +370,79 @@ fn extract_files(files: &[PathBuf], cwd: &Path) -> ScanResult {
             "py" => python::parse(&source, &rel, &mut result),
             "go" => go::parse(&source, &rel, &mut result),
             "kt" | "kts" => kotlin::parse(&source, &rel, &mut result),
+            "java" => java::parse(&source, &rel, &mut result),
+            "cs" => csharp::parse(&source, &rel, &mut result),
+            "c" | "h" => c::parse(&source, &rel, &mut result),
+            "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" => {
+                cpp::parse(&source, &rel, &mut result)
+            }
+            "rb" => ruby::parse(&source, &rel, &mut result),
+            "ex" | "exs" => elixir::parse(&source, &rel, &mut result),
+            "lua" | "luau" => lua::parse(&source, &rel, &mut result),
+            "ml" | "mli" => ocaml::parse(&source, &rel, &mut result),
+            "zig" | "zon" => zig::parse(&source, &rel, &mut result),
+            "odin" => odin::parse(&source, &rel, &mut result),
+            "sh" | "bash" | "zsh" | "fish" => shell::parse(&source, &rel, &mut result),
+            "pl" | "pm" | "t" => perl::parse(&source, &rel, &mut result),
+            "swift" => swift::parse(&source, &rel, &mut result),
             "js" | "jsx" => typescript::parse(&source, &rel, ext == "jsx", &mut result),
-            // TODO: add more languages as tree-sitter grammars are added
-            _ => {}
+            "dart" => generic::parse(
+                &source,
+                &rel,
+                tree_sitter_dart::LANGUAGE.into(),
+                &mut result,
+            ),
+            "php" => generic::parse(
+                &source,
+                &rel,
+                tree_sitter_php::LANGUAGE_PHP.into(),
+                &mut result,
+            ),
+            "scala" | "sc" => generic::parse(
+                &source,
+                &rel,
+                tree_sitter_scala::LANGUAGE.into(),
+                &mut result,
+            ),
+            _ => {
+                if let Some(language) = language_for_extension(ext) {
+                    generic::parse(&source, &rel, language, &mut result);
+                }
+            }
         }
     }
 
     result
 }
 
+fn language_for_extension(ext: &str) -> Option<tree_sitter::Language> {
+    let language = match ext {
+        "sh" | "bash" | "zsh" | "fish" => tree_sitter_bash::LANGUAGE.into(),
+        "ex" | "exs" => tree_sitter_elixir::LANGUAGE.into(),
+        "rb" => tree_sitter_ruby::LANGUAGE.into(),
+        "ml" | "mli" => tree_sitter_ocaml::LANGUAGE_OCAML.into(),
+        "pl" | "pm" | "t" => tree_sitter_perl::LANGUAGE.into(),
+        "lua" | "luau" => tree_sitter_lua::LANGUAGE.into(),
+        "zig" | "zon" => tree_sitter_zig::LANGUAGE.into(),
+        "odin" => tree_sitter_odin::LANGUAGE.into(),
+        "swift" => tree_sitter_swift::LANGUAGE.into(),
+        "java" => tree_sitter_java::LANGUAGE.into(),
+        "c" | "h" => tree_sitter_c::LANGUAGE.into(),
+        "cs" => tree_sitter_c_sharp::LANGUAGE.into(),
+        "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" => {
+            tree_sitter_cpp::LANGUAGE.into()
+        }
+        "php" => tree_sitter_php::LANGUAGE_PHP.into(),
+        "scala" | "sc" => tree_sitter_scala::LANGUAGE.into(),
+        "dart" => tree_sitter_dart::LANGUAGE.into(),
+        _ => return None,
+    };
+    Some(language)
+}
+
 // ── file collection ─────────────────────────────────────────────────
 
-fn collect_source_files(root: &Path) -> Result<Vec<PathBuf>> {
+pub fn collect_source_files(root: &Path) -> Result<Vec<PathBuf>> {
     if root.is_file() {
         return Ok(if is_supported(root) {
             vec![root.to_path_buf()]
@@ -411,10 +474,54 @@ fn collect_source_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn is_supported(path: &Path) -> bool {
+pub fn is_supported(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
-        Some("rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "kt" | "kts")
+        Some(
+            "sh" | "bash"
+                | "zsh"
+                | "fish"
+                | "py"
+                | "pyw"
+                | "rs"
+                | "js"
+                | "jsx"
+                | "mjs"
+                | "cjs"
+                | "ts"
+                | "tsx"
+                | "go"
+                | "ex"
+                | "exs"
+                | "rb"
+                | "pl"
+                | "pm"
+                | "t"
+                | "lua"
+                | "luau"
+                | "zig"
+                | "zon"
+                | "odin"
+                | "swift"
+                | "kt"
+                | "kts"
+                | "java"
+                | "c"
+                | "h"
+                | "cs"
+                | "cc"
+                | "cpp"
+                | "cxx"
+                | "c++"
+                | "hpp"
+                | "hh"
+                | "hxx"
+                | "h++"
+                | "php"
+                | "scala"
+                | "sc"
+                | "dart"
+        )
     )
 }
 
@@ -479,6 +586,7 @@ fn execute_search(
         format!("Query: {query}"),
         format!("Mode: {mode}"),
         format!("Files analyzed: {}", files.len()),
+        repo_index_line(&index),
     ];
     if hits.is_empty() {
         lines.push("No matching symbols found.".to_string());
@@ -507,6 +615,7 @@ fn execute_search(
             "query": query,
             "mode": mode,
             "files_analyzed": files.len(),
+            "repo_intelligence": repo_index_details(&index),
             "results": hits.iter().map(|hit| json!({
                 "file": hit.file,
                 "symbol": hit.symbol,
@@ -572,6 +681,10 @@ fn execute_tests(
 
 fn build_symbol_index(files: &[PathBuf], cwd: &Path) -> Vec<IndexedSymbol> {
     let result = extract_files(files, cwd);
+    symbol_index_from_scan_result(&result)
+}
+
+fn symbol_index_from_scan_result(result: &ScanResult) -> Vec<IndexedSymbol> {
     let mut symbols = Vec::new();
     for t in result.types.values() {
         symbols.push(IndexedSymbol {
@@ -597,6 +710,21 @@ fn build_symbol_index(files: &[PathBuf], cwd: &Path) -> Vec<IndexedSymbol> {
         });
     }
     symbols
+}
+
+fn repo_index_line(index: &[IndexedSymbol]) -> String {
+    format!(
+        "Repo intelligence: {} symbols, {} tests",
+        index.len(),
+        index.iter().filter(|symbol| symbol.is_test).count()
+    )
+}
+
+fn repo_index_details(index: &[IndexedSymbol]) -> serde_json::Value {
+    json!({
+        "symbols": index.len(),
+        "tests": index.iter().filter(|symbol| symbol.is_test).count(),
+    })
 }
 
 fn search_index(
@@ -842,6 +970,7 @@ fn execute_related(mut files: Vec<PathBuf>, cwd: &Path, target: &str) -> ToolOut
         format!("Action: related"),
         format!("Target: {target}"),
         format!("Files analyzed: {}", files.len()),
+        repo_index_line(&index),
     ];
     if let Some(symbol) = definition {
         lines.push(format!(
@@ -882,6 +1011,7 @@ fn execute_related(mut files: Vec<PathBuf>, cwd: &Path, target: &str) -> ToolOut
             "action": "related",
             "target": target,
             "files_analyzed": files.len(),
+            "repo_intelligence": repo_index_details(&index),
             "definition": definition.map(|symbol| json!({
                 "file": symbol.file,
                 "symbol": symbol.name,
@@ -1002,6 +1132,7 @@ fn execute_impact(
         format!("Target: {target}"),
         "Accuracy: lexical/structural impact analysis, not a complete LSP call graph.".to_string(),
         format!("Files analyzed: {}", files.len()),
+        repo_index_line(&index),
         format!("References found: {}", references.len()),
     ];
     if !affected_files.is_empty() {
@@ -1038,6 +1169,7 @@ fn execute_impact(
             "target": target,
             "accuracy": "lexical_structural_not_lsp_complete",
             "files_analyzed": files.len(),
+            "repo_intelligence": repo_index_details(&index),
             "public_status": public_status,
             "affected_files": affected_files.into_iter().collect::<Vec<_>>(),
             "references": references.iter().map(|hit| json!({
@@ -1389,17 +1521,6 @@ fn truncate_output(text: String) -> String {
     result
 }
 
-struct CodeBlock {
-    file: PathBuf,
-    start_line: usize,
-    end_line: usize,
-    kind: Option<String>,
-    symbol: Option<String>,
-    language: Option<String>,
-    truncated: bool,
-    code: String,
-}
-
 enum Locator {
     Line(usize),
     Range(usize, usize),
@@ -1635,40 +1756,17 @@ fn parse_extract_target(target: &str) -> Option<(String, Locator)> {
     None
 }
 
-fn block_details(block: &CodeBlock) -> serde_json::Value {
-    json!({
-        "path": block.file.to_string_lossy(),
-        "symbol": block.symbol,
-        "kind": block.kind,
-        "language": block.language,
-        "start_line": block.start_line,
-        "end_line": block.end_line,
-        "truncated": block.truncated,
-    })
-}
-
 fn read_text_file(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.contains(&0) {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    std::fs::read_to_string(path).ok()
 }
 
+fn block_details(block: &CodeBlock) -> serde_json::Value {
+    crate::tools::code_intel::block_details(block)
+}
+
+#[cfg(test)]
 fn get_parser(path: &Path) -> Option<tree_sitter::Parser> {
-    let ext = path.extension()?.to_str()?;
-    let language = match ext {
-        "rs" => tree_sitter_rust::LANGUAGE.into(),
-        "ts" | "tsx" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        "js" | "jsx" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        "py" => tree_sitter_python::LANGUAGE.into(),
-        "go" => tree_sitter_go::LANGUAGE.into(),
-        "kt" | "kts" => tree_sitter_kotlin_ng::LANGUAGE.into(),
-        _ => return None,
-    };
-    let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&language).ok()?;
-    Some(parser)
+    crate::tools::code_intel::parser_for_path(path)
 }
 
 fn extract_blocks_at_lines(
@@ -1676,199 +1774,183 @@ fn extract_blocks_at_lines(
     path: &Path,
     match_lines: &[usize],
 ) -> Option<Vec<CodeBlock>> {
-    let mut parser = get_parser(path)?;
-    let tree = parser.parse(source, None)?;
-    let root = tree.root_node();
-    let lines: Vec<&str> = source.lines().collect();
-
-    let mut blocks = Vec::new();
-    let mut seen_ranges = std::collections::HashSet::new();
-
-    for &line_idx in match_lines {
-        if let Some(node) = find_enclosing_block(root, line_idx) {
-            let start = node.start_position().row;
-            let end = node.end_position().row;
-            let range = (start, end);
-            if seen_ranges.insert(range) {
-                let s = start.min(lines.len());
-                let e = (end + 1).min(lines.len());
-                blocks.push(CodeBlock {
-                    file: PathBuf::new(),
-                    start_line: start + 1,
-                    end_line: end + 1,
-                    kind: Some(node.kind().to_string()),
-                    symbol: None,
-                    language: language_for_path(path).map(str::to_string),
-                    truncated: false,
-                    code: lines[s..e].join("\n"),
-                });
-            }
-        }
-    }
-
-    Some(blocks)
-}
-
-fn find_enclosing_block(root: tree_sitter::Node, target_line: usize) -> Option<tree_sitter::Node> {
-    let mut best: Option<tree_sitter::Node> = None;
-    find_enclosing_block_recursive(root, target_line, &mut best);
-    best
-}
-
-fn find_enclosing_block_recursive<'a>(
-    node: tree_sitter::Node<'a>,
-    target_line: usize,
-    best: &mut Option<tree_sitter::Node<'a>>,
-) {
-    let start = node.start_position().row;
-    let end = node.end_position().row;
-
-    if target_line < start || target_line > end {
-        return;
-    }
-
-    if BLOCK_KINDS.contains(&node.kind()) {
-        *best = Some(node);
-    }
-
-    let mut cursor = node.walk();
-    let children: Vec<_> = node.children(&mut cursor).collect();
-    for child in children {
-        find_enclosing_block_recursive(child, target_line, best);
-    }
+    crate::tools::code_intel::extract_blocks_at_lines(source, path, match_lines)
 }
 
 fn extract_symbol(source: &str, path: &Path, name: &str) -> Option<CodeBlock> {
-    let mut parser = get_parser(path)?;
-    let tree = parser.parse(source, None)?;
-    let root = tree.root_node();
-    let lines: Vec<&str> = source.lines().collect();
-
-    let node = find_symbol_node(root, source, name)?;
-    let start = node.start_position().row;
-    let end = node.end_position().row;
-    let s = start.min(lines.len());
-    let e = (end + 1).min(lines.len());
-
-    Some(CodeBlock {
-        file: PathBuf::new(),
-        start_line: start + 1,
-        end_line: end + 1,
-        kind: Some(node.kind().to_string()),
-        symbol: Some(name.to_string()),
-        language: language_for_path(path).map(str::to_string),
-        truncated: false,
-        code: lines[s..e].join("\n"),
-    })
-}
-
-fn find_symbol_node<'a>(
-    node: tree_sitter::Node<'a>,
-    source: &str,
-    name: &str,
-) -> Option<tree_sitter::Node<'a>> {
-    if BLOCK_KINDS.contains(&node.kind()) && node_has_name(node, source, name) {
-        return Some(node);
-    }
-
-    let mut cursor = node.walk();
-    let children: Vec<_> = node.children(&mut cursor).collect();
-    for child in children {
-        if let Some(found) = find_symbol_node(child, source, name) {
-            return Some(found);
-        }
-    }
-
-    None
-}
-
-fn node_has_name(node: tree_sitter::Node, source: &str, name: &str) -> bool {
-    let mut cursor = node.walk();
-    let children: Vec<_> = node.children(&mut cursor).collect();
-    for child in children {
-        let kind = child.kind();
-        if kind == "identifier"
-            || kind == "type_identifier"
-            || kind == "name"
-            || kind == "property_identifier"
-            || kind == "simple_identifier"
-            || kind == "variable_identifier"
-        {
-            let text = &source[child.byte_range()];
-            if text == name {
-                return true;
-            }
-        }
-        if BLOCK_KINDS.contains(&kind) {
-            continue;
-        }
-        let mut inner_cursor = child.walk();
-        let inner_children: Vec<_> = child.children(&mut inner_cursor).collect();
-        for inner in inner_children {
-            let ik = inner.kind();
-            if ik == "identifier"
-                || ik == "type_identifier"
-                || ik == "name"
-                || ik == "simple_identifier"
-                || ik == "variable_identifier"
-            {
-                let text = &source[inner.byte_range()];
-                if text == name {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+    crate::tools::code_intel::extract_symbol(source, path, name)
 }
 
 fn language_for_path(path: &Path) -> Option<&'static str> {
-    match path.extension().and_then(|e| e.to_str())? {
-        "rs" => Some("rust"),
-        "ts" | "tsx" => Some("typescript"),
-        "js" | "jsx" => Some("javascript"),
-        "py" => Some("python"),
-        "go" => Some("go"),
-        "kt" | "kts" => Some("kotlin"),
-        _ => None,
-    }
+    crate::tools::code_intel::language_for_path(path)
 }
 
 fn format_blocks(blocks: &[CodeBlock]) -> String {
-    let mut sections = Vec::with_capacity(blocks.len());
-
-    for block in blocks {
-        let mut header = format!(
-            "{}:{}-{}",
-            block.file.display(),
-            block.start_line,
-            block.end_line
-        );
-        if let Some(kind) = &block.kind {
-            header.push_str(&format!(" ({kind})"));
-        }
-        let details = block_details(block);
-
-        let fence = match block.file.extension().and_then(|e| e.to_str()) {
-            Some("rs") => "rust",
-            Some("ts") | Some("tsx") => "typescript",
-            Some("js") | Some("jsx") => "javascript",
-            Some("py") => "python",
-            Some("go") => "go",
-            _ => "text",
-        };
-        sections.push(format!(
-            "{header}\nDetails: {details}\n```{fence}\n{}\n```",
-            block.code
-        ));
-    }
-
-    sections.join("\n\n")
+    crate::tools::code_intel::format_blocks(blocks)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parser_is_available_for_requested_languages() {
+        let cases = [
+            ("script.sh", "echo hello"),
+            ("main.py", "def hello():\n    pass\n"),
+            ("lib.rs", "fn hello() {}"),
+            ("app.js", "function hello() {}"),
+            ("app.ts", "function hello(): void {}"),
+            ("main.go", "package main\nfunc hello() {}\n"),
+            ("mod.ex", "defmodule Hello do\n  def hi, do: :ok\nend\n"),
+            ("app.rb", "def hello\nend\n"),
+            ("app.pl", "sub hello { return 1; }"),
+            ("app.lua", "function hello() end"),
+            ("main.zig", "pub fn hello() void {}"),
+            ("main.odin", "hello :: proc() {}"),
+            ("App.swift", "func hello() {}"),
+            ("Main.kt", "fun hello() {}"),
+            ("Main.java", "class Main { void hello() {} }"),
+            ("main.c", "void hello() {}"),
+            ("Program.cs", "class Program { void Hello() {} }"),
+            ("main.cpp", "void hello() {}"),
+            ("index.php", "<?php function hello() {}"),
+            ("Main.scala", "class Main { def hello(): Unit = () }"),
+            ("main.dart", "void hello() {}"),
+        ];
+
+        for (file_name, source) in cases {
+            let path = Path::new(file_name);
+            let mut parser =
+                get_parser(path).unwrap_or_else(|| panic!("missing parser for {file_name}"));
+            let tree = parser
+                .parse(source, None)
+                .unwrap_or_else(|| panic!("failed to parse {file_name}"));
+            assert!(
+                !tree.root_node().has_error(),
+                "parser reported errors for {file_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_extractor_indexes_representative_new_languages() {
+        let cases = [
+            (
+                "src/app.rb",
+                "class Greeter\n  def hello(name)\n  end\nend\n",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/Main.java",
+                "class Greeter { void hello(String name) {} }",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/main.c",
+                "struct Greeter { int id; };\nvoid hello(void) {}",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/App.swift",
+                "struct Greeter { func hello() {} }",
+                "Greeter",
+                "hello",
+            ),
+            ("src/script.sh", "hello() { echo hi; }", "", "hello"),
+            (
+                "src/app.lua",
+                "function hello(name) return name end",
+                "",
+                "hello",
+            ),
+            (
+                "src/main.odin",
+                "Greeter :: struct {}
+hello :: proc() {}",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/app.pl",
+                "package Greeter;
+sub hello { return 1; }",
+                "",
+                "hello",
+            ),
+            (
+                "src/main.cpp",
+                "class Greeter { void hello(); };
+void hello() {}",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/Program.cs",
+                "class Greeter { void Hello() {} }",
+                "Greeter",
+                "Hello",
+            ),
+            (
+                "src/index.php",
+                "<?php class Greeter { function hello($name) { return $name; } }",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/Main.scala",
+                "class Greeter { def hello(name: String): String = name }",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/main.dart",
+                "class Greeter { void hello(String name) {} }",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/mod.ex",
+                "defmodule Greeter do
+  def hello(name), do: name
+end",
+                "Greeter",
+                "hello",
+            ),
+            (
+                "src/main.zig",
+                "const Greeter = struct {
+};
+pub fn hello() void {}",
+                "Greeter",
+                "hello",
+            ),
+        ];
+
+        for (file, source, type_name, function_name) in cases {
+            let mut result = ScanResult::default();
+            let ext = Path::new(file).extension().unwrap().to_str().unwrap();
+            let language = language_for_extension(ext)
+                .unwrap_or_else(|| panic!("missing generic language for {file}"));
+            generic::parse(source, file, language, &mut result);
+
+            if !type_name.is_empty() {
+                assert!(
+                    result.types.contains_key(type_name),
+                    "missing type {type_name} for {file}; got {:?}",
+                    result.types.keys().collect::<Vec<_>>()
+                );
+            }
+            assert!(
+                result.functions.contains_key(function_name),
+                "missing function {function_name} for {file}; got {:?}",
+                result.functions.keys().collect::<Vec<_>>()
+            );
+        }
+    }
 
     #[test]
     fn schema_uses_directory_files_extract_and_targets() {
@@ -2013,6 +2095,35 @@ mod tests {
     }
 
     #[test]
+    fn scan_repo_intelligence_counts_reuse_symbol_index_shape() {
+        let index = vec![
+            IndexedSymbol {
+                file: "src/lib.rs".to_string(),
+                name: "Widget".to_string(),
+                kind: "struct".to_string(),
+                line: 1,
+                text: "Widget".to_string(),
+                is_test: false,
+            },
+            IndexedSymbol {
+                file: "src/lib.rs".to_string(),
+                name: "widget_builds".to_string(),
+                kind: "function".to_string(),
+                line: 5,
+                text: "fn widget_builds()".to_string(),
+                is_test: true,
+            },
+        ];
+
+        assert_eq!(
+            repo_index_line(&index),
+            "Repo intelligence: 2 symbols, 1 tests"
+        );
+        assert_eq!(repo_index_details(&index)["symbols"], 2);
+        assert_eq!(repo_index_details(&index)["tests"], 1);
+    }
+
+    #[test]
     fn impact_uses_tests_for_verification_commands() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -2143,6 +2254,350 @@ fn internal_helper() {}
 
         let helper = &result.functions["internal_helper"];
         assert_eq!(helper.visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn extract_swift_file_with_rich_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("Greeter.swift");
+        std::fs::write(
+            &file,
+            r#"
+public protocol GreetingService { func greet(name: String) }
+struct Greeter: GreetingService {
+    enum Tone { case friendly, formal }
+    public func greet(name: String) async {}
+    private func helper() {}
+}
+extension Greeter {
+    func extra() {}
+}
+func makeGreeter() -> Greeter { Greeter() }
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(&[file], tmp.path());
+
+        assert_eq!(result.types["GreetingService"].kind, TypeKind::Protocol);
+        assert_eq!(
+            result.types["GreetingService"].visibility,
+            Visibility::Public
+        );
+        assert_eq!(result.types["Greeter"].kind, TypeKind::Struct);
+        assert!(result.types["Greeter"]
+            .implements
+            .contains(&"GreetingService".to_string()));
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"greet".to_string()));
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"helper".to_string()));
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"extra".to_string()));
+        assert_eq!(result.types["Greeter::Tone"].kind, TypeKind::Enum);
+        assert_eq!(
+            result.functions["Greeter::greet"].visibility,
+            Visibility::Public
+        );
+        assert!(result.functions["Greeter::greet"].is_async);
+        assert_eq!(
+            result.functions["Greeter::helper"].visibility,
+            Visibility::Private
+        );
+        assert!(result.functions.contains_key("Greeter::extra"));
+        assert!(result.functions.contains_key("makeGreeter"));
+        assert!(result.functions["makeGreeter"].source.ends_with(":11"));
+    }
+
+    #[test]
+    fn extract_zig_odin_shell_perl_files_with_rich_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zig_file = tmp.path().join("main.zig");
+        std::fs::write(
+            &zig_file,
+            r#"
+pub const Greeter = struct {};
+pub fn hello() void {}
+fn helper() void {}
+"#,
+        )
+        .unwrap();
+        let odin_file = tmp.path().join("main.odin");
+        std::fs::write(
+            &odin_file,
+            r#"
+Greeter :: struct {}
+hello :: proc() {}
+"#,
+        )
+        .unwrap();
+        let shell_file = tmp.path().join("script.sh");
+        std::fs::write(
+            &shell_file,
+            r#"
+hello() { echo hi; }
+function helper { echo ok; }
+"#,
+        )
+        .unwrap();
+        let perl_file = tmp.path().join("Greeter.pm");
+        std::fs::write(
+            &perl_file,
+            r#"
+package Greeter;
+sub hello { return 1; }
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(&[zig_file, odin_file, shell_file, perl_file], tmp.path());
+
+        assert_eq!(result.types["Greeter"].kind, TypeKind::Struct);
+        assert_eq!(result.functions["hello"].visibility, Visibility::Public);
+        assert_eq!(result.functions["helper"].visibility, Visibility::Private);
+        assert!(result.functions["hello"].signature.contains("hello"));
+        assert!(result.functions.contains_key("helper"));
+        assert!(result.types.contains_key("Greeter"));
+        assert!(result.functions.contains_key("Greeter::hello"));
+    }
+
+    #[test]
+    fn extract_ruby_elixir_lua_ocaml_files_with_rich_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ruby_file = tmp.path().join("greeter.rb");
+        std::fs::write(
+            &ruby_file,
+            r#"
+module Services
+  class Greeter
+    def hello(name)
+      name
+    end
+  end
+end
+"#,
+        )
+        .unwrap();
+        let elixir_file = tmp.path().join("greeter.ex");
+        std::fs::write(
+            &elixir_file,
+            r#"
+defmodule Services.Greeter do
+  def hello(name), do: name
+  defp normalize(name), do: name
+end
+"#,
+        )
+        .unwrap();
+        let lua_file = tmp.path().join("greeter.lua");
+        std::fs::write(
+            &lua_file,
+            r#"
+local Greeter = {}
+function Greeter:hello(name) return name end
+function helper(name) return name end
+"#,
+        )
+        .unwrap();
+        let ocaml_file = tmp.path().join("greeter.ml");
+        std::fs::write(
+            &ocaml_file,
+            r#"
+module Greeter = struct
+  type user = { name : string }
+  let hello name = name
+end
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(&[ruby_file, elixir_file, lua_file, ocaml_file], tmp.path());
+
+        assert!(result.types.contains_key("Services"));
+        assert!(result.types.contains_key("Services::Greeter"));
+        assert!(result.types["Services::Greeter"]
+            .methods
+            .contains(&"hello".to_string()));
+        assert!(result.functions.contains_key("Services::Greeter::hello"));
+
+        assert!(result.types.contains_key("Services.Greeter"));
+        assert_eq!(
+            result.functions["Services.Greeter::normalize"].visibility,
+            Visibility::Private
+        );
+
+        assert!(result.types.contains_key("Greeter"));
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"hello".to_string()));
+        assert!(result.functions.contains_key("Greeter:hello"));
+        assert!(result.functions.contains_key("helper"));
+
+        assert!(result.types.contains_key("Greeter::user"));
+        assert!(result.functions.contains_key("Greeter::hello"));
+        assert!(result.functions["Greeter::hello"].source.ends_with(":4"));
+    }
+
+    #[test]
+    fn extract_c_file_with_rich_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("sample.c");
+        std::fs::write(
+            &file,
+            r#"
+typedef unsigned long Size;
+struct User { int id; const char *name; };
+enum Status { Active, Inactive };
+void greet(struct User *user) {}
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(&[file], tmp.path());
+
+        assert_eq!(result.types["Size"].kind, TypeKind::TypeAlias);
+        assert_eq!(result.types["User"].kind, TypeKind::Struct);
+        assert!(result.types["User"]
+            .fields
+            .iter()
+            .any(|field| field.name == "id"));
+        assert_eq!(result.types["Status"].kind, TypeKind::Enum);
+        assert!(result.types["Status"]
+            .variants
+            .contains(&"Active".to_string()));
+        assert!(result.functions["greet"].signature.contains("void greet"));
+        assert!(result.functions["greet"].source.ends_with(":5"));
+    }
+
+    #[test]
+    fn extract_cpp_file_with_rich_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("sample.cpp");
+        std::fs::write(
+            &file,
+            r#"
+using Size = unsigned long;
+enum class Status { Active, Inactive };
+class Greeter {
+    int count;
+    void helper() {}
+};
+void greet(Greeter& greeter) {}
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(&[file], tmp.path());
+
+        assert_eq!(result.types["Size"].kind, TypeKind::TypeAlias);
+        assert_eq!(result.types["Status"].kind, TypeKind::Enum);
+        assert!(result.types["Status"]
+            .variants
+            .contains(&"Active".to_string()));
+        assert_eq!(result.types["Greeter"].kind, TypeKind::Class);
+        assert!(result.types["Greeter"]
+            .fields
+            .iter()
+            .any(|field| field.name == "count"));
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"helper".to_string()));
+        assert!(result.functions.contains_key("Greeter::helper"));
+        assert!(result.functions["greet"].signature.contains("void greet"));
+    }
+
+    #[test]
+    fn extract_java_file_with_rich_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("Greeter.java");
+        std::fs::write(
+            &file,
+            r#"
+public interface GreetingService { void greet(String name); }
+public enum Tone { Friendly, Formal }
+class Greeter implements GreetingService {
+    public Greeter() {}
+    private void helper() {}
+    @Test public void greet(String name) {}
+}
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(&[file], tmp.path());
+
+        assert_eq!(result.types["GreetingService"].kind, TypeKind::Interface);
+        assert_eq!(result.types["Tone"].kind, TypeKind::Enum);
+        assert!(result.types["Tone"]
+            .variants
+            .contains(&"Friendly".to_string()));
+        assert_eq!(result.types["Greeter"].kind, TypeKind::Class);
+        assert_eq!(result.types["Greeter"].visibility, Visibility::Internal);
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"Greeter".to_string()));
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"greet".to_string()));
+
+        assert_eq!(
+            result.functions["Greeter::Greeter"].visibility,
+            Visibility::Public
+        );
+        assert_eq!(
+            result.functions["Greeter::helper"].visibility,
+            Visibility::Private
+        );
+        assert!(result.functions["Greeter::greet"].is_test);
+    }
+
+    #[test]
+    fn extract_csharp_file_with_rich_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("Greeter.cs");
+        std::fs::write(
+            &file,
+            r#"
+public interface IGreeting { void Greet(string name); }
+public enum Tone { Friendly, Formal }
+internal class Greeter : IGreeting {
+    public Greeter() {}
+    private void Helper() {}
+    [Fact] public async Task Greet(string name) {}
+}
+"#,
+        )
+        .unwrap();
+
+        let result = extract_files(&[file], tmp.path());
+
+        assert_eq!(result.types["IGreeting"].kind, TypeKind::Interface);
+        assert_eq!(result.types["Tone"].kind, TypeKind::Enum);
+        assert!(result.types["Tone"]
+            .variants
+            .contains(&"Friendly".to_string()));
+        assert_eq!(result.types["Greeter"].kind, TypeKind::Class);
+        assert_eq!(result.types["Greeter"].visibility, Visibility::Internal);
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"Greeter".to_string()));
+        assert!(result.types["Greeter"]
+            .methods
+            .contains(&"Greet".to_string()));
+
+        assert_eq!(
+            result.functions["Greeter::Greeter"].visibility,
+            Visibility::Public
+        );
+        assert_eq!(
+            result.functions["Greeter::Helper"].visibility,
+            Visibility::Private
+        );
+        assert!(result.functions["Greeter::Greet"].is_async);
+        assert!(result.functions["Greeter::Greet"].is_test);
     }
 
     #[test]

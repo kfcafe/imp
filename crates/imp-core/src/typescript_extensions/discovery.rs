@@ -8,6 +8,7 @@ pub struct TypeScriptExtension {
     pub root: PathBuf,
     pub entrypoint: PathBuf,
     pub source: TypeScriptExtensionSource,
+    pub manifest_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +58,7 @@ fn discover_extension_entries(
                         root: dir.to_path_buf(),
                         entrypoint: path,
                         source: source.clone(),
+                        manifest_path: None,
                     });
                 }
             }
@@ -90,6 +92,17 @@ fn detect_package_dir(
     source: TypeScriptExtensionSource,
 ) -> Option<TypeScriptExtension> {
     let name = dir.file_name()?.to_string_lossy().to_string();
+    let manifest = dir.join("imp.extension.json");
+    if manifest.exists() {
+        return Some(TypeScriptExtension {
+            name,
+            root: dir.to_path_buf(),
+            entrypoint: manifest.clone(),
+            source,
+            manifest_path: Some(manifest),
+        });
+    }
+
     let package_json = dir.join("package.json");
 
     if package_json.exists() {
@@ -105,6 +118,7 @@ fn detect_package_dir(
                         root: dir.to_path_buf(),
                         entrypoint: dir.join(entrypoint),
                         source,
+                        manifest_path: None,
                     });
                 }
             }
@@ -117,6 +131,7 @@ fn detect_package_dir(
         root: dir.to_path_buf(),
         entrypoint,
         source,
+        manifest_path: None,
     })
 }
 

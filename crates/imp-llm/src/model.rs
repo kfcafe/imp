@@ -135,6 +135,14 @@ pub fn builtin_providers() -> Vec<ProviderMeta> {
             api_style: ApiStyle::OpenAiCompat,
         },
         ProviderMeta {
+            id: "zai",
+            name: "Z.AI",
+            env_vars: &["ZAI_API_KEY"],
+            api_base_url: Some("https://api.z.ai/api/paas/v4"),
+            docs_url: "z.ai/model-api",
+            api_style: ApiStyle::OpenAiCompat,
+        },
+        ProviderMeta {
             id: "openrouter",
             name: "OpenRouter",
             env_vars: &["OPENROUTER_API_KEY"],
@@ -561,6 +569,46 @@ fn builtin_models() -> Vec<ModelMeta> {
                 tool_use: true,
             },
         },
+        // -- Z.AI --
+        ModelMeta {
+            id: "glm-4.7".into(),
+            provider: "zai".into(),
+            name: "GLM 4.7".into(),
+            context_window: 256_000,
+            max_output_tokens: 32_768,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "glm-4.7-flash".into(),
+            provider: "zai".into(),
+            name: "GLM 4.7 Flash".into(),
+            context_window: 128_000,
+            max_output_tokens: 16_384,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
+                tool_use: true,
+            },
+        },
+        ModelMeta {
+            id: "glm-5".into(),
+            provider: "zai".into(),
+            name: "GLM 5".into(),
+            context_window: 256_000,
+            max_output_tokens: 32_768,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
+                tool_use: true,
+            },
+        },
         // -- Groq --
         ModelMeta {
             id: "google/gemini-3.1-flash-lite-preview".into(),
@@ -737,7 +785,7 @@ pub fn builtin_openai_codex_models() -> Vec<ModelMeta> {
         id: "gpt-5.5".into(),
         provider: "openai-codex".into(),
         name: "GPT-5.5".into(),
-        context_window: 400_000,
+        context_window: 1_000_000,
         max_output_tokens: 128_000,
         pricing: ModelPricing::default(),
         capabilities: Capabilities {
@@ -773,6 +821,10 @@ fn guess_provider_for_custom_model(model_name: &str) -> Option<&'static str> {
 
     if lower.starts_with("kimi") || lower.starts_with("moonshot") {
         return Some("moonshot");
+    }
+
+    if lower.starts_with("glm-") || lower.starts_with("zai") || lower.starts_with("z-ai") {
+        return Some("zai");
     }
 
     None
@@ -828,6 +880,19 @@ fn synthesize_custom_model_meta(model_id: &str, provider: &str) -> ModelMeta {
             capabilities: Capabilities {
                 reasoning: true,
                 images: true,
+                tool_use: true,
+            },
+        },
+        "zai" => ModelMeta {
+            id: model_id.into(),
+            provider: provider.into(),
+            name: model_id.into(),
+            context_window: 256_000,
+            max_output_tokens: 32_768,
+            pricing: ModelPricing::default(),
+            capabilities: Capabilities {
+                reasoning: true,
+                images: false,
                 tool_use: true,
             },
         },
@@ -946,7 +1011,7 @@ fn synthesize_openai_model_meta(model_id: &str) -> ModelMeta {
             id: model_id.into(),
             provider: "openai".into(),
             name: model_id.into(),
-            context_window: 400_000,
+            context_window: 1_000_000,
             max_output_tokens: 128_000,
             pricing: ModelPricing::default(),
             capabilities: Capabilities {
@@ -1047,6 +1112,12 @@ fn builtin_aliases() -> Vec<(String, String)> {
         ("kimi2.6".into(), "kimi2.6".into()),
         ("kimi-for-coding".into(), "kimi-for-coding".into()),
         // Groq
+        ("zai".into(), "glm-4.7".into()),
+        ("zai-glm".into(), "glm-4.7".into()),
+        ("glm".into(), "glm-4.7".into()),
+        ("glm-4.7".into(), "glm-4.7".into()),
+        ("glm-4.7-flash".into(), "glm-4.7-flash".into()),
+        ("glm-5".into(), "glm-5".into()),
         ("llama-groq".into(), "llama-3.3-70b-versatile".into()),
     ]
 }
@@ -1100,6 +1171,7 @@ mod tests {
             .expect("gpt5.5 alias should synthesize");
         assert_eq!(model.id, "gpt-5.5");
         assert_eq!(model.provider, "openai");
+        assert_eq!(model.context_window, 1_000_000);
     }
 
     #[test]
@@ -1180,6 +1252,34 @@ mod tests {
     }
 
     #[test]
+    fn find_by_alias_resolves_zai_glm() {
+        let reg = ModelRegistry::with_builtins();
+        let model = reg.find_by_alias("zai").expect("zai alias should resolve");
+        assert_eq!(model.id, "glm-4.7");
+        assert_eq!(model.provider, "zai");
+    }
+
+    #[test]
+    fn resolve_meta_guesses_zai_for_glm_models() {
+        let reg = ModelRegistry::with_builtins();
+        let model = reg
+            .resolve_meta("glm-5-air", None)
+            .expect("glm model should synthesize");
+        assert_eq!(model.id, "glm-5-air");
+        assert_eq!(model.provider, "zai");
+        assert!(model.capabilities.reasoning);
+    }
+
+    #[test]
+    fn provider_registry_includes_zai() {
+        let registry = ProviderRegistry::with_builtins();
+        let provider = registry.find("zai").expect("zai provider should exist");
+        assert_eq!(provider.name, "Z.AI");
+        assert_eq!(provider.api_base_url, Some("https://api.z.ai/api/paas/v4"));
+        assert_eq!(provider.env_vars, &["ZAI_API_KEY"]);
+    }
+
+    #[test]
     fn provider_registry_includes_moonshot() {
         let registry = ProviderRegistry::with_builtins();
         let provider = registry
@@ -1227,7 +1327,11 @@ mod tests {
         let models = builtin_openai_codex_models();
         assert_eq!(models.len(), 7);
         assert!(models.iter().all(|model| model.provider == "openai-codex"));
-        assert!(models.iter().any(|model| model.id == "gpt-5.5"));
+        let gpt_5_5 = models
+            .iter()
+            .find(|model| model.id == "gpt-5.5")
+            .expect("OpenAI Codex model list should include GPT-5.5");
+        assert_eq!(gpt_5_5.context_window, 1_000_000);
     }
 
     #[test]

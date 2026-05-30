@@ -617,7 +617,8 @@ fn stream_response(
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body =
+                crate::auth::redact_provider_error_body(&response.text().await.unwrap_or_default());
             let _ = tx.unbounded_send(Err(Error::Provider(format!("HTTP {status}: {body}"))));
             return;
         }
@@ -899,6 +900,7 @@ mod tests {
                     timestamp: 0,
                 }),
             ],
+            ..Default::default()
         };
         let options = RequestOptions {
             system_prompt: "You are a helpful coding assistant.".into(),

@@ -6,7 +6,168 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## [Unreleased]
 
-Use this section for changes that have landed on `main` after the 0.1.3 draft.
+Use this section for changes that have landed on nightly after the 0.3.0 release.
+
+## [0.3.0] - 2026-05-29
+
+### Added
+
+- Added actionable workflow run contracts so command-backed workflows can publish clearer execution and verification expectations.
+- Added cached repo intelligence summaries and more visible startup metadata for project context.
+
+### Changed
+
+- Sped up TUI startup and session picker loading, including faster recent-session scans and cached repository intelligence.
+- Simplified agent runtime stop policy so tool results and turn continuation are handled more predictably.
+- Treat bare CLI arguments as one-shot prompts for smoother command-line usage.
+- Increased Tokio worker stack size for deeper async/runtime paths.
+
+### Fixed
+
+- Fixed startup skill hit detection.
+- Handled repeated key events in the TUI.
+
+## [0.2.9] - 2026-05-28
+
+### Added
+
+- Added executable workflow runner support for command-backed checks, step status advancement, and reconciliation dogfood workflows.
+- Added repo intelligence counts to scan output and TUI startup/homepage surfaces.
+- Added dependency audit notes for current RustSec findings and blocked upgrade paths.
+
+### Changed
+
+- Prefer native workflow policy, prompt, and tool surfaces over legacy mana/prototype guidance.
+- Bound helper command execution for guardrails, hooks, git, shell tools, Lua/TypeScript extension bridges, and compaction requests.
+- Improved workflow tool output cards and related TUI rendering polish.
+
+### Fixed
+
+- Reconciled workflow status after command checks so stale workflow states are easier to detect and clean up.
+- Redacted secrets from persisted diagnostics, traces, provider/search errors, web-read URLs, and truncated command output files.
+- Tightened write-path checks around symlink escapes and preserved private permissions on session and trace files.
+
+## [0.2.8] - 2026-05-27
+
+### Added
+
+- Added the native `workflow` tool for creating and running structured agent workflows from imp.
+- Added workflow boundary documentation and technical reference pages for architecture, sessions, tools, policy, RPC, Lua extensions, and workflows.
+
+### Changed
+
+- Made TUI selection copy use `Cmd+C`, leaving `Ctrl+C` reserved for clear, abort, and quit behavior.
+
+### Fixed
+
+- Fixed compaction fail-fast behavior and reuse-bench context initialization.
+- Bumped the workspace release version to `0.2.8`.
+
+## [0.2.7] - 2026-05-26
+
+### Changed
+
+- Made the TUI session tree denser, newest-first, and more readable on smaller terminals, with inline position counts and preview shown only when there is ample space.
+- Bumped the workspace release version to `0.2.7`.
+
+## [0.2.6] - 2026-05-26
+
+### Added
+
+- Added bounded subagent runtime primitives in `imp-core`, including subagent DTOs, lifecycle/status/activity-summary/outcome structures, and an initial no-op coordinator for future bounded worker orchestration.
+- Added design documentation for bounded subagent orchestration and the imp runtime boundary around clean worker contexts, activity summaries, cancellation, evidence, and host-owned durable state.
+- Added Codex/OpenAI-compatible prompt cache identity wiring so supported providers can receive stable cache hints.
+
+### Changed
+
+- Made `imp` standalone by default again: the default `imp-cli` dependency tree no longer pulls in `imp-work`, `mana-core`, or `mana-cli`.
+- Moved mana-facing CLI/TUI/tool integration behind optional `mana-ui` / `mana-tool` feature gates while keeping default chat/run usage independent from mana.
+- Split `imp-core` workflow integration away from the core agent loop into explicit runtime layers, separating recipe/runtime support from mana compatibility code.
+- Reworked mana-related runtime hooks so mana API support and the heavier mana tool/CLI integration are separate optional feature surfaces.
+- Updated the TUI to compile in a standalone default configuration, with mana navigator/run UI available only when the optional mana UI feature is enabled.
+- Bumped the workspace release version to `0.2.6`.
+
+### Removed
+
+- Removed active `imp-work` workspace membership and default `imp-core` / `imp-cli` dependencies on `imp-work`.
+- Removed the native `work` tool from the default imp runtime surface; durable work orchestration is no longer part of the default standalone imp build.
+- Removed the legacy native `imp run` / WorkRun planning path from the default CLI surface.
+
+### Fixed
+
+- Fixed feature gating so `imp-core --features mana-api` builds without pulling in the heavier mana tool integration.
+- Fixed default dependency hygiene so `cargo tree -p imp-cli` has no `imp-work`, `mana-core`, or `mana-cli` entries unless optional mana integration is enabled.
+- Fixed standalone TUI/CLI build paths that previously assumed mana run state or mana navigator types were always available.
+- Fixed TUI tool icon label spacing.
+
+## [0.2.5] - 2026-05-22
+
+### Added
+
+- Added autonomous runtime objective and obligation tracking for failed-command recovery and edited-file verification.
+
+### Changed
+
+- Made imp-work follow-up tasks created from outcomes ready by default so active continuation work remains discoverable.
+- Made work tool operations honor explicit project paths for global project-scoped stores.
+
+### Fixed
+
+- Prevented explanation-only answers from creating durable imp-work tasks unless the user explicitly asks for durable work structure.
+- Blocked parent task close/outcome when open child tasks remain, unless explicitly forced.
+- Made `work(action="next")` report todo child tasks so agents do not confuse “no ready tasks” with “no work remains.”
+- Fixed imp-work validation and discovery to account for merged global project-scoped and local task state.
+
+## [0.2.4] - 2026-05-22
+
+### Added
+
+- Added native `imp run <work-id> --dry-run` planning for imp-work task and epic dispatch, including dependency, context, and path-conflict blockers.
+- Added `imp stats` reports for local session, token, cost, tool, file-change, project, and wrapped-style usage summaries.
+- Added persisted imp-work coordinator run records and event logs for future multi-agent work orchestration.
+- Added structured file and line-change metadata to read/write/edit tool results so UI, stats, evidence, and handoff surfaces can summarize tool effects reliably.
+- Added richer TUI tool cards, tool icons, command-palette pages for commands/skills/workflows, and sidebar detail cards for common tools.
+- Added design planning docs for Droid parity, mission-mode vs imp-work, host sync, and OSS launch readiness.
+
+### Changed
+
+- Folded worktree management into the native `git` tool as `worktree_list`, `worktree_add`, and `worktree_remove`; removed the standalone `worktree` tool.
+- Removed the legacy `session_search`/`recall` native tool from the default registry and mode tool lists.
+- Tightened autonomous continuation behavior so failed shell commands are treated as recoverable obligations while durable-work externalization is only nudged when the user explicitly asks for durable work structure.
+- Refreshed the README around the current local-first imp surface, native imp-work, providers, safety controls, and extension support.
+- Standardized TUI tool label rendering so icons sit directly next to names, including `$Terminal`.
+
+### Fixed
+
+- Fixed sidebar and chat rendering expectations around the new tool card headers and summary detail lines.
+- Fixed readable imp-work task IDs to be deterministic from titles and deduplicated with numeric suffixes.
+
+## [0.2.3] - 2026-05-22
+
+### Added
+
+- Added the native `work` tool as imp's durable work system, replacing mana as the default agent workflow for tasks, lifecycle state, context, verification, and handoff.
+- Added global project-scoped imp-work storage under `~/.imp/work`, with normal work actions keyed by canonical project root instead of cwd-local `.imp/work`.
+- Added `work(action="guide")` for agent-facing imp-work operating guidance and `work(action="scope")` for explicit store/source visibility.
+- Added project stream events and automatic stream-history loading into task context packs so follow-up work can retain continuity after prior tasks close.
+- Added an offline `scripts/migrate-mana-to-imp-work` migration command for importing existing `.mana` units into global imp-work storage.
+- Added Z.AI provider/model metadata and aliases for GLM models.
+
+### Changed
+
+- Switched system prompt, mode guidance, and agent workflow nudges from mana-first durable work to native imp-work.
+- Made global imp-work the normal backend for work create/list/show/update and lifecycle graph flows; project-local work stores are now migration input only.
+- Moved migration out of the normal work tool API so migration remains transitional tooling rather than an everyday agent action.
+
+### Fixed
+
+- Kept imp-work lifecycle, verification, dependency, context, and tree flows coherent after the global-only backend switch.
+
+## [0.2.2] - 2026-05-21
+
+### Fixed
+
+- Fixed over-eager runtime stopping after tool observations so `read`, `edit`, failed `bash`, and mana close results are interpreted by the agent instead of ending work prematurely.
 
 ### Added
 
@@ -111,8 +272,19 @@ Initial crates.io release of the imp crate family.
 - Standardized published crates on MIT license metadata.
 - Added crates.io metadata and versioned internal dependencies for published crates.
 
-[Unreleased]: https://github.com/kfcafe/imp/compare/v0.1.3...HEAD
-[0.1.3]: https://github.com/kfcafe/imp/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/kfcafe/imp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kfcafe/imp/compare/v0.2.9...v0.3.0
+[0.2.9]: https://github.com/kfcafe/imp/compare/v0.2.8...v0.2.9
+[0.2.8]: https://github.com/kfcafe/imp/compare/v0.2.7...v0.2.8
+[0.2.7]: https://github.com/kfcafe/imp/compare/v0.2.6...v0.2.7
+[0.2.6]: https://github.com/kfcafe/imp/compare/v0.2.5...v0.2.6
+[0.2.5]: https://github.com/kfcafe/imp/compare/v0.2.4...v0.2.5
+[0.2.4]: https://github.com/kfcafe/imp/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/kfcafe/imp/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/kfcafe/imp/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/kfcafe/imp/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/kfcafe/imp/compare/v0.1.3...v0.2.0
+[0.1.3]: https://github.com/kfcafe/imp/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/kfcafe/imp/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/kfcafe/imp/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kfcafe/imp/releases/tag/v0.1.0

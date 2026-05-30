@@ -4,7 +4,10 @@ use std::process::Stdio;
 use imp_llm::truncate_chars_with_suffix;
 use project_detect::{detect_walk, ProjectKind};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+
+const GUARDRAIL_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// How strongly guardrail failures influence agent execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -215,15 +218,7 @@ pub async fn run_after_write_checks(
 
     let mut results = Vec::new();
     for cmd in &commands {
-        let result = Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await;
+        let result = run_guardrail_command(cmd, cwd, GUARDRAIL_CHECK_TIMEOUT).await;
 
         match result {
             Ok(output) => {
@@ -259,6 +254,68 @@ pub async fn run_after_write_checks(
         }
     }
     results
+}
+
+async fn run_guardrail_command(
+    cmd: &str,
+    cwd: &Path,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
+    let mut child = command.spawn()?;
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(status_result) => {
+            let status = status_result?;
+            let mut stdout_bytes = Vec::new();
+            let mut stderr_bytes = Vec::new();
+            if let Some(mut stream) = stdout.take() {
+                stream.read_to_end(&mut stdout_bytes).await?;
+            }
+            if let Some(mut stream) = stderr.take() {
+                stream.read_to_end(&mut stderr_bytes).await?;
+            }
+            Ok(std::process::Output {
+                status,
+                stdout: stdout_bytes,
+                stderr: stderr_bytes,
+            })
+        }
+        Err(_) => {
+            kill_process_group(&child).await;
+            let _ = child.kill().await;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("guardrail command timed out after {}s", timeout.as_secs()),
+            ))
+        }
+    }
+}
+
+async fn kill_process_group(child: &tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
 }
 
 /// Format check results into a message for the agent.
@@ -379,6 +436,22 @@ mod tests {
     #[derive(Debug, Deserialize)]
     struct GuardrailToml {
         guardrails: GuardrailConfig,
+    }
+
+    #[tokio::test]
+    async fn guardrail_command_timeout_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let started = std::time::Instant::now();
+
+        let result =
+            run_guardrail_command("sleep 5", dir.path(), std::time::Duration::from_millis(50))
+                .await;
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut
+        ));
     }
 
     #[test]

@@ -1,7 +1,6 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,6 +47,7 @@ pub struct StartupTiming {
     pub since_previous_ms: u64,
 }
 
+#[cfg(feature = "mana-ui")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeadlessOutputMode {
     Json,
@@ -89,11 +89,11 @@ impl StartupTimer {
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use imp_core::agent::{Agent, AgentCommand, AgentEvent, AgentHandle};
-use imp_core::config::{AnimationLevel, Config, ToolOutputDisplay};
+use imp_core::config::{AgentMode, Config, ToolOutputDisplay};
 use imp_core::format_error_for_display;
 use imp_core::tools::web::types::SearchProvider;
-use imp_core::typescript_extensions::{
-    inspect_typescript_extension_statuses, TypeScriptExtensionLoadState,
+use imp_core::tools::{
+    AnchorStore, CheckpointState, FileCache, FileTracker, Tool, ToolContext, ToolOutput,
 };
 use imp_core::workflow::{AutonomyMode, VerificationGate};
 use std::ffi::OsString;
@@ -102,11 +102,7 @@ use imp_core::imp_session::{
     resolve_runtime_connection, ImpSession, ResolvedRuntimeConnection, RuntimeConnectionIntent,
     SessionChoice, SessionOptions,
 };
-use imp_core::personality::{
-    default_soul_markdown, generated_tunable_line, replace_tunable_line, soul_identity_text,
-    tunable_state_for_label, SoulTunableState,
-};
-use imp_core::resources::{discover_project_soul, suggested_project_soul_path};
+use imp_core::runtime::RuntimeStateAccumulator;
 use imp_core::session::{SessionEntry, SessionManager};
 use imp_core::ui::{ComponentSpec, NotifyLevel, SelectOption, UserInterface, WidgetContent};
 use imp_core::usage::{UsageCostBreakdown, UsageRecordSource, UsageTokens};
@@ -119,113 +115,14 @@ use imp_llm::oauth::kimi_code::KimiCodeOAuth;
 use imp_llm::provider::ThinkingLevel;
 use imp_llm::providers::create_provider;
 use imp_llm::{truncate_chars_with_suffix, Message, Model, StreamEvent};
-use imp_tui::animation::{activity_label as tui_activity_label, ActivitySurface, AnimationState};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 
+mod stats_report;
 mod usage_report;
-
-#[derive(Debug)]
-struct ShellLiveness {
-    enabled: bool,
-    tick: u64,
-    visible_len: usize,
-}
-
-impl ShellLiveness {
-    fn new() -> Self {
-        Self {
-            enabled: io::stderr().is_terminal(),
-            tick: 0,
-            visible_len: 0,
-        }
-    }
-
-    fn render(&mut self, state: AnimationState) {
-        if !self.enabled {
-            return;
-        }
-        let label = tui_activity_label(
-            state,
-            self.tick,
-            AnimationLevel::Minimal,
-            ActivitySurface::Chat,
-        );
-        self.tick = self.tick.wrapping_add(1);
-        if label.is_empty() {
-            self.clear();
-            return;
-        }
-        let padded = if self.visible_len > label.len() {
-            format!(
-                "{label}{:width$}",
-                "",
-                width = self.visible_len - label.len()
-            )
-        } else {
-            label.clone()
-        };
-        eprint!("\r{padded}");
-        io::stderr().flush().ok();
-        self.visible_len = label.len();
-    }
-
-    fn clear(&mut self) {
-        if !self.enabled || self.visible_len == 0 {
-            return;
-        }
-        eprint!("\r{:width$}\r", "", width = self.visible_len);
-        io::stderr().flush().ok();
-        self.visible_len = 0;
-    }
-
-    fn settle_line(&mut self) {
-        if !self.enabled || self.visible_len == 0 {
-            return;
-        }
-        eprintln!();
-        self.visible_len = 0;
-    }
-}
-
-fn shell_animation_state(
-    printed_thinking: bool,
-    printed_any_text: bool,
-    active_tools: u32,
-) -> AnimationState {
-    if active_tools > 0 {
-        AnimationState::ExecutingTools { active_tools }
-    } else if printed_any_text {
-        AnimationState::Streaming
-    } else if printed_thinking {
-        AnimationState::Thinking
-    } else {
-        AnimationState::WaitingForResponse
-    }
-}
-
-fn bump_shell_liveness(
-    liveness: &mut ShellLiveness,
-    printed_thinking: bool,
-    printed_any_text: bool,
-    active_tools: u32,
-) {
-    let state = shell_animation_state(printed_thinking, printed_any_text, active_tools);
-    liveness.render(state);
-}
-
-fn clear_shell_liveness_for_output(
-    liveness: &mut ShellLiveness,
-    printed_trailing_newline: &mut bool,
-) {
-    if liveness.visible_len > 0 {
-        liveness.settle_line();
-        *printed_trailing_newline = true;
-    }
-}
 
 /// A coding agent engine
 #[derive(Parser)]
@@ -242,6 +139,9 @@ struct Cli {
     /// Model to use (alias or full ID)
     #[arg(short, long)]
     model: Option<String>,
+    /// Role to apply (planner, coder, verifier, reviewer, researcher, integrator)
+    #[arg(long)]
+    role: Option<String>,
 
     /// Thinking level: off, minimal, low, medium, high, xhigh
     #[arg(long)]
@@ -303,6 +203,9 @@ struct Cli {
     /// Final output format for --print: text or json
     #[arg(long, default_value = "text")]
     output: String,
+    /// Emit shared runtime_event/runtime_state payloads alongside legacy JSON events
+    #[arg(long)]
+    runtime_json: bool,
 
     /// Autonomy mode: suggest, safe, local-auto, worktree-auto, allow-all-local, allow-all, ci
     #[arg(long, value_name = "MODE")]
@@ -336,6 +239,7 @@ struct Cli {
     command: Option<Commands>,
 }
 
+#[cfg(feature = "mana-ui")]
 #[derive(Args, Debug, Clone)]
 struct HeadlessManaArgs {
     /// Mana unit ID to run
@@ -348,6 +252,7 @@ struct HeadlessManaArgs {
     defer_verify: bool,
 }
 
+#[cfg(feature = "mana-ui")]
 #[derive(Args, Debug, Clone)]
 struct ManaNamespaceArgs {
     /// Mana operator verb or unit ID
@@ -364,8 +269,6 @@ struct ManaNamespaceArgs {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Start the CLI-first interactive chat shell
-    Chat,
     /// Open the fullscreen terminal UI explicitly
     Tui,
     /// Open the viewer/inspector surface (planned; not fully implemented yet)
@@ -375,8 +278,6 @@ enum Commands {
     },
     /// Edit a guided subset of imp settings in the terminal
     Settings,
-    /// Edit personality/soul settings in the terminal
-    Personality,
     /// Run the terminal-native setup wizard
     Setup,
     /// Log in to a provider. OAuth is supported for Anthropic, OpenAI/ChatGPT, and Kimi Code.
@@ -394,14 +295,22 @@ enum Commands {
     /// Edit configuration
     Config,
     /// Enter the mana-aware operator namespace. Use `imp mana <unit-id>` to run one unit.
+    #[cfg(feature = "mana-ui")]
     Mana(ManaNamespaceArgs),
-    /// Compatibility alias for `imp mana <unit-id>` during migration.
-    #[command(hide = true)]
-    Run(HeadlessManaArgs),
+    /// Local statistics from persisted imp sessions
+    Stats {
+        #[command(subcommand)]
+        command: StatsCommand,
+    },
     /// Usage reporting and export
     Usage {
         #[command(subcommand)]
         command: UsageCommand,
+    },
+    /// Inspect, validate, run, and update native workflow artifacts
+    Workflow {
+        #[command(subcommand)]
+        command: WorkflowCommand,
     },
     /// Open or inspect run evidence artifacts
     Evidence {
@@ -437,13 +346,69 @@ enum Commands {
 }
 
 #[derive(Subcommand, Debug)]
+enum WorkflowCommand {
+    /// List workflows under .imp/workflows
+    List,
+    /// Show a workflow summary
+    Show(WorkflowTargetArgs),
+    /// Validate one workflow, or all workflows when no id is provided
+    Validate(WorkflowValidateArgs),
+    /// Show the next runnable workflow step
+    Run(WorkflowTargetArgs),
+    /// Update a workflow status path and append an audit event
+    Update(WorkflowUpdateArgs),
+}
+
+#[derive(Args, Debug)]
+struct WorkflowTargetArgs {
+    /// Workflow id under .imp/workflows
+    id: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct WorkflowValidateArgs {
+    /// Workflow id under .imp/workflows
+    id: Option<String>,
+    /// Validation mode
+    #[arg(long, default_value = "strict")]
+    mode: WorkflowValidationModeArg,
+}
+
+#[derive(Args, Debug)]
+struct WorkflowUpdateArgs {
+    /// Workflow id under .imp/workflows
+    id: String,
+    /// Workflow object path to replace, e.g. steps.verify.status
+    path: String,
+    /// Replacement status value
+    value: String,
+    /// Reason recorded in events.jsonl
+    #[arg(long)]
+    reason: String,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum WorkflowValidationModeArg {
+    Draft,
+    Strict,
+}
+
+impl WorkflowValidationModeArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Strict => "strict",
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
 enum EvidenceCommand {
     /// List recent run evidence records
     List,
     /// Print the latest evidence HTML path
     Latest,
 }
-
 #[derive(Subcommand, Debug)]
 enum SecretsCommand {
     /// List configured secret providers/services
@@ -477,6 +442,113 @@ enum SecretsCommand {
         /// Provider/service to configure (e.g. tavily, exa, resend, my-service)
         provider: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum StatsCommand {
+    /// Show overall local imp stats
+    Summary(StatsReportArgs),
+    /// Show token and cost stats
+    Tokens(StatsReportArgs),
+    /// Show stats grouped by tool
+    Tools(StatsReportArgs),
+    /// Show file/code-change stats
+    Files(StatsReportArgs),
+    /// Show stats grouped by day
+    Daily(StatsReportArgs),
+    /// Show stats grouped by week
+    Weekly(StatsReportArgs),
+    /// Show stats grouped by project/session directory hint
+    Projects(StatsReportArgs),
+    /// Show stats grouped by session
+    Sessions(StatsReportArgs),
+    /// Show a fun local imp wrapped summary
+    Wrapped(StatsReportArgs),
+    /// Export local imp stats records in a machine-friendly format
+    Export(StatsExportArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum StatsExportFormat {
+    Json,
+}
+
+#[derive(Debug, Clone, Args)]
+struct StatsReportArgs {
+    /// Include records on or after this unix timestamp or YYYY-MM-DD date
+    #[arg(long)]
+    since: Option<String>,
+    /// Include records before this unix timestamp or date
+    #[arg(long)]
+    until: Option<String>,
+    /// Only include this session id or path fragment
+    #[arg(long)]
+    session: Option<String>,
+    /// Only include this tool name
+    #[arg(long)]
+    tool: Option<String>,
+    /// Emit JSON instead of a human table when supported
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct StatsExportArgs {
+    #[command(flatten)]
+    filters: StatsReportArgs,
+    /// Export format
+    #[arg(long, value_enum, default_value_t = StatsExportFormat::Json)]
+    format: StatsExportFormat,
+}
+
+#[derive(Debug, Clone)]
+struct StatsFilters {
+    since: Option<u64>,
+    until: Option<u64>,
+    session: Option<String>,
+    tool: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StatsFilterSummary {
+    since: Option<u64>,
+    until: Option<u64>,
+    session: Option<String>,
+    tool: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StatsSummaryJson {
+    report: &'static str,
+    generated_at: u64,
+    filters: StatsFilterSummary,
+    sessions: usize,
+    tool_calls: usize,
+    tool_errors: usize,
+    unique_tools: usize,
+    files_created: usize,
+    lines_added: usize,
+    lines_removed: usize,
+    lines_read: usize,
+    token_requests: usize,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    total_tokens: u64,
+    total_cost: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StatsToolRow {
+    tool: String,
+    calls: usize,
+    errors: usize,
+    files_created: usize,
+    lines_added: usize,
+    lines_removed: usize,
+    lines_read: usize,
 }
 
 #[derive(Subcommand, Debug)]
@@ -779,6 +851,96 @@ fn run_install_local(
     Ok(())
 }
 
+async fn run_workflow_command(command: &WorkflowCommand) -> imp_core::Result<()> {
+    let (action, id, mode, path, value, reason) = match command {
+        WorkflowCommand::List => ("list", None, None, None, None, None),
+        WorkflowCommand::Show(args) => ("show", args.id.as_deref(), None, None, None, None),
+        WorkflowCommand::Validate(args) => (
+            "validate",
+            args.id.as_deref(),
+            Some(args.mode.as_str()),
+            None,
+            None,
+            None,
+        ),
+        WorkflowCommand::Run(args) => ("run", args.id.as_deref(), None, None, None, None),
+        WorkflowCommand::Update(args) => (
+            "update",
+            Some(args.id.as_str()),
+            None,
+            Some(args.path.as_str()),
+            Some(args.value.as_str()),
+            Some(args.reason.as_str()),
+        ),
+    };
+
+    let mut params = serde_json::Map::from_iter([("action".to_string(), json!(action))]);
+    if let Some(id) = id {
+        params.insert("id".to_string(), json!(id));
+    }
+    if let Some(mode) = mode {
+        params.insert("mode".to_string(), json!(mode));
+    }
+    if let Some(path) = path {
+        params.insert("path".to_string(), json!(path));
+    }
+    if let Some(value) = value {
+        params.insert("value".to_string(), json!(value));
+    }
+    if let Some(reason) = reason {
+        params.insert("reason".to_string(), json!(reason));
+    }
+
+    let output = run_workflow_tool(Value::Object(params), AgentMode::Full).await?;
+    print_tool_output(&output);
+    if output.is_error {
+        return Err(imp_core::error::Error::Tool(
+            "workflow command failed".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn run_workflow_tool(params: Value, mode: AgentMode) -> imp_core::Result<ToolOutput> {
+    let (tx, _rx) = mpsc::channel(16);
+    let (command_tx, _command_rx) = mpsc::channel(16);
+    let cwd = std::env::current_dir()?;
+    let tool = imp_core::tools::workflow::WorkflowTool;
+    tool.execute(
+        "cli-workflow",
+        params,
+        ToolContext {
+            cwd,
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            update_tx: tx,
+            command_tx,
+            ui: std::sync::Arc::new(imp_core::ui::NullInterface),
+            file_cache: std::sync::Arc::new(FileCache::new()),
+            checkpoint_state: std::sync::Arc::new(CheckpointState::new()),
+            file_tracker: std::sync::Arc::new(std::sync::Mutex::new(FileTracker::new())),
+            anchor_store: std::sync::Arc::new(AnchorStore::new()),
+            lua_tool_loader: None,
+            mode,
+            read_max_lines: 500,
+            turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(
+                imp_core::mana_review::TurnManaReviewAccumulator::default(),
+            )),
+            config: std::sync::Arc::new(Config::default()),
+            run_policy: Default::default(),
+            supporting_provenance: Vec::new(),
+        },
+    )
+    .await
+}
+
+fn print_tool_output(output: &ToolOutput) {
+    for block in &output.content {
+        if let imp_llm::ContentBlock::Text { text } = block {
+            println!("{text}");
+        }
+    }
+}
+
 fn run_evidence_command(command: Option<&EvidenceCommand>) -> imp_core::Result<()> {
     let records =
         imp_core::run_evidence::read_index_records(imp_core::storage::global_run_index_path())?;
@@ -810,13 +972,6 @@ pub async fn run() {
     // Dispatch subcommands first
     if let Some(command) = &cli.command {
         match command {
-            Commands::Chat => {
-                if let Err(e) = run_chat_mode(&cli).await {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
-                }
-                return;
-            }
             Commands::Tui => {
                 if let Err(e) = run_interactive(&cli).await {
                     eprintln!("Error: {e}");
@@ -833,13 +988,6 @@ pub async fn run() {
             }
             Commands::Settings => {
                 if let Err(e) = run_settings_mode() {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
-                }
-                return;
-            }
-            Commands::Personality => {
-                if let Err(e) = run_personality_mode() {
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
@@ -873,6 +1021,7 @@ pub async fn run() {
                 println!("{}", config_path.display());
                 return;
             }
+            #[cfg(feature = "mana-ui")]
             Commands::Mana(ManaNamespaceArgs {
                 target,
                 args,
@@ -905,22 +1054,22 @@ pub async fn run() {
                     }
                 }
             },
-            Commands::Run(HeadlessManaArgs {
-                unit_id,
-                mana_dir,
-                defer_verify,
-            }) => {
-                match run_headless_mode(&cli, unit_id, mana_dir.as_deref(), *defer_verify).await {
-                    Ok(true) => return,
-                    Ok(false) => std::process::exit(1),
-                    Err(e) => {
-                        eprintln!("Error: {e}");
-                        std::process::exit(1);
-                    }
+            Commands::Stats { command } => {
+                if let Err(e) = stats_report::run_stats_command(command) {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
                 }
+                return;
             }
             Commands::Usage { command } => {
                 if let Err(e) = usage_report::run_usage_command(command) {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
+            Commands::Workflow { command } => {
+                if let Err(e) = run_workflow_command(command).await {
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
@@ -961,11 +1110,8 @@ pub async fn run() {
     }
 
     if cli.mode == "chat" {
-        if let Err(e) = run_chat_mode(&cli).await {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-        return;
+        eprintln!("Error: --mode chat has been removed. Use `imp` for the TUI or `imp -p \"...\"` for one-shot mode.");
+        std::process::exit(2);
     }
 
     // Expand @file args into file content context
@@ -999,13 +1145,21 @@ pub async fn run() {
 
     // If stdin was piped without -p, run in print mode with stdin as prompt
     if let Some(ref stdin) = stdin_content {
-        let remaining: Vec<&str> = cli.args.iter().map(|s| s.as_str()).collect();
-        let instruction = if remaining.is_empty() {
-            String::new()
-        } else {
-            remaining.join(" ")
-        };
+        let remaining = prompt_args(&cli.args);
+        let instruction = remaining.join(" ");
         let full_prompt = build_full_prompt(&instruction, &file_context, &Some(stdin.clone()));
+        if let Err(e) = run_print_mode(&cli, &full_prompt).await {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // If positional prompt text was provided without -p, treat it as a one-shot prompt.
+    // @file arguments still contribute file context and are not included in the prompt text.
+    let bare_prompt_args = prompt_args(&cli.args);
+    if !bare_prompt_args.is_empty() {
+        let full_prompt = build_full_prompt(&bare_prompt_args.join(" "), &file_context, &None);
         if let Err(e) = run_print_mode(&cli, &full_prompt).await {
             eprintln!("Error: {e}");
             std::process::exit(1);
@@ -1998,6 +2152,7 @@ async fn resolve_provider_api_key(
     }
 }
 
+#[cfg(feature = "mana-ui")]
 fn worker_status_counts_as_success(status: imp_core::mana_worker::WorkerStatus) -> bool {
     matches!(
         status,
@@ -2006,6 +2161,7 @@ fn worker_status_counts_as_success(status: imp_core::mana_worker::WorkerStatus) 
     )
 }
 
+#[cfg(feature = "mana-ui")]
 async fn run_headless_mode(
     cli: &Cli,
     unit_id: &str,
@@ -2035,6 +2191,7 @@ async fn run_headless_mode(
         model: cli.model.clone().or_else(|| assignment.model.clone()),
         provider: cli.provider.clone(),
         api_key: cli.api_key.clone(),
+        role: cli.role.clone(),
         thinking: cli
             .thinking
             .as_ref()
@@ -2073,11 +2230,18 @@ async fn run_headless_mode(
     emit_startup_timing(&mut startup_timer, StartupStage::RunLoopStarted);
 
     let output_mode = determine_headless_output_mode(&cli.mode, io::stdout().is_terminal());
+    let mut runtime_state = RuntimeStateAccumulator::new("headless");
     let mut printed_trailing_newline = false;
 
     while let Some(event) = prepared.session.recv_event().await {
         match output_mode {
-            HeadlessOutputMode::Json => print_json_event(&event)?,
+            HeadlessOutputMode::Json => {
+                if cli.runtime_json {
+                    print_json_event_with_runtime(&event, Some(&mut runtime_state))?
+                } else {
+                    print_json_event(&event)?
+                }
+            }
             HeadlessOutputMode::Human => print_headless_human_event(
                 &event,
                 !cli.no_tools,
@@ -2165,6 +2329,7 @@ fn format_timing_event(timing: &TimingEvent) -> String {
     )
 }
 
+#[cfg(feature = "mana-ui")]
 async fn run_reserved_mana_namespace_command(
     target: &str,
     args: &[String],
@@ -2190,6 +2355,7 @@ fn cli_verification_gates(commands: &[String]) -> Vec<VerificationGate> {
         .collect()
 }
 
+#[cfg(feature = "mana-ui")]
 fn determine_headless_output_mode(cli_mode: &str, stdout_is_terminal: bool) -> HeadlessOutputMode {
     match cli_mode {
         "json" | "rpc" => HeadlessOutputMode::Json,
@@ -2198,6 +2364,7 @@ fn determine_headless_output_mode(cli_mode: &str, stdout_is_terminal: bool) -> H
     }
 }
 
+#[cfg(feature = "mana-ui")]
 fn print_headless_human_event(
     event: &AgentEvent,
     show_tools: bool,
@@ -2283,7 +2450,53 @@ fn print_headless_human_event(
     Ok(())
 }
 
+#[cfg(feature = "mana-ui")]
 fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>> {
+    print_json_event_with_runtime(event, None)
+}
+#[cfg(feature = "mana-ui")]
+fn print_json_event_with_runtime(
+    event: &AgentEvent,
+    runtime: Option<&mut RuntimeStateAccumulator>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let value = legacy_json_event_value(event)?;
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{}", serde_json::to_string(&value)?)?;
+    if let Some(runtime) = runtime {
+        let sequence = runtime.snapshot().status_items.len() as u64
+            + runtime.snapshot().active_tools.len() as u64
+            + runtime.snapshot().completed_tools.len() as u64
+            + 1;
+        let run_id = runtime
+            .snapshot()
+            .workflow
+            .run_id
+            .clone()
+            .unwrap_or_else(|| "headless".into());
+        let runtime_event = event.to_runtime_event(run_id, sequence);
+        runtime.apply(&runtime_event);
+        writeln!(
+            stdout,
+            "{}",
+            serde_json::to_string(&json!({
+                "type": "runtime_event",
+                "event": runtime_event,
+            }))?
+        )?;
+        writeln!(
+            stdout,
+            "{}",
+            serde_json::to_string(&json!({
+                "type": "runtime_state",
+                "snapshot": runtime.snapshot(),
+            }))?
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mana-ui")]
+fn legacy_json_event_value(event: &AgentEvent) -> Result<Value, Box<dyn std::error::Error>> {
     let value = match event {
         AgentEvent::AgentStart { model, timestamp } => {
             json!({ "type": "agent_start", "model": model, "timestamp": timestamp })
@@ -2344,9 +2557,25 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
             "checkpoint": checkpoint,
         }),
         AgentEvent::Warning { message } => json!({ "type": "warning", "message": message }),
+        AgentEvent::WorktreeCreated { metadata } => json!({
+            "type": "worktree_created",
+            "metadata": metadata,
+        }),
+        AgentEvent::WorktreeDiffCaptured { metadata } => json!({
+            "type": "worktree_diff_captured",
+            "metadata": metadata,
+        }),
+        AgentEvent::WorktreeCloseout { result } => json!({
+            "type": "worktree_closeout",
+            "result": result,
+        }),
         AgentEvent::EvidenceWritten { path } => json!({
             "type": "evidence_written",
             "path": path.display().to_string(),
+        }),
+        AgentEvent::WorkflowControllerSnapshot { snapshot } => json!({
+            "type": "workflow_controller_snapshot",
+            "snapshot": snapshot,
         }),
         AgentEvent::VerificationStarted { gate } => json!({
             "type": "verification_started",
@@ -2365,16 +2594,13 @@ fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>
             "record": record,
         }),
         AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
-        AgentEvent::ToolOutputDelta { .. } => return Ok(()), // handled in TUI only
+        AgentEvent::ToolOutputDelta { .. } => json!({ "type": "tool_output_delta" }),
     };
 
-    let line = serde_json::to_string(&value)?;
-    let mut stdout = io::stdout().lock();
-    writeln!(stdout, "{line}")?;
-    stdout.flush()?;
-    Ok(())
+    Ok(value)
 }
 
+#[cfg(feature = "mana-ui")]
 fn stream_event_to_json(event: &StreamEvent) -> serde_json::Value {
     match event {
         StreamEvent::MessageStart { model } => {
@@ -2947,12 +3173,50 @@ async fn deliver_ui_response(value: Value, pending_ui: &UiResponseMap) -> Result
 }
 
 async fn forward_rpc_events(mut handle: AgentHandle, stdout_tx: mpsc::Sender<Value>) {
+    let mut runtime_state = RuntimeStateAccumulator::new("rpc");
+    let mut sequence = 0_u64;
     while let Some(event) = handle.event_rx.recv().await {
-        let _ = stdout_tx.send(rpc_agent_event_to_json(&event)).await;
+        sequence += 1;
+        let runtime_event = event.to_runtime_event("rpc", sequence);
+        runtime_state.apply(&runtime_event);
+        let _ = stdout_tx
+            .send(rpc_agent_event_to_json_with_runtime(
+                &event,
+                &runtime_event,
+                &runtime_state.snapshot(),
+            ))
+            .await;
     }
 }
 
+#[cfg(test)]
 fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
+    let runtime_event = event.to_runtime_event("rpc", 0);
+    let mut runtime_state = RuntimeStateAccumulator::new("rpc");
+    runtime_state.apply(&runtime_event);
+    rpc_agent_event_to_json_with_runtime(event, &runtime_event, &runtime_state.snapshot())
+}
+
+fn rpc_agent_event_to_json_with_runtime(
+    event: &AgentEvent,
+    runtime_event: &imp_core::runtime::RuntimeEvent,
+    runtime_state: &imp_core::runtime::RuntimeStateSnapshot,
+) -> Value {
+    let mut value = rpc_agent_event_legacy_json(event);
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "runtime_event".into(),
+            serde_json::to_value(runtime_event).unwrap_or(Value::Null),
+        );
+        object.insert(
+            "runtime_state".into(),
+            serde_json::to_value(runtime_state).unwrap_or(Value::Null),
+        );
+    }
+    value
+}
+
+fn rpc_agent_event_legacy_json(event: &AgentEvent) -> Value {
     match event {
         AgentEvent::AgentStart { model, timestamp } => json!({
             "type": "agent_start",
@@ -3029,9 +3293,25 @@ fn rpc_agent_event_to_json(event: &AgentEvent) -> Value {
         AgentEvent::Warning { message } => {
             json!({ "type": "warning", "message": message })
         }
+        AgentEvent::WorktreeCreated { metadata } => json!({
+            "type": "worktree_created",
+            "metadata": metadata,
+        }),
+        AgentEvent::WorktreeDiffCaptured { metadata } => json!({
+            "type": "worktree_diff_captured",
+            "metadata": metadata,
+        }),
+        AgentEvent::WorktreeCloseout { result } => json!({
+            "type": "worktree_closeout",
+            "result": result,
+        }),
         AgentEvent::EvidenceWritten { path } => json!({
             "type": "evidence_written",
             "path": path.display().to_string(),
+        }),
+        AgentEvent::WorkflowControllerSnapshot { snapshot } => json!({
+            "type": "workflow_controller_snapshot",
+            "snapshot": snapshot,
         }),
         AgentEvent::VerificationStarted { gate } => json!({
             "type": "verification_started",
@@ -3213,6 +3493,7 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
         model: cli.model.clone(),
         provider: cli.provider.clone(),
         api_key: cli.api_key.clone(),
+        role: cli.role.clone(),
         thinking: cli
             .thinking
             .as_ref()
@@ -3385,171 +3666,6 @@ async fn run_print_mode(cli: &Cli, prompt: &str) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-struct CliTerminalUi;
-
-#[async_trait]
-impl UserInterface for CliTerminalUi {
-    fn has_ui(&self) -> bool {
-        true
-    }
-
-    async fn notify(&self, message: &str, level: NotifyLevel) {
-        let prefix = match level {
-            NotifyLevel::Info => "info",
-            NotifyLevel::Warning => "warning",
-            NotifyLevel::Error => "error",
-        };
-        eprintln!("[{prefix}] {message}");
-    }
-
-    async fn confirm(&self, title: &str, message: &str) -> Option<bool> {
-        let title = title.to_string();
-        let message = message.to_string();
-        tokio::task::spawn_blocking(move || {
-            eprintln!("\n{title}");
-            if !message.trim().is_empty() {
-                eprintln!("{message}");
-            }
-            eprint!("Proceed? [Y/n] ");
-            io::stdout().flush().ok()?;
-            let mut input = String::new();
-            let bytes = io::stdin().read_line(&mut input).ok()?;
-            if bytes == 0 {
-                return None;
-            }
-            let answer = input.trim().to_lowercase();
-            Some(!matches!(answer.as_str(), "n" | "no"))
-        })
-        .await
-        .ok()
-        .flatten()
-    }
-
-    async fn select_with_context(
-        &self,
-        title: &str,
-        context: &str,
-        options: &[SelectOption],
-    ) -> Option<usize> {
-        let title = title.to_string();
-        let context = context.to_string();
-        let options = options.to_vec();
-        tokio::task::spawn_blocking(move || {
-            eprintln!("\n{title}");
-            if !context.trim().is_empty() {
-                eprintln!("{context}");
-            }
-            for (idx, option) in options.iter().enumerate() {
-                eprintln!("{}. {}", idx + 1, option.label);
-                if let Some(description) = &option.description {
-                    if !description.trim().is_empty() {
-                        eprintln!("   {description}");
-                    }
-                }
-            }
-            eprint!("Select> ");
-            io::stdout().flush().ok()?;
-            let mut input = String::new();
-            let bytes = io::stdin().read_line(&mut input).ok()?;
-            if bytes == 0 {
-                return None;
-            }
-            let index: usize = input.trim().parse().ok()?;
-            index.checked_sub(1).filter(|idx| *idx < options.len())
-        })
-        .await
-        .ok()
-        .flatten()
-    }
-
-    async fn input_with_context(
-        &self,
-        title: &str,
-        context: &str,
-        placeholder: &str,
-    ) -> Option<String> {
-        let title = title.to_string();
-        let context = context.to_string();
-        let placeholder = placeholder.to_string();
-        tokio::task::spawn_blocking(move || {
-            eprintln!("\n{title}");
-            if !context.trim().is_empty() {
-                eprintln!("{context}");
-            }
-            if !placeholder.trim().is_empty() {
-                eprintln!("placeholder: {placeholder}");
-            }
-            eprint!("> ");
-            io::stdout().flush().ok()?;
-            let mut input = String::new();
-            let bytes = io::stdin().read_line(&mut input).ok()?;
-            if bytes == 0 {
-                return None;
-            }
-            Some(input.trim().to_string())
-        })
-        .await
-        .ok()
-        .flatten()
-    }
-
-    async fn set_status(&self, _key: &str, _text: Option<&str>) {}
-
-    async fn set_widget(&self, _key: &str, _content: Option<WidgetContent>) {}
-
-    async fn custom(&self, _component: ComponentSpec) -> Option<serde_json::Value> {
-        None
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ChatShellCommand {
-    Help(Option<String>),
-    Quit,
-    Status,
-    New,
-    Resume,
-    Compact,
-    Settings,
-    Personality,
-    Setup,
-    View(Option<String>),
-    Model(Option<String>),
-    Thinking(Option<String>),
-    Unknown(String),
-}
-
-fn parse_chat_shell_command(input: &str) -> Option<ChatShellCommand> {
-    let raw = input
-        .strip_prefix(':')
-        .or_else(|| input.strip_prefix('/'))?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Some(ChatShellCommand::Help(None));
-    }
-
-    let mut parts = trimmed.split_whitespace();
-    let command = parts.next().unwrap_or_default();
-    let rest = parts.collect::<Vec<_>>().join(" ");
-    let arg = if rest.is_empty() { None } else { Some(rest) };
-
-    Some(match command {
-        "help" | "h" => ChatShellCommand::Help(arg),
-        "quit" | "q" | "exit" => ChatShellCommand::Quit,
-        "status" => ChatShellCommand::Status,
-        "new" => ChatShellCommand::New,
-        "resume" => ChatShellCommand::Resume,
-        "compact" => ChatShellCommand::Compact,
-        "settings" => ChatShellCommand::Settings,
-        "personality" => ChatShellCommand::Personality,
-        "setup" => ChatShellCommand::Setup,
-        "view" => ChatShellCommand::View(arg),
-        "model" => ChatShellCommand::Model(arg),
-        "thinking" => ChatShellCommand::Thinking(arg),
-        _ => ChatShellCommand::Unknown(trimmed.to_string()),
-    })
-}
-
 fn parse_thinking_level_strict(raw: &str) -> Option<ThinkingLevel> {
     match raw.trim().to_lowercase().as_str() {
         "off" => Some(ThinkingLevel::Off),
@@ -3654,241 +3770,6 @@ fn print_settings_summary(config: &Config, config_path: &Path) {
     );
     println!("s. save and exit");
     println!("q. quit without saving");
-}
-
-fn resolve_project_soul_path(cwd: &Path) -> PathBuf {
-    discover_project_soul(cwd)
-        .map(|soul| soul.path)
-        .unwrap_or_else(|| suggested_project_soul_path(cwd))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PersonalityScopeCli {
-    Global,
-    Project,
-}
-
-impl PersonalityScopeCli {
-    fn toggle(self) -> Self {
-        match self {
-            Self::Global => Self::Project,
-            Self::Project => Self::Global,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Global => "global",
-            Self::Project => "project",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PersonalityModeCli {
-    Builder,
-    Source,
-}
-
-fn tunable_cli_label(state: SoulTunableState) -> &'static str {
-    match state {
-        SoulTunableState::Preset(0) => "very low",
-        SoulTunableState::Preset(1) => "low",
-        SoulTunableState::Preset(2) => "balanced",
-        SoulTunableState::Preset(3) => "high",
-        SoulTunableState::Preset(4) => "very high",
-        SoulTunableState::Preset(_) => "preset",
-        SoulTunableState::Edited => "edited",
-        SoulTunableState::Missing => "missing",
-    }
-}
-
-fn personality_scope_paths(cwd: &Path) -> (PathBuf, PathBuf) {
-    (
-        Config::user_config_dir().join("soul.md"),
-        resolve_project_soul_path(cwd),
-    )
-}
-
-fn load_soul_content(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|_| default_soul_markdown())
-}
-
-fn save_soul_content(path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let body = if content.trim().is_empty() {
-        default_soul_markdown()
-    } else {
-        content.to_string()
-    };
-    std::fs::write(path, body)?;
-    Ok(())
-}
-
-fn open_in_editor(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-    let status = ProcessCommand::new(&editor).arg(path).status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!("editor `{editor}` exited with {status}")).into())
-    }
-}
-
-fn print_personality_builder(scope: PersonalityScopeCli, path: &Path, content: &str) {
-    println!();
-    println!("Personality — builder mode");
-    println!("scope: {}", scope.label());
-    println!("path: {}", path.display());
-    println!("identity: {}", soul_identity_text(content));
-    println!("1. scope               {}", scope.label());
-    println!(
-        "2. autonomy            {}",
-        tunable_cli_label(tunable_state_for_label(content, "Autonomy"))
-    );
-    println!(
-        "3. brevity             {}",
-        tunable_cli_label(tunable_state_for_label(content, "Brevity"))
-    );
-    println!(
-        "4. caution             {}",
-        tunable_cli_label(tunable_state_for_label(content, "Caution"))
-    );
-    println!(
-        "5. warmth              {}",
-        tunable_cli_label(tunable_state_for_label(content, "Warmth"))
-    );
-    println!(
-        "6. planning            {}",
-        tunable_cli_label(tunable_state_for_label(content, "Planning"))
-    );
-    println!("7. switch to source mode");
-    println!("s. save and exit");
-    println!("q. quit without saving");
-}
-
-fn print_personality_source(scope: PersonalityScopeCli, path: &Path, content: &str) {
-    println!();
-    println!("Personality — source mode");
-    println!("scope: {}", scope.label());
-    println!("path: {}", path.display());
-    println!("identity: {}", soul_identity_text(content));
-    println!("Preview:");
-    for line in content.lines().take(16) {
-        println!("  {line}");
-    }
-    if content.lines().count() > 16 {
-        println!("  …");
-    }
-    println!("1. switch scope");
-    println!("2. switch to builder mode");
-    println!("3. open in $EDITOR");
-    println!("4. reset to default soul");
-    println!("s. save and exit");
-    println!("q. quit without saving");
-}
-
-fn cycle_personality_tunable(content: &str, label: &str) -> String {
-    let next_idx = match tunable_state_for_label(content, label) {
-        SoulTunableState::Preset(idx) => (idx + 1) % 5,
-        SoulTunableState::Missing | SoulTunableState::Edited => 0,
-    };
-    let new_line = generated_tunable_line(label, next_idx)
-        .unwrap_or_else(|| format!("- {label}: {}", next_idx));
-    replace_tunable_line(content, label, &new_line)
-}
-
-fn run_personality_mode() -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = std::env::current_dir()?;
-    let (global_path, project_path) = personality_scope_paths(&cwd);
-    let mut global_content = load_soul_content(&global_path);
-    let mut project_content = load_soul_content(&project_path);
-    let mut scope = if discover_project_soul(&cwd).is_some() {
-        PersonalityScopeCli::Project
-    } else {
-        PersonalityScopeCli::Global
-    };
-    let mut mode = PersonalityModeCli::Builder;
-
-    loop {
-        let (path, content) = match scope {
-            PersonalityScopeCli::Global => (&global_path, &mut global_content),
-            PersonalityScopeCli::Project => (&project_path, &mut project_content),
-        };
-
-        match mode {
-            PersonalityModeCli::Builder => print_personality_builder(scope, path, content),
-            PersonalityModeCli::Source => print_personality_source(scope, path, content),
-        }
-
-        let Some(choice) = prompt_optional_input_line("Select field> ")? else {
-            println!();
-            return Ok(());
-        };
-
-        match mode {
-            PersonalityModeCli::Builder => match choice.trim() {
-                "1" => scope = scope.toggle(),
-                "2" => {
-                    *content = cycle_personality_tunable(content, "Autonomy");
-                    println!("Updated autonomy.");
-                }
-                "3" => {
-                    *content = cycle_personality_tunable(content, "Brevity");
-                    println!("Updated brevity.");
-                }
-                "4" => {
-                    *content = cycle_personality_tunable(content, "Caution");
-                    println!("Updated caution.");
-                }
-                "5" => {
-                    *content = cycle_personality_tunable(content, "Warmth");
-                    println!("Updated warmth.");
-                }
-                "6" => {
-                    *content = cycle_personality_tunable(content, "Planning");
-                    println!("Updated planning.");
-                }
-                "7" => mode = PersonalityModeCli::Source,
-                "s" | "save" => {
-                    save_soul_content(path, content)?;
-                    println!("Soul saved to {}", path.display());
-                    return Ok(());
-                }
-                "q" | "quit" => {
-                    println!("Discarded personality changes.");
-                    return Ok(());
-                }
-                other => println!("Unknown selection: {other}"),
-            },
-            PersonalityModeCli::Source => match choice.trim() {
-                "1" => scope = scope.toggle(),
-                "2" => mode = PersonalityModeCli::Builder,
-                "3" => {
-                    save_soul_content(path, content)?;
-                    open_in_editor(path)?;
-                    *content = load_soul_content(path);
-                    println!("Reloaded soul from {}", path.display());
-                }
-                "4" => {
-                    *content = default_soul_markdown();
-                    println!("Reset current scope to default soul markdown in memory.");
-                }
-                "s" | "save" => {
-                    save_soul_content(path, content)?;
-                    println!("Soul saved to {}", path.display());
-                    return Ok(());
-                }
-                "q" | "quit" => {
-                    println!("Discarded personality changes.");
-                    return Ok(());
-                }
-                other => println!("Unknown selection: {other}"),
-            },
-        }
-    }
 }
 
 fn run_settings_mode() -> Result<(), Box<dyn std::error::Error>> {
@@ -4014,569 +3895,6 @@ fn thinking_level_label(level: ThinkingLevel) -> &'static str {
     }
 }
 
-fn shell_session_choice(cli: &Cli) -> SessionChoice {
-    if cli.no_session {
-        SessionChoice::InMemory
-    } else if cli.cont {
-        SessionChoice::Continue
-    } else if let Some(ref path) = cli.session {
-        SessionChoice::Open(path.clone())
-    } else {
-        SessionChoice::New
-    }
-}
-
-fn shell_project_label(cwd: &Path) -> String {
-    cwd.file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| cwd.display().to_string())
-}
-
-fn shell_session_label(session: &ImpSession) -> String {
-    session
-        .session_manager()
-        .title(32)
-        .or_else(|| session.session_manager().session_id())
-        .unwrap_or_else(|| "in-memory".to_string())
-}
-
-fn pluralize(count: usize, singular: &str, plural: &str) -> String {
-    if count == 1 {
-        singular.to_string()
-    } else {
-        plural.to_string()
-    }
-}
-
-fn format_chat_status_line(session: &ImpSession) -> String {
-    let project = shell_project_label(session.cwd());
-    let model = truncate_chars_with_suffix(&session.model().meta.id, 20, "…");
-    let thinking = session
-        .config()
-        .thinking
-        .map(thinking_level_label)
-        .unwrap_or("off");
-    let session_label = shell_session_label(session);
-
-    format!("[{project} · {model} · {thinking} · {session_label}]")
-}
-
-#[derive(Debug, Default)]
-struct ChatTurnSummaryState {
-    tool_calls: usize,
-    read_paths: std::collections::HashSet<String>,
-    changed_paths: std::collections::HashSet<String>,
-    other_tools: usize,
-    had_tool_error: bool,
-    mana_review_state: Option<imp_core::mana_review::ManaReviewState>,
-}
-
-impl ChatTurnSummaryState {
-    fn record_tool_start(&mut self, tool_name: &str, args: &Value) {
-        self.tool_calls += 1;
-        match tool_name {
-            "read" => {
-                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                    self.read_paths.insert(abbreviate_home_path(path));
-                } else {
-                    self.other_tools += 1;
-                }
-            }
-            "write" | "edit" | "multi_edit" => {
-                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                    self.changed_paths.insert(abbreviate_home_path(path));
-                } else {
-                    self.other_tools += 1;
-                }
-            }
-            _ => {
-                self.other_tools += 1;
-            }
-        }
-    }
-
-    fn summary_line(&self, cost_total: f64) -> String {
-        let mut parts = Vec::new();
-
-        if self.tool_calls == 0 {
-            parts.push("analysis only".to_string());
-        } else {
-            if !self.read_paths.is_empty() {
-                let count = self.read_paths.len();
-                parts.push(format!(
-                    "{count} {} read",
-                    pluralize(count, "file", "files")
-                ));
-            }
-            if !self.changed_paths.is_empty() {
-                let count = self.changed_paths.len();
-                parts.push(format!(
-                    "{count} {} changed",
-                    pluralize(count, "file", "files")
-                ));
-            }
-            if self.other_tools > 0 {
-                let count = self.other_tools;
-                parts.push(format!(
-                    "{count} {} used",
-                    pluralize(count, "tool", "tools")
-                ));
-            }
-        }
-
-        if self.had_tool_error {
-            parts.push("errors surfaced".to_string());
-        }
-
-        match self.mana_review_state {
-            Some(imp_core::mana_review::ManaReviewState::NeedsDecision) => {
-                parts.push("review required".to_string())
-            }
-            Some(imp_core::mana_review::ManaReviewState::Changed) => {
-                parts.push("durable changes captured".to_string())
-            }
-            _ => {}
-        }
-
-        parts.push(format!("cost ${cost_total:.4}"));
-        format!("summary: {}", parts.join(" · "))
-    }
-}
-
-fn abbreviate_home_path(path: &str) -> String {
-    for prefix in ["/Users/", "/home/"] {
-        if let Some(rest) = path.strip_prefix(prefix) {
-            if let Some((_, suffix)) = rest.split_once('/') {
-                return format!("~/{suffix}");
-            }
-            return "~".to_string();
-        }
-    }
-    path.to_string()
-}
-
-fn print_chat_status(session: &ImpSession) {
-    println!("{}", format_chat_status_line(session));
-}
-
-fn print_chat_status_detail(session: &ImpSession) {
-    let project = shell_project_label(session.cwd());
-    let model = &session.model().meta.id;
-    let provider = &session.model().meta.provider;
-    let thinking = session
-        .config()
-        .thinking
-        .map(thinking_level_label)
-        .unwrap_or("off");
-    let session_id = session
-        .session_manager()
-        .session_id()
-        .unwrap_or_else(|| "in-memory".to_string());
-    let title = shell_session_label(session);
-    let path = session
-        .session_manager()
-        .path()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "(in-memory)".to_string());
-    println!("Status");
-    println!("  project     {project}");
-    println!("  model       {model}");
-    println!("  provider    {provider}");
-    println!("  thinking    {thinking}");
-    println!("  session     {title}");
-    println!("  session id  {session_id}");
-    println!("  path        {path}");
-}
-
-async fn build_chat_session(
-    cli: &Cli,
-    session_choice: SessionChoice,
-) -> Result<ImpSession, Box<dyn std::error::Error>> {
-    let cwd = std::env::current_dir()?;
-    let config = Config::resolve(&imp_core::storage::global_root(), Some(&cwd))?;
-
-    let mut options = SessionOptions {
-        cwd: cwd.clone(),
-        model: cli.model.clone(),
-        provider: cli.provider.clone(),
-        api_key: cli.api_key.clone(),
-        thinking: cli
-            .thinking
-            .as_ref()
-            .map(|thinking| parse_thinking_level(thinking)),
-        max_turns: cli.max_turns.or(config.max_turns),
-        autonomy_mode: cli.autonomy,
-        verification_gates: cli_verification_gates(&cli.verify),
-        max_tokens: cli.max_tokens.or(config.max_tokens),
-        system_prompt: cli.system_prompt.clone(),
-        no_tools: cli.no_tools,
-        session: session_choice,
-        ui: Some(Arc::new(CliTerminalUi) as Arc<dyn UserInterface>),
-        ..Default::default()
-    };
-
-    if !cli.no_tools {
-        options.lua_loader = build_lua_loader(false, cwd.clone());
-    }
-
-    ImpSession::create(options)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
-}
-
-fn format_chat_tool_summary(tool_name: &str, args: &Value) -> String {
-    match tool_name {
-        "bash" => {
-            let command = args
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim_start();
-            if command.is_empty() {
-                String::new()
-            } else if command.starts_with("rg ")
-                || command.starts_with("grep ")
-                || command.starts_with("fd ")
-                || command.starts_with("find ")
-                || command == "find"
-                || command.starts_with("ls ")
-                || command == "ls"
-            {
-                "search".to_string()
-            } else if command.contains("check")
-                || command.contains("test")
-                || command.contains("verify")
-                || command.contains("lint")
-            {
-                "check".to_string()
-            } else {
-                "run".to_string()
-            }
-        }
-        "read" | "write" | "edit" => args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(abbreviate_home_path)
-            .unwrap_or_default(),
-        "scan" => {
-            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
-            match action {
-                "extract" => args
-                    .get("files")
-                    .and_then(|v| v.as_array())
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|v| v.as_str())
-                            .map(abbreviate_home_path)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_else(|| "extract".to_string()),
-                "scan" => args
-                    .get("directory")
-                    .and_then(|v| v.as_str())
-                    .map(abbreviate_home_path)
-                    .unwrap_or_default(),
-                _ => {
-                    if action == tool_name {
-                        String::new()
-                    } else {
-                        action.to_string()
-                    }
-                }
-            }
-        }
-        "mana" => args
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        _ => String::new(),
-    }
-}
-
-async fn execute_chat_shell_command(
-    session: &mut ImpSession,
-    cli: &Cli,
-    command: ChatShellCommand,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    match command {
-        ChatShellCommand::Help(topic) => {
-            match topic.as_deref() {
-                Some("model") => {
-                    println!(
-                        "Current model: {}\nUsage: :model <name>\nHint: run `imp --list-models` for the full built-in catalog.",
-                        session.model().meta.id
-                    );
-                }
-                Some("thinking") => {
-                    let current = session
-                        .config()
-                        .thinking
-                        .map(thinking_level_label)
-                        .unwrap_or("off");
-                    println!(
-                        "Current thinking level: {current}\nUsage: :thinking <off|minimal|low|medium|high|xhigh>"
-                    );
-                }
-                _ => {
-                    println!(
-                        "Shell commands\n  :help [topic]      Show commands and quick guidance\n  :status            Show current shell/session status\n  :new               Start a fresh session\n  :resume            Continue the most recent session for this cwd\n  :compact           Compact older context (planned)\n  :settings          Edit a guided subset of imp settings\n  :personality       Edit soul/personality tunables and source\n  :setup             Run the setup wizard\n  :view <area>       Open `imp view` for sessions, tree, logs, or checkpoints\n  :model <name>      Switch model for later prompts\n  :thinking <level>  Set thinking level for later prompts\n  :quit              Exit chat\n\nTools\n  web.read can read web pages and public YouTube URLs (metadata + captions when available).\n\nCompatibility\n  Slash-prefixed forms like `/help` and `/view` still work during migration,\n  but `:` is the preferred shell grammar."
-                    );
-                }
-            }
-            Ok(true)
-        }
-        ChatShellCommand::Quit => Ok(false),
-        ChatShellCommand::Status => {
-            print_chat_status_detail(session);
-            Ok(true)
-        }
-        ChatShellCommand::New => {
-            let replacement = build_chat_session(cli, SessionChoice::New).await?;
-            *session = replacement;
-            println!("Started a fresh session.");
-            Ok(true)
-        }
-        ChatShellCommand::Resume => {
-            let replacement = build_chat_session(cli, SessionChoice::Continue).await?;
-            let resumed = shell_session_label(&replacement);
-            let session_id = replacement
-                .session_manager()
-                .session_id()
-                .unwrap_or_else(|| "in-memory".to_string());
-            *session = replacement;
-            println!("Resumed session: {resumed} ({session_id})");
-            Ok(true)
-        }
-        ChatShellCommand::Compact => {
-            println!("Compaction isn't available in the shell yet.");
-            println!("For now, use `imp tui` or inspect session history with `imp view sessions`.");
-            println!("A shell-native compaction flow is planned.");
-            Ok(true)
-        }
-        ChatShellCommand::Settings => {
-            run_settings_mode()?;
-            Ok(true)
-        }
-        ChatShellCommand::Personality => {
-            run_personality_mode()?;
-            Ok(true)
-        }
-        ChatShellCommand::Setup => {
-            run_setup_mode().await?;
-            Ok(true)
-        }
-        ChatShellCommand::View(area) => {
-            let area = area.unwrap_or_else(|| "sessions".to_string());
-            println!("Opening `imp view {area}`...");
-            run_view_mode(cli, Some(area.as_str())).await?;
-            println!("Returned from viewer.");
-            Ok(true)
-        }
-        ChatShellCommand::Model(None) => {
-            let mut models: Vec<String> = session
-                .model_registry()
-                .list()
-                .iter()
-                .map(|meta| meta.id.clone())
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect();
-            models.sort();
-            let preview = models.into_iter().take(12).collect::<Vec<_>>().join(", ");
-            println!(
-                "Current model: {}\nUsage: :model <name>\nExamples: {}{}",
-                session.model().meta.id,
-                preview,
-                if preview.is_empty() { "" } else { ", ..." }
-            );
-            Ok(true)
-        }
-        ChatShellCommand::Model(Some(name)) => {
-            session
-                .set_model(name.trim())
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
-            println!("Model set to {}", session.model().meta.id);
-            Ok(true)
-        }
-        ChatShellCommand::Thinking(None) => {
-            let current = session
-                .config()
-                .thinking
-                .map(thinking_level_label)
-                .unwrap_or("off");
-            println!(
-                "Current thinking level: {current}\nUsage: :thinking <off|minimal|low|medium|high|xhigh>"
-            );
-            Ok(true)
-        }
-        ChatShellCommand::Thinking(Some(level)) => {
-            let Some(parsed) = parse_thinking_level_strict(level.trim()) else {
-                println!("Unknown thinking level: {}", level.trim());
-                println!("Expected one of: off, minimal, low, medium, high, xhigh");
-                return Ok(true);
-            };
-            session.set_thinking(parsed);
-            println!("Thinking level set to {}", thinking_level_label(parsed));
-            Ok(true)
-        }
-        ChatShellCommand::Unknown(raw) => {
-            println!("Unknown shell command: :{raw}");
-            println!("Type :help for available commands.");
-            Ok(true)
-        }
-    }
-}
-
-async fn run_chat_prompt(
-    session: &mut ImpSession,
-    cli: &Cli,
-    prompt: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    session
-        .prompt(prompt)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
-
-    let mut printed_trailing_newline = true;
-    let mut printed_thinking = false;
-    let mut printed_any_text = false;
-    let mut active_tools = 0u32;
-    let mut liveness = ShellLiveness::new();
-    let mut turn_summary = ChatTurnSummaryState::default();
-
-    while let Some(event) = session.recv_event().await {
-        bump_shell_liveness(
-            &mut liveness,
-            printed_thinking,
-            printed_any_text,
-            active_tools,
-        );
-        match event {
-            AgentEvent::MessageDelta { delta } => match delta {
-                StreamEvent::TextDelta { text } => {
-                    clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
-                    print!("{text}");
-                    io::stdout().flush().ok();
-                    printed_trailing_newline = false;
-                    printed_any_text = true;
-                }
-                StreamEvent::ThinkingDelta { .. } => {
-                    printed_thinking = true;
-                    bump_shell_liveness(
-                        &mut liveness,
-                        printed_thinking,
-                        printed_any_text,
-                        active_tools,
-                    );
-                }
-                _ => {}
-            },
-            AgentEvent::ToolExecutionStart {
-                tool_name, args, ..
-            } if !cli.no_tools => {
-                active_tools = active_tools.saturating_add(1);
-                clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
-                turn_summary.record_tool_start(&tool_name, &args);
-                let summary = format_chat_tool_summary(&tool_name, &args);
-                if summary.is_empty() {
-                    eprintln!("tool: {tool_name}");
-                } else {
-                    eprintln!("tool: {tool_name} {summary}");
-                }
-            }
-            AgentEvent::ToolExecutionEnd { result, .. } if !cli.no_tools => {
-                active_tools = active_tools.saturating_sub(1);
-                if result.is_error {
-                    let text: String = result
-                        .content
-                        .iter()
-                        .filter_map(|b| match b {
-                            imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
-                    clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
-                    if !text.is_empty() {
-                        eprintln!("error: {}", truncate_chars_with_suffix(&text, 160, "…"));
-                        eprintln!("next: deeper log viewing is planned under `imp view logs`.");
-                    }
-                }
-            }
-            AgentEvent::TurnEnd { .. } => {
-                liveness.clear();
-                if !printed_trailing_newline {
-                    println!();
-                    printed_trailing_newline = true;
-                }
-            }
-            AgentEvent::Error { error } => {
-                clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
-                eprintln!("error: {}", format_error_for_display(&error));
-            }
-            AgentEvent::Timing { timing } => {
-                if cli.verbose {
-                    clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
-                    eprintln!("{}", format_timing_event(&timing));
-                }
-            }
-            AgentEvent::AgentEnd { usage: _, cost, .. } => {
-                clear_shell_liveness_for_output(&mut liveness, &mut printed_trailing_newline);
-                eprintln!("{}", turn_summary.summary_line(cost.total));
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    session
-        .wait()
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
-    Ok(())
-}
-
-async fn run_chat_mode(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let mut session = build_chat_session(cli, shell_session_choice(cli)).await?;
-
-    println!("imp chat");
-    println!("  Use :help for commands. Ctrl-D exits.");
-
-    loop {
-        print_chat_status(&session);
-        print!("imp> ");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        let bytes = io::stdin().read_line(&mut input)?;
-        if bytes == 0 {
-            println!();
-            break;
-        }
-
-        let input = input.trim_end_matches(['\r', '\n']).to_string();
-        if input.trim().is_empty() {
-            continue;
-        }
-
-        if let Some(command) = parse_chat_shell_command(&input) {
-            if !execute_chat_shell_command(&mut session, cli, command).await? {
-                break;
-            }
-            continue;
-        }
-
-        run_chat_prompt(&mut session, cli, &input).await?;
-    }
-
-    Ok(())
-}
-
 async fn run_view_mode(_cli: &Cli, area: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let session_dir = imp_core::storage::global_sessions_dir();
@@ -4592,7 +3910,7 @@ async fn run_view_mode(_cli: &Cli, area: Option<&str>) -> Result<(), Box<dyn std
             println!("Sessions\n========");
             for (idx, session) in sessions.iter().enumerate().take(20) {
                 let title = session.title(72).unwrap_or_else(|| session.id.clone());
-                let project = shell_project_label(Path::new(&session.cwd));
+                let project = session.cwd.clone();
                 println!("{}. {}", idx + 1, title);
                 println!("   id: {}", session.id);
                 println!("   project: {}", project);
@@ -4857,6 +4175,13 @@ fn expand_file_args(args: &[String]) -> String {
     parts.join("\n\n")
 }
 
+fn prompt_args(args: &[String]) -> Vec<&str> {
+    args.iter()
+        .filter(|arg| !arg.starts_with('@'))
+        .map(String::as_str)
+        .collect()
+}
+
 /// Build the full prompt from user text, @file context, and stdin.
 fn build_full_prompt(prompt: &str, file_context: &str, stdin: &Option<String>) -> String {
     let mut parts = Vec::new();
@@ -4876,16 +4201,24 @@ fn build_full_prompt(prompt: &str, file_context: &str, stdin: &Option<String>) -
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    #[cfg(feature = "mana-ui")]
     use async_trait::async_trait;
+    #[cfg(feature = "mana-ui")]
     use futures_util::Stream;
     use imp_llm::auth::{OAuthCredential, StoredCredential};
+    #[cfg(feature = "mana-ui")]
     use imp_llm::message::{AssistantMessage, ContentBlock, StopReason};
+    #[cfg(feature = "mana-ui")]
     use imp_llm::provider::{Context as ProviderContext, Provider, RequestOptions, ThinkingLevel};
     use imp_llm::stream::StreamEvent;
+    #[cfg(feature = "mana-ui")]
     use imp_llm::{Model, ModelMeta};
+    #[cfg(feature = "mana-ui")]
     use mana_core::unit::Unit;
     use serde_json::json;
+    #[cfg(feature = "mana-ui")]
     use std::pin::Pin;
+    #[cfg(feature = "mana-ui")]
     use std::sync::Arc;
 
     /// Helper: build a minimal Cli struct with defaults for testing.
@@ -4894,6 +4227,7 @@ mod tests {
             print: None,
             provider: None,
             model: None,
+            role: None,
             thinking: None,
             api_key: None,
             cont: false,
@@ -4908,9 +4242,10 @@ mod tests {
             no_tools: false,
             system_prompt: None,
             mode: "interactive".to_string(),
+            output: "text".to_string(),
+            runtime_json: false,
             autonomy: None,
             verify: Vec::new(),
-            output: "text".to_string(),
             max_turns: None,
             max_tokens: None,
             verbose: false,
@@ -4924,10 +4259,32 @@ mod tests {
         AuthStore::new(std::path::PathBuf::from("auth.json"))
     }
 
+    #[test]
+    fn prompt_args_excludes_file_context_args() {
+        let args = vec![
+            "help".to_string(),
+            "me".to_string(),
+            "@README.md".to_string(),
+            "install".to_string(),
+            "utop".to_string(),
+        ];
+
+        assert_eq!(prompt_args(&args), vec!["help", "me", "install", "utop"]);
+    }
+
+    #[test]
+    fn build_full_prompt_keeps_bare_prompt_after_file_context() {
+        let prompt = build_full_prompt("help me install utop", "<file>ctx</file>", &None);
+
+        assert_eq!(prompt, "<file>ctx</file>\n\nhelp me install utop");
+    }
+
+    #[cfg(feature = "mana-ui")]
     struct StaticTestProvider {
         text: String,
     }
 
+    #[cfg(feature = "mana-ui")]
     #[async_trait]
     impl Provider for StaticTestProvider {
         fn stream(
@@ -4970,6 +4327,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "mana-ui")]
     fn static_test_model(text: &str) -> Model {
         Model {
             meta: ModelMeta {
@@ -4987,6 +4345,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "mana-ui")]
     fn write_test_mana_unit(
         root: &std::path::Path,
         id: &str,
@@ -5048,6 +4407,7 @@ mod tests {
         assert_eq!(gates[1].id, "cli-verify-2");
     }
 
+    #[cfg(feature = "mana-ui")]
     #[test]
     fn cli_parses_mana_namespace_unit_target_for_headless_worker() {
         let cli = Cli::try_parse_from(["imp", "mana", "5.1"]).expect("parse mana unit target");
@@ -5063,18 +4423,68 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_run_as_compatibility_alias_for_headless_mana_worker() {
-        let cli =
-            Cli::try_parse_from(["imp", "run", "5.1", "--defer-verify"]).expect("parse run alias");
+    fn cli_parses_workflow_commands() {
+        let cli = Cli::try_parse_from([
+            "imp",
+            "workflow",
+            "validate",
+            "audit-and-repair-workflows",
+            "--mode",
+            "draft",
+        ])
+        .expect("parse workflow validate");
         match cli.command {
-            Some(Commands::Run(args)) => {
-                assert_eq!(args.unit_id, "5.1");
-                assert!(args.defer_verify);
+            Some(Commands::Workflow {
+                command: WorkflowCommand::Validate(args),
+            }) => {
+                assert_eq!(args.id.as_deref(), Some("audit-and-repair-workflows"));
+                assert!(matches!(args.mode, WorkflowValidationModeArg::Draft));
             }
-            other => panic!("expected run compatibility alias, got {other:?}"),
+            other => panic!("expected workflow validate command, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "imp",
+            "workflow",
+            "update",
+            "audit-and-repair-workflows",
+            "status",
+            "done",
+            "--reason",
+            "verified",
+        ])
+        .expect("parse workflow update");
+        match cli.command {
+            Some(Commands::Workflow {
+                command: WorkflowCommand::Update(args),
+            }) => {
+                assert_eq!(args.id, "audit-and-repair-workflows");
+                assert_eq!(args.path, "status");
+                assert_eq!(args.value, "done");
+                assert_eq!(args.reason, "verified");
+            }
+            other => panic!("expected workflow update command, got {other:?}"),
         }
     }
 
+    #[test]
+    fn cli_workflow_rejects_invalid_validation_mode() {
+        let err = match Cli::try_parse_from(["imp", "workflow", "validate", "--mode", "loose"]) {
+            Ok(_) => panic!("invalid workflow validation mode should fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn cli_treats_old_run_mana_flags_as_prompt_args() {
+        let cli = Cli::try_parse_from(["imp", "run", "5.1", "--defer-verify"])
+            .expect("legacy native work run flags are no longer a subcommand");
+        assert!(cli.command.is_none());
+        assert_eq!(cli.args, vec!["run", "5.1", "--defer-verify"]);
+    }
+
+    #[cfg(feature = "mana-ui")]
     #[test]
     fn cli_parses_reserved_mana_namespace_verb_with_passthrough_args() {
         let cli = Cli::try_parse_from(["imp", "mana", "show", "28.1"]).expect("parse mana show");
@@ -5087,6 +4497,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "mana-ui")]
     #[test]
     fn reserved_mana_namespace_commands_error_clearly() {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -5098,6 +4509,7 @@ mod tests {
         assert!(text.contains("use `mana status` directly"));
     }
 
+    #[cfg(feature = "mana-ui")]
     #[test]
     fn worker_status_counts_as_success_for_completed_and_awaiting_verify_only() {
         assert!(worker_status_counts_as_success(
@@ -5117,6 +4529,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "mana-ui")]
     #[tokio::test]
     async fn worker_run_end_to_end_with_model_override_closes_verified_unit() {
         let temp = tempfile::tempdir().unwrap();
@@ -5142,6 +4555,7 @@ mod tests {
             model: None,
             provider: None,
             api_key: None,
+            role: None,
             system_prompt: None,
             thinking: Some(ThinkingLevel::Off),
             max_turns: Some(2),
@@ -5180,6 +4594,7 @@ mod tests {
         assert_eq!(archived.unit.status.to_string(), "closed");
     }
 
+    #[cfg(feature = "mana-ui")]
     #[tokio::test]
     async fn run_headless_no_tools_worker_single_turn_exits_cleanly() {
         let temp = tempfile::tempdir().unwrap();
@@ -5205,6 +4620,7 @@ mod tests {
             model: None,
             provider: None,
             api_key: None,
+            role: None,
             system_prompt: None,
             thinking: Some(ThinkingLevel::Off),
             max_turns: Some(1),
@@ -5257,6 +4673,7 @@ mod tests {
         assert!(!saw_max_turn_error);
     }
 
+    #[cfg(feature = "mana-ui")]
     #[test]
     fn determine_headless_output_mode_prefers_human_for_terminal_run() {
         assert_eq!(
@@ -5269,6 +4686,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mana-ui")]
     #[test]
     fn determine_headless_output_mode_keeps_json_for_piped_or_explicit_protocol_modes() {
         assert_eq!(
@@ -5283,132 +4701,6 @@ mod tests {
             determine_headless_output_mode("rpc", true),
             HeadlessOutputMode::Json
         );
-    }
-
-    #[test]
-    fn parse_chat_shell_command_supports_colon_and_slash_prefix() {
-        assert_eq!(
-            parse_chat_shell_command(":help"),
-            Some(ChatShellCommand::Help(None))
-        );
-        assert_eq!(
-            parse_chat_shell_command("/quit"),
-            Some(ChatShellCommand::Quit)
-        );
-        assert_eq!(
-            parse_chat_shell_command(":status"),
-            Some(ChatShellCommand::Status)
-        );
-    }
-
-    #[test]
-    fn parse_chat_shell_command_parses_model_and_thinking_args() {
-        assert_eq!(
-            parse_chat_shell_command(":model sonnet"),
-            Some(ChatShellCommand::Model(Some("sonnet".to_string())))
-        );
-        assert_eq!(
-            parse_chat_shell_command(":thinking high"),
-            Some(ChatShellCommand::Thinking(Some("high".to_string())))
-        );
-        assert_eq!(
-            parse_chat_shell_command(":view logs"),
-            Some(ChatShellCommand::View(Some("logs".to_string())))
-        );
-        assert_eq!(
-            parse_chat_shell_command(":settings"),
-            Some(ChatShellCommand::Settings)
-        );
-        assert_eq!(
-            parse_chat_shell_command(":personality"),
-            Some(ChatShellCommand::Personality)
-        );
-        assert_eq!(
-            parse_chat_shell_command(":setup"),
-            Some(ChatShellCommand::Setup)
-        );
-        assert_eq!(
-            parse_chat_shell_command(":resume"),
-            Some(ChatShellCommand::Resume)
-        );
-    }
-
-    #[test]
-    fn parse_chat_shell_command_returns_unknown_for_unrecognized_commands() {
-        assert_eq!(
-            parse_chat_shell_command(":mystery abc"),
-            Some(ChatShellCommand::Unknown("mystery abc".to_string()))
-        );
-    }
-
-    #[test]
-    fn provider_has_auth_detects_stored_credentials() {
-        let path = std::path::PathBuf::from("auth.json");
-        let mut auth_store = AuthStore::new(path);
-        auth_store
-            .store(
-                "anthropic",
-                StoredCredential::ApiKey {
-                    key: "sk-test".into(),
-                },
-            )
-            .unwrap();
-        let provider = ProviderRegistry::with_builtins()
-            .find("anthropic")
-            .unwrap()
-            .clone();
-        assert!(provider_has_auth(&auth_store, &provider));
-    }
-
-    #[test]
-    fn setup_provider_list_hides_kimi_code() {
-        let registry = ProviderRegistry::with_builtins();
-        let providers: Vec<&ProviderMeta> = registry
-            .list()
-            .iter()
-            .filter(|provider| setup_visible_provider(provider.id))
-            .collect();
-
-        assert!(providers.iter().any(|provider| provider.id == "moonshot"));
-        assert!(!providers.iter().any(|provider| provider.id == "kimi-code"));
-    }
-
-    #[test]
-    fn setup_openai_models_include_gpt_5_5() {
-        let registry = ModelRegistry::with_builtins();
-        let models = setup_models_for_provider(&registry, "openai");
-
-        let gpt_5_5 = models
-            .iter()
-            .find(|model| model.id == "gpt-5.5")
-            .expect("OpenAI setup model list should include GPT-5.5");
-        assert_eq!(gpt_5_5.provider, "openai");
-    }
-
-    #[test]
-    fn kimi_provider_alias_maps_to_moonshot() {
-        assert_eq!(provider_alias("kimi"), "moonshot");
-        assert_eq!(provider_alias("moonshot"), "moonshot");
-    }
-
-    #[test]
-    fn run_secrets_show_accepts_kimi_alias() {
-        assert_eq!(provider_alias("kimi"), "moonshot");
-    }
-
-    #[test]
-    fn tunable_cli_label_formats_builder_states() {
-        assert_eq!(tunable_cli_label(SoulTunableState::Preset(2)), "balanced");
-        assert_eq!(tunable_cli_label(SoulTunableState::Edited), "edited");
-        assert_eq!(tunable_cli_label(SoulTunableState::Missing), "missing");
-    }
-
-    #[test]
-    fn cycle_personality_tunable_updates_markdown() {
-        let content = default_soul_markdown();
-        let updated = cycle_personality_tunable(&content, "Warmth");
-        assert_ne!(updated, content);
-        assert!(updated.contains("- Warmth:"));
     }
 
     #[test]
@@ -5470,32 +4762,6 @@ mod tests {
             Some(ThinkingLevel::Medium)
         );
         assert_eq!(parse_thinking_level_strict("turbo"), None);
-    }
-
-    #[test]
-    fn shell_session_choice_prefers_continue_and_open_over_new() {
-        let mut cli = default_cli();
-        assert!(matches!(shell_session_choice(&cli), SessionChoice::New));
-
-        cli.no_session = true;
-        assert!(matches!(
-            shell_session_choice(&cli),
-            SessionChoice::InMemory
-        ));
-
-        cli.no_session = false;
-        cli.cont = true;
-        assert!(matches!(
-            shell_session_choice(&cli),
-            SessionChoice::Continue
-        ));
-
-        cli.cont = false;
-        cli.session = Some(PathBuf::from("session.jsonl"));
-        assert!(matches!(
-            shell_session_choice(&cli),
-            SessionChoice::Open(path) if path.as_os_str() == "session.jsonl"
-        ));
     }
 
     #[test]
@@ -5911,6 +5177,7 @@ mod tests {
         assert_eq!(StartupStage::RunLoopStarted.as_str(), "run_loop_started");
     }
 
+    #[cfg(feature = "mana-ui")]
     #[test]
     fn imp_cli_uses_canonical_mana_worker_prompt_and_context_helpers() {
         let assignment = imp_core::mana_worker::WorkerAssignment {
@@ -5962,8 +5229,7 @@ mod tests {
 
 fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
     use imp_core::import::{
-        detect_sources, import_agents_md, import_skills, import_typescript_extensions, AgentSource,
-        SkipReason,
+        detect_sources, import_agents_md, import_skills, AgentSource, SkipReason,
     };
 
     let home = match std::env::var("HOME") {
@@ -6005,7 +5271,6 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
     println!("Found agent configurations:\n");
     let mut total_skills = 0;
     let mut total_agents_md = 0;
-    let mut total_typescript_extensions = 0;
 
     for source in &sources {
         println!(
@@ -6034,22 +5299,6 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
             total_agents_md += source.agents_md.len();
         }
 
-        if !source.typescript_extensions.is_empty() {
-            println!(
-                "    {} TypeScript extensions:",
-                source.typescript_extensions.len()
-            );
-            for extension in &source.typescript_extensions {
-                let package = extension
-                    .package_name
-                    .as_deref()
-                    .map(|name| format!(" ({name})"))
-                    .unwrap_or_default();
-                println!("      - {}{}", extension.name, package);
-            }
-            total_typescript_extensions += source.typescript_extensions.len();
-        }
-
         println!();
     }
 
@@ -6059,7 +5308,7 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
         return;
     }
 
-    if total_skills == 0 && total_agents_md == 0 && total_typescript_extensions == 0 {
+    if total_skills == 0 && total_agents_md == 0 {
         println!("Nothing to import.");
         return;
     }
@@ -6067,8 +5316,8 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
     // Confirm unless --yes
     if !auto_yes {
         print!(
-            "Import {} skills, {} instruction files, and {} TypeScript extensions into imp? [y/N] ",
-            total_skills, total_agents_md, total_typescript_extensions
+            "Import {} skills and {} instruction files into imp? [y/N] ",
+            total_skills, total_agents_md
         );
         io::stdout().flush().unwrap();
         let mut input = String::new();
@@ -6081,11 +5330,6 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
 
     let imp_config = Config::user_config_dir();
     let imp_skills = imp_config.join("skills");
-    let imp_extensions = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".imp")
-        .join("extensions");
-
     // Import skills
     for source in &sources {
         if source.skills.is_empty() {
@@ -6122,59 +5366,6 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
                 );
             }
         }
-    }
-
-    // Import TypeScript extensions into the project-local .imp extension root.
-    for source in &sources {
-        if source.typescript_extensions.is_empty() {
-            continue;
-        }
-
-        match import_typescript_extensions(
-            &source.typescript_extensions,
-            &imp_extensions,
-            source.agent.import_namespace(),
-        ) {
-            Ok(result) => {
-                if !result.copied.is_empty() {
-                    println!(
-                        "  ✓ Imported {} TypeScript extensions from {} → {}:",
-                        result.copied.len(),
-                        source.agent.label(),
-                        imp_extensions
-                            .join(source.agent.import_namespace())
-                            .display()
-                    );
-                    for name in &result.copied {
-                        println!("      {name}");
-                    }
-                }
-                for (name, reason) in &result.skipped {
-                    match reason {
-                        SkipReason::AlreadyExists => {
-                            println!("    ⊘ {name} — TypeScript extension already exists, skipped");
-                        }
-                        SkipReason::CopyFailed(err) => {
-                            eprintln!("    ✗ {name} — TypeScript extension copy failed: {err}");
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "  ✗ Failed to import TypeScript extensions from {}: {e}",
-                    source.agent.label()
-                );
-            }
-        }
-    }
-
-    if total_typescript_extensions > 0 {
-        println!(
-            "\nTypeScript extensions are staged in {}. Runtime support is limited to the current compatibility subset.",
-            imp_extensions.display()
-        );
-        print_typescript_extension_statuses(&imp_extensions);
     }
 
     // Import AGENTS.md (only the first one found, if imp doesn't have one yet)
@@ -6215,40 +5406,4 @@ fn run_import(dry_run: bool, from: Option<&str>, auto_yes: bool) {
     }
 
     println!("\nDone. Skills are in {}", imp_skills.display());
-}
-
-fn print_typescript_extension_statuses(imp_extensions: &Path) {
-    let Some(project_dir) = imp_extensions.parent().and_then(Path::parent) else {
-        return;
-    };
-    let statuses = inspect_typescript_extension_statuses(project_dir);
-    if statuses.is_empty() {
-        return;
-    }
-
-    println!("\nTypeScript extension runtime status:");
-    for status in statuses {
-        println!("  - {} — {}", status.extension_name, status.state.label());
-        if !status.tools.is_empty() {
-            let tool_names: Vec<_> = status.tools.iter().map(|tool| tool.name.as_str()).collect();
-            println!("      tools: {}", tool_names.join(", "));
-        }
-        if status.state == TypeScriptExtensionLoadState::LoadedWithStubs {
-            let notes: Vec<_> = status
-                .tools
-                .iter()
-                .flat_map(|tool| tool.compatibility.stubbed_apis.iter())
-                .map(String::as_str)
-                .collect();
-            if !notes.is_empty() {
-                println!("      stubbed APIs: {}", notes.join(", "));
-            }
-        }
-        if status.state == TypeScriptExtensionLoadState::NeedsDependencies {
-            println!("      dependencies are missing; ask before installing with Bun");
-        }
-        if let Some(message) = status.message {
-            println!("      {message}");
-        }
-    }
 }

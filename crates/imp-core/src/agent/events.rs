@@ -1,11 +1,16 @@
 use std::path::PathBuf;
 
-use imp_llm::{AssistantMessage, Cost, Message, StreamEvent, Usage};
+use imp_llm::{AssistantMessage, ContentBlock, Cost, Message, StreamEvent, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::mana_review::TurnManaReview;
-use crate::reference_monitor::PolicyTraceRecord;
+use crate::reference_monitor::{PolicyTraceRecord, ToolPolicyDecision};
+use crate::runtime::{
+    RuntimeArtifactRef, RuntimeEvent, RuntimeEventKind, RuntimePolicyDecision,
+    RuntimePolicyDecisionKind, RuntimeToolCall, RuntimeToolStatus, RuntimeUsageSummary,
+    RuntimeWorktreeState,
+};
 use crate::trace::TraceEvent;
 use crate::trust::Provenance;
 use crate::workflow::VerificationGate;
@@ -189,12 +194,24 @@ pub enum AgentEvent {
     RecoveryCheckpoint {
         checkpoint: RecoveryCheckpoint,
     },
+    WorkflowControllerSnapshot {
+        snapshot: crate::workflow::WorkflowControllerSnapshot,
+    },
     VerificationStarted {
         gate: VerificationGate,
     },
     VerificationCompleted {
         gate: VerificationGate,
         closeout_effect: crate::workflow::VerificationCloseoutEffect,
+    },
+    WorktreeCreated {
+        metadata: crate::workflow::WorktreeRunMetadata,
+    },
+    WorktreeDiffCaptured {
+        metadata: crate::workflow::WorktreeRunMetadata,
+    },
+    WorktreeCloseout {
+        result: crate::workflow::WorktreeCloseoutResult,
     },
     EvidenceWritten {
         path: PathBuf,
@@ -208,6 +225,169 @@ pub enum AgentEvent {
 }
 
 impl AgentEvent {
+    pub fn to_runtime_event(&self, run_id: impl Into<String>, sequence: u64) -> RuntimeEvent {
+        RuntimeEvent {
+            run_id: run_id.into(),
+            sequence,
+            timestamp_ms: self.source_timestamp_ms(),
+            kind: self.to_runtime_event_kind(),
+            ..RuntimeEvent::default()
+        }
+    }
+
+    fn source_timestamp_ms(&self) -> Option<u64> {
+        match self {
+            AgentEvent::AgentStart { timestamp, .. } => Some(*timestamp),
+            AgentEvent::RecoveryCheckpoint { checkpoint } => Some(checkpoint.timestamp),
+            _ => None,
+        }
+    }
+
+    fn to_runtime_event_kind(&self) -> RuntimeEventKind {
+        match self {
+            AgentEvent::AgentStart { model, .. } => RuntimeEventKind::AgentStarted {
+                model: model.clone(),
+            },
+            AgentEvent::AgentEnd {
+                usage,
+                cost,
+                status,
+            } => RuntimeEventKind::AgentEnded {
+                status: status.clone().into(),
+                usage: Some(runtime_usage_summary(usage, cost)),
+            },
+            AgentEvent::TurnStart { index } => RuntimeEventKind::TurnStarted { index: *index },
+            AgentEvent::TurnAssessment { index, assessment } => RuntimeEventKind::TurnAssessed {
+                index: *index,
+                summary: Some(format!("{assessment:?}")),
+            },
+            AgentEvent::TurnEnd { index, .. } => RuntimeEventKind::TurnEnded { index: *index },
+            AgentEvent::MessageStart { message } => RuntimeEventKind::MessageStarted {
+                role: message_role(message).into(),
+                summary: message_summary(message),
+            },
+            AgentEvent::MessageDelta { delta } => match delta {
+                StreamEvent::TextDelta { text } | StreamEvent::ThinkingDelta { text } => {
+                    RuntimeEventKind::MessageDelta {
+                        delta: text.clone(),
+                    }
+                }
+                StreamEvent::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } => RuntimeEventKind::ToolStarted {
+                    tool_call: RuntimeToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        status: RuntimeToolStatus::Running,
+                        args_preview: Some(arguments.to_string()),
+                        ..RuntimeToolCall::default()
+                    },
+                },
+                StreamEvent::Error { error } => RuntimeEventKind::Error {
+                    message: error.clone(),
+                },
+                StreamEvent::MessageStart { model } => RuntimeEventKind::AgentStarted {
+                    model: model.clone(),
+                },
+                StreamEvent::MessageEnd { message } => RuntimeEventKind::MessageEnded {
+                    role: "assistant".into(),
+                    summary: assistant_message_text(message),
+                },
+            },
+            AgentEvent::MessageEnd { message } => RuntimeEventKind::MessageEnded {
+                role: message_role(message).into(),
+                summary: message_summary(message),
+            },
+            AgentEvent::ToolExecutionStart {
+                tool_call_id,
+                tool_name,
+                args,
+            } => RuntimeEventKind::ToolStarted {
+                tool_call: RuntimeToolCall {
+                    id: tool_call_id.clone(),
+                    name: tool_name.clone(),
+                    status: RuntimeToolStatus::Running,
+                    args_preview: Some(args.to_string()),
+                    ..RuntimeToolCall::default()
+                },
+            },
+            AgentEvent::ToolOutputDelta { tool_call_id, text } => RuntimeEventKind::ToolOutput {
+                tool_call_id: tool_call_id.clone(),
+                output_delta: text.clone(),
+            },
+            AgentEvent::ToolExecutionEnd {
+                tool_call_id,
+                result,
+                ..
+            } => RuntimeEventKind::ToolCompleted {
+                tool_call: RuntimeToolCall {
+                    id: tool_call_id.clone(),
+                    name: result.tool_name.clone(),
+                    status: if result.is_error {
+                        RuntimeToolStatus::Failed
+                    } else {
+                        RuntimeToolStatus::Succeeded
+                    },
+                    output_preview: tool_result_summary(result),
+                    ..RuntimeToolCall::default()
+                },
+            },
+            AgentEvent::Warning { message } => RuntimeEventKind::Warning {
+                message: message.clone(),
+            },
+            AgentEvent::Timing { timing } => RuntimeEventKind::Timing {
+                stage: timing.stage.as_str().into(),
+                duration_ms: timing.duration_ms,
+                success: timing.success,
+            },
+            AgentEvent::RecoveryCheckpoint { checkpoint } => RuntimeEventKind::RecoveryCheckpoint {
+                kind: checkpoint.kind.as_str().into(),
+                turn: checkpoint.turn,
+                tool_call_id: checkpoint.tool_call_id.clone(),
+            },
+            AgentEvent::WorkflowControllerSnapshot { snapshot } => {
+                RuntimeEventKind::WorkflowControllerUpdated {
+                    snapshot: snapshot.clone(),
+                }
+            }
+            AgentEvent::VerificationStarted { gate } => {
+                RuntimeEventKind::VerificationUpdated { gate: gate.clone() }
+            }
+            AgentEvent::VerificationCompleted { gate, .. } => {
+                RuntimeEventKind::VerificationUpdated { gate: gate.clone() }
+            }
+            AgentEvent::WorktreeCreated { metadata }
+            | AgentEvent::WorktreeDiffCaptured { metadata } => RuntimeEventKind::WorktreeUpdated {
+                worktree: RuntimeWorktreeState {
+                    metadata: metadata.clone(),
+                    metadata_path: None,
+                    closeout: None,
+                },
+            },
+            AgentEvent::WorktreeCloseout { result } => RuntimeEventKind::WorktreeUpdated {
+                worktree: RuntimeWorktreeState {
+                    closeout: Some(result.clone()),
+                    ..RuntimeWorktreeState::default()
+                },
+            },
+            AgentEvent::EvidenceWritten { path } => RuntimeEventKind::EvidenceUpdated {
+                artifact: RuntimeArtifactRef {
+                    kind: "evidence-packet".into(),
+                    path: path.clone(),
+                    summary: Some("Run evidence packet".into()),
+                },
+            },
+            AgentEvent::PolicyChecked { record } => RuntimeEventKind::PolicyDecision {
+                decision: runtime_policy_decision(record),
+            },
+            AgentEvent::Error { error } => RuntimeEventKind::Error {
+                message: error.clone(),
+            },
+        }
+    }
+
     pub fn to_trace_event(&self, run_id: impl Into<String>) -> TraceEvent {
         let run_id = run_id.into();
         match self {
@@ -336,6 +516,11 @@ impl AgentEvent {
                 }
                 event
             }
+            AgentEvent::WorkflowControllerSnapshot { snapshot } => TraceEvent::new(
+                run_id,
+                "workflow.controller",
+                json!({ "snapshot": snapshot }),
+            ),
             AgentEvent::VerificationStarted { gate } => TraceEvent::new(
                 run_id,
                 "verification.started",
@@ -349,6 +534,28 @@ impl AgentEvent {
                 "verification.completed",
                 verification_gate_payload(gate, Some(*closeout_effect)),
             ),
+            AgentEvent::WorktreeCreated { metadata } => TraceEvent::new(
+                run_id,
+                "worktree.created",
+                worktree_metadata_payload(metadata),
+            ),
+            AgentEvent::WorktreeDiffCaptured { metadata } => TraceEvent::new(
+                run_id,
+                "worktree.diff_captured",
+                worktree_metadata_payload(metadata),
+            ),
+            AgentEvent::WorktreeCloseout { result } => TraceEvent::new(
+                run_id,
+                "worktree.closeout",
+                json!({
+                    "action": result.action,
+                    "applied": result.applied,
+                    "removed": result.removed,
+                    "branch_deleted": result.branch_deleted,
+                    "clean": result.clean,
+                    "message": result.message,
+                }),
+            ),
             AgentEvent::EvidenceWritten { path } => TraceEvent::new(
                 run_id,
                 "evidence.written",
@@ -360,6 +567,100 @@ impl AgentEvent {
             }
         }
     }
+}
+
+fn runtime_usage_summary(usage: &Usage, cost: &Cost) -> RuntimeUsageSummary {
+    RuntimeUsageSummary {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_tokens: usage.cache_read_tokens,
+        cache_write_tokens: usage.cache_write_tokens,
+        total_tokens: usage.total_tokens(),
+        total_cost: Some(format!("{:.6}", cost.total)),
+    }
+}
+
+fn message_role(message: &Message) -> &'static str {
+    match message {
+        Message::User(_) => "user",
+        Message::Assistant(_) => "assistant",
+        Message::ToolResult(_) => "tool_result",
+    }
+}
+
+fn message_summary(message: &Message) -> Option<String> {
+    match message {
+        Message::User(message) => content_text(&message.content),
+        Message::Assistant(message) => assistant_message_text(message),
+        Message::ToolResult(result) => tool_result_summary(result),
+    }
+}
+
+fn assistant_message_text(message: &AssistantMessage) -> Option<String> {
+    content_text(&message.content)
+}
+
+fn content_text(content: &[ContentBlock]) -> Option<String> {
+    let text = content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } | ContentBlock::Thinking { text } => text.as_str(),
+            ContentBlock::ToolCall { name, .. } => name.as_str(),
+            ContentBlock::Image { .. } => "[image]",
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn tool_result_summary(result: &imp_llm::ToolResultMessage) -> Option<String> {
+    content_text(&result.content)
+}
+
+fn runtime_policy_decision(record: &PolicyTraceRecord) -> RuntimePolicyDecision {
+    let (decision, reason) = match &record.decision {
+        ToolPolicyDecision::Allow { reasons } => (
+            RuntimePolicyDecisionKind::Allow,
+            reasons.first().map(|reason| reason.message.clone()),
+        ),
+        ToolPolicyDecision::Deny { reason } => (
+            RuntimePolicyDecisionKind::Deny,
+            Some(reason.message.clone()),
+        ),
+        ToolPolicyDecision::AskUser { reason }
+        | ToolPolicyDecision::DryRunOnly { reason }
+        | ToolPolicyDecision::SandboxOnly { reason }
+        | ToolPolicyDecision::RequireVerification { reason } => (
+            RuntimePolicyDecisionKind::Warn,
+            Some(reason.message.clone()),
+        ),
+    };
+    RuntimePolicyDecision {
+        id: record.tool_call_id.clone(),
+        subject: record.tool_name.clone(),
+        decision,
+        reason,
+    }
+}
+
+fn worktree_metadata_payload(metadata: &crate::workflow::WorktreeRunMetadata) -> serde_json::Value {
+    json!({
+        "repo_root": metadata.repo_root.display().to_string(),
+        "main_worktree": metadata.main_worktree.display().to_string(),
+        "worktree_path": metadata.worktree_path.display().to_string(),
+        "branch": metadata.branch,
+        "start_point": metadata.start_point,
+        "run_id": metadata.run_id,
+        "workflow_id": metadata.workflow_id,
+        "status_path": metadata.status_path.display().to_string(),
+        "stat_path": metadata.stat_path.display().to_string(),
+        "patch_path": metadata.patch_path.display().to_string(),
+        "clean": metadata.clean,
+    })
 }
 
 fn verification_gate_payload(
@@ -427,6 +728,100 @@ mod trace_tests {
         assert_eq!(timing.kind, "timing");
         assert_eq!(timing.turn, Some(2));
         assert_eq!(timing.payload["stage"], "llm_request_start");
+        let worktree = AgentEvent::WorktreeDiffCaptured {
+            metadata: crate::workflow::WorktreeRunMetadata {
+                repo_root: "/repo".into(),
+                main_worktree: "/repo".into(),
+                worktree_path: "/tmp/worktree".into(),
+                branch: "imp/run/worktree-auto".into(),
+                run_id: "run-1".into(),
+                patch_path: "/repo/.imp/runs/run-1/worktree/diff.patch".into(),
+                clean: false,
+                ..crate::workflow::WorktreeRunMetadata::default()
+            },
+        }
+        .to_trace_event("run-1");
+        assert_eq!(worktree.kind, "worktree.diff_captured");
+        assert_eq!(worktree.payload["worktree_path"], "/tmp/worktree");
+        assert_eq!(worktree.payload["branch"], "imp/run/worktree-auto");
+        assert_eq!(
+            worktree.payload["patch_path"],
+            "/repo/.imp/runs/run-1/worktree/diff.patch"
+        );
+        assert_eq!(worktree.payload["clean"], false);
+
+        let closeout = AgentEvent::WorktreeCloseout {
+            result: crate::workflow::WorktreeCloseoutResult {
+                action: crate::workflow::WorktreeCloseoutAction::Keep,
+                message: "kept".into(),
+                ..crate::workflow::WorktreeCloseoutResult::default()
+            },
+        }
+        .to_trace_event("run-1");
+        assert_eq!(closeout.kind, "worktree.closeout");
+        assert_eq!(closeout.payload["action"], "keep");
+    }
+
+    #[test]
+    fn agent_events_convert_to_runtime_events() {
+        let runtime = AgentEvent::ToolExecutionStart {
+            tool_call_id: "tool-1".into(),
+            tool_name: "bash".into(),
+            args: serde_json::json!({ "command": "cargo test" }),
+        }
+        .to_runtime_event("run-1", 42);
+        assert_eq!(runtime.run_id, "run-1");
+        assert_eq!(runtime.sequence, 42);
+        match runtime.kind {
+            RuntimeEventKind::ToolStarted { tool_call } => {
+                assert_eq!(tool_call.id, "tool-1");
+                assert_eq!(tool_call.name, "bash");
+                assert_eq!(tool_call.status, RuntimeToolStatus::Running);
+                assert!(tool_call
+                    .args_preview
+                    .as_deref()
+                    .is_some_and(|args| args.contains("cargo test")));
+            }
+            other => panic!("unexpected runtime event kind: {other:?}"),
+        }
+
+        let policy = AgentEvent::PolicyChecked {
+            record: PolicyTraceRecord {
+                run_id: None,
+                workflow_id: None,
+                turn: None,
+                tool_call_id: Some("tool-1".into()),
+                tool_name: "bash".into(),
+                action_kind: crate::reference_monitor::ToolActionKind::Execute,
+                decision: ToolPolicyDecision::Deny {
+                    reason: crate::reference_monitor::PolicyReason::new(
+                        crate::reference_monitor::PolicySource::Guardrail,
+                        "deny_test",
+                        "blocked for test",
+                    ),
+                },
+                args_hash: None,
+                resource_scope: crate::reference_monitor::ResourceScope::Command {
+                    program: "bash".into(),
+                },
+                autonomy_mode: crate::workflow::AutonomyMode::Safe,
+                workflow_type: crate::workflow::WorkflowType::AdHoc,
+                risk_level: crate::workflow::RiskLevel::Low,
+                trust_scope: crate::reference_monitor::TrustScopeContext::default(),
+                trust_labels: Vec::new(),
+                details: serde_json::Value::Null,
+            },
+        }
+        .to_runtime_event("run-1", 43);
+        match policy.kind {
+            RuntimeEventKind::PolicyDecision { decision } => {
+                assert_eq!(decision.id.as_deref(), Some("tool-1"));
+                assert_eq!(decision.subject, "bash");
+                assert_eq!(decision.decision, RuntimePolicyDecisionKind::Deny);
+                assert_eq!(decision.reason.as_deref(), Some("blocked for test"));
+            }
+            other => panic!("unexpected runtime event kind: {other:?}"),
+        }
     }
 
     #[test]

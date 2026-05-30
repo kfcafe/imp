@@ -5,8 +5,11 @@ use imp_llm::truncate_chars_with_suffix;
 use serde_json::json;
 
 use super::fuzzy;
-use super::{generate_diff, suggest_similar_files, Tool, ToolContext, ToolOutput};
+use super::{
+    generate_diff, line_change_counts, suggest_similar_files, Tool, ToolContext, ToolOutput,
+};
 use crate::error::Result;
+use crate::tools::code_intel;
 
 pub struct EditTool;
 
@@ -48,6 +51,14 @@ impl Tool for EditTool {
                     "type": "string",
                     "description": "Optional end anchor"
                 },
+                "target": {
+                    "type": "string",
+                    "description": "Optional target symbol guard. old_text must occur inside this symbol/block for parseable source files."
+                },
+                "validate_syntax": {
+                    "type": "boolean",
+                    "description": "When true, parse the edited source and report syntax errors before apply/during dry run."
+                },
                 "edits": {
                     "type": "array",
                     "description": "Transactional edits[]",
@@ -87,6 +98,11 @@ impl Tool for EditTool {
         let new_text = get_str_param(&params, "new_text", "newText").unwrap_or("");
         let dry_run = get_bool_param(&params, "dry_run", "dryRun").unwrap_or(false);
         let replace_all = get_bool_param(&params, "replace_all", "replaceAll").unwrap_or(false);
+        let target = params["target"]
+            .as_str()
+            .filter(|target| !target.trim().is_empty());
+        let validate_syntax =
+            get_bool_param(&params, "validate_syntax", "validateSyntax").unwrap_or(false);
         let expected_occurrences = params
             .get("expected_occurrences")
             .or_else(|| params.get("expectedOccurrences"))
@@ -146,6 +162,19 @@ impl Tool for EditTool {
         let old_normalized = old_text.replace("\r\n", "\n");
         let new_normalized = new_text.replace("\r\n", "\n");
 
+        if let Some(target) = target {
+            let Some(block) = code_intel::extract_symbol(&content, &path, target.trim()) else {
+                return Ok(ToolOutput::error(format!(
+                    "Target symbol not found in {raw_path}: {target}. No changes made."
+                )));
+            };
+            if !block.code.contains(&old_normalized) {
+                return Ok(ToolOutput::error(format!(
+                    "old_text was not found inside target symbol {target} in {raw_path}. No changes made."
+                )));
+            }
+        }
+
         let exact_occurrences = count_occurrences(&content, &old_normalized);
         if let Some(expected) = expected_occurrences {
             if exact_occurrences != expected {
@@ -177,7 +206,20 @@ impl Tool for EditTool {
             }
         };
 
+        let syntax_validation =
+            validate_syntax.then(|| code_intel::validate_syntax(&new_content, &path));
+        if let Some(validation) = &syntax_validation {
+            if validation.supported && !validation.valid {
+                return Ok(ToolOutput::error(format!(
+                    "Edit would introduce syntax errors in {raw_path}: {:?}. No changes made.",
+                    validation.errors
+                )));
+            }
+        }
+        let symbol_diff = code_intel::diff_top_level_symbols(&content, &new_content, &path);
+
         let diff = generate_diff(raw_path, &content, &new_content);
+        let (lines_added, lines_removed) = line_change_counts(&content, &new_content);
 
         // Restore original line endings if needed
         let final_content = if has_crlf {
@@ -219,6 +261,29 @@ impl Tool for EditTool {
                 "replace_all": replace_all,
                 "exact_occurrences": exact_occurrences,
                 "replacements": replacements,
+                "target": target,
+                "syntax_validation": syntax_validation.as_ref().map(|validation| json!({
+                    "supported": validation.supported,
+                    "valid": validation.valid,
+                    "language": validation.language,
+                    "errors": validation.errors.iter().map(|error| json!({
+                        "start_line": error.start_line,
+                        "end_line": error.end_line,
+                        "kind": error.kind,
+                    })).collect::<Vec<_>>(),
+                })),
+                "lines_added": lines_added,
+                "lines_removed": lines_removed,
+                "files": [{
+                    "path": path.display().to_string(),
+                    "status": "modified",
+                    "lines_added": lines_added,
+                    "lines_removed": lines_removed,
+                }],
+                "changed_symbols": {
+                    "added": symbol_diff.added.iter().cloned().collect::<Vec<_>>(),
+                    "removed": symbol_diff.removed.iter().cloned().collect::<Vec<_>>(),
+                },
             }),
             is_error: false,
         })
@@ -334,6 +399,7 @@ async fn execute_anchor_edit(
     }
 
     let diff = generate_diff(raw_path, &content, &new_content);
+    let (lines_added, lines_removed) = line_change_counts(&content, &new_content);
     let final_content = if has_crlf {
         new_content.replace('\n', "\r\n")
     } else {
@@ -371,6 +437,14 @@ async fn execute_anchor_edit(
             "anchored": true,
             "start_line": start_anchor.line,
             "end_line": end_anchor.line,
+            "lines_added": lines_added,
+            "lines_removed": lines_removed,
+            "files": [{
+                "path": path.display().to_string(),
+                "status": "modified",
+                "lines_added": lines_added,
+                "lines_removed": lines_removed,
+            }],
             "refreshed_anchors": refreshed.iter().map(|anchor| json!({
                 "line": anchor.line,
                 "anchor": anchor.id,
@@ -451,6 +525,99 @@ mod tests {
             run_policy: Default::default(),
             supporting_provenance: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn edit_target_guard_requires_old_text_inside_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(
+            &file,
+            "fn target() {\n    let a = 1;\n}\n\nfn other() {\n    let b = 2;\n}\n",
+        )
+        .unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(
+                "c-target",
+                json!({
+                    "path": "lib.rs",
+                    "target": "target",
+                    "oldText": "let b = 2;",
+                    "newText": "let b = 3;"
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result
+            .text_content()
+            .unwrap()
+            .contains("inside target symbol"));
+        assert!(std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("let b = 2;"));
+    }
+
+    #[tokio::test]
+    async fn edit_validate_syntax_blocks_invalid_rust() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, "fn target() {\n    let a = 1;\n}\n").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(
+                "c-syntax",
+                json!({
+                    "path": "lib.rs",
+                    "target": "target",
+                    "oldText": "let a = 1;",
+                    "newText": "let a = ;",
+                    "validateSyntax": true
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.text_content().unwrap().contains("syntax errors"));
+        assert!(std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("let a = 1;"));
+    }
+
+    #[tokio::test]
+    async fn edit_target_guard_and_syntax_validation_succeed_for_typescript() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("main.ts");
+        std::fs::write(&file, "export function target() {\n  return 1;\n}\n").unwrap();
+
+        let tool = EditTool;
+        let result = tool
+            .execute(
+                "c-ts",
+                json!({
+                    "path": "main.ts",
+                    "target": "target",
+                    "oldText": "return 1;",
+                    "newText": "return 2;",
+                    "validateSyntax": true
+                }),
+                test_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("return 2;"));
+        assert_eq!(result.details["syntax_validation"]["valid"], true);
     }
 
     #[tokio::test]

@@ -215,10 +215,7 @@ fn agent_status(entry: &PersistedAgentEntry) -> String {
     }
 }
 
-fn agents_file() -> std::path::PathBuf {
-    if let Ok(path) = mana::commands::agents::agents_file_path() {
-        return path;
-    }
+fn agents_dir() -> std::path::PathBuf {
     let dir = std::env::var("HOME")
         .map(|home| {
             std::path::PathBuf::from(home)
@@ -228,27 +225,15 @@ fn agents_file() -> std::path::PathBuf {
         })
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp").join("mana"));
     std::fs::create_dir_all(&dir).ok();
-    dir.join("agents.json")
+    dir
+}
+
+fn agents_file() -> std::path::PathBuf {
+    agents_dir().join("agents.json")
 }
 
 fn run_state_file() -> std::path::PathBuf {
-    if let Ok(path) = mana::commands::agents::agents_file_path() {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).ok();
-            return dir.join("run_state.json");
-        }
-    }
-
-    let dir = std::env::var("HOME")
-        .map(|home| {
-            std::path::PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("units")
-        })
-        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp").join("mana"));
-    std::fs::create_dir_all(&dir).ok();
-    dir.join("run_state.json")
+    agents_dir().join("run_state.json")
 }
 
 fn unix_time_ms() -> u128 {

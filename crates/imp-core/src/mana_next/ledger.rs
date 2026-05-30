@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::workflow::{AutonomyMode, RiskLevel, WorkflowType};
+use crate::workflow::{ChildWorkflowRun, ChildWorkflowStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WorkflowLedgerUpdate {
@@ -76,6 +77,161 @@ pub fn apply_workflow_ledger_update(record: &mut WorkflowRecord, update: Workflo
     extend_unique(&mut record.blockers, update.blockers);
     extend_unique(&mut record.verification_refs, update.verification_refs);
     extend_unique(&mut record.evidence_refs, update.evidence_refs);
+}
+
+pub fn child_run_ref_from_child_workflow(run: &ChildWorkflowRun) -> ChildRunRef {
+    ChildRunRef {
+        child_id: run.spec.id.to_string(),
+        role: Some(run.spec.role.clone()),
+        status: ledger_status_from_child_status(run.status),
+        workflow_id: run.spec.parent.workflow_id.clone(),
+        evidence_refs: run
+            .evidence_refs
+            .iter()
+            .map(|evidence| evidence.path.display().to_string())
+            .collect(),
+    }
+}
+
+pub fn apply_child_workflow_ledger_update(parent: &mut WorkflowRecord, run: &ChildWorkflowRun) {
+    let child_ref = child_run_ref_from_child_workflow(run);
+    upsert_child_run_ref(&mut parent.child_run_refs, child_ref);
+    extend_unique(
+        &mut parent.evidence_refs,
+        run.evidence_refs
+            .iter()
+            .map(|evidence| evidence.path.display().to_string())
+            .collect(),
+    );
+    if run.status.blocks_required_parent() && run.spec.required {
+        extend_unique(
+            &mut parent.blockers,
+            vec![format!(
+                "required child workflow {} is {:?}",
+                run.spec.id, run.status
+            )],
+        );
+        parent.status = ledger_status_from_child_status(run.status);
+    } else if matches!(run.status, ChildWorkflowStatus::DoneWithConcerns) {
+        parent.status = LedgerStatus::DoneWithConcerns;
+    }
+}
+
+pub fn task_record_from_child_workflow(run: &ChildWorkflowRun) -> TaskRecord {
+    TaskRecord {
+        id: run.spec.id.to_string(),
+        workflow_id: run.spec.parent.workflow_id.clone(),
+        title: run.spec.title.clone(),
+        status: ledger_status_from_child_status(run.status),
+        role: Some(run.spec.role.clone()),
+        requires: run.spec.contract.closeout_criteria.criteria.clone(),
+        produces: run
+            .evidence_refs
+            .iter()
+            .map(|evidence| evidence.kind.clone())
+            .collect(),
+        evidence_refs: run
+            .evidence_refs
+            .iter()
+            .map(|evidence| evidence.path.display().to_string())
+            .collect(),
+        blockers: if run.status.blocks_required_parent() {
+            vec![run
+                .summary
+                .as_ref()
+                .map(|summary| summary.summary.clone())
+                .unwrap_or_else(|| format!("child workflow is {:?}", run.status))]
+        } else {
+            Vec::new()
+        },
+        closeout_status: closeout_status_from_child_status(run.status),
+        ..TaskRecord::default()
+    }
+}
+
+pub fn evidence_records_from_child_workflow(run: &ChildWorkflowRun) -> Vec<EvidenceRecord> {
+    run.evidence_refs
+        .iter()
+        .enumerate()
+        .map(|(index, evidence)| EvidenceRecord {
+            id: format!("{}:evidence:{index}", run.spec.id),
+            workflow_id: run.spec.parent.workflow_id.clone(),
+            task_id: Some(run.spec.id.to_string()),
+            evidence_type: evidence_type_from_child_evidence_kind(&evidence.kind),
+            summary: evidence
+                .summary
+                .clone()
+                .unwrap_or_else(|| evidence.kind.clone()),
+            artifact: Some(ArtifactRef::new(
+                artifact_kind_from_child_evidence_kind(&evidence.kind),
+                evidence.path.clone(),
+            )),
+            produced_by: Some(run.spec.role.clone()),
+            ..EvidenceRecord::default()
+        })
+        .collect()
+}
+
+fn upsert_child_run_ref(target: &mut Vec<ChildRunRef>, child_ref: ChildRunRef) {
+    if let Some(existing) = target
+        .iter_mut()
+        .find(|existing| existing.child_id == child_ref.child_id)
+    {
+        *existing = child_ref;
+    } else {
+        target.push(child_ref);
+    }
+}
+
+fn ledger_status_from_child_status(status: ChildWorkflowStatus) -> LedgerStatus {
+    match status {
+        ChildWorkflowStatus::Planned => LedgerStatus::Planned,
+        ChildWorkflowStatus::Queued | ChildWorkflowStatus::Starting => LedgerStatus::Claimed,
+        ChildWorkflowStatus::Running | ChildWorkflowStatus::WaitingForTool => {
+            LedgerStatus::Executing
+        }
+        ChildWorkflowStatus::WaitingForApproval => LedgerStatus::WaitingForApproval,
+        ChildWorkflowStatus::WaitingForParent => LedgerStatus::NeedsContext,
+        ChildWorkflowStatus::Blocked | ChildWorkflowStatus::Stale => LedgerStatus::Blocked,
+        ChildWorkflowStatus::Cancelling | ChildWorkflowStatus::Cancelled => LedgerStatus::Cancelled,
+        ChildWorkflowStatus::Failed => LedgerStatus::Blocked,
+        ChildWorkflowStatus::Done | ChildWorkflowStatus::Integrated => LedgerStatus::Done,
+        ChildWorkflowStatus::DoneWithConcerns => LedgerStatus::DoneWithConcerns,
+    }
+}
+
+fn closeout_status_from_child_status(status: ChildWorkflowStatus) -> Option<CloseoutStatus> {
+    match status {
+        ChildWorkflowStatus::Done | ChildWorkflowStatus::Integrated => Some(CloseoutStatus::Done),
+        ChildWorkflowStatus::DoneWithConcerns => Some(CloseoutStatus::DoneWithConcerns),
+        ChildWorkflowStatus::Blocked | ChildWorkflowStatus::Stale | ChildWorkflowStatus::Failed => {
+            Some(CloseoutStatus::Blocked)
+        }
+        ChildWorkflowStatus::WaitingForParent => Some(CloseoutStatus::NeedsContext),
+        ChildWorkflowStatus::Cancelling | ChildWorkflowStatus::Cancelled => {
+            Some(CloseoutStatus::Cancelled)
+        }
+        _ => None,
+    }
+}
+
+fn evidence_type_from_child_evidence_kind(kind: &str) -> EvidenceType {
+    match kind {
+        "trace" => EvidenceType::Trace,
+        "evidence" | "evidence-packet" => EvidenceType::EvidencePacket,
+        "test-output" | "verification-result" | "failure-excerpts" => EvidenceType::TestOutput,
+        "review-findings" => EvidenceType::ManualReview,
+        _ => EvidenceType::ChildResult,
+    }
+}
+
+fn artifact_kind_from_child_evidence_kind(kind: &str) -> ArtifactKind {
+    match kind {
+        "trace" => ArtifactKind::Trace,
+        "evidence" | "evidence-packet" => ArtifactKind::EvidencePacket,
+        "test-output" | "verification-result" | "failure-excerpts" => ArtifactKind::VerifyLog,
+        _ => ArtifactKind::Other,
+    }
 }
 
 fn extend_unique(target: &mut Vec<String>, values: Vec<String>) {
@@ -470,6 +626,105 @@ pub enum NoteSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_child_run(status: ChildWorkflowStatus) -> ChildWorkflowRun {
+        let spec = crate::workflow::ChildWorkflowSpec {
+            id: crate::workflow::ChildWorkflowId::new("child-verifier-1"),
+            parent: crate::workflow::ParentWorkflowRef {
+                workflow_id: Some("parent-workflow".into()),
+                run_id: Some("parent-run".into()),
+                mana_unit_ref: Some("394.13".into()),
+            },
+            parent_contract: crate::workflow::WorkflowContract::default(),
+            role: "verifier".into(),
+            title: "Verify child".into(),
+            prompt: "Run tests".into(),
+            contract: crate::workflow::WorkflowContract {
+                id: Some("child-verifier-1".into()),
+                role: Some("verifier".into()),
+                ..crate::workflow::WorkflowContract::default()
+            },
+            required: true,
+            ..crate::workflow::ChildWorkflowSpec::default()
+        };
+        let mut run = ChildWorkflowRun::new(spec);
+        run.status = status;
+        run
+    }
+
+    #[test]
+    fn mana_child_workflow_ledger_updates_parent_and_child_refs() {
+        let mut run = sample_child_run(ChildWorkflowStatus::DoneWithConcerns);
+        run.evidence_refs.push(crate::workflow::ChildEvidenceRef {
+            kind: "test-output".into(),
+            path: ".imp/runs/parent/children/verifier/evidence.md".into(),
+            summary: Some("verifier evidence".into()),
+        });
+        let mut parent = WorkflowRecord::new("parent-workflow", "Parent workflow");
+
+        apply_child_workflow_ledger_update(&mut parent, &run);
+        apply_child_workflow_ledger_update(&mut parent, &run);
+
+        assert_eq!(parent.status, LedgerStatus::DoneWithConcerns);
+        assert_eq!(parent.child_run_refs.len(), 1);
+        assert_eq!(parent.child_run_refs[0].child_id, "child-verifier-1");
+        assert_eq!(parent.child_run_refs[0].role.as_deref(), Some("verifier"));
+        assert_eq!(
+            parent.child_run_refs[0].status,
+            LedgerStatus::DoneWithConcerns
+        );
+        assert_eq!(
+            parent.evidence_refs,
+            vec![".imp/runs/parent/children/verifier/evidence.md"]
+        );
+    }
+
+    #[test]
+    fn mana_child_workflow_required_blocker_updates_parent_status() {
+        let mut run = sample_child_run(ChildWorkflowStatus::Blocked);
+        run.summary = Some(crate::workflow::ChildWorkflowSummary {
+            status: ChildWorkflowStatus::Blocked,
+            summary: "missing credentials".into(),
+            findings: Vec::new(),
+            concerns: vec!["cannot run verifier".into()],
+        });
+        let mut parent = WorkflowRecord::new("parent-workflow", "Parent workflow");
+
+        apply_child_workflow_ledger_update(&mut parent, &run);
+
+        assert_eq!(parent.status, LedgerStatus::Blocked);
+        assert_eq!(parent.blockers.len(), 1);
+        assert!(parent.blockers[0].contains("child-verifier-1"));
+    }
+
+    #[test]
+    fn mana_child_workflow_task_and_evidence_records_are_derived() {
+        let mut run = sample_child_run(ChildWorkflowStatus::Done);
+        run.evidence_refs.push(crate::workflow::ChildEvidenceRef {
+            kind: "test-output".into(),
+            path: ".imp/runs/parent/children/verifier/test.txt".into(),
+            summary: Some("tests passed".into()),
+        });
+
+        let task = task_record_from_child_workflow(&run);
+        assert_eq!(task.id, "child-verifier-1");
+        assert_eq!(task.workflow_id.as_deref(), Some("parent-workflow"));
+        assert_eq!(task.role.as_deref(), Some("verifier"));
+        assert_eq!(task.status, LedgerStatus::Done);
+        assert_eq!(task.closeout_status, Some(CloseoutStatus::Done));
+        assert_eq!(task.produces, vec!["test-output"]);
+
+        let evidence = evidence_records_from_child_workflow(&run);
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].workflow_id.as_deref(), Some("parent-workflow"));
+        assert_eq!(evidence[0].task_id.as_deref(), Some("child-verifier-1"));
+        assert_eq!(evidence[0].evidence_type, EvidenceType::TestOutput);
+        assert_eq!(evidence[0].produced_by.as_deref(), Some("verifier"));
+        assert_eq!(
+            evidence[0].artifact.as_ref().unwrap().kind,
+            ArtifactKind::VerifyLog
+        );
+    }
 
     #[test]
     fn mana_workflow_ledger_adapter_builds_record_from_contract() {

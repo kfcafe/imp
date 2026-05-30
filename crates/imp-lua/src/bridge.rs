@@ -1,4 +1,7 @@
-use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use imp_core::storage;
@@ -14,6 +17,8 @@ use std::sync::{Arc, Mutex};
 use crate::sandbox::{
     LuaCallContext, LuaCommandHandle, LuaError, LuaHookHandle, LuaRuntime, LuaToolHandle,
 };
+
+const LUA_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A `Tool` implementation backed by a Lua function registered with
 /// `imp.register_tool()`.
@@ -132,6 +137,48 @@ pub fn load_lua_tools(runtime: Arc<Mutex<LuaRuntime>>, registry: &mut ToolRegist
 
     for tool in handles {
         registry.register(Arc::new(tool));
+    }
+}
+
+pub(crate) fn run_lua_exec_command(
+    mut command: Command,
+    timeout: Duration,
+) -> std::io::Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output();
+        }
+        if started.elapsed() >= timeout {
+            kill_process_group(&child);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("imp.exec() timed out after {}s", timeout.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn kill_process_group(child: &Child) {
+    #[cfg(unix)]
+    if let Ok(pid) = i32::try_from(child.id()) {
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
     }
 }
 
@@ -406,7 +453,8 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
                     }
                 }
 
-                command.stdin(Stdio::null()).output()
+                command.stdin(Stdio::null());
+                run_lua_exec_command(command, LUA_EXEC_TIMEOUT)
             } else {
                 let mut command = Command::new("sh");
                 command.arg("-c").arg(&cmd);
@@ -423,7 +471,8 @@ pub fn setup_host_api(runtime: &LuaRuntime) -> Result<(), LuaError> {
                     }
                 }
 
-                command.stdin(Stdio::null()).output()
+                command.stdin(Stdio::null());
+                run_lua_exec_command(command, LUA_EXEC_TIMEOUT)
             }
             .map_err(mlua::Error::external)?;
 

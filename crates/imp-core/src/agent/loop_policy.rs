@@ -21,6 +21,7 @@ impl LoopPolicy for DefaultLoopPolicy {
             .decide(assessment)
             .or_else(|| RuntimeStopRule.decide(assessment))
             .or_else(|| WorkCompletedRule.decide(assessment))
+            .or_else(|| OrchestrationProgressRule.decide(assessment))
             .or_else(|| ManaStopRule.decide(assessment))
             .or_else(|| TextFallbackStopRule.decide(assessment))
             .or_else(|| ContinueRecommendationRule.decide(assessment))
@@ -55,10 +56,26 @@ struct WorkCompletedRule;
 
 impl LoopPolicyRule for WorkCompletedRule {
     fn decide(&self, assessment: &PostTurnAssessment) -> Option<LoopDecision> {
+        if assessment.runtime.work_completed && !assessment.runtime.orchestration_started {
+            Some(finish(StopReason::WorkCompleted))
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct OrchestrationProgressRule;
+
+impl LoopPolicyRule for OrchestrationProgressRule {
+    fn decide(&self, assessment: &PostTurnAssessment) -> Option<LoopDecision> {
         assessment
             .runtime
-            .work_completed
-            .then(|| finish(StopReason::WorkCompleted))
+            .orchestration_started
+            .then(|| LoopDecision::Continue {
+                prompt: super::orchestration_follow_up_text(None),
+                reason: super::ContinueReason::OrchestrationProgress,
+            })
     }
 }
 
@@ -137,6 +154,7 @@ mod tests {
                 execution_debt: false,
                 execution_evidence: false,
                 planning_only_progress: false,
+                orchestration_started: false,
             },
             mana: ManaEvidence { stop_reason: None },
             text_fallback: TextFallbackEvidence {

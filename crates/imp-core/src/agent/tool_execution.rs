@@ -101,6 +101,27 @@ fn attach_provenance_to_result(
     result
 }
 
+fn attach_policy_trace_to_result(
+    mut result: imp_llm::ToolResultMessage,
+    policy_record: &crate::reference_monitor::PolicyTraceRecord,
+) -> imp_llm::ToolResultMessage {
+    let mut details = match result.details {
+        serde_json::Value::Object(map) => map,
+        serde_json::Value::Null => serde_json::Map::new(),
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("raw".into(), other);
+            map
+        }
+    };
+    details.insert(
+        "policy".into(),
+        serde_json::to_value(policy_record).unwrap_or(serde_json::Value::Null),
+    );
+    result.details = serde_json::Value::Object(details);
+    result
+}
+
 impl Agent {
     pub(super) fn plan_tools(&self, calls: Vec<(String, String, serde_json::Value)>) -> ToolPlan {
         let calls = calls
@@ -316,10 +337,10 @@ impl Agent {
         );
         policy_context.run_id = self.run_id.lock().ok().and_then(|run_id| run_id.clone());
         policy_context.workflow_id = self
-            .workflow_contract
+            .workflow_contract()
             .id
             .clone()
-            .or_else(|| self.workflow_contract.mana_unit_ref.clone());
+            .or_else(|| self.workflow_contract().mana_unit_ref.clone());
         policy_context.turn = Some(turn);
         policy_context.tool_call_id = Some(call_id.to_string());
         policy_context.args = args.clone();
@@ -331,7 +352,7 @@ impl Agent {
             policy_context.metadata = metadata;
         }
         policy_context.mode = self.mode;
-        policy_context.apply_workflow_contract(&self.workflow_contract);
+        policy_context.apply_workflow_contract(self.workflow_contract());
 
         let policy_record =
             crate::reference_monitor::ReferenceMonitor.evaluate(&policy_context, &self.run_policy);
@@ -341,10 +362,11 @@ impl Agent {
         })
         .await;
         if let Some(reason) = policy_block {
-            let result = crate::tools::ToolOutput::error(legacy_policy_error_message(
+            let mut result = crate::tools::ToolOutput::error(legacy_policy_error_message(
                 tool_name, self.mode, &reason,
             ))
             .into_tool_result(call_id, tool_name);
+            result = attach_policy_trace_to_result(result, &policy_record);
             self.emit(AgentEvent::ToolExecutionEnd {
                 tool_call_id: call_id.to_string(),
                 result: result.clone(),
@@ -488,7 +510,7 @@ impl Agent {
                     lua_tool_loader: self.lua_tool_loader.clone(),
                     mode: self.mode,
                     read_max_lines: self.read_max_lines,
-                    turn_mana_review: self.turn_mana_review.clone(),
+                    turn_mana_review: self.turn_mana_review_accumulator(),
                     config: self.config.clone(),
                     run_policy: self.run_policy.clone(),
                     supporting_provenance: policy_context.supporting_provenance.clone(),
@@ -587,6 +609,7 @@ impl Agent {
 
         let provenance = tool_result_provenance(tool_name, &args);
         result = attach_provenance_to_result(result, &provenance);
+        result = attach_policy_trace_to_result(result, &policy_record);
         self.emit(AgentEvent::ToolExecutionEnd {
             tool_call_id: call_id.to_string(),
             result: result.clone(),

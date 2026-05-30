@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use serde_json::Value;
 
+use crate::animation::{static_working_glyph, tool_frame};
 use crate::theme::Theme;
 
 fn abbreviate_home_path(path: &str) -> String {
@@ -21,6 +22,21 @@ fn abbreviate_home_path(path: &str) -> String {
     path.to_string()
 }
 
+fn abbreviate_path(path: &str, max: usize) -> String {
+    let abbreviated = abbreviate_home_path(path);
+    if abbreviated.chars().count() <= max {
+        return abbreviated;
+    }
+
+    let file_name = abbreviated.rsplit('/').next().unwrap_or(&abbreviated);
+    let fallback = format!("…/{file_name}");
+    if fallback.chars().count() <= max {
+        fallback
+    } else {
+        truncate_chars_with_suffix(&fallback, max, "…")
+    }
+}
+
 fn abbreviate_path_list(items: &[Value]) -> String {
     items
         .iter()
@@ -31,35 +47,10 @@ fn abbreviate_path_list(items: &[Value]) -> String {
 }
 
 fn shell_summary(args: &Value) -> String {
-    let command = args
-        .get("command")
+    args.get("command")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim_start();
-    if command.is_empty() {
-        return String::new();
-    }
-
-    let label = if command.starts_with("rg ")
-        || command.starts_with("grep ")
-        || command.starts_with("fd ")
-        || command.starts_with("find ")
-        || command == "find"
-        || command.starts_with("ls ")
-        || command == "ls"
-    {
-        "search"
-    } else if command.contains("check")
-        || command.contains("test")
-        || command.contains("verify")
-        || command.contains("lint")
-    {
-        "check"
-    } else {
-        "run"
-    };
-
-    label.to_string()
+        .map(|command| command.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// A tool call ready for display.
@@ -102,10 +93,16 @@ impl DisplayToolCall {
         focused: bool,
         animation_level: AnimationLevel,
     ) -> Line<'static> {
-        let _ = tick;
-        let _ = animation_level;
         let is_running = self.output.is_none() && !self.is_error;
-        let icon = if self.is_error { "✗" } else { "✓" };
+        let status_icon = if self.is_error {
+            "✗"
+        } else if is_running && animation_level == AnimationLevel::None {
+            static_working_glyph()
+        } else if is_running {
+            tool_frame(tick)
+        } else {
+            "✓"
+        };
         let icon_style = if self.is_error {
             theme.error_style()
         } else if is_running {
@@ -127,30 +124,51 @@ impl DisplayToolCall {
         };
 
         let mut spans = vec![focus_span];
-        if !is_running {
-            spans.push(Span::styled(format!(" {icon} "), icon_style));
-        }
-        spans.push(Span::styled(
-            self.name.clone(),
-            Style::default()
-                .fg(theme.tool_name)
-                .add_modifier(Modifier::BOLD),
-        ));
+        spans.push(Span::styled(format!(" {status_icon} "), icon_style));
+        let is_terminal = matches!(self.name.as_str(), "bash" | "shell");
+        let tool_icon = tool_display_icon(&self.name);
+        if is_terminal {
+            spans.push(Span::styled(
+                format_tool_icon_for_label(tool_icon, &self.name),
+                Style::default().fg(theme.accent),
+            ));
+            if !self.args_summary.is_empty() {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(self.args_summary.clone(), theme.muted_style()));
+            }
+        } else {
+            spans.push(Span::styled(
+                format_tool_icon_for_label(tool_icon, &self.name),
+                Style::default().fg(theme.accent),
+            ));
+            spans.push(Span::styled(
+                tool_display_name(&self.name),
+                Style::default()
+                    .fg(theme.tool_name)
+                    .add_modifier(Modifier::BOLD),
+            ));
 
-        if !self.args_summary.is_empty() {
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(self.args_summary.clone(), theme.muted_style()));
+            if !self.args_summary.is_empty() {
+                if let Some((primary, secondary)) = split_args_summary(&self.args_summary) {
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(primary, theme.muted_style()));
+                    if let Some(secondary) = secondary {
+                        spans.push(Span::styled(format!(" · {secondary}"), theme.muted_style()));
+                    }
+                }
+            }
         }
 
-        // Result summary when collapsed — just line count (icon already shows status)
+        // Result summary when collapsed — keep it compact but more useful than a raw line count.
         if !self.expanded {
             if let Some(ref output) = self.output {
                 if self.is_error {
-                    spans.push(Span::styled(" error", theme.error_style()));
+                    spans.push(Span::styled(" failed", theme.error_style()));
                 } else {
                     let line_count = output.lines().count();
+                    let suffix = if line_count == 1 { "line" } else { "lines" };
                     spans.push(Span::styled(
-                        format!("  {line_count} lines"),
+                        format!("  · {line_count} {suffix}"),
                         theme.muted_style(),
                     ));
                 }
@@ -160,14 +178,29 @@ impl DisplayToolCall {
         Line::from(spans)
     }
 
+    pub fn summary_detail_lines(&self, theme: &Theme) -> Vec<Line<'static>> {
+        let Some((_primary, Some(secondary))) = split_args_summary(&self.args_summary) else {
+            return Vec::new();
+        };
+        vec![Line::from(vec![
+            Span::styled("  └ ", theme.muted_style()),
+            Span::styled(secondary, theme.muted_style()),
+        ])]
+    }
+
     /// Build compact inline spans for multi-tool-per-line rendering: "✓ name args"
     pub fn compact_spans(&self, theme: &Theme) -> Vec<Span<'static>> {
         let icon_style = theme.success_style();
         let args_short = short_args(&self.args_summary);
+        let tool_icon = tool_display_icon(&self.name);
         let mut spans = vec![
             Span::styled("✓ ", icon_style),
             Span::styled(
-                self.name.clone(),
+                format_tool_icon_for_label(tool_icon, &self.name),
+                Style::default().fg(theme.accent),
+            ),
+            Span::styled(
+                tool_display_name(&self.name),
                 Style::default()
                     .fg(theme.tool_name)
                     .add_modifier(Modifier::BOLD),
@@ -187,39 +220,269 @@ impl DisplayToolCall {
                 .and_then(|v| v.as_str())
                 .map(abbreviate_home_path)
                 .unwrap_or_default(),
-            "bash" => shell_summary(args),
-            "edit" | "write" => args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .map(abbreviate_home_path)
-                .unwrap_or_default(),
-            "scan" => {
-                let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
-                match action {
-                    "extract" => args
-                        .get("targets")
-                        .or_else(|| args.get("files"))
-                        .and_then(|v| v.as_array())
-                        .map(|items| abbreviate_path_list(items))
-                        .unwrap_or_else(|| "extract".to_string()),
-                    "directory" | "scan" => args
-                        .get("directory")
-                        .and_then(|v| v.as_str())
-                        .map(abbreviate_home_path)
-                        .unwrap_or_default(),
-                    _ => {
-                        if action == name {
-                            String::new()
-                        } else {
-                            action.to_string()
-                        }
-                    }
-                }
-            }
+            "bash" | "shell" => shell_summary(args),
+            "edit" | "write" | "multi_edit" => format_edit_args(args),
+            "scan" => format_scan_args(args),
+            "workflow" => format_workflow_args(args),
+            "work" => format_work_args(args),
+            "prototype" => format_prototype_args(args),
+            "git" => format_git_args(args),
+            "web" => format_web_args(args),
             "mana" => format_mana_args(args),
             _ => summarize_json_object(args),
         }
     }
+}
+
+fn split_args_summary(summary: &str) -> Option<(String, Option<String>)> {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return None;
+    }
+    summary
+        .split_once("\n  ")
+        .map(|(primary, secondary)| (primary.to_string(), Some(secondary.trim().to_string())))
+        .or_else(|| Some((summary.to_string(), None)))
+}
+
+fn push_named_field(fields: &mut Vec<String>, key: &str, value: Option<String>) {
+    if let Some(value) = value {
+        let value = truncate_chars_with_suffix(&value, 36, "…");
+        if !value.is_empty() {
+            fields.push(format!("{key} {value}"));
+        }
+    }
+}
+
+fn action_with_fields(action: &str, fields: &[String]) -> String {
+    if fields.is_empty() {
+        action.to_string()
+    } else {
+        format!("{action}  {}", fields.join("  "))
+    }
+}
+
+fn format_scan_args(args: &Value) -> String {
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("scan");
+    match action {
+        "search" => args
+            .get("query")
+            .and_then(value_to_short_string)
+            .map(|query| format!("search {query}"))
+            .unwrap_or_else(|| "search".to_string()),
+        "extract" => args
+            .get("targets")
+            .or_else(|| args.get("files"))
+            .and_then(Value::as_array)
+            .map(|items| abbreviate_path_list(items))
+            .unwrap_or_else(|| "extract".to_string()),
+        "directory" | "scan" => args
+            .get("directory")
+            .and_then(Value::as_str)
+            .map(abbreviate_home_path)
+            .unwrap_or_default(),
+        _ => {
+            if action == "scan" {
+                String::new()
+            } else {
+                action.to_string()
+            }
+        }
+    }
+}
+
+fn format_workflow_args(args: &Value) -> String {
+    let action = args
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("workflow");
+    let id = args.get("id").and_then(Value::as_str);
+    let mode = args.get("mode").and_then(Value::as_str);
+
+    match action {
+        "list" => mode
+            .map(|mode| format!("list · {mode}"))
+            .unwrap_or_else(|| "list".to_string()),
+        "show" | "validate" | "run" => {
+            let mut summary = id
+                .map(|id| format!("{action} {id}"))
+                .unwrap_or_else(|| action.to_string());
+            if let Some(mode) = mode.filter(|mode| !mode.is_empty()) {
+                summary.push_str(&format!(" · {mode}"));
+            }
+            summary
+        }
+        "update" => {
+            let mut summary = id
+                .map(|id| format!("update {id}"))
+                .unwrap_or_else(|| "update".to_string());
+            if let Some(path) = args.get("path").and_then(Value::as_str) {
+                summary.push_str(&format!(" · {path}"));
+                if let Some(value) = args.get("value").and_then(value_to_short_string) {
+                    summary.push_str(&format!(" → {value}"));
+                }
+            }
+            if let Some(reason) = args
+                .get("reason")
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.is_empty())
+            {
+                summary.push_str("\n  ");
+                summary.push_str(&truncate_chars_with_suffix(reason, 72, "…"));
+            }
+            summary
+        }
+        _ => {
+            let mut fields = Vec::new();
+            push_named_field(&mut fields, "id", id.map(str::to_string));
+            push_named_field(&mut fields, "mode", mode.map(str::to_string));
+            action_with_fields(action, &fields)
+        }
+    }
+}
+
+fn format_work_args(args: &Value) -> String {
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("work");
+    let title = args
+        .get("title")
+        .or_else(|| args.get("text"))
+        .and_then(value_to_short_string)
+        .map(|title| truncate_chars_with_suffix(&title, 44, "…"));
+    let id = args.get("id").and_then(value_to_short_string);
+    let kind = args.get("kind").and_then(Value::as_str).unwrap_or("item");
+    let status = args.get("status").and_then(Value::as_str);
+    let outcome = args.get("outcome").and_then(Value::as_str);
+
+    match action {
+        "create" => match title {
+            Some(title) => format!(
+                "create {kind} · {status}\n  {title}",
+                status = status.unwrap_or("todo")
+            ),
+            None => format!("create {kind}{}", status_suffix(status)),
+        },
+        "close" => id
+            .map(|id| format!("close {id}{}", outcome_suffix(outcome)))
+            .unwrap_or_else(|| format!("close{}", outcome_suffix(outcome))),
+        "update" => id
+            .map(|id| format!("update {id}{}", status_suffix(status)))
+            .unwrap_or_else(|| format!("update {kind}{}", status_suffix(status))),
+        "show" => id
+            .map(|id| format!("show {id}"))
+            .unwrap_or_else(|| format!("show {kind}")),
+        "list" => status
+            .map(|status| format!("list {kind}s · {status}"))
+            .unwrap_or_else(|| format!("list {kind}s")),
+        _ => {
+            let mut parts = vec![action.to_string()];
+            if let Some(title) = title {
+                parts.push(title);
+            } else if let Some(id) = id {
+                parts.push(id);
+            } else if kind != "item" {
+                parts.push(kind.to_string());
+            }
+            let suffix = status
+                .or(outcome)
+                .map(|value| format!(" · {value}"))
+                .unwrap_or_default();
+            format!("{}{}", parts.join(" "), suffix)
+        }
+    }
+}
+
+fn status_suffix(status: Option<&str>) -> String {
+    status
+        .map(|status| format!(" · {status}"))
+        .unwrap_or_default()
+}
+
+fn outcome_suffix(outcome: Option<&str>) -> String {
+    outcome
+        .filter(|outcome| !outcome.is_empty())
+        .map(|outcome| format!(" · {outcome}"))
+        .unwrap_or_default()
+}
+
+fn format_prototype_args(args: &Value) -> String {
+    let action = args
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("prototype");
+    let mut fields = Vec::new();
+    for key in [
+        "question",
+        "language",
+        "hypothesis_result",
+        "recommended_action",
+    ] {
+        push_named_field(
+            &mut fields,
+            key,
+            args.get(key).and_then(value_to_short_string),
+        );
+    }
+    action_with_fields(action, &fields)
+}
+
+fn format_git_args(args: &Value) -> String {
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("git");
+    let mut fields = Vec::new();
+    for key in ["base", "head", "message"] {
+        push_named_field(
+            &mut fields,
+            key,
+            args.get(key).and_then(value_to_short_string),
+        );
+    }
+    if let Some(files) = args.get("files").and_then(Value::as_array) {
+        push_named_field(&mut fields, "files", Some(abbreviate_path_list(files)));
+    }
+    action_with_fields(action, &fields)
+}
+
+fn format_web_args(args: &Value) -> String {
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("web");
+    let mut fields = Vec::new();
+    for key in ["query", "url"] {
+        push_named_field(
+            &mut fields,
+            key,
+            args.get(key).and_then(value_to_short_string),
+        );
+    }
+    action_with_fields(action, &fields)
+}
+
+fn format_edit_args(args: &Value) -> String {
+    let path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .or_else(|| first_edit_path(args))
+        .map(|path| abbreviate_path(path, 32));
+    let edit_count = args
+        .get("edits")
+        .and_then(Value::as_array)
+        .map(|edits| edits.len())
+        .or_else(|| args.get("old_text").map(|_| 1));
+
+    match (path, edit_count) {
+        (Some(path), Some(count)) => format!(
+            "{path} · {count} change{}",
+            if count == 1 { "" } else { "s" }
+        ),
+        (Some(path), None) => path,
+        (None, Some(count)) => {
+            format!("edit · {count} change{}", if count == 1 { "" } else { "s" })
+        }
+        (None, None) => "edit".to_string(),
+    }
+}
+
+fn first_edit_path(args: &Value) -> Option<&str> {
+    args.get("edits")
+        .and_then(Value::as_array)
+        .and_then(|edits| edits.iter().find_map(|edit| edit.get("path")?.as_str()))
 }
 
 fn format_mana_args(args: &Value) -> String {
@@ -405,6 +668,49 @@ fn format_mana_args(args: &Value) -> String {
         action.to_string()
     } else {
         format!("{action}  {}", fields.join("  "))
+    }
+}
+
+pub fn tool_display_icon(name: &str) -> &'static str {
+    match name {
+        "prototype" => "⚗",
+        "ask_user" => "?",
+        "work" => "▣",
+        "bash" | "shell" => "$",
+        "read" => "◧",
+        "write" => "✎",
+        "edit" | "multi_edit" => "◇",
+        "git" => "◆",
+        "scan" => "⌕",
+        "web" => "◎",
+        "workflow" => "⚑",
+        "mana" => "•",
+        _ => "•",
+    }
+}
+
+fn format_tool_icon_for_label(icon: &str, tool_name: &str) -> String {
+    if matches!(tool_name, "bash" | "shell") {
+        icon.to_string()
+    } else {
+        format!("{icon} ")
+    }
+}
+
+pub fn tool_display_name(name: &str) -> String {
+    match name {
+        "workflow" => "Workflow".to_string(),
+        "ask_user" => "Ask".to_string(),
+        "prototype" => "Prototype".to_string(),
+        "bash" | "shell" => "Terminal".to_string(),
+        "multi_edit" => "Edit".to_string(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+                None => String::new(),
+            }
+        }
     }
 }
 
@@ -711,12 +1017,77 @@ mod tests {
     }
 
     #[test]
+    fn tool_headers_include_prototype_icon() {
+        let tc = make_tc("prototype", "run", Some("ok"), false);
+        let text = tc
+            .header_line(&Theme::default())
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("✓ ⚗ Prototype"));
+    }
+
+    #[test]
+    fn tool_frame_uses_slow_simple_spinner() {
+        assert_eq!(tool_frame(0), "◐");
+        assert_eq!(tool_frame(5), "◐");
+        assert_eq!(tool_frame(6), "◓");
+        assert_eq!(tool_frame(12), "◑");
+        assert_eq!(tool_frame(18), "◒");
+        assert_eq!(tool_frame(24), "◐");
+    }
+
+    #[test]
+    fn tool_headers_use_icons_and_status_colors() {
+        let tc = make_tc("work", "task", Some("ok"), false);
+        let text = tc
+            .header_line(&Theme::default())
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("✓ ▣ Work"));
+
+        let running = make_tc("bash", "cargo test -p imp-tui", None, false);
+        let running_text = running
+            .header_line(&Theme::default())
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(running_text.contains("◐ $ cargo test -p imp-tui"));
+        assert!(!running_text.contains("Terminal"));
+    }
+
+    #[test]
+    fn running_tool_header_uses_static_glyph_when_animation_disabled() {
+        let running = make_tc("bash", "cargo test -p imp-tui", None, false);
+        let text = running
+            .header_line_animated(&Theme::default(), 9, AnimationLevel::None)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("• $ cargo test -p imp-tui"));
+    }
+
+    #[test]
     fn make_args_summary_hides_bash_command_text() {
         let summary = DisplayToolCall::make_args_summary(
             "bash",
             &serde_json::json!({"command": "cargo test -p imp-tui"}),
         );
-        assert_eq!(summary, "check");
+        assert_eq!(summary, "cargo test -p imp-tui");
+    }
+
+    #[test]
+    fn make_args_summary_preserves_full_multiline_bash_command() {
+        let command = "cat <<\'EOF\' > /tmp/example\nhello world\nEOF";
+        let summary =
+            DisplayToolCall::make_args_summary("bash", &serde_json::json!({"command": command}));
+        assert_eq!(summary, command);
     }
 
     #[test]
@@ -726,6 +1097,159 @@ mod tests {
             &serde_json::json!({"action": "scan", "directory": "/Users/test/project"}),
         );
         assert_eq!(summary, "~/project");
+    }
+
+    #[test]
+    fn make_args_summary_shows_scan_search_query() {
+        let summary = DisplayToolCall::make_args_summary(
+            "scan",
+            &serde_json::json!({"action": "search", "query": "ToolExecutionStart"}),
+        );
+        assert_eq!(summary, "search ToolExecutionStart");
+    }
+
+    #[test]
+    fn inline_edit_summary_includes_file_and_change_count() {
+        let summary = DisplayToolCall::make_args_summary(
+            "edit",
+            &serde_json::json!({
+                "path": "/Users/asher/project/crates/imp-tui/src/views/tool_output.rs",
+                "edits": [{"old_text": "old", "new_text": "new"}]
+            }),
+        );
+
+        assert_eq!(summary, "…/tool_output.rs · 1 change");
+    }
+
+    #[test]
+    fn inline_edit_summary_uses_path_from_transactional_edit() {
+        let summary = DisplayToolCall::make_args_summary(
+            "edit",
+            &serde_json::json!({
+                "edits": [{
+                    "path": "/Users/asher/project/crates/imp-tui/src/views/tools.rs",
+                    "old_text": "old",
+                    "new_text": "new"
+                }]
+            }),
+        );
+
+        assert_eq!(summary, "…/tools.rs · 1 change");
+    }
+
+    #[test]
+    fn inline_summaries_format_core_tool_arguments() {
+        let work = DisplayToolCall::make_args_summary(
+            "work",
+            &serde_json::json!({
+                "action": "create",
+                "kind": "task",
+                "title": "Improve inline summaries",
+                "status": "todo",
+                "force": false
+            }),
+        );
+        assert_eq!(work, "create task · todo\n  Improve inline summaries");
+
+        let prototype = DisplayToolCall::make_args_summary(
+            "prototype",
+            &serde_json::json!({
+                "action": "run",
+                "question": "Can cards render compact metadata?",
+                "language": "python",
+                "hypothesis_result": "supported"
+            }),
+        );
+        assert!(prototype.starts_with("run  question Can cards render compact metadat…"));
+        assert!(prototype.contains("language python"));
+        assert!(prototype.contains("hypothesis_result supported"));
+
+        let workflow_run = DisplayToolCall::make_args_summary(
+            "workflow",
+            &serde_json::json!({"action": "run", "id": "benchmark-workflow-e2e"}),
+        );
+        assert_eq!(workflow_run, "run benchmark-workflow-e2e");
+
+        let workflow_update = DisplayToolCall::make_args_summary(
+            "workflow",
+            &serde_json::json!({
+                "action": "update",
+                "id": "benchmark-workflow-e2e",
+                "path": "steps.context.status",
+                "value": "done",
+                "reason": "Loaded project instructions and inspected the workflow tool surface"
+            }),
+        );
+        assert_eq!(
+            workflow_update,
+            "update benchmark-workflow-e2e · steps.context.status → done\n  Loaded project instructions and inspected the workflow tool surface"
+        );
+
+        let git = DisplayToolCall::make_args_summary(
+            "git",
+            &serde_json::json!({"action": "diff", "base": "HEAD~1", "head": "HEAD"}),
+        );
+        assert_eq!(git, "diff  base HEAD~1  head HEAD");
+
+        let web = DisplayToolCall::make_args_summary(
+            "web",
+            &serde_json::json!({"action": "search", "query": "imp sidebar design"}),
+        );
+        assert_eq!(web, "search  query imp sidebar design");
+    }
+
+    #[test]
+    fn multiline_tool_summary_exposes_detail_line() {
+        let tc = DisplayToolCall {
+            id: "tc-1".into(),
+            name: "work".into(),
+            args_summary: "create task · todo\n  Temporary tool smoke test".into(),
+            output: Some("ok".into()),
+            details: serde_json::Value::Null,
+            is_error: false,
+            expanded: false,
+            streaming_lines: Vec::new(),
+            streaming_output: String::new(),
+        };
+
+        let header = tc
+            .header_line(&Theme::default())
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(header.contains("create task · todo"));
+        assert!(!header.contains("\n"));
+
+        let detail = tc.summary_detail_lines(&Theme::default());
+        let text = detail[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(text, "  └ Temporary tool smoke test");
+    }
+
+    #[test]
+    fn inline_header_result_summary_reads_like_status_badge() {
+        let tc = make_tc("read", "src/main.rs", Some("one\ntwo"), false);
+        let text = tc
+            .header_line(&Theme::default())
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("· 2 lines"));
+        assert!(!text.contains("ok"));
+
+        let failed = make_tc("bash", "check", Some("boom"), true);
+        let text = failed
+            .header_line(&Theme::default())
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("failed"));
     }
 
     #[test]

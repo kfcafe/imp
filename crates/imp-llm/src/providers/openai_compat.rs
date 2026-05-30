@@ -498,7 +498,8 @@ fn stream_response(
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body =
+                crate::auth::redact_provider_error_body(&resp.text().await.unwrap_or_default());
             let _ = tx.unbounded_send(Err(Error::Provider(format!("HTTP {status}: {body}"))));
             return;
         }
@@ -836,7 +837,10 @@ mod tests {
     #[test]
     fn openai_compat_system_prompt_becomes_system_message() {
         let model = test_model();
-        let context = Context { messages: vec![] };
+        let context = Context {
+            messages: vec![],
+            ..Default::default()
+        };
         let options = RequestOptions {
             system_prompt: "You are a helpful assistant.".into(),
             ..Default::default()
@@ -871,6 +875,7 @@ mod tests {
         let model = test_model();
         let context = Context {
             messages: vec![Message::user("Hello!")],
+            ..Default::default()
         };
         let options = RequestOptions::default();
 
@@ -900,6 +905,7 @@ mod tests {
                 ],
                 timestamp: 0,
             })],
+            ..Default::default()
         };
 
         let req = build_request(&model, context, RequestOptions::default());
@@ -1182,6 +1188,7 @@ mod tests {
         let model = test_model();
         let context = Context {
             messages: vec![Message::user("Hi")],
+            ..Default::default()
         };
         let options = RequestOptions {
             system_prompt: "Be helpful.".into(),

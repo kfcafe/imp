@@ -12,11 +12,12 @@ categories.workspace = true
 
 [dependencies]
 imp-llm.workspace = true
-mana-core.workspace = true
+mana-core = { workspace = true, optional = true }
+mana = { version = "0.3.2", package = "mana-cli", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
-mana = { version = "0.3.1", package = "mana-cli" }
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -41,6 +42,23 @@ tree-sitter-typescript.workspace = true
 tree-sitter-python.workspace = true
 tree-sitter-go.workspace = true
 tree-sitter-kotlin-ng.workspace = true
+tree-sitter-bash.workspace = true
+tree-sitter-elixir.workspace = true
+tree-sitter-ruby.workspace = true
+tree-sitter-ocaml.workspace = true
+tree-sitter-perl.workspace = true
+tree-sitter-lua.workspace = true
+tree-sitter-zig.workspace = true
+tree-sitter-odin.workspace = true
+tree-sitter-swift.workspace = true
+tree-sitter-java.workspace = true
+tree-sitter-c.workspace = true
+tree-sitter-cpp.workspace = true
+tree-sitter-c-sharp.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-php.workspace = true
+tree-sitter-scala.workspace = true
+tree-sitter-dart.workspace = true
 jsonschema = "0.45"
 rusqlite = { version = "0.39", features = ["bundled"] }
 
@@ -58,6 +76,8 @@ libc = "0.2"
 # rush-backend = ["rush"]
 # For now, declare the feature so cfg(feature = "rush-backend") compiles without warnings.
 rush-backend = []
+mana-api = ["dep:mana-core"]
+mana-tool = ["mana-api", "dep:mana"]
 
 [[bench]]
 name = "core_hot_paths"

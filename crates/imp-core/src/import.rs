@@ -6,7 +6,6 @@ pub struct DetectedSource {
     pub agent: AgentSource,
     pub skills: Vec<DetectedSkill>,
     pub agents_md: Vec<DetectedAgentsMd>,
-    pub typescript_extensions: Vec<DetectedTypeScriptExtension>,
 }
 
 /// Which agent tool the source comes from.
@@ -33,23 +32,6 @@ impl AgentSource {
             Self::Codex => "codex",
         }
     }
-}
-
-/// A TypeScript extension discovered in another agent's config.
-#[derive(Debug, Clone)]
-pub struct DetectedTypeScriptExtension {
-    pub name: String,
-    pub source_path: PathBuf,
-    pub entrypoints: Vec<PathBuf>,
-    pub package_name: Option<String>,
-    pub shape: TypeScriptExtensionShape,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TypeScriptExtensionShape {
-    SingleFile,
-    PackageJson,
-    FallbackIndex,
 }
 
 /// A skill discovered in another agent's config.
@@ -106,8 +88,6 @@ fn detect_pi(home: &Path) -> Option<DetectedSource> {
     }
 
     let skills = discover_skills_in_dir(&pi_dir.join("skills"));
-    let typescript_extensions = discover_pi_typescript_extensions(&pi_dir.join("extensions"));
-
     let mut agents_md = Vec::new();
     let agents_path = pi_dir.join("AGENTS.md");
     if agents_path.exists() {
@@ -117,7 +97,7 @@ fn detect_pi(home: &Path) -> Option<DetectedSource> {
         });
     }
 
-    if skills.is_empty() && agents_md.is_empty() && typescript_extensions.is_empty() {
+    if skills.is_empty() && agents_md.is_empty() {
         return None;
     }
 
@@ -125,7 +105,6 @@ fn detect_pi(home: &Path) -> Option<DetectedSource> {
         agent: AgentSource::Pi,
         skills,
         agents_md,
-        typescript_extensions,
     })
 }
 
@@ -154,7 +133,6 @@ fn detect_claude_code(home: &Path) -> Option<DetectedSource> {
         agent: AgentSource::ClaudeCode,
         skills: Vec::new(),
         agents_md,
-        typescript_extensions: Vec::new(),
     })
 }
 
@@ -184,98 +162,7 @@ fn detect_codex(home: &Path) -> Option<DetectedSource> {
         agent: AgentSource::Codex,
         skills: Vec::new(),
         agents_md,
-        typescript_extensions: Vec::new(),
     })
-}
-
-fn discover_pi_typescript_extensions(dir: &Path) -> Vec<DetectedTypeScriptExtension> {
-    let mut extensions = Vec::new();
-
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return extensions,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            if path.extension().and_then(|ext| ext.to_str()) == Some("ts") {
-                if let Some(name) = file_stem_string(&path) {
-                    extensions.push(DetectedTypeScriptExtension {
-                        name,
-                        source_path: path.clone(),
-                        entrypoints: vec![path],
-                        package_name: None,
-                        shape: TypeScriptExtensionShape::SingleFile,
-                    });
-                }
-            }
-            continue;
-        }
-
-        if !path.is_dir() {
-            continue;
-        }
-
-        if let Some(extension) = detect_pi_extension_dir(&path) {
-            extensions.push(extension);
-        }
-    }
-
-    extensions.sort_by(|a, b| a.name.cmp(&b.name));
-    extensions
-}
-
-fn detect_pi_extension_dir(dir: &Path) -> Option<DetectedTypeScriptExtension> {
-    let name = dir.file_name()?.to_string_lossy().to_string();
-    let package_json = dir.join("package.json");
-
-    if package_json.exists() {
-        if let Ok(content) = std::fs::read_to_string(&package_json) {
-            if let Ok(package) = serde_json::from_str::<serde_json::Value>(&content) {
-                let entrypoints = package
-                    .get("pi")
-                    .and_then(|pi| pi.get("extensions"))
-                    .and_then(|extensions| extensions.as_array())
-                    .map(|extensions| {
-                        extensions
-                            .iter()
-                            .filter_map(|entry| entry.as_str())
-                            .map(|entry| dir.join(entry))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-
-                if !entrypoints.is_empty() {
-                    return Some(DetectedTypeScriptExtension {
-                        name,
-                        source_path: dir.to_path_buf(),
-                        entrypoints,
-                        package_name: package
-                            .get("name")
-                            .and_then(|value| value.as_str())
-                            .map(ToOwned::to_owned),
-                        shape: TypeScriptExtensionShape::PackageJson,
-                    });
-                }
-            }
-        }
-    }
-
-    let index = dir.join("index.ts");
-    index.exists().then(|| DetectedTypeScriptExtension {
-        name,
-        source_path: dir.to_path_buf(),
-        entrypoints: vec![index],
-        package_name: None,
-        shape: TypeScriptExtensionShape::FallbackIndex,
-    })
-}
-
-fn file_stem_string(path: &Path) -> Option<String> {
-    path.file_stem()
-        .map(|stem| stem.to_string_lossy().to_string())
-        .filter(|stem| !stem.is_empty())
 }
 
 fn discover_skills_in_dir(dir: &Path) -> Vec<DetectedSkill> {
@@ -418,49 +305,6 @@ pub fn import_skills(
     Ok(result)
 }
 
-/// Copy TypeScript extensions from a detected source into imp's project extension directory.
-pub fn import_typescript_extensions(
-    extensions: &[DetectedTypeScriptExtension],
-    imp_extensions_dir: &Path,
-    namespace: &str,
-) -> std::io::Result<ImportResult> {
-    let namespaced_dir = imp_extensions_dir.join(namespace);
-    std::fs::create_dir_all(&namespaced_dir)?;
-
-    let mut result = ImportResult {
-        copied: Vec::new(),
-        skipped: Vec::new(),
-    };
-
-    for extension in extensions {
-        let dest_dir = namespaced_dir.join(&extension.name);
-        if dest_dir.exists() {
-            result
-                .skipped
-                .push((extension.name.clone(), SkipReason::AlreadyExists));
-            continue;
-        }
-
-        let copy_result = if extension.source_path.is_dir() {
-            copy_dir_recursive(&extension.source_path, &dest_dir)
-        } else {
-            std::fs::create_dir_all(&dest_dir).and_then(|()| {
-                std::fs::copy(&extension.source_path, dest_dir.join("index.ts")).map(|_| ())
-            })
-        };
-
-        match copy_result {
-            Ok(()) => result.copied.push(extension.name.clone()),
-            Err(e) => result.skipped.push((
-                extension.name.clone(),
-                SkipReason::CopyFailed(e.to_string()),
-            )),
-        }
-    }
-
-    Ok(result)
-}
-
 /// Copy an AGENTS.md/CLAUDE.md file into imp's config as AGENTS.md.
 ///
 /// Returns the destination path, or None if it already exists.
@@ -511,33 +355,6 @@ mod tests {
         .unwrap();
     }
 
-    fn write_pi_package(dir: &Path, name: &str, package_name: &str) {
-        let package_dir = dir.join(name);
-        std::fs::create_dir_all(&package_dir).unwrap();
-        std::fs::write(
-            package_dir.join("index.ts"),
-            "export default function(pi) {}\n",
-        )
-        .unwrap();
-        std::fs::write(
-            package_dir.join("package.json"),
-            format!(
-                r#"{{"name":"{package_name}","type":"module","pi":{{"extensions":["./index.ts"]}}}}"#
-            ),
-        )
-        .unwrap();
-    }
-
-    fn write_pi_fallback_package(dir: &Path, name: &str) {
-        let package_dir = dir.join(name);
-        std::fs::create_dir_all(&package_dir).unwrap();
-        std::fs::write(
-            package_dir.join("index.ts"),
-            "export default function(pi) {}\n",
-        )
-        .unwrap();
-    }
-
     #[test]
     fn detect_pi_skills() {
         let home = TempDir::new().unwrap();
@@ -554,46 +371,6 @@ mod tests {
         let names: Vec<&str> = sources[0].skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"rust"));
         assert!(names.contains(&"testing"));
-    }
-
-    #[test]
-    fn detect_pi_typescript_extensions() {
-        let home = TempDir::new().unwrap();
-        let extensions_dir = home.path().join(".pi").join("agent").join("extensions");
-        std::fs::create_dir_all(&extensions_dir).unwrap();
-        std::fs::write(
-            extensions_dir.join("ask.ts"),
-            "export default function(pi) {}\n",
-        )
-        .unwrap();
-        write_pi_package(
-            &extensions_dir,
-            "color-palette",
-            "pi-extension-color-palette",
-        );
-        write_pi_fallback_package(&extensions_dir, "mana");
-
-        let sources = detect_sources(home.path());
-        assert_eq!(sources.len(), 1);
-        let extensions = &sources[0].typescript_extensions;
-        assert_eq!(extensions.len(), 3);
-
-        let ask = extensions.iter().find(|ext| ext.name == "ask").unwrap();
-        assert_eq!(ask.shape, TypeScriptExtensionShape::SingleFile);
-        assert_eq!(ask.entrypoints.len(), 1);
-
-        let color_palette = extensions
-            .iter()
-            .find(|ext| ext.name == "color-palette")
-            .unwrap();
-        assert_eq!(color_palette.shape, TypeScriptExtensionShape::PackageJson);
-        assert_eq!(
-            color_palette.package_name.as_deref(),
-            Some("pi-extension-color-palette")
-        );
-
-        let mana = extensions.iter().find(|ext| ext.name == "mana").unwrap();
-        assert_eq!(mana.shape, TypeScriptExtensionShape::FallbackIndex);
     }
 
     #[test]
@@ -702,53 +479,6 @@ mod tests {
         // Original content preserved
         let content = std::fs::read_to_string(dest.join("rust").join("SKILL.md")).unwrap();
         assert_eq!(content, "existing");
-    }
-
-    #[test]
-    fn import_typescript_extensions_copies_to_namespace() {
-        let home = TempDir::new().unwrap();
-        let source_dir = home.path().join("source");
-        std::fs::create_dir_all(&source_dir).unwrap();
-        std::fs::write(
-            source_dir.join("ask.ts"),
-            "export default function(pi) {}\n",
-        )
-        .unwrap();
-        write_pi_package(&source_dir, "color-palette", "pi-extension-color-palette");
-
-        let extensions = discover_pi_typescript_extensions(&source_dir);
-        let dest = home.path().join(".imp").join("extensions");
-        let result = import_typescript_extensions(&extensions, &dest, "pi").unwrap();
-
-        assert_eq!(result.copied.len(), 2);
-        assert!(result.skipped.is_empty());
-        assert!(dest.join("pi").join("ask").join("index.ts").exists());
-        assert!(dest
-            .join("pi")
-            .join("color-palette")
-            .join("package.json")
-            .exists());
-    }
-
-    #[test]
-    fn import_typescript_extensions_skips_existing() {
-        let home = TempDir::new().unwrap();
-        let source_dir = home.path().join("source");
-        std::fs::create_dir_all(&source_dir).unwrap();
-        std::fs::write(
-            source_dir.join("ask.ts"),
-            "export default function(pi) {}\n",
-        )
-        .unwrap();
-
-        let extensions = discover_pi_typescript_extensions(&source_dir);
-        let dest = home.path().join(".imp").join("extensions");
-        std::fs::create_dir_all(dest.join("pi").join("ask")).unwrap();
-
-        let result = import_typescript_extensions(&extensions, &dest, "pi").unwrap();
-        assert!(result.copied.is_empty());
-        assert_eq!(result.skipped.len(), 1);
-        assert!(matches!(result.skipped[0].1, SkipReason::AlreadyExists));
     }
 
     #[test]

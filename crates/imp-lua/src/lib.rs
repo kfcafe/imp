@@ -1242,6 +1242,25 @@ mod tests {
     }
 
     #[test]
+    fn imp_exec_timeout_helper_returns_error() {
+        let started = std::time::Instant::now();
+        let mut command = std::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg("sleep 5")
+            .stdin(std::process::Stdio::null());
+
+        let result =
+            crate::bridge::run_lua_exec_command(command, std::time::Duration::from_millis(50));
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut
+        ));
+    }
+
+    #[test]
     fn imp_secret_errors_when_disabled() {
         let rt = make_runtime();
         let result = rt.exec(

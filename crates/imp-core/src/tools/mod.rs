@@ -1,19 +1,19 @@
 pub mod ask;
 pub mod bash;
+pub mod code_intel;
 pub mod edit;
-pub mod extend;
 pub mod git;
 pub mod lua;
+#[cfg(feature = "mana-tool")]
 pub mod mana;
 pub mod memory;
 pub mod multi_edit;
 pub mod query;
 pub mod read;
 pub mod scan;
-pub mod session_search;
 pub mod shell;
 pub mod web;
-pub mod worktree;
+pub mod workflow;
 pub mod write;
 
 use std::collections::hash_map::DefaultHasher;
@@ -994,6 +994,22 @@ pub fn suggest_similar_files(cwd: &Path, target: &str) -> Vec<String> {
 // ── Diff generation ─────────────────────────────────────────────────
 
 /// Generate a unified diff between old and new content.
+pub fn line_change_counts(old: &str, new: &str) -> (usize, usize) {
+    use similar::ChangeTag;
+
+    let diff = similar::TextDiff::from_lines(old, new);
+    let mut added = 0;
+    let mut removed = 0;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => added += 1,
+            ChangeTag::Delete => removed += 1,
+            ChangeTag::Equal => {}
+        }
+    }
+    (added, removed)
+}
+
 pub fn generate_diff(file_path: &str, old: &str, new: &str) -> String {
     use similar::TextDiff;
 

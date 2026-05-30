@@ -4,6 +4,8 @@
 //! server-rendered pages. Won't work for heavy SPAs that require JS execution.
 
 use reqwest::Client;
+use std::sync::OnceLock;
+use std::time::Duration;
 use url::Url;
 
 use super::types::{ContentFormat, ExtractionQuality, PageContent};
@@ -14,6 +16,20 @@ pub(crate) const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_1
 pub(crate) const ACCEPT_HEADER: &str =
     "text/markdown,text/plain;q=0.9,text/html;q=0.8,application/xhtml+xml;q=0.7,*/*;q=0.5";
 const MAX_RESPONSE_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_REDIRECTS: usize = 10;
+
+fn no_redirect_client() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("failed to build read HTTP client")
+    })
+}
 
 /// Fetch a URL and extract its readable content.
 pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent, ReadError> {
@@ -25,16 +41,8 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
             .map_err(|err| ReadError::Youtube(err.to_string()));
     }
 
-    let requested_url = url.to_string();
-
-    let response = client
-        .get(url)
-        .header("User-Agent", USER_AGENT)
-        .header("Accept", ACCEPT_HEADER)
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .send()
-        .await
-        .map_err(|e| ReadError::Fetch(e.to_string()))?;
+    let requested_url = redact_url_for_display(url);
+    let response = fetch_validated_redirects(no_redirect_client(), parsed_url).await?;
 
     let status_code = response.status().as_u16();
     if !response.status().is_success() {
@@ -70,8 +78,7 @@ pub async fn fetch_and_extract(client: &Client, url: &str) -> Result<PageContent
         return Err(ReadError::NotHtml(content_type));
     }
 
-    let final_url = response.url().to_string();
-    validate_url(&final_url)?;
+    let final_url = redact_url_for_display(response.url().as_str());
     let was_redirected = final_url != requested_url;
     if let Some(content_length) = response.content_length() {
         if content_length > MAX_RESPONSE_BYTES {
@@ -151,6 +158,104 @@ struct ResponseMeta {
     format_received: ContentFormat,
     was_redirected: bool,
     raw_body_bytes: usize,
+}
+
+async fn fetch_validated_redirects(
+    client: &Client,
+    initial_url: Url,
+) -> Result<reqwest::Response, ReadError> {
+    let mut current_url = initial_url;
+    for _ in 0..=MAX_REDIRECTS {
+        validate_url(current_url.as_str())?;
+        let response = client
+            .get(current_url.clone())
+            .header("User-Agent", USER_AGENT)
+            .header("Accept", ACCEPT_HEADER)
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .send()
+            .await
+            .map_err(|e| ReadError::Fetch(e.to_string()))?;
+
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+
+        let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
+            return Ok(response);
+        };
+        let location = location
+            .to_str()
+            .map_err(|_| ReadError::InvalidUrl("redirect Location is not valid UTF-8".into()))?;
+        let next_url = validated_redirect_location(&current_url, location)?;
+        current_url = next_url;
+    }
+
+    Err(ReadError::TooManyRedirects)
+}
+
+fn redact_url_for_display(url: &str) -> String {
+    let Ok(mut parsed) = Url::parse(url) else {
+        return url.to_string();
+    };
+    let pairs = parsed
+        .query_pairs()
+        .map(|(key, value)| {
+            if is_sensitive_query_key(&key) {
+                (key.into_owned(), "[REDACTED]".to_string())
+            } else {
+                (key.into_owned(), value.into_owned())
+            }
+        })
+        .collect::<Vec<_>>();
+    if pairs.is_empty() {
+        return parsed.to_string();
+    }
+    parsed.set_query(None);
+    {
+        let mut query = parsed.query_pairs_mut();
+        for (key, value) in pairs {
+            query.append_pair(&key, &value);
+        }
+    }
+    parsed.to_string()
+}
+
+fn is_sensitive_query_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "access_token"
+            | "accesstoken"
+            | "api_key"
+            | "apikey"
+            | "auth"
+            | "authorization"
+            | "code"
+            | "id_token"
+            | "idtoken"
+            | "key"
+            | "password"
+            | "refresh_token"
+            | "refreshtoken"
+            | "secret"
+            | "sig"
+            | "signature"
+            | "token"
+    ) || normalized.ends_with("token")
+        || normalized.ends_with("secret")
+        || normalized.ends_with("apikey")
+}
+
+fn validated_redirect_location(current_url: &Url, location: &str) -> Result<Url, ReadError> {
+    let next_url = current_url
+        .join(location)
+        .map_err(|e| ReadError::InvalidUrl(format!("invalid redirect Location: {e}")))?;
+    validate_url(next_url.as_str())?;
+    Ok(next_url)
 }
 
 /// Extract readable content from raw HTML using Mozilla Readability algorithm.
@@ -400,6 +505,7 @@ pub enum ReadError {
     NoContent,
     InsufficientContent,
     ResponseTooLarge(u64),
+    TooManyRedirects,
     Youtube(String),
 }
 
@@ -419,6 +525,7 @@ impl std::fmt::Display for ReadError {
                 "Response too large: {bytes} bytes exceeds {} byte limit",
                 MAX_RESPONSE_BYTES
             ),
+            Self::TooManyRedirects => write!(f, "Too many redirects"),
             Self::Youtube(msg) => write!(f, "YouTube extraction failed: {msg}"),
         }
     }
@@ -453,6 +560,42 @@ mod tests {
                 "expected unsafe URL error for {url}, got {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn redact_url_for_display_redacts_sensitive_query_values() {
+        let redacted = redact_url_for_display(
+            "https://example.com/page?token=secret&ok=value&api_key=hidden&signature=sig",
+        );
+        assert!(!redacted.contains("secret"));
+        assert!(!redacted.contains("hidden"));
+        assert!(!redacted.contains("=sig"));
+        assert!(redacted.contains("ok=value"));
+        assert!(redacted.contains("token=%5BREDACTED%5D"));
+    }
+
+    #[test]
+    fn redirect_location_rejects_unsafe_targets_before_fetching() {
+        let current = Url::parse("https://example.com/start").unwrap();
+        for location in [
+            "http://127.0.0.1:8080/admin",
+            "//localhost:3000/private",
+            "http://169.254.169.254/latest/meta-data",
+            "http://[::1]/",
+        ] {
+            let result = validated_redirect_location(&current, location);
+            assert!(
+                matches!(result, Err(ReadError::UnsafeUrl(_))),
+                "expected unsafe redirect for {location}, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_location_allows_relative_public_targets() {
+        let current = Url::parse("https://example.com/start").unwrap();
+        let result = validated_redirect_location(&current, "/article").unwrap();
+        assert_eq!(result.as_str(), "https://example.com/article");
     }
 
     #[test]

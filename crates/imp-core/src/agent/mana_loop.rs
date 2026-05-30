@@ -14,7 +14,7 @@ pub enum ManaActionClass {
 pub fn classify_mana_action(action: &str) -> ManaActionClass {
     match action {
         "guide" | "template" => ManaActionClass::ReadHelp,
-        "status" | "list" | "show" | "logs" | "agents" | "next" | "tree" | "run_state" => {
+        "status" | "list" | "show" | "logs" | "agents" | "next" | "tree" => {
             ManaActionClass::Inspect
         }
         "update" | "notes_append" => ManaActionClass::ProgressCheckpoint,
@@ -23,7 +23,7 @@ pub fn classify_mana_action(action: &str) -> ManaActionClass {
             ManaActionClass::DecisionFact
         }
         "claim" | "release" | "verify" | "close" | "reopen" | "fail" => ManaActionClass::Lifecycle,
-        "run" | "evaluate" => ManaActionClass::Orchestration,
+        "run" | "evaluate" | "run_state" => ManaActionClass::Orchestration,
         "delete" => ManaActionClass::Destructive,
         _ => ManaActionClass::Unknown,
     }
@@ -129,7 +129,7 @@ pub fn enrich_mana_result_details(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mana-tool"))]
 mod tests {
     use super::*;
     use crate::tools::{mana::ManaTool, Tool};
@@ -165,7 +165,6 @@ mod tests {
             ("guide", ManaActionClass::ReadHelp),
             ("template", ManaActionClass::ReadHelp),
             ("show", ManaActionClass::Inspect),
-            ("run_state", ManaActionClass::Inspect),
             ("update", ManaActionClass::ProgressCheckpoint),
             ("notes_append", ManaActionClass::ProgressCheckpoint),
             ("create", ManaActionClass::GraphMutation),
@@ -176,6 +175,7 @@ mod tests {
             ("close", ManaActionClass::Lifecycle),
             ("run", ManaActionClass::Orchestration),
             ("evaluate", ManaActionClass::Orchestration),
+            ("run_state", ManaActionClass::Orchestration),
             ("delete", ManaActionClass::Destructive),
             ("not_real", ManaActionClass::Unknown),
         ];

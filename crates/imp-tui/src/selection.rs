@@ -70,9 +70,9 @@ impl TextSurface {
         self.rect.width > 0
             && self.rect.height > 0
             && col >= self.rect.x
-            && col < self.rect.x + self.rect.width
+            && (col as u32) < (self.rect.x as u32 + self.rect.width as u32)
             && row >= self.rect.y
-            && row < self.rect.y + self.rect.height
+            && (row as u32) < (self.rect.y as u32 + self.rect.height as u32)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -135,7 +135,7 @@ impl TextSurface {
         if rel >= self.rect.height as usize {
             None
         } else {
-            Some(self.rect.y + rel as u16)
+            Some(self.rect.y.saturating_add(rel as u16))
         }
     }
 
@@ -259,8 +259,8 @@ impl Widget for SelectionOverlay<'_> {
             };
 
             for col in start_col..=end_col {
-                let x = surface.rect.x + col as u16;
-                if x >= surface.rect.x + surface.rect.width {
+                let x = surface.rect.x.saturating_add(col as u16);
+                if (x as u32) >= (surface.rect.x as u32 + surface.rect.width as u32) {
                     break;
                 }
                 if let Some(cell) = buf.cell_mut((x, row)) {
@@ -268,5 +268,74 @@ impl Widget for SelectionOverlay<'_> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contains_handles_saturated_rect_edges() {
+        let surface = TextSurface::new(
+            SelectablePane::Chat,
+            Rect {
+                x: u16::MAX,
+                y: u16::MAX,
+                width: 1,
+                height: 1,
+            },
+            vec!["x".to_string()],
+            0,
+        );
+
+        assert!(surface.contains(u16::MAX, u16::MAX));
+    }
+
+    #[test]
+    fn visible_row_for_line_handles_saturated_y() {
+        let surface = TextSurface::new(
+            SelectablePane::Chat,
+            Rect {
+                x: 0,
+                y: u16::MAX,
+                width: 1,
+                height: 1,
+            },
+            vec!["x".to_string()],
+            0,
+        );
+
+        assert_eq!(surface.visible_row_for_line(0), Some(u16::MAX));
+    }
+
+    #[test]
+    fn overlay_render_handles_saturated_x_without_panicking() {
+        let theme = Theme::default();
+        let surface = TextSurface::new(
+            SelectablePane::Chat,
+            Rect {
+                x: u16::MAX,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            vec!["x".to_string()],
+            0,
+        );
+        let selection = SelectionState::new(
+            SelectablePane::Chat,
+            SelectionPos { line: 0, col: 0 },
+            SelectionPos { line: 0, col: 0 },
+        );
+        let mut buf = Buffer::empty(Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        });
+
+        SelectionOverlay::new(&theme, Some(&selection), Some(&surface), None)
+            .render(buf.area, &mut buf);
     }
 }

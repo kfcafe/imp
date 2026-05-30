@@ -116,6 +116,7 @@ pub struct SessionInfo {
     pub updated_at: u64,
     pub message_count: usize,
     pub first_message: Option<String>,
+    pub last_message: Option<String>,
     pub name: Option<String>,
     pub summary: Option<String>,
 }
@@ -178,6 +179,15 @@ pub struct SessionManager {
     leaf_id: Option<String>,
     session_name: Option<String>,
     session_summary: Option<String>,
+}
+
+fn set_private_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 impl SessionManager {
@@ -415,6 +425,7 @@ impl SessionManager {
                 .create(true)
                 .append(true)
                 .open(path)?;
+            set_private_permissions(path)?;
             let line = serde_json::to_string(&entry)?;
             writeln!(file, "{line}")?;
         }
@@ -1027,92 +1038,40 @@ impl SessionManager {
 
     /// List available sessions in a directory.
     pub fn list(session_dir: &Path) -> Result<Vec<SessionInfo>> {
+        Self::list_page(session_dir, 0, usize::MAX, None)
+    }
+
+    pub fn list_page(
+        session_dir: &Path,
+        offset: usize,
+        limit: usize,
+        query: Option<&str>,
+    ) -> Result<Vec<SessionInfo>> {
+        let mut files = recent_session_files(session_dir)?;
+        if offset > 0 {
+            files = files.into_iter().skip(offset).collect();
+        }
+        if query.is_none() {
+            files.truncate(limit);
+        }
+
+        let query = query
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
         let mut sessions = Vec::new();
-        if !session_dir.exists() {
-            return Ok(sessions);
-        }
-
-        for dir_entry in std::fs::read_dir(session_dir)? {
-            let dir_entry = dir_entry?;
-            let path = dir_entry.path();
-            if path.extension().is_none_or(|e| e != "jsonl") {
-                continue;
-            }
-
-            let updated_at = dir_entry
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-
-            if let Ok(session) = Self::open(&path) {
-                let cwd = session
-                    .entries
-                    .iter()
-                    .find_map(|e| match e {
-                        SessionEntry::Header { cwd, .. } => Some(cwd.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-
-                let created_at = session
-                    .entries
-                    .iter()
-                    .find_map(|e| match e {
-                        SessionEntry::Header { created_at, .. } => Some(*created_at),
-                        _ => None,
-                    })
-                    .unwrap_or(0);
-
-                let mut message_count = session
-                    .entries
-                    .iter()
-                    .filter(|e| matches!(e, SessionEntry::Message { .. }))
-                    .count();
-
-                let first_message = session.entries.iter().find_map(|e| match e {
-                    SessionEntry::Message { message, .. } => extract_text(message),
-                    _ => None,
-                });
-
-                if message_count == 0 {
-                    message_count = session
-                        .entries
-                        .iter()
-                        .filter(|e| matches!(e, SessionEntry::Compaction { .. }))
-                        .count();
+        for (path, updated_at) in files {
+            if let Ok(info) = read_session_info(&path, updated_at) {
+                if query
+                    .as_deref()
+                    .is_none_or(|needle| session_info_matches(&info, needle))
+                {
+                    sessions.push(info);
+                    if query.is_none() && sessions.len() >= limit {
+                        break;
+                    }
                 }
-
-                let name = session.name().map(str::to_string);
-                let summary = session
-                    .summary()
-                    .map(str::to_string)
-                    .or_else(|| derive_session_summary(&session.entries));
-
-                sessions.push(SessionInfo {
-                    id: path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_default(),
-                    path,
-                    cwd,
-                    created_at,
-                    updated_at,
-                    message_count,
-                    first_message,
-                    name,
-                    summary,
-                });
             }
         }
-
-        sessions.sort_by(|a, b| {
-            b.updated_at
-                .cmp(&a.updated_at)
-                .then_with(|| b.created_at.cmp(&a.created_at))
-        });
         Ok(sessions)
     }
 }
@@ -1768,6 +1727,176 @@ fn summarize_session_title(text: &str, max_chars: usize) -> String {
     truncate_chars_with_suffix(summary.trim(), max_chars, "…")
 }
 
+fn recent_session_files(session_dir: &Path) -> Result<Vec<(PathBuf, u64)>> {
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    if !session_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    for dir_entry in std::fs::read_dir(session_dir)? {
+        let dir_entry = dir_entry?;
+        let path = dir_entry.path();
+        if path.extension().is_none_or(|e| e != "jsonl") {
+            continue;
+        }
+
+        let modified = dir_entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let updated_at = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        files.push((path, updated_at, modified));
+    }
+
+    files.sort_by(|(path_a, _, modified_a), (path_b, _, modified_b)| {
+        modified_b.cmp(modified_a).then_with(|| path_b.cmp(path_a))
+    });
+    Ok(files
+        .into_iter()
+        .map(|(path, updated_at, _)| (path, updated_at))
+        .collect())
+}
+
+fn session_info_matches(info: &SessionInfo, needle: &str) -> bool {
+    info.name
+        .as_deref()
+        .is_some_and(|value| value.to_ascii_lowercase().contains(needle))
+        || info
+            .summary
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains(needle))
+        || info
+            .first_message
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains(needle))
+        || info.cwd.to_ascii_lowercase().contains(needle)
+        || info.id.to_ascii_lowercase().contains(needle)
+}
+
+fn read_session_info(path: &Path, updated_at: u64) -> Result<SessionInfo> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    let mut cwd = String::new();
+    let mut created_at = 0;
+    let mut message_count = 0;
+    let mut compaction_count = 0;
+    let mut first_message = None;
+    let mut last_message = None;
+    let mut name = None;
+    let mut summary = None;
+    let mut summary_parts = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<SessionEntry>(&line) else {
+            continue;
+        };
+        match entry {
+            SessionEntry::Header {
+                cwd: entry_cwd,
+                created_at: entry_created_at,
+                ..
+            } => {
+                cwd = entry_cwd;
+                created_at = entry_created_at;
+            }
+            SessionEntry::Message { message, .. } => {
+                message_count += 1;
+                if first_message.is_none() {
+                    first_message = extract_text(&message);
+                }
+                if let Some(text) = extract_text(&message) {
+                    last_message = Some(text);
+                }
+                if summary.is_none() && summary_parts.len() < 3 {
+                    if let Message::Assistant(_) = message {
+                        if let Some(text) = extract_text(&message) {
+                            let trimmed = cleanup_summary_text(&text);
+                            if !trimmed.is_empty() {
+                                summary_parts.push(trimmed);
+                            }
+                        }
+                    }
+                }
+            }
+            SessionEntry::Compaction {
+                summary: compaction_summary,
+                ..
+            } => {
+                compaction_count += 1;
+                if summary.is_none() {
+                    let trimmed = cleanup_summary_text(&compaction_summary);
+                    if !trimmed.is_empty() {
+                        summary_parts.clear();
+                        summary_parts.push(trimmed);
+                    }
+                }
+            }
+            SessionEntry::SessionMeta {
+                name: meta_name,
+                summary: meta_summary,
+                ..
+            } => {
+                name = meta_name;
+                if meta_summary
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                {
+                    summary = meta_summary
+                        .map(|value| truncate_chars_with_suffix(value.trim(), 120, "…"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let summary = summary.or_else(|| {
+        if summary_parts.is_empty() {
+            None
+        } else {
+            let collapsed = summary_parts
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if collapsed.is_empty() {
+                None
+            } else {
+                Some(truncate_chars_with_suffix(&collapsed, 120, "…"))
+            }
+        }
+    });
+
+    Ok(SessionInfo {
+        id: path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        path: path.to_path_buf(),
+        cwd,
+        created_at,
+        updated_at,
+        message_count: if message_count == 0 {
+            compaction_count
+        } else {
+            message_count
+        },
+        first_message,
+        last_message,
+        name,
+        summary,
+    })
+}
+
 /// Read just the first non-empty line of a file.
 fn read_first_line(path: &Path) -> Result<String> {
     use std::io::BufRead;
@@ -1901,6 +2030,7 @@ mod tests {
             updated_at: 0,
             message_count: 1,
             first_message: Some("help me with oauth login issues".into()),
+            last_message: Some("fixed oauth login issues".into()),
             name: None,
             summary: Some(
                 "Investigated OAuth login failures and refreshed provider auth flow".into(),
@@ -2046,6 +2176,55 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn session_jsonl_is_private_on_disk() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut mgr = SessionManager::new(Path::new("/tmp"), tmp.path()).unwrap();
+        mgr.append_tool_result_message(ToolResultMessage {
+            tool_call_id: "call-private".into(),
+            tool_name: "bash".into(),
+            content: vec![ContentBlock::Text {
+                text: "private prompt".into(),
+            }],
+            is_error: false,
+            details: serde_json::Value::Null,
+            timestamp: 0,
+        })
+        .unwrap();
+
+        let mode = std::fs::metadata(mgr.path().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn append_tool_result_message_persists_redacted_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut mgr = SessionManager::new(Path::new("/tmp"), tmp.path()).unwrap();
+        mgr.append_tool_result_message(ToolResultMessage {
+            tool_call_id: "call-redacted".into(),
+            tool_name: "bash".into(),
+            content: vec![ContentBlock::Text {
+                text: "[REDACTED:test-service]".into(),
+            }],
+            is_error: false,
+            details: serde_json::Value::Null,
+            timestamp: 0,
+        })
+        .unwrap();
+
+        let path = mgr.path().unwrap();
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert!(contents.contains("[REDACTED:test-service]"));
+        assert!(!contents.contains("native-secret-value"));
+    }
+
     #[test]
     fn session_create_append_reopen() {
         let tmp = TempDir::new().unwrap();
@@ -2173,15 +2352,55 @@ mod tests {
         counts.sort();
         assert_eq!(counts, vec![1, 2]);
 
-        // first_message should be set
+        // first_message and last_message should be set
         for s in &sessions {
             assert!(s.first_message.is_some());
+            assert!(s.last_message.is_some());
         }
 
         assert!(sessions.iter().any(|s| s.name.as_deref() == Some("First")));
         assert!(sessions
             .iter()
             .any(|s| s.summary.as_deref() == Some("Second session summary")));
+    }
+
+    #[test]
+    fn session_list_page_orders_by_updated_time_and_limits() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join("sessions");
+        let cwd = tmp.path().join("project");
+
+        let mut old = SessionManager::new(&cwd, &session_dir).unwrap();
+        old.append(make_msg_entry("old", "old session")).unwrap();
+        let _old_path = old.path().unwrap().to_path_buf();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut new = SessionManager::new(&cwd, &session_dir).unwrap();
+        new.append(make_msg_entry("new", "new session")).unwrap();
+        let new_path = new.path().unwrap().to_path_buf();
+
+        let sessions = SessionManager::list_page(&session_dir, 0, 1, None).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].path, new_path);
+    }
+
+    #[test]
+    fn session_list_captures_last_message() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join("sessions");
+        let cwd = tmp.path().join("project");
+
+        let mut session = SessionManager::new(&cwd, &session_dir).unwrap();
+        session
+            .append(make_msg_entry("first", "first prompt"))
+            .unwrap();
+        session
+            .append(make_msg_entry("last", "latest response"))
+            .unwrap();
+
+        let sessions = SessionManager::list(&session_dir).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].first_message.as_deref(), Some("first prompt"));
+        assert_eq!(sessions[0].last_message.as_deref(), Some("latest response"));
     }
 
     #[test]

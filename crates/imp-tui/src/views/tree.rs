@@ -68,11 +68,7 @@ pub struct TreeViewState {
 
 impl TreeViewState {
     pub fn new(nodes: Vec<FlatTreeNode>, current_id: Option<String>) -> Self {
-        let selected_id = current_id
-            .as_deref()
-            .and_then(|id| nodes.iter().find(|n| n.id == id))
-            .map(|n| n.id.clone())
-            .or_else(|| nodes.first().map(|n| n.id.clone()));
+        let selected_id = nodes.last().map(|n| n.id.clone());
 
         Self {
             nodes,
@@ -124,6 +120,7 @@ impl TreeViewState {
         let current_branch_ids = self.current_branch_ids();
         self.nodes
             .iter()
+            .rev()
             .filter(|n| match self.filter_mode {
                 TreeFilterMode::All => true,
                 TreeFilterMode::CurrentBranch => current_branch_ids.contains(n.id.as_str()),
@@ -292,17 +289,28 @@ impl Widget for TreeView<'_> {
         }
 
         Clear.render(area, buf);
-        let block = Block::default()
-            .title(format!(
-                " Session Tree [{}] ",
+        let filtered = self.state.filtered_nodes();
+        let selected_index = self.state.selected_filtered_index().unwrap_or(0) + 1;
+        let title = if filtered.is_empty() {
+            format!(
+                " Session Tree · {} · newest first · 0/0 ",
                 self.state.filter_mode.label()
-            ))
+            )
+        } else {
+            format!(
+                " Session Tree · {} · newest first · {}/{} ",
+                self.state.filter_mode.label(),
+                selected_index,
+                filtered.len()
+            )
+        };
+        let block = Block::default()
+            .title(title)
             .borders(Borders::ALL)
             .border_style(self.theme.border_style());
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let filtered = self.state.filtered_nodes();
         if filtered.is_empty() {
             let line = Line::from(Span::styled(
                 "  No matching nodes",
@@ -312,11 +320,11 @@ impl Widget for TreeView<'_> {
             return;
         }
 
-        let has_preview = inner.width >= 96 && inner.height >= 10;
+        let has_preview = inner.width >= 140 && inner.height >= 18;
         let columns = if has_preview {
             Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(54), Constraint::Percentage(46)])
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(inner)
         } else {
             Layout::default()
@@ -325,7 +333,14 @@ impl Widget for TreeView<'_> {
                 .split(inner)
         };
 
-        render_tree_list(columns[0], self.state, &filtered, buf, self.theme);
+        render_tree_list(
+            columns[0],
+            self.state,
+            &filtered,
+            buf,
+            self.theme,
+            has_preview,
+        );
         if has_preview {
             render_tree_preview(columns[1], self.state.selected_node(), buf, self.theme);
         }
@@ -338,6 +353,7 @@ fn render_tree_list(
     filtered: &[&FlatTreeNode],
     buf: &mut Buffer,
     theme: &Theme,
+    show_tree_shape: bool,
 ) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -361,22 +377,23 @@ fn render_tree_list(
         let is_selected = scroll + row == selected_idx;
         let is_current = state.current_id.as_deref() == Some(&node.id);
 
-        let marker = if is_current { "● " } else { "  " };
-        let branch = if node.depth == 0 {
-            String::new()
-        } else if node.is_last_child {
-            "└─ ".to_string()
+        let marker = if is_current { "●" } else { " " };
+        let (indent, branch) = if show_tree_shape {
+            tree_prefix(node)
+        } else if node.depth == 0 {
+            (String::new(), String::new())
         } else {
-            "├─ ".to_string()
+            ("·".repeat(node.depth.min(8)), " ".to_string())
         };
-        let guides = render_guides(&node.guides);
-        let kind = format!("[{}] ", kind_tag(node));
+        let kind = kind_tag(node);
         let suffix = branch_suffix(node);
 
         let prefix_len = marker.chars().count()
-            + guides.chars().count()
+            + 1
+            + indent.chars().count()
             + branch.chars().count()
-            + kind.chars().count();
+            + kind.chars().count()
+            + 1;
         let suffix_len = suffix.chars().count();
         let summary_width = area.width.saturating_sub((prefix_len + suffix_len) as u16) as usize;
         let summary = truncate_chars_with_suffix(&node.summary, summary_width.max(8), "…");
@@ -395,9 +412,11 @@ fn render_tree_list(
 
         let line = Line::from(vec![
             Span::styled(marker.to_string(), theme.accent_style()),
-            Span::styled(guides, theme.muted_style()),
+            Span::raw(" "),
+            Span::styled(indent, theme.muted_style()),
             Span::styled(branch, theme.muted_style()),
             Span::styled(kind, Style::default().add_modifier(Modifier::DIM)),
+            Span::raw(" "),
             Span::styled(summary, style),
             Span::styled(suffix, theme.muted_style()),
         ]);
@@ -452,8 +471,7 @@ fn render_tree_preview(area: Rect, node: Option<&FlatTreeNode>, buf: &mut Buffer
         "Content:".to_string(),
         node.full_text.clone(),
         String::new(),
-        "Enter checks out here • f forks here • Ctrl+O cycles all/current/branch/no-tools/user"
-            .to_string(),
+        "Enter: checkout • f: fork • Ctrl+O: filter all/current/branches/no-tools/user".to_string(),
     ];
 
     let wrapped = wrap_lines(&lines, inner.width as usize, inner.height as usize);
@@ -475,14 +493,32 @@ fn render_tree_preview(area: Rect, node: Option<&FlatTreeNode>, buf: &mut Buffer
 
 fn branch_suffix(node: &FlatTreeNode) -> String {
     if node.child_count > 1 {
-        format!("  +{}", node.child_count)
+        format!(" +{}", node.child_count)
     } else if node.has_children {
-        "  ↳".to_string()
+        " ›".to_string()
     } else {
         String::new()
     }
 }
 
+fn tree_prefix(node: &FlatTreeNode) -> (String, String) {
+    if node.depth == 0 {
+        return (String::new(), String::new());
+    }
+
+    let visible_depth = node.guides.len().min(6);
+    let hidden_depth = node.guides.len().saturating_sub(visible_depth);
+    let mut indent = String::new();
+    if hidden_depth > 0 {
+        indent.push('…');
+    }
+    for guide in &node.guides[hidden_depth..] {
+        indent.push_str(if *guide { "│" } else { " " });
+    }
+
+    let branch = if node.is_last_child { "└" } else { "├" }.to_string();
+    (indent, branch)
+}
 fn kind_tag(node: &FlatTreeNode) -> &'static str {
     if node.is_compaction {
         "C"
@@ -493,14 +529,6 @@ fn kind_tag(node: &FlatTreeNode) -> &'static str {
     } else {
         "A"
     }
-}
-
-fn render_guides(guides: &[bool]) -> String {
-    let mut out = String::new();
-    for guide in guides {
-        out.push_str(if *guide { "│  " } else { "   " });
-    }
-    out
 }
 
 fn fallback_message_text(msg: &imp_llm::Message, text: String) -> String {
@@ -623,7 +651,7 @@ mod tests {
             .into_iter()
             .map(|n| n.id.as_str())
             .collect();
-        assert_eq!(ids, vec!["root", "left"]);
+        assert_eq!(ids, vec!["left", "root"]);
     }
 
     #[test]
@@ -673,20 +701,33 @@ mod tests {
             node("a1", "assistant"),
             node("t1", "tool"),
         ];
-        let mut state = TreeViewState::new(nodes, Some("u1".into()));
-        state.move_down();
-        state.move_down();
+        let mut state = TreeViewState::new(nodes, Some("t1".into()));
         assert_eq!(state.selected_id(), Some("t1"));
 
         state.cycle_filter(); // current-branch
         state.cycle_filter(); // branch-points
         state.cycle_filter(); // no-tools
 
-        assert_eq!(state.selected_id(), Some("u1"));
+        assert_eq!(state.selected_id(), Some("a1"));
     }
 
     #[test]
     fn render_guides_draws_vertical_connectors_for_open_ancestors() {
-        assert_eq!(render_guides(&[true, false, true]), "│     │  ");
+        let node = FlatTreeNode {
+            id: "child".into(),
+            parent_id: Some("parent".into()),
+            depth: 3,
+            guides: vec![true, false, true],
+            summary: "child".into(),
+            full_text: "child".into(),
+            kind_label: "assistant",
+            is_user: false,
+            is_tool: false,
+            is_compaction: false,
+            has_children: false,
+            child_count: 0,
+            is_last_child: false,
+        };
+        assert_eq!(tree_prefix(&node), ("│ │".to_string(), "├".to_string()));
     }
 }
