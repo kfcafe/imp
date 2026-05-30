@@ -24,10 +24,14 @@ pub mod types;
 pub mod typescript;
 pub mod zig;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use async_trait::async_trait;
+use rayon::prelude::*;
 use serde_json::json;
 
 use super::{truncate_head, truncate_line, Tool, ToolContext, ToolOutput, TruncationResult};
@@ -88,7 +92,7 @@ impl Tool for ScanTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["directory", "files", "extract", "search", "tests", "related", "references", "impact"],
+                    "enum": ["directory", "files", "extract", "search", "tests", "related"],
                     "description": "Scan operation"
                 },
                 "directory": {
@@ -111,13 +115,8 @@ impl Tool for ScanTool {
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["symbol", "text", "concept"],
-                    "description": "Search mode; default concept"
-                },
-                "preset": {
-                    "type": "string",
-                    "enum": ["definition", "edit_context", "module_context", "test_context"],
-                    "description": "Extraction preset"
+                    "enum": ["symbol", "text"],
+                    "description": "Search mode; default symbol"
                 },
                 "target": {
                     "type": "string",
@@ -149,17 +148,19 @@ impl Tool for ScanTool {
 
         let mut files = match action {
             "extract" => {
-                let target_values = params
-                    .get("targets")
-                    .or_else(|| params.get("files"))
-                    .and_then(|value| value.as_array());
-                let targets = match parse_string_array(target_values, "targets") {
-                    Ok(targets) if !targets.is_empty() => targets,
-                    Ok(_) => return Ok(ToolOutput::error("scan extract requires targets")),
-                    Err(message) => return Ok(ToolOutput::error(message)),
-                };
-                let preset = params["preset"].as_str();
-                return Ok(execute_extract_with_preset(&targets, preset, &ctx));
+                let mut targets = parse_string_array(params["targets"].as_array(), "targets")
+                    .map_err(|message| Error::Tool(message))?;
+                if let Some(target) = params["target"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|target| !target.is_empty())
+                {
+                    targets.insert(0, target.to_string());
+                }
+                if targets.is_empty() {
+                    return Ok(ToolOutput::error("scan extract requires target or targets"));
+                }
+                return Ok(execute_extract(&targets, &ctx));
             }
             "search" => {
                 let query = match params["query"]
@@ -170,7 +171,7 @@ impl Tool for ScanTool {
                     Some(query) => query,
                     None => return Ok(ToolOutput::error("scan search requires query")),
                 };
-                let mode = params["mode"].as_str().unwrap_or("concept");
+                let mode = params["mode"].as_str().unwrap_or("symbol");
                 let max_results = params["max_results"].as_u64().unwrap_or(10) as usize;
                 let files = files_from_params_or_directory(&params, &ctx)?;
                 return Ok(execute_search(
@@ -212,26 +213,9 @@ impl Tool for ScanTool {
                 return Ok(execute_related(files, &ctx.cwd, &target));
             }
             "references" | "impact" => {
-                let target = params["target"]
-                    .as_str()
-                    .map(str::to_string)
-                    .or_else(|| params["query"].as_str().map(str::to_string));
-                let Some(target) = target else {
-                    return Ok(ToolOutput::error(format!(
-                        "scan {action} requires target or query"
-                    )));
-                };
-                let max_results = params["max_results"].as_u64().unwrap_or(25) as usize;
-                let files = files_from_params_or_directory(&params, &ctx)?;
-                if action == "references" {
-                    return Ok(execute_references(
-                        files,
-                        &ctx.cwd,
-                        &target,
-                        max_results.max(1),
-                    ));
-                }
-                return Ok(execute_impact(files, &ctx.cwd, &target, max_results.max(1)));
+                return Ok(ToolOutput::text(
+                    "`references` and `impact` are not available in scan. Use `scan related` for grounded local context, `scan tests` for likely tests, or `bash`/`rg` for textual references.",
+                ));
             }
             "files" | "build" => {
                 let files = match parse_string_array(params["files"].as_array(), "files") {
@@ -261,8 +245,29 @@ impl Tool for ScanTool {
             return Ok(ToolOutput::text("No supported source files found."));
         }
 
-        let result = extract_files(&files, &ctx.cwd);
         let action_name = canonical_action(action);
+        if action_name == "directory" {
+            if let Some((output, types_count, functions_count)) =
+                fast_rust_directory_output(&files, &ctx.cwd)
+            {
+                return Ok(ToolOutput {
+                    content: vec![imp_llm::ContentBlock::Text {
+                        text: truncate_output(output),
+                    }],
+                    details: json!({
+                        "action": action_name,
+                        "files_analyzed": files.len(),
+                        "supported_languages": SUPPORTED_LANGUAGES,
+                        "types_count": types_count,
+                        "functions_count": functions_count,
+                        "fast_path": "rust_directory_skeleton",
+                    }),
+                    is_error: false,
+                });
+            }
+        }
+
+        let result = extract_files(&files, &ctx.cwd);
         let output = format_result(&result, &files, &ctx.cwd, action_name, None);
 
         Ok(ToolOutput {
@@ -335,84 +340,132 @@ fn files_from_params_or_directory(
 // ── extraction dispatch ─────────────────────────────────────────────
 
 pub fn extract_files(files: &[PathBuf], cwd: &Path) -> ScanResult {
-    let mut result = ScanResult::default();
-
-    for file in files {
-        let source = match std::fs::read_to_string(file) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        // Skip binary files
-        if source.as_bytes().contains(&0) {
-            continue;
-        }
-
-        let rel = file
-            .strip_prefix(cwd)
-            .unwrap_or(file)
-            .to_string_lossy()
-            .to_string();
-
-        let ext = file
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or_default();
-
-        match ext {
-            "rs" => rust::parse(&source, &rel, &mut result),
-            "ts" => {
-                if !rel.ends_with(".d.ts") {
-                    typescript::parse(&source, &rel, false, &mut result);
-                }
-            }
-            "tsx" => typescript::parse(&source, &rel, true, &mut result),
-            "py" => python::parse(&source, &rel, &mut result),
-            "go" => go::parse(&source, &rel, &mut result),
-            "kt" | "kts" => kotlin::parse(&source, &rel, &mut result),
-            "java" => java::parse(&source, &rel, &mut result),
-            "cs" => csharp::parse(&source, &rel, &mut result),
-            "c" | "h" => c::parse(&source, &rel, &mut result),
-            "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" => {
-                cpp::parse(&source, &rel, &mut result)
-            }
-            "rb" => ruby::parse(&source, &rel, &mut result),
-            "ex" | "exs" => elixir::parse(&source, &rel, &mut result),
-            "lua" | "luau" => lua::parse(&source, &rel, &mut result),
-            "ml" | "mli" => ocaml::parse(&source, &rel, &mut result),
-            "zig" | "zon" => zig::parse(&source, &rel, &mut result),
-            "odin" => odin::parse(&source, &rel, &mut result),
-            "sh" | "bash" | "zsh" | "fish" => shell::parse(&source, &rel, &mut result),
-            "pl" | "pm" | "t" => perl::parse(&source, &rel, &mut result),
-            "swift" => swift::parse(&source, &rel, &mut result),
-            "js" | "jsx" => typescript::parse(&source, &rel, ext == "jsx", &mut result),
-            "dart" => generic::parse(
-                &source,
-                &rel,
-                tree_sitter_dart::LANGUAGE.into(),
-                &mut result,
-            ),
-            "php" => generic::parse(
-                &source,
-                &rel,
-                tree_sitter_php::LANGUAGE_PHP.into(),
-                &mut result,
-            ),
-            "scala" | "sc" => generic::parse(
-                &source,
-                &rel,
-                tree_sitter_scala::LANGUAGE.into(),
-                &mut result,
-            ),
-            _ => {
-                if let Some(language) = language_for_extension(ext) {
-                    generic::parse(&source, &rel, language, &mut result);
-                }
-            }
+    static CACHE: OnceLock<Mutex<HashMap<u64, ScanResult>>> = OnceLock::new();
+    let key = file_set_cache_key(files);
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(cache) = cache.lock() {
+        if let Some(result) = cache.get(&key) {
+            return result.clone();
         }
     }
 
+    if files.len() <= 8 {
+        let mut result = ScanResult::default();
+        for file in files {
+            merge_scan_result_preserving_existing(&mut result, extract_file(file, cwd));
+        }
+        if let Ok(mut cache) = cache.lock() {
+            cache.insert(key, result.clone());
+        }
+        return result;
+    }
+
+    let per_file = files
+        .par_iter()
+        .map(|file| extract_file(file, cwd))
+        .collect::<Vec<_>>();
+    let result = per_file
+        .into_iter()
+        .fold(ScanResult::default(), |mut acc, result| {
+            merge_scan_result_preserving_existing(&mut acc, result);
+            acc
+        });
+
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, result.clone());
+    }
     result
+}
+
+fn extract_file(file: &Path, cwd: &Path) -> ScanResult {
+    let mut result = ScanResult::default();
+    let source = match std::fs::read_to_string(file) {
+        Ok(s) => s,
+        Err(_) => return result,
+    };
+
+    if source.as_bytes().contains(&0) {
+        return result;
+    }
+
+    let rel = file
+        .strip_prefix(cwd)
+        .unwrap_or(file)
+        .to_string_lossy()
+        .to_string();
+
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+
+    match ext {
+        "rs" => rust::parse(&source, &rel, &mut result),
+        "ts" => {
+            if !rel.ends_with(".d.ts") {
+                typescript::parse(&source, &rel, false, &mut result);
+            }
+        }
+        "tsx" => typescript::parse(&source, &rel, true, &mut result),
+        "py" => python::parse(&source, &rel, &mut result),
+        "go" => go::parse(&source, &rel, &mut result),
+        "kt" | "kts" => kotlin::parse(&source, &rel, &mut result),
+        "java" => java::parse(&source, &rel, &mut result),
+        "cs" => csharp::parse(&source, &rel, &mut result),
+        "c" | "h" => c::parse(&source, &rel, &mut result),
+        "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" => {
+            cpp::parse(&source, &rel, &mut result)
+        }
+        "rb" => ruby::parse(&source, &rel, &mut result),
+        "ex" | "exs" => elixir::parse(&source, &rel, &mut result),
+        "lua" | "luau" => lua::parse(&source, &rel, &mut result),
+        "ml" | "mli" => ocaml::parse(&source, &rel, &mut result),
+        "zig" | "zon" => zig::parse(&source, &rel, &mut result),
+        "odin" => odin::parse(&source, &rel, &mut result),
+        "sh" | "bash" | "zsh" | "fish" => shell::parse(&source, &rel, &mut result),
+        "pl" | "pm" | "t" => perl::parse(&source, &rel, &mut result),
+        "swift" => swift::parse(&source, &rel, &mut result),
+        "js" | "jsx" => typescript::parse(&source, &rel, ext == "jsx", &mut result),
+        "dart" => generic::parse(
+            &source,
+            &rel,
+            tree_sitter_dart::LANGUAGE.into(),
+            &mut result,
+        ),
+        "php" => generic::parse(
+            &source,
+            &rel,
+            tree_sitter_php::LANGUAGE_PHP.into(),
+            &mut result,
+        ),
+        "scala" | "sc" => generic::parse(
+            &source,
+            &rel,
+            tree_sitter_scala::LANGUAGE.into(),
+            &mut result,
+        ),
+        _ => {
+            if let Some(language) = language_for_extension(ext) {
+                generic::parse(&source, &rel, language, &mut result);
+            }
+        }
+    }
+    result
+}
+
+fn merge_scan_result_preserving_existing(acc: &mut ScanResult, result: ScanResult) {
+    for (name, info) in result.types {
+        acc.types.entry(name).or_insert(info);
+    }
+    for (name, info) in result.functions {
+        acc.functions.entry(name).or_insert(info);
+    }
+}
+
+fn file_set_cache_key(files: &[PathBuf]) -> u64 {
+    let mut sorted = files.to_vec();
+    sorted.sort();
+    symbol_index_cache_key(&sorted)
 }
 
 fn language_for_extension(ext: &str) -> Option<tree_sitter::Language> {
@@ -458,13 +511,17 @@ pub fn collect_source_files(root: &Path) -> Result<Vec<PathBuf>> {
         )));
     }
 
+    if let Some(files) = git_tracked_source_files(root) {
+        return Ok(files);
+    }
+
     let mut files = Vec::new();
     for entry in walkdir::WalkDir::new(root)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|entry| !is_skip_dir(entry.path()))
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
-        .filter(|e| !is_skip_dir(e.path()))
     {
         if is_supported(entry.path()) {
             files.push(entry.path().to_path_buf());
@@ -472,6 +529,38 @@ pub fn collect_source_files(root: &Path) -> Result<Vec<PathBuf>> {
     }
 
     Ok(files)
+}
+
+fn git_tracked_source_files(root: &Path) -> Option<Vec<PathBuf>> {
+    let (dir, pathspec) = if root.is_file() {
+        (
+            root.parent()?,
+            root.file_name()?.to_string_lossy().to_string(),
+        )
+    } else {
+        (root, ".".to_string())
+    };
+    let output = Command::new("git")
+        .arg("ls-files")
+        .arg("-z")
+        .arg("--")
+        .arg(&pathspec)
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let files = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|bytes| !bytes.is_empty())
+        .filter_map(|bytes| std::str::from_utf8(bytes).ok())
+        .map(|relative| dir.join(relative))
+        .filter(|path| is_supported(path))
+        .collect::<Vec<_>>();
+    Some(files)
 }
 
 pub fn is_supported(path: &Path) -> bool {
@@ -579,7 +668,8 @@ fn execute_search(
 ) -> ToolOutput {
     files.sort();
     files.dedup();
-    let index = build_symbol_index(&files, cwd);
+    let index_files = prefilter_search_files(&files, query, mode);
+    let index = build_symbol_index(&index_files, cwd);
     let hits = search_index(&index, query, mode, max_results);
     let mut lines = vec![
         format!("Action: search"),
@@ -637,7 +727,8 @@ fn execute_tests(
 ) -> ToolOutput {
     files.sort();
     files.dedup();
-    let index = build_symbol_index(&files, cwd);
+    let index_files = prefilter_test_files(&files, target);
+    let index = build_symbol_index(&index_files, cwd);
     let tests = discover_tests(&index, target, cwd, max_results);
     let mut lines = vec![
         format!("Action: tests"),
@@ -679,9 +770,137 @@ fn execute_tests(
     }
 }
 
+fn prefilter_test_files(files: &[PathBuf], target: &str) -> Vec<PathBuf> {
+    let (target_file, target_symbol) = split_target(target);
+    let terms = target_symbol
+        .as_deref()
+        .map(query_terms)
+        .unwrap_or_default();
+    let selected = files
+        .par_iter()
+        .filter_map(|file| {
+            let file_text = file.to_string_lossy().to_lowercase();
+            let rel_text = file_text.as_str();
+            let matches_target_file = target_file
+                .as_ref()
+                .is_some_and(|target| rel_text.ends_with(&target.to_lowercase()));
+            let likely_test_neighbor = target_file
+                .as_ref()
+                .is_some_and(|target| same_stem_or_test_neighbor(rel_text, target));
+            let likely_test = looks_like_test_file(rel_text);
+            let matches_terms =
+                !terms.is_empty() && terms.iter().any(|term| rel_text.contains(term));
+            if matches_target_file || likely_test_neighbor || matches_terms {
+                return Some(file.clone());
+            }
+            if likely_test
+                && (terms.is_empty()
+                    || std::fs::read_to_string(file)
+                        .map(|source| {
+                            let source = source.to_lowercase();
+                            terms.iter().any(|term| source.contains(term))
+                        })
+                        .unwrap_or(false))
+            {
+                return Some(file.clone());
+            }
+            None
+        })
+        .collect::<Vec<_>>();
+
+    if selected.is_empty() {
+        files.to_vec()
+    } else {
+        dedup_paths(selected)
+    }
+}
+
+fn dedup_paths(mut files: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    files.retain(|file| seen.insert(file.clone()));
+    files
+}
+
+fn prefilter_related_files(files: &[PathBuf], target: &str) -> Vec<PathBuf> {
+    let mut selected = prefilter_test_files(files, target);
+    let (target_file, target_symbol) = split_target(target);
+    let terms = target_symbol
+        .as_deref()
+        .map(query_terms)
+        .unwrap_or_default();
+    let mut seen = selected.iter().cloned().collect::<HashSet<_>>();
+    for file in files {
+        let file_text = file.to_string_lossy().to_lowercase();
+        let same_file = target_file
+            .as_ref()
+            .is_some_and(|target| file_text.ends_with(&target.to_lowercase()));
+        let matches_terms = !terms.is_empty() && terms.iter().any(|term| file_text.contains(term));
+        if (same_file || matches_terms) && seen.insert(file.clone()) {
+            selected.push(file.clone());
+        }
+    }
+    selected
+}
+
+fn prefilter_search_files(files: &[PathBuf], query: &str, _mode: &str) -> Vec<PathBuf> {
+    let terms = query_terms(query);
+    if terms.is_empty() {
+        return Vec::new();
+    }
+
+    let selected = files
+        .par_iter()
+        .filter_map(|file| {
+            let path_text = file.to_string_lossy().to_lowercase();
+            if terms.iter().any(|term| path_text.contains(term)) {
+                return Some(file.clone());
+            }
+            std::fs::read_to_string(file).ok().and_then(|source| {
+                let source = source.to_lowercase();
+                terms
+                    .iter()
+                    .any(|term| source.contains(term))
+                    .then(|| file.clone())
+            })
+        })
+        .collect::<Vec<_>>();
+    dedup_paths(selected)
+}
+
 fn build_symbol_index(files: &[PathBuf], cwd: &Path) -> Vec<IndexedSymbol> {
+    static CACHE: OnceLock<Mutex<HashMap<u64, Vec<IndexedSymbol>>>> = OnceLock::new();
+    let key = symbol_index_cache_key(files);
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(cache) = cache.lock() {
+        if let Some(index) = cache.get(&key) {
+            return index.clone();
+        }
+    }
+
     let result = extract_files(files, cwd);
-    symbol_index_from_scan_result(&result)
+    let index = symbol_index_from_scan_result(&result);
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, index.clone());
+    }
+    index
+}
+
+fn symbol_index_cache_key(files: &[PathBuf]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    files.len().hash(&mut hasher);
+    for file in files {
+        file.hash(&mut hasher);
+        if let Ok(meta) = std::fs::metadata(file) {
+            meta.len().hash(&mut hasher);
+            if let Ok(modified) = meta.modified() {
+                if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+                    duration.as_secs().hash(&mut hasher);
+                    duration.subsec_nanos().hash(&mut hasher);
+                }
+            }
+        }
+    }
+    hasher.finish()
 }
 
 fn symbol_index_from_scan_result(result: &ScanResult) -> Vec<IndexedSymbol> {
@@ -941,22 +1160,11 @@ fn related_symbols<'a>(
         .collect()
 }
 
-fn collect_target_files(targets: &[String], cwd: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for target in targets {
-        if let Some((file, _locator)) = parse_extract_target(target) {
-            files.push(crate::tools::resolve_path(cwd, &file));
-        }
-    }
-    files.sort();
-    files.dedup();
-    files
-}
-
 fn execute_related(mut files: Vec<PathBuf>, cwd: &Path, target: &str) -> ToolOutput {
     files.sort();
     files.dedup();
-    let index = build_symbol_index(&files, cwd);
+    let index_files = prefilter_related_files(&files, target);
+    let index = build_symbol_index(&index_files, cwd);
     let (target_file, target_symbol) = split_target(target);
     let related = related_symbols(&index, target_file.as_deref(), target_symbol.as_deref(), 12);
     let tests = discover_tests(&index, target, cwd, 5);
@@ -1038,276 +1246,78 @@ fn execute_related(mut files: Vec<PathBuf>, cwd: &Path, target: &str) -> ToolOut
     }
 }
 
-#[derive(Debug, Clone)]
-struct ReferenceHit {
-    file: String,
-    line: usize,
-    kind: String,
-    snippet: String,
-    confidence: &'static str,
-    why: String,
-}
-
-fn execute_references(
-    mut files: Vec<PathBuf>,
-    cwd: &Path,
-    target: &str,
-    max_results: usize,
-) -> ToolOutput {
-    files.sort();
-    files.dedup();
-    let index = build_symbol_index(&files, cwd);
-    let hits = find_references(&files, cwd, &index, target, max_results);
-    let mut lines = vec![
-        "Action: references".to_string(),
-        format!("Target: {target}"),
-        "Accuracy: lexical/structural reference search, not a complete LSP call graph.".to_string(),
-        format!("Files analyzed: {}", files.len()),
-    ];
-    if hits.is_empty() {
-        lines.push("No references found.".to_string());
-    } else {
-        lines.push("References:".to_string());
-        for hit in &hits {
-            lines.push(format!(
-                "- {}:{} [{} {}] {} — {}",
-                hit.file, hit.line, hit.kind, hit.confidence, hit.snippet, hit.why
-            ));
-        }
-    }
-
-    ToolOutput {
-        content: vec![imp_llm::ContentBlock::Text {
-            text: truncate_output(lines.join("\n")),
-        }],
-        details: json!({
-            "action": "references",
-            "target": target,
-            "accuracy": "lexical_structural_not_lsp_complete",
-            "files_analyzed": files.len(),
-            "references": hits.iter().map(|hit| json!({
-                "file": hit.file,
-                "line": hit.line,
-                "kind": hit.kind,
-                "snippet": hit.snippet,
-                "confidence": hit.confidence,
-                "why": hit.why,
-            })).collect::<Vec<_>>(),
-        }),
-        is_error: false,
-    }
-}
-
-fn execute_impact(
-    mut files: Vec<PathBuf>,
-    cwd: &Path,
-    target: &str,
-    max_results: usize,
-) -> ToolOutput {
-    files.sort();
-    files.dedup();
-    let index = build_symbol_index(&files, cwd);
-    let references = find_references(&files, cwd, &index, target, max_results);
-    let tests = discover_tests(&index, target, cwd, 10);
-    let (_target_file, target_symbol) = split_target(target);
-    let public_status = target_symbol.as_ref().and_then(|name| {
-        index
+fn fast_rust_directory_output(files: &[PathBuf], cwd: &Path) -> Option<(String, usize, usize)> {
+    if files.is_empty()
+        || !files
             .iter()
-            .find(|symbol| symbol.name == *name)
-            .map(|symbol| {
-                if symbol.kind == "function" {
-                    "unknown"
+            .all(|file| file.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+    {
+        return None;
+    }
+
+    let mut sections = Vec::new();
+    let mut types_count = 0;
+    let mut functions_count = 0;
+    let file_sections = files
+        .par_iter()
+        .map(|file| {
+            let source = std::fs::read_to_string(file).ok()?;
+            let rel = file
+                .strip_prefix(cwd)
+                .unwrap_or(file)
+                .to_string_lossy()
+                .to_string();
+            let mut lines = vec![rel];
+            let mut types = 0;
+            let mut functions = 0;
+            for (idx, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                let Some(symbol) = rust_skeleton_line(trimmed) else {
+                    continue;
+                };
+                if symbol.contains("fn ") {
+                    functions += 1;
                 } else {
-                    "indexed symbol"
+                    types += 1;
                 }
-            })
-    });
-    let affected_files: BTreeSet<String> = references.iter().map(|hit| hit.file.clone()).collect();
-    let verify_commands: Vec<String> = tests
-        .iter()
-        .filter_map(|test| test.command.clone())
-        .collect();
-    let mut lines = vec![
-        "Action: impact".to_string(),
-        format!("Target: {target}"),
-        "Accuracy: lexical/structural impact analysis, not a complete LSP call graph.".to_string(),
-        format!("Files analyzed: {}", files.len()),
-        repo_index_line(&index),
-        format!("References found: {}", references.len()),
-    ];
-    if !affected_files.is_empty() {
-        lines.push("Likely affected files:".to_string());
-        for file in &affected_files {
-            lines.push(format!("- {file}"));
-        }
-    }
-    if !tests.is_empty() {
-        lines.push("Relevant tests:".to_string());
-        for test in &tests {
-            lines.push(format!(
-                "- {}:{} {} — {}",
-                test.file,
-                test.line,
-                test.name,
-                test.command.as_deref().unwrap_or("no command inferred")
-            ));
-        }
-    }
-    if !verify_commands.is_empty() {
-        lines.push("Suggested verification:".to_string());
-        for command in &verify_commands {
-            lines.push(format!("- {command}"));
-        }
-    }
-
-    ToolOutput {
-        content: vec![imp_llm::ContentBlock::Text {
-            text: truncate_output(lines.join("\n")),
-        }],
-        details: json!({
-            "action": "impact",
-            "target": target,
-            "accuracy": "lexical_structural_not_lsp_complete",
-            "files_analyzed": files.len(),
-            "repo_intelligence": repo_index_details(&index),
-            "public_status": public_status,
-            "affected_files": affected_files.into_iter().collect::<Vec<_>>(),
-            "references": references.iter().map(|hit| json!({
-                "file": hit.file,
-                "line": hit.line,
-                "kind": hit.kind,
-                "snippet": hit.snippet,
-                "confidence": hit.confidence,
-                "why": hit.why,
-            })).collect::<Vec<_>>(),
-            "tests": tests.iter().map(|test| json!({
-                "file": test.file,
-                "symbol": test.name,
-                "line": test.line,
-                "command": test.command,
-                "why": test.why,
-            })).collect::<Vec<_>>(),
-            "verify_commands": verify_commands,
-        }),
-        is_error: false,
-    }
-}
-
-fn find_references(
-    files: &[PathBuf],
-    cwd: &Path,
-    index: &[IndexedSymbol],
-    target: &str,
-    max_results: usize,
-) -> Vec<ReferenceHit> {
-    let (_target_file, target_symbol) = split_target(target);
-    let needle = target_symbol.unwrap_or_else(|| target.to_string());
-    let needle = needle.trim();
-    if needle.is_empty() {
-        return Vec::new();
-    }
-    let pattern = format!(r"\b{}\b", regex::escape(needle));
-    let Ok(symbol_regex) = regex::Regex::new(&pattern) else {
-        return Vec::new();
-    };
-    let mut hits = Vec::new();
-    for file in files {
-        let Some(content) = read_text_file(file) else {
-            continue;
-        };
-        let rel = file
-            .strip_prefix(cwd)
-            .unwrap_or(file)
-            .to_string_lossy()
-            .to_string();
-        for (idx, line) in content.lines().enumerate() {
-            if !symbol_regex.is_match(line) {
-                continue;
+                lines.push(format!("  {}| {symbol}", idx + 1));
             }
-            let line_no = idx + 1;
-            let (kind, confidence, why) = classify_reference(index, &rel, line_no, line, needle);
-            hits.push(ReferenceHit {
-                file: rel.clone(),
-                line: line_no,
-                kind,
-                snippet: truncate_line(line.trim(), 180),
-                confidence,
-                why,
-            });
+            (lines.len() > 1).then(|| (lines.join("\n"), types, functions))
+        })
+        .collect::<Vec<_>>();
+
+    for file_section in file_sections.into_iter().flatten() {
+        sections.push(file_section.0);
+        types_count += file_section.1;
+        functions_count += file_section.2;
+    }
+
+    if sections.is_empty() {
+        None
+    } else {
+        Some((sections.join("\n\n"), types_count, functions_count))
+    }
+}
+
+fn rust_skeleton_line(trimmed: &str) -> Option<String> {
+    let mut text = trimmed;
+    for prefix in ["pub(crate) ", "pub(super) ", "pub "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            text = rest;
+            break;
         }
     }
-    hits.sort_by(|a, b| {
-        reference_kind_rank(&a.kind)
-            .cmp(&reference_kind_rank(&b.kind))
-            .then_with(|| a.file.cmp(&b.file))
-            .then_with(|| a.line.cmp(&b.line))
-    });
-    hits.truncate(max_results);
-    hits
+    for keyword in ["struct ", "enum ", "trait ", "impl ", "fn ", "async fn "] {
+        if text.starts_with(keyword) {
+            let cutoff = text
+                .find('{')
+                .or_else(|| text.find(';'))
+                .unwrap_or(text.len());
+            return Some(text[..cutoff].trim_end().to_string());
+        }
+    }
+    None
 }
-
-fn classify_reference(
-    index: &[IndexedSymbol],
-    file: &str,
-    line_no: usize,
-    line: &str,
-    needle: &str,
-) -> (String, &'static str, String) {
-    if index
-        .iter()
-        .any(|symbol| symbol.file == file && symbol.line == line_no && symbol.name == needle)
-    {
-        return (
-            "definition".to_string(),
-            "high",
-            "matches indexed symbol definition".to_string(),
-        );
-    }
-    let trimmed = line.trim_start();
-    if trimmed.starts_with("use ")
-        || trimmed.starts_with("import ")
-        || trimmed.starts_with("from ")
-        || trimmed.contains("require(")
-    {
-        return (
-            "import".to_string(),
-            "medium",
-            "line looks like import/use".to_string(),
-        );
-    }
-    if looks_like_test_file(file)
-        || index
-            .iter()
-            .any(|symbol| symbol.file == file && symbol.is_test && line_no >= symbol.line)
-    {
-        return (
-            "test".to_string(),
-            "medium",
-            "reference appears in test context".to_string(),
-        );
-    }
-    if line.contains(&format!("{needle}(")) || line.contains(&format!(".{needle}")) {
-        return (
-            "call".to_string(),
-            "medium",
-            "line looks like call/member access".to_string(),
-        );
-    }
-    ("reference".to_string(), "low", "lexical match".to_string())
-}
-
-fn reference_kind_rank(kind: &str) -> usize {
-    match kind {
-        "definition" => 0,
-        "call" => 1,
-        "reference" => 2,
-        "import" => 3,
-        "test" => 4,
-        _ => 5,
-    }
-}
-
-// ── formatting ──────────────────────────────────────────────────────
 
 fn format_result(
     result: &ScanResult,
@@ -1525,80 +1535,6 @@ enum Locator {
     Line(usize),
     Range(usize, usize),
     Symbol(String),
-}
-
-fn execute_extract_with_preset(
-    targets: &[String],
-    preset: Option<&str>,
-    ctx: &ToolContext,
-) -> ToolOutput {
-    let Some(preset) = preset else {
-        return execute_extract(targets, ctx);
-    };
-    match preset {
-        "definition" | "module_context" => execute_extract(targets, ctx),
-        "edit_context" | "test_context" => execute_context_preset(targets, preset, ctx),
-        other => ToolOutput::error(format!(
-            "unknown extract preset: {other}. Use definition, edit_context, module_context, or test_context."
-        )),
-    }
-}
-
-fn execute_context_preset(targets: &[String], preset: &str, ctx: &ToolContext) -> ToolOutput {
-    let mut output = execute_extract(targets, ctx);
-    if output.is_error {
-        return output;
-    }
-    let files = collect_target_files(targets, &ctx.cwd);
-    let index = build_symbol_index(&files, &ctx.cwd);
-    let mut extras = Vec::new();
-    for target in targets {
-        let tests = discover_tests(&index, target, &ctx.cwd, 5);
-        if preset == "test_context" && !tests.is_empty() {
-            extras.push(format!("Related tests for {target}:"));
-            for test in tests {
-                extras.push(format!(
-                    "- {}:{} {} — {}",
-                    test.file,
-                    test.line,
-                    test.name,
-                    test.command
-                        .unwrap_or_else(|| "no command inferred".to_string())
-                ));
-            }
-        } else if preset == "edit_context" {
-            let (target_file, target_symbol) = split_target(target);
-            let related =
-                related_symbols(&index, target_file.as_deref(), target_symbol.as_deref(), 6);
-            if !related.is_empty() {
-                extras.push(format!("Related symbols for {target}:"));
-                for symbol in related {
-                    extras.push(format!(
-                        "- {}:{} [{}] {} (extract: {}#{})",
-                        symbol.file,
-                        symbol.line,
-                        symbol.kind,
-                        symbol.name,
-                        symbol.file,
-                        symbol.name
-                    ));
-                }
-            }
-        }
-    }
-    if !extras.is_empty() {
-        if let Some(text) = output.content.iter_mut().find_map(|block| match block {
-            imp_llm::ContentBlock::Text { text } => Some(text),
-            _ => None,
-        }) {
-            text.push_str("\n\n");
-            text.push_str(&extras.join("\n"));
-            *text = truncate_output(text.clone());
-        }
-        output.details["preset"] = json!(preset);
-        output.details["context"] = json!(extras);
-    }
-    output
 }
 
 fn execute_extract(targets: &[String], ctx: &ToolContext) -> ToolOutput {
@@ -1963,13 +1899,13 @@ pub fn hello() void {}",
         assert!(actions.iter().any(|value| value == "search"));
         assert!(actions.iter().any(|value| value == "tests"));
         assert!(actions.iter().any(|value| value == "related"));
-        assert!(actions.iter().any(|value| value == "references"));
-        assert!(actions.iter().any(|value| value == "impact"));
+        assert!(!actions.iter().any(|value| value == "references"));
+        assert!(!actions.iter().any(|value| value == "impact"));
         assert!(properties.contains_key("targets"));
         assert!(properties.contains_key("query"));
         assert!(properties.contains_key("mode"));
         assert!(properties.contains_key("max_results"));
-        assert!(properties.contains_key("preset"));
+        assert!(!properties.contains_key("preset"));
         assert!(properties.contains_key("target"));
         assert!(!properties.contains_key("task"));
     }
@@ -2069,32 +2005,6 @@ pub fn hello() void {}",
     }
 
     #[test]
-    fn collect_target_files_extracts_paths_from_targets() {
-        let cwd = Path::new("/tmp/example");
-        let files = collect_target_files(&["src/lib.rs#run".to_string()], cwd);
-
-        assert_eq!(files, vec![PathBuf::from("/tmp/example/src/lib.rs")]);
-    }
-
-    #[test]
-    fn references_classify_definitions_and_calls() {
-        let tmp = tempfile::tempdir().unwrap();
-        let file = tmp.path().join("lib.rs");
-        std::fs::write(
-            &file,
-            "fn resolve_auth_fallback() {}\nfn caller() { resolve_auth_fallback(); }\n",
-        )
-        .unwrap();
-        let files = vec![file];
-        let index = build_symbol_index(&files, tmp.path());
-
-        let references = find_references(&files, tmp.path(), &index, "resolve_auth_fallback", 10);
-
-        assert!(references.iter().any(|hit| hit.kind == "definition"));
-        assert!(references.iter().any(|hit| hit.kind == "call"));
-    }
-
-    #[test]
     fn scan_repo_intelligence_counts_reuse_symbol_index_shape() {
         let index = vec![
             IndexedSymbol {
@@ -2124,36 +2034,6 @@ pub fn hello() void {}",
     }
 
     #[test]
-    fn impact_uses_tests_for_verification_commands() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("Cargo.toml"),
-            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
-        )
-        .unwrap();
-        let file = tmp.path().join("session.rs");
-        std::fs::write(
-            &file,
-            "fn resolve_auth_fallback() {}\n#[test]\nfn resolve_auth_fallback_uses_env() { resolve_auth_fallback(); }\n",
-        )
-        .unwrap();
-
-        let output = execute_impact(
-            vec![file],
-            tmp.path(),
-            "session.rs#resolve_auth_fallback",
-            10,
-        );
-
-        assert_eq!(output.details["action"], "impact");
-        assert!(output.details["verify_commands"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value.as_str() == Some("cargo test resolve_auth_fallback_uses_env")));
-    }
-
-    #[test]
     fn parse_extract_target_rejects_invalid_lines() {
         assert!(parse_extract_target("src/lib.rs:0").is_none());
         assert!(parse_extract_target("src/lib.rs:10-2").is_none());
@@ -2180,8 +2060,8 @@ pub fn hello() void {}",
             lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
-            turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(
-                crate::mana_review::TurnManaReviewAccumulator::default(),
+            turn_workflow_review: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::workflow_review::TurnWorkflowReviewAccumulator::default(),
             )),
             run_policy: Default::default(),
             config: std::sync::Arc::new(crate::config::Config::default()),

@@ -386,7 +386,7 @@ impl AgentBuilder {
             trace_phase("mana_prompt_context", prompt_context_started);
 
             let repo_context_started = Instant::now();
-            let repo_context = crate::repo_intelligence::summarize_repo_context(&self.cwd)
+            let repo_context = crate::repo_intelligence::summarize_repo_context_cached(&self.cwd)
                 .ok()
                 .flatten();
             trace_phase("repo_intelligence_context", repo_context_started);
