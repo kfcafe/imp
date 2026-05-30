@@ -18,15 +18,6 @@ pub mod hooks;
 pub mod imp_session;
 pub mod import;
 pub mod learning;
-#[cfg(feature = "mana-api")]
-pub mod mana_next;
-#[cfg(feature = "mana-api")]
-pub mod mana_prompt_context;
-pub mod mana_review;
-#[cfg(feature = "mana-api")]
-pub mod mana_run_state;
-#[cfg(feature = "mana-api")]
-pub mod mana_worker;
 pub mod memory;
 pub mod personality;
 pub mod policy;
@@ -48,7 +39,7 @@ pub mod trust;
 pub mod ui;
 pub mod usage;
 pub mod workflow;
-pub mod workflow_profiles;
+pub mod workflow_review;
 
 pub use agent::{RecoveryCheckpoint, RecoveryCheckpointKind, TimingEvent, TimingStage};
 pub use error::{Error, Result};
@@ -57,10 +48,10 @@ pub use imp_llm::{
     CancellationMode, ContinuationMode, PersistentSessionMode, ResumabilityMode,
     TransportCapabilities,
 };
-pub use mana_review::{ManaReviewState, ManaReviewUnitKind, ManaUnitRef, TurnManaReview};
-#[cfg(feature = "mana-api")]
-pub use mana_run_state::{mana_run_summary, stop_mana_run, ManaRunSummary};
 pub use sdk::*;
+pub use workflow_review::{
+    TurnWorkflowReview, WorkflowReviewState, WorkflowReviewUnitKind, WorkflowUnitRef,
+};
 
 // Re-export imp-llm for downstream crates
 pub use imp_llm;

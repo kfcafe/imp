@@ -24,7 +24,7 @@ pub(super) struct RuntimeEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ManaEvidence {
+pub(super) struct WorkflowEvidence {
     pub(super) stop_reason: Option<NextActionStopReason>,
 }
 
@@ -43,7 +43,7 @@ pub(super) struct ContinueRecommendation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NextActionAssessment {
     pub runtime: NextActionRuntimeEvidence,
-    pub mana: NextActionManaEvidence,
+    pub workflow: NextActionWorkflowEvidence,
     pub text_fallback: NextActionTextFallbackEvidence,
     pub continue_recommendation: Option<NextActionContinueRecommendation>,
     pub chosen_action: NextActionDebugView,
@@ -61,7 +61,7 @@ pub struct NextActionRuntimeEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NextActionManaEvidence {
+pub struct NextActionWorkflowEvidence {
     pub stop_reason: Option<String>,
 }
 
@@ -86,7 +86,7 @@ pub enum NextActionDebugView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PostTurnAssessment {
     pub(super) runtime: RuntimeEvidence,
-    pub(super) mana: ManaEvidence,
+    pub(super) workflow: WorkflowEvidence,
     pub(super) text_fallback: TextFallbackEvidence,
     pub(super) continue_recommendation: Option<ContinueRecommendation>,
 }
@@ -109,7 +109,7 @@ impl PostTurnAssessment {
             };
         }
 
-        if let Some(reason) = self.mana.stop_reason {
+        if let Some(reason) = self.workflow.stop_reason {
             return NextAction::Stop { reason };
         }
 
@@ -170,9 +170,9 @@ impl PostTurnAssessment {
                 planning_only_progress: self.runtime.planning_only_progress,
                 orchestration_started: self.runtime.orchestration_started,
             },
-            mana: NextActionManaEvidence {
+            workflow: NextActionWorkflowEvidence {
                 stop_reason: self
-                    .mana
+                    .workflow
                     .stop_reason
                     .map(|reason| reason.as_str().to_string()),
             },

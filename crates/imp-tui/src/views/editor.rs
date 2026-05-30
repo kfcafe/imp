@@ -418,8 +418,8 @@ pub struct EditorView<'a> {
     animation_level: AnimationLevel,
     activity_state: AnimationState,
     _workflow_mode: WorkflowMode,
-    mana_scope_label: Option<String>,
-    mana_run_label: Option<String>,
+    workflow_scope_label: Option<String>,
+    workflow_run_label: Option<String>,
     build_loop_label: Option<String>,
     improve_status_label: Option<String>,
     loop_label: Option<String>,
@@ -448,8 +448,8 @@ impl<'a> EditorView<'a> {
             animation_level: AnimationLevel::Minimal,
             activity_state: AnimationState::Idle,
             _workflow_mode: WorkflowMode::Normal,
-            mana_scope_label: None,
-            mana_run_label: None,
+            workflow_scope_label: None,
+            workflow_run_label: None,
             build_loop_label: None,
             improve_status_label: None,
             loop_label: None,
@@ -522,13 +522,13 @@ impl<'a> EditorView<'a> {
         self
     }
 
-    pub fn mana_scope_label(mut self, label: Option<String>) -> Self {
-        self.mana_scope_label = label;
+    pub fn workflow_scope_label(mut self, label: Option<String>) -> Self {
+        self.workflow_scope_label = label;
         self
     }
 
-    pub fn mana_run_label(mut self, label: Option<String>) -> Self {
-        self.mana_run_label = label;
+    pub fn workflow_run_label(mut self, label: Option<String>) -> Self {
+        self.workflow_run_label = label;
         self
     }
 
@@ -571,8 +571,8 @@ impl Widget for EditorView<'_> {
         let top_right = build_top_right_label(self.turn_elapsed, self.theme);
         let bottom_left = build_bottom_left_label(
             self._workflow_mode,
-            self.mana_scope_label.as_deref(),
-            self.mana_run_label.as_deref(),
+            self.workflow_scope_label.as_deref(),
+            self.workflow_run_label.as_deref(),
             self.build_loop_label.as_deref(),
         );
         let activity =
@@ -811,15 +811,15 @@ fn build_top_right_label(turn_elapsed: Option<Duration>, theme: &Theme) -> Vec<S
 
 fn build_bottom_left_label(
     _workflow_mode: WorkflowMode,
-    mana_scope_label: Option<&str>,
-    mana_run_label: Option<&str>,
+    workflow_scope_label: Option<&str>,
+    workflow_run_label: Option<&str>,
     build_loop_label: Option<&str>,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    if let Some(scope) = mana_scope_label.filter(|scope| !scope.trim().is_empty()) {
+    if let Some(scope) = workflow_scope_label.filter(|scope| !scope.trim().is_empty()) {
         spans.push(Span::raw(scope.to_string()));
     }
-    if let Some(run) = mana_run_label.filter(|label| !label.trim().is_empty()) {
+    if let Some(run) = workflow_run_label.filter(|label| !label.trim().is_empty()) {
         spans.push(Span::raw(" · "));
         spans.push(Span::raw(run.to_string()));
     }

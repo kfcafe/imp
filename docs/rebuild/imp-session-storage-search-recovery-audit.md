@@ -1,6 +1,6 @@
 # imp Session Storage and Search Recovery Audit
 
-This audit resolves mana unit `50.16.5.1`: why `session_search` can report no indexed sessions even when raw session transcripts exist, and where an operator should look for recovery on this machine.
+This audit resolves workflow unit `50.16.5.1`: why `session_search` can report no indexed sessions even when raw session transcripts exist, and where an operator should look for recovery on this machine.
 
 ## Current code paths
 

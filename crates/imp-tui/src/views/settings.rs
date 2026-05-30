@@ -1,7 +1,7 @@
 use imp_core::config::{
     AgentMode, AnimationLevel, ChatToolDisplay, Config, ContextConfig, ContinuePolicy, LuaConfig,
-    ManaConfig, ManaRunConfig, ManaScopePreference, ShellBackend, SidebarStyle, ToolOutputDisplay,
-    WriteOverwritePolicy,
+    ShellBackend, SidebarStyle, ToolOutputDisplay, WorkflowConfig, WorkflowRunConfig,
+    WorkflowScopePreference, WriteOverwritePolicy,
 };
 use imp_core::tools::web::types::SearchProvider;
 use imp_llm::auth::AuthStore;
@@ -52,14 +52,14 @@ pub enum SettingsField {
     WebSearchProvider,
     TavilyApiKey,
     ExaApiKey,
-    ManaScope,
-    ManaAutoCommit,
-    ManaAutoCloseParent,
-    ManaVerifyTimeout,
-    ManaRunBackground,
-    ManaMaxWorkers,
-    ManaReviewAfterRun,
-    ManaContinueAfterFailure,
+    WorkflowScope,
+    WorkflowAutoCommit,
+    WorkflowAutoCloseParent,
+    WorkflowVerifyTimeout,
+    WorkflowRunBackground,
+    WorkflowMaxWorkers,
+    WorkflowReviewAfterRun,
+    WorkflowContinueAfterFailure,
     Save,
 }
 
@@ -70,7 +70,7 @@ pub enum SettingsTab {
     Ui,
     Security,
     Web,
-    Mana,
+    Workflow,
 }
 
 const SETTINGS_TABS: &[SettingsTab] = &[
@@ -79,7 +79,7 @@ const SETTINGS_TABS: &[SettingsTab] = &[
     SettingsTab::Ui,
     SettingsTab::Security,
     SettingsTab::Web,
-    SettingsTab::Mana,
+    SettingsTab::Workflow,
 ];
 
 const GENERAL_FIELDS: &[SettingsField] = &[
@@ -131,15 +131,15 @@ const WEB_FIELDS: &[SettingsField] = &[
     SettingsField::ExaApiKey,
 ];
 
-const MANA_FIELDS: &[SettingsField] = &[
-    SettingsField::ManaScope,
-    SettingsField::ManaAutoCommit,
-    SettingsField::ManaAutoCloseParent,
-    SettingsField::ManaVerifyTimeout,
-    SettingsField::ManaRunBackground,
-    SettingsField::ManaMaxWorkers,
-    SettingsField::ManaReviewAfterRun,
-    SettingsField::ManaContinueAfterFailure,
+const WORKFLOW_FIELDS: &[SettingsField] = &[
+    SettingsField::WorkflowScope,
+    SettingsField::WorkflowAutoCommit,
+    SettingsField::WorkflowAutoCloseParent,
+    SettingsField::WorkflowVerifyTimeout,
+    SettingsField::WorkflowRunBackground,
+    SettingsField::WorkflowMaxWorkers,
+    SettingsField::WorkflowReviewAfterRun,
+    SettingsField::WorkflowContinueAfterFailure,
 ];
 
 const FIELDS: &[SettingsField] = &[
@@ -177,14 +177,14 @@ const FIELDS: &[SettingsField] = &[
     SettingsField::WebSearchProvider,
     SettingsField::TavilyApiKey,
     SettingsField::ExaApiKey,
-    SettingsField::ManaScope,
-    SettingsField::ManaAutoCommit,
-    SettingsField::ManaAutoCloseParent,
-    SettingsField::ManaVerifyTimeout,
-    SettingsField::ManaRunBackground,
-    SettingsField::ManaMaxWorkers,
-    SettingsField::ManaReviewAfterRun,
-    SettingsField::ManaContinueAfterFailure,
+    SettingsField::WorkflowScope,
+    SettingsField::WorkflowAutoCommit,
+    SettingsField::WorkflowAutoCloseParent,
+    SettingsField::WorkflowVerifyTimeout,
+    SettingsField::WorkflowRunBackground,
+    SettingsField::WorkflowMaxWorkers,
+    SettingsField::WorkflowReviewAfterRun,
+    SettingsField::WorkflowContinueAfterFailure,
     SettingsField::Save,
 ];
 
@@ -196,7 +196,7 @@ impl SettingsTab {
             SettingsTab::Ui => "UI",
             SettingsTab::Security => "Security",
             SettingsTab::Web => "Web",
-            SettingsTab::Mana => "Mana",
+            SettingsTab::Workflow => "Workflow",
         }
     }
 
@@ -207,14 +207,14 @@ impl SettingsTab {
             SettingsTab::Ui => UI_FIELDS,
             SettingsTab::Security => SECURITY_FIELDS,
             SettingsTab::Web => WEB_FIELDS,
-            SettingsTab::Mana => MANA_FIELDS,
+            SettingsTab::Workflow => WORKFLOW_FIELDS,
         }
     }
 
     fn empty_message(self) -> Option<&'static str> {
         match self {
             SettingsTab::Security => None,
-            SettingsTab::Mana => None,
+            SettingsTab::Workflow => None,
             _ => None,
         }
     }
@@ -270,14 +270,14 @@ pub struct SettingsState {
     pub improve_auto_turn_budget: u32,
     pub loop_turn_budget: u32,
     pub web_search_provider: Option<SearchProvider>,
-    pub mana_scope: ManaScopePreference,
-    pub mana_auto_commit: bool,
-    pub mana_auto_close_parent: bool,
-    pub mana_verify_timeout: u64,
-    pub mana_run_background: bool,
-    pub mana_max_workers: u32,
-    pub mana_review_after_run: bool,
-    pub mana_continue_after_failure: bool,
+    pub workflow_scope: WorkflowScopePreference,
+    pub workflow_auto_commit: bool,
+    pub workflow_auto_close_parent: bool,
+    pub workflow_verify_timeout: u64,
+    pub workflow_run_background: bool,
+    pub workflow_max_workers: u32,
+    pub workflow_review_after_run: bool,
+    pub workflow_continue_after_failure: bool,
     pub tavily_api_key: String,
     pub exa_api_key: String,
     pub tavily_configured: bool,
@@ -388,14 +388,14 @@ impl SettingsState {
             improve_auto_turn_budget: config.ui.improve_auto_turn_budget,
             loop_turn_budget: config.ui.loop_turn_budget,
             web_search_provider: config.web.search_provider,
-            mana_scope: config.mana.scope,
-            mana_auto_commit: config.mana.auto_commit,
-            mana_auto_close_parent: config.mana.auto_close_parent,
-            mana_verify_timeout: config.mana.verify_timeout.unwrap_or(0),
-            mana_run_background: config.mana.run.background,
-            mana_max_workers: config.mana.run.max_workers,
-            mana_review_after_run: config.mana.run.review_after_run,
-            mana_continue_after_failure: config.mana.run.continue_after_failure,
+            workflow_scope: config.workflow.scope,
+            workflow_auto_commit: config.workflow.auto_commit,
+            workflow_auto_close_parent: config.workflow.auto_close_parent,
+            workflow_verify_timeout: config.workflow.verify_timeout.unwrap_or(0),
+            workflow_run_background: config.workflow.run.background,
+            workflow_max_workers: config.workflow.run.max_workers,
+            workflow_review_after_run: config.workflow.run.review_after_run,
+            workflow_continue_after_failure: config.workflow.run.continue_after_failure,
             tavily_api_key: String::new(),
             exa_api_key: String::new(),
             tavily_configured: auth_store.stored.contains_key("tavily")
@@ -589,32 +589,33 @@ impl SettingsState {
                     Some(SearchProvider::Perplexity) | Some(SearchProvider::GitHub) => None,
                 };
             }
-            SettingsField::ManaScope => {
-                self.mana_scope = match self.mana_scope {
-                    ManaScopePreference::Project => ManaScopePreference::Root,
-                    ManaScopePreference::Root => ManaScopePreference::Project,
+            SettingsField::WorkflowScope => {
+                self.workflow_scope = match self.workflow_scope {
+                    WorkflowScopePreference::Project => WorkflowScopePreference::Root,
+                    WorkflowScopePreference::Root => WorkflowScopePreference::Project,
                 };
             }
-            SettingsField::ManaAutoCommit => {
-                self.mana_auto_commit = !self.mana_auto_commit;
+            SettingsField::WorkflowAutoCommit => {
+                self.workflow_auto_commit = !self.workflow_auto_commit;
             }
-            SettingsField::ManaAutoCloseParent => {
-                self.mana_auto_close_parent = !self.mana_auto_close_parent;
+            SettingsField::WorkflowAutoCloseParent => {
+                self.workflow_auto_close_parent = !self.workflow_auto_close_parent;
             }
-            SettingsField::ManaVerifyTimeout => {
-                self.mana_verify_timeout = self.mana_verify_timeout.saturating_add(30).min(3600);
+            SettingsField::WorkflowVerifyTimeout => {
+                self.workflow_verify_timeout =
+                    self.workflow_verify_timeout.saturating_add(30).min(3600);
             }
-            SettingsField::ManaRunBackground => {
-                self.mana_run_background = !self.mana_run_background;
+            SettingsField::WorkflowRunBackground => {
+                self.workflow_run_background = !self.workflow_run_background;
             }
-            SettingsField::ManaMaxWorkers => {
-                self.mana_max_workers = self.mana_max_workers.saturating_add(1).min(32);
+            SettingsField::WorkflowMaxWorkers => {
+                self.workflow_max_workers = self.workflow_max_workers.saturating_add(1).min(32);
             }
-            SettingsField::ManaReviewAfterRun => {
-                self.mana_review_after_run = !self.mana_review_after_run;
+            SettingsField::WorkflowReviewAfterRun => {
+                self.workflow_review_after_run = !self.workflow_review_after_run;
             }
-            SettingsField::ManaContinueAfterFailure => {
-                self.mana_continue_after_failure = !self.mana_continue_after_failure;
+            SettingsField::WorkflowContinueAfterFailure => {
+                self.workflow_continue_after_failure = !self.workflow_continue_after_failure;
             }
             SettingsField::TavilyApiKey => {}
             SettingsField::ExaApiKey => {}
@@ -768,32 +769,32 @@ impl SettingsState {
                     Some(SearchProvider::Perplexity) => Some(SearchProvider::Linkup),
                 };
             }
-            SettingsField::ManaScope => {
-                self.mana_scope = match self.mana_scope {
-                    ManaScopePreference::Project => ManaScopePreference::Root,
-                    ManaScopePreference::Root => ManaScopePreference::Project,
+            SettingsField::WorkflowScope => {
+                self.workflow_scope = match self.workflow_scope {
+                    WorkflowScopePreference::Project => WorkflowScopePreference::Root,
+                    WorkflowScopePreference::Root => WorkflowScopePreference::Project,
                 };
             }
-            SettingsField::ManaAutoCommit => {
-                self.mana_auto_commit = !self.mana_auto_commit;
+            SettingsField::WorkflowAutoCommit => {
+                self.workflow_auto_commit = !self.workflow_auto_commit;
             }
-            SettingsField::ManaAutoCloseParent => {
-                self.mana_auto_close_parent = !self.mana_auto_close_parent;
+            SettingsField::WorkflowAutoCloseParent => {
+                self.workflow_auto_close_parent = !self.workflow_auto_close_parent;
             }
-            SettingsField::ManaVerifyTimeout => {
-                self.mana_verify_timeout = self.mana_verify_timeout.saturating_sub(30);
+            SettingsField::WorkflowVerifyTimeout => {
+                self.workflow_verify_timeout = self.workflow_verify_timeout.saturating_sub(30);
             }
-            SettingsField::ManaRunBackground => {
-                self.mana_run_background = !self.mana_run_background;
+            SettingsField::WorkflowRunBackground => {
+                self.workflow_run_background = !self.workflow_run_background;
             }
-            SettingsField::ManaMaxWorkers => {
-                self.mana_max_workers = self.mana_max_workers.saturating_sub(1).max(1);
+            SettingsField::WorkflowMaxWorkers => {
+                self.workflow_max_workers = self.workflow_max_workers.saturating_sub(1).max(1);
             }
-            SettingsField::ManaReviewAfterRun => {
-                self.mana_review_after_run = !self.mana_review_after_run;
+            SettingsField::WorkflowReviewAfterRun => {
+                self.workflow_review_after_run = !self.workflow_review_after_run;
             }
-            SettingsField::ManaContinueAfterFailure => {
-                self.mana_continue_after_failure = !self.mana_continue_after_failure;
+            SettingsField::WorkflowContinueAfterFailure => {
+                self.workflow_continue_after_failure = !self.workflow_continue_after_failure;
             }
             SettingsField::TavilyApiKey => {}
             SettingsField::ExaApiKey => {}
@@ -828,13 +829,13 @@ impl SettingsState {
                 self.editing_number = true;
                 self.edit_buffer = self.read_max_lines.to_string();
             }
-            SettingsField::ManaVerifyTimeout => {
+            SettingsField::WorkflowVerifyTimeout => {
                 self.editing_number = true;
-                self.edit_buffer = self.mana_verify_timeout.to_string();
+                self.edit_buffer = self.workflow_verify_timeout.to_string();
             }
-            SettingsField::ManaMaxWorkers => {
+            SettingsField::WorkflowMaxWorkers => {
                 self.editing_number = true;
-                self.edit_buffer = self.mana_max_workers.to_string();
+                self.edit_buffer = self.workflow_max_workers.to_string();
             }
             SettingsField::SidebarWidth => {
                 self.editing_number = true;
@@ -945,14 +946,14 @@ impl SettingsState {
                     self.read_max_lines = v;
                 }
             }
-            SettingsField::ManaVerifyTimeout => {
+            SettingsField::WorkflowVerifyTimeout => {
                 if let Ok(v) = self.edit_buffer.parse::<u64>() {
-                    self.mana_verify_timeout = v.min(3600);
+                    self.workflow_verify_timeout = v.min(3600);
                 }
             }
-            SettingsField::ManaMaxWorkers => {
+            SettingsField::WorkflowMaxWorkers => {
                 if let Ok(v) = self.edit_buffer.parse::<u32>() {
-                    self.mana_max_workers = v.clamp(1, 32);
+                    self.workflow_max_workers = v.clamp(1, 32);
                 }
             }
             SettingsField::SidebarWidth => {
@@ -1020,16 +1021,17 @@ impl SettingsState {
             allow_secrets: Some(self.lua_secrets),
             allowed_env: config.lua.allowed_env.clone(),
         };
-        config.mana = ManaConfig {
-            scope: self.mana_scope,
-            auto_commit: self.mana_auto_commit,
-            auto_close_parent: self.mana_auto_close_parent,
-            verify_timeout: (self.mana_verify_timeout > 0).then_some(self.mana_verify_timeout),
-            run: ManaRunConfig {
-                background: self.mana_run_background,
-                max_workers: self.mana_max_workers.max(1),
-                continue_after_failure: self.mana_continue_after_failure,
-                review_after_run: self.mana_review_after_run,
+        config.workflow = WorkflowConfig {
+            scope: self.workflow_scope,
+            auto_commit: self.workflow_auto_commit,
+            auto_close_parent: self.workflow_auto_close_parent,
+            verify_timeout: (self.workflow_verify_timeout > 0)
+                .then_some(self.workflow_verify_timeout),
+            run: WorkflowRunConfig {
+                background: self.workflow_run_background,
+                max_workers: self.workflow_max_workers.max(1),
+                continue_after_failure: self.workflow_continue_after_failure,
+                review_after_run: self.workflow_review_after_run,
             },
         };
     }
@@ -1856,7 +1858,7 @@ fn render_settings_field(
             },
             "← →",
         ),
-        SettingsField::ManaScope => render_field(
+        SettingsField::WorkflowScope => render_field(
             state,
             theme,
             buf,
@@ -1865,13 +1867,13 @@ fn render_settings_field(
             row,
             field_index(field),
             "Default scope",
-            match state.mana_scope {
-                ManaScopePreference::Project => "project",
-                ManaScopePreference::Root => "root",
+            match state.workflow_scope {
+                WorkflowScopePreference::Project => "project",
+                WorkflowScopePreference::Root => "root",
             },
             "← →",
         ),
-        SettingsField::ManaAutoCommit => render_field(
+        SettingsField::WorkflowAutoCommit => render_field(
             state,
             theme,
             buf,
@@ -1880,10 +1882,14 @@ fn render_settings_field(
             row,
             field_index(field),
             "Commit on close",
-            if state.mana_auto_commit { "on" } else { "off" },
+            if state.workflow_auto_commit {
+                "on"
+            } else {
+                "off"
+            },
             "← →",
         ),
-        SettingsField::ManaAutoCloseParent => render_field(
+        SettingsField::WorkflowAutoCloseParent => render_field(
             state,
             theme,
             buf,
@@ -1892,22 +1898,22 @@ fn render_settings_field(
             row,
             field_index(field),
             "Auto-close parent",
-            if state.mana_auto_close_parent {
+            if state.workflow_auto_close_parent {
                 "on"
             } else {
                 "off"
             },
             "← →",
         ),
-        SettingsField::ManaVerifyTimeout => {
+        SettingsField::WorkflowVerifyTimeout => {
             let value = if state.editing_number
-                && state.current_field() == SettingsField::ManaVerifyTimeout
+                && state.current_field() == SettingsField::WorkflowVerifyTimeout
             {
                 format!("{}▎", state.edit_buffer)
-            } else if state.mana_verify_timeout == 0 {
+            } else if state.workflow_verify_timeout == 0 {
                 "default".to_string()
             } else {
-                format!("{}s", state.mana_verify_timeout)
+                format!("{}s", state.workflow_verify_timeout)
             };
             render_field(
                 state,
@@ -1922,7 +1928,7 @@ fn render_settings_field(
                 "← → / type (0 = default)",
             );
         }
-        SettingsField::ManaRunBackground => render_field(
+        SettingsField::WorkflowRunBackground => render_field(
             state,
             theme,
             buf,
@@ -1931,20 +1937,21 @@ fn render_settings_field(
             row,
             field_index(field),
             "Run in background",
-            if state.mana_run_background {
+            if state.workflow_run_background {
                 "on"
             } else {
                 "off"
             },
             "← →",
         ),
-        SettingsField::ManaMaxWorkers => {
-            let value =
-                if state.editing_number && state.current_field() == SettingsField::ManaMaxWorkers {
-                    format!("{}▎", state.edit_buffer)
-                } else {
-                    state.mana_max_workers.to_string()
-                };
+        SettingsField::WorkflowMaxWorkers => {
+            let value = if state.editing_number
+                && state.current_field() == SettingsField::WorkflowMaxWorkers
+            {
+                format!("{}▎", state.edit_buffer)
+            } else {
+                state.workflow_max_workers.to_string()
+            };
             render_field(
                 state,
                 theme,
@@ -1958,7 +1965,7 @@ fn render_settings_field(
                 "← → / type",
             );
         }
-        SettingsField::ManaReviewAfterRun => render_field(
+        SettingsField::WorkflowReviewAfterRun => render_field(
             state,
             theme,
             buf,
@@ -1967,14 +1974,14 @@ fn render_settings_field(
             row,
             field_index(field),
             "Review after run",
-            if state.mana_review_after_run {
+            if state.workflow_review_after_run {
                 "on"
             } else {
                 "off"
             },
             "← →",
         ),
-        SettingsField::ManaContinueAfterFailure => render_field(
+        SettingsField::WorkflowContinueAfterFailure => render_field(
             state,
             theme,
             buf,
@@ -1983,7 +1990,7 @@ fn render_settings_field(
             row,
             field_index(field),
             "Continue after failure",
-            if state.mana_continue_after_failure {
+            if state.workflow_continue_after_failure {
                 "on"
             } else {
                 "off"

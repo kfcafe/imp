@@ -4,7 +4,6 @@ use imp_llm::{AssistantMessage, ContentBlock, Cost, Message, StreamEvent, Usage}
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::mana_review::TurnManaReview;
 use crate::reference_monitor::{PolicyTraceRecord, ToolPolicyDecision};
 use crate::runtime::{
     RuntimeArtifactRef, RuntimeEvent, RuntimeEventKind, RuntimePolicyDecision,
@@ -14,6 +13,7 @@ use crate::runtime::{
 use crate::trace::TraceEvent;
 use crate::trust::Provenance;
 use crate::workflow::VerificationGate;
+use crate::workflow_review::TurnWorkflowReview;
 
 use super::NextActionAssessment;
 
@@ -160,7 +160,7 @@ pub enum AgentEvent {
     TurnEnd {
         index: u32,
         message: AssistantMessage,
-        mana_review: TurnManaReview,
+        workflow_review: TurnWorkflowReview,
     },
     MessageStart {
         message: Message,
@@ -421,14 +421,14 @@ impl AgentEvent {
             AgentEvent::TurnEnd {
                 index,
                 message,
-                mana_review,
+                workflow_review,
             } => TraceEvent::new(
                 run_id,
                 "turn.end",
                 json!({
                     "index": index,
                     "message": format!("{message:?}"),
-                    "mana_review": format!("{mana_review:?}"),
+                    "workflow_review": format!("{workflow_review:?}"),
                 }),
             )
             .with_turn(*index),

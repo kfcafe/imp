@@ -42,7 +42,7 @@ impl std::fmt::Display for ChildWorkflowId {
 pub struct ParentWorkflowRef {
     pub workflow_id: Option<String>,
     pub run_id: Option<String>,
-    pub mana_unit_ref: Option<String>,
+    pub workflow_unit_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -550,7 +550,7 @@ pub fn create_child_workflow_contract(
         workspace_scope: parent.workspace_scope.clone(),
         trust_scope: parent.trust_scope.clone(),
         parent_workflow_ref: parent.id.clone(),
-        mana_unit_ref: parent.mana_unit_ref.clone(),
+        workflow_unit_ref: parent.workflow_unit_ref.clone(),
         role: Some(role.name.clone()),
         ..WorkflowContract::default()
     };
@@ -755,7 +755,7 @@ mod tests {
                 .allow("read")
                 .allow("edit")
                 .allow("bash"),
-            mana_unit_ref: Some("394.13".into()),
+            workflow_unit_ref: Some("394.13".into()),
             ..WorkflowContract::default()
         };
 
@@ -772,7 +772,7 @@ mod tests {
             contract.parent_workflow_ref.as_deref(),
             Some("parent-workflow")
         );
-        assert_eq!(contract.mana_unit_ref.as_deref(), Some("394.13"));
+        assert_eq!(contract.workflow_unit_ref.as_deref(), Some("394.13"));
         assert_eq!(contract.role.as_deref(), Some("verifier"));
         assert_eq!(contract.workflow_type, WorkflowType::Verification);
         assert_eq!(contract.autonomy_mode, AutonomyMode::Safe);
@@ -835,7 +835,7 @@ mod tests {
             parent: ParentWorkflowRef {
                 workflow_id: Some("parent-workflow".into()),
                 run_id: Some("run-parent".into()),
-                mana_unit_ref: Some("394.13".into()),
+                workflow_unit_ref: Some("394.13".into()),
             },
             parent_contract: WorkflowContract {
                 id: Some("parent-workflow".into()),
@@ -878,7 +878,10 @@ mod tests {
             decoded.spec.id,
             ChildWorkflowId::new("parent/children/verifier-1")
         );
-        assert_eq!(decoded.spec.parent.mana_unit_ref.as_deref(), Some("394.13"));
+        assert_eq!(
+            decoded.spec.parent.workflow_unit_ref.as_deref(),
+            Some("394.13")
+        );
         assert_eq!(decoded.spec.contract.role.as_deref(), Some("verifier"));
         assert_eq!(decoded.status, ChildWorkflowStatus::DoneWithConcerns);
         assert_eq!(decoded.evidence_refs[0].kind, "test-output");

@@ -2,7 +2,7 @@
 
 ## Decision
 
-imp-work should use a single user-global work store by default, with `project_root` recorded as first-class metadata on stored work records. This avoids mana's cwd-scoped `.mana` fragmentation where work created from `~` is invisible when imp is later launched from `~/imp`, and vice versa.
+imp-work should use a single user-global work store by default, with `project_root` recorded as first-class metadata on stored work records. This avoids workflow's cwd-scoped `.imp/workflows` fragmentation where work created from `~` is invisible when imp is later launched from `~/imp`, and vice versa.
 
 ## Chosen topology
 
@@ -25,13 +25,13 @@ The current markdown `WorkStore` can remain useful for local/project stores and 
 - Current-project view: detect the active project root and filter records by `project_root`.
 - Global view/search: query all records across all projects.
 - Explicit project view: caller passes a `project_root` to filter another project.
-- Imported `.mana` records should preserve source refs and record the project root of the source graph.
+- Imported `.imp/workflows` records should preserve source refs and record the project root of the source graph.
 
 ## Alternatives considered
 
 ### Independent project-local stores
 
-Rejected as the default because it recreates the `.mana` cwd fragmentation problem. It can be retained as an import/export or project-local backup format.
+Rejected as the default because it recreates the `.imp/workflows` cwd fragmentation problem. It can be retained as an import/export or project-local backup format.
 
 ### Single store without project metadata
 
@@ -43,7 +43,7 @@ Rejected as the primary model because discovery order and cwd behavior remain su
 
 ## Migration policy
 
-1. Import old `.mana` graphs into the global store with `project_root` set to the source project.
+1. Import old `.imp/workflows` graphs into the global store with `project_root` set to the source project.
 2. Import existing project-local `.imp/work` stores into the global store if found.
 3. Never delete source stores automatically.
 4. Report imported/skipped/lossy records.

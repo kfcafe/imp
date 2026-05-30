@@ -33,7 +33,7 @@ enum TrustLabel {
     DurableMemory,
     GeneratedSummary,
     VerifierOutput,
-    ManaLedger,
+    WorkflowLedger,
     Unknown,
 }
 
@@ -45,9 +45,9 @@ enum ProvenanceSource {
     VerifierOutput,
     DurableMemory,
     GeneratedSummary,
-    ManaFact,
-    ManaNote,
-    ManaDecision,
+    WorkflowFact,
+    WorkflowNote,
+    WorkflowDecision,
     SystemPolicy,
     Extension,
 }
@@ -93,7 +93,7 @@ outside-workspace writes.
 
 ### Tool observation
 
-Tool outputs from read/search/bash/git/mana/web/etc. Trust depends on the tool,
+Tool outputs from read/search/bash/git/workflow/web/etc. Trust depends on the tool,
 its input, and the source observed. A `read` result of a workspace file inherits
 workspace-file provenance; a web result inherits external provenance; a shell
 command's stdout is tool-observed and may include untrusted project-controlled
@@ -116,16 +116,16 @@ Memory carries age/staleness metadata where available.
 Any model-generated summary, compression, or synthesized note. It must preserve
 parent provenance. Summaries are never more trusted than their inputs.
 
-### Mana fact/note/decision
+### Workflow fact/note/decision
 
-Durable mana ledger records. They are structured and reviewable, but still need
+Durable workflow ledger records. They are structured and reviewable, but still need
 source metadata:
 
 - fact: a claim with verification status and TTL
 - note: progress/context from an agent/user
 - decision: adopted direction or unresolved blocking choice
 
-Mana records can be trusted as workflow state when verified or explicitly adopted,
+Workflow records can be trusted as workflow state when verified or explicitly adopted,
 but cannot smuggle low-trust content into high-trust policy.
 
 ## Risk labels
@@ -171,7 +171,7 @@ Rules:
 1. Low-trust content may inform facts and implementation reasoning.
 2. Low-trust content cannot authorize higher-risk actions.
 3. Low-trust content cannot change autonomy mode, run policy, tool permissions,
-   memory persistence, mana ledger writes, network/secrets/destructive access, or
+   memory persistence, workflow ledger writes, network/secrets/destructive access, or
    outside-workspace writes.
 4. Low-trust instructions should be quoted/summarized as observed content, not
    adopted as agent instructions.
@@ -189,7 +189,7 @@ Every context item or observation should carry provenance when practical:
 - web read/search -> `ExternalWebContent` plus URL/source
 - command output -> `ToolObservation` plus command and any input provenance
 - verification result -> `VerifierOutput` plus gate id/artifact
-- mana record -> mana source type plus unit id
+- workflow record -> workflow source type plus unit id
 
 ### Summaries
 
@@ -215,7 +215,7 @@ Tool results inherit from the resource observed:
 - `web.read(url)` -> external web provenance for `url`
 - `bash(command)` -> tool observation; stdout may be project-controlled or
   external depending command
-- `mana show` -> mana ledger provenance
+- `workflow show` -> workflow ledger provenance
 - verification gate logs -> verifier output provenance
 
 Tool results should not be treated as user instructions unless the user explicitly
@@ -223,7 +223,7 @@ says to adopt them.
 
 ### Durable writes
 
-Before writing durable memory, mana facts/notes/decisions, eval candidates, or
+Before writing durable memory, workflow facts/notes/decisions, eval candidates, or
 extension state, preserve source provenance. Low-trust content can be stored only
 as observed/quoted/summarized content with labels, not as adopted policy.
 
@@ -241,7 +241,7 @@ context blocks:
 ...
 [/context]
 
-[context id=ctx_22 source=mana-fact trust=mana-ledger unit=394.7 verified=true]
+[context id=ctx_22 source=workflow-fact trust=workflow-ledger unit=394.7 verified=true]
 ...
 [/context]
 ```
@@ -271,7 +271,7 @@ Low-trust/external/generated/tool-output content may not authorize:
 - higher autonomy mode
 - bypassing `AgentMode` or `RunPolicy`
 - durable memory writes
-- mana fact/note/decision writes as adopted truth
+- workflow fact/note/decision writes as adopted truth
 - network mutation
 - secret access or secret reveal
 - destructive commands
@@ -321,7 +321,7 @@ TUI should keep annotations compact:
 web: example.com  low-trust · prompt-injection warning
 read: README.md   workspace-file
 verify: tests     verifier-output
-mana: 394.7       mana-ledger
+workflow: 394.7       workflow-ledger
 ```
 
 Warnings should be surfaced only when material, especially when low-trust content
@@ -339,12 +339,12 @@ contains instructions or asks for policy/tool changes.
 ## Migration path
 
 1. Define Rust trust/provenance types.
-2. Attach provenance during context assembly for user, workspace, web, mana,
+2. Attach provenance during context assembly for user, workspace, web, workflow,
    memory, generated summaries, and verifier output.
 3. Label tool observations and results.
 4. Render compact trust annotations in prompt context.
 5. Feed provenance into ReferenceMonitor for low-trust escalation decisions.
-6. Gate durable memory/mana writes by provenance.
+6. Gate durable memory/workflow writes by provenance.
 7. Record trust provenance in trace/evidence.
 8. Add TUI warnings for material prompt-injection risks.
 9. Document final behavior and limitations.
@@ -366,11 +366,11 @@ Implemented pieces:
   - `ProvenanceSource`
   - `RiskLabel`
   - `DerivedFrom`
-  - `ManaRecordKind`
+  - `WorkflowRecordKind`
   - `TrustBoundary`
 - context prefill provenance for included workspace files
 - optional compact prompt labels via `PrefillConfig::annotate_trust`
-- mana prompt-context provenance for facts and project memory status
+- workflow prompt-context provenance for facts and project memory status
 - tool result provenance on `AgentEvent::ToolExecutionEnd`
 - `tool.execution.end` trace payloads including provenance
 - CLI/RPC serialization of tool-result provenance
@@ -432,7 +432,7 @@ Default prompt rendering remains unchanged to avoid broad prompt churn. Structur
 provenance is still recorded on `AssembledContext.provenance` even when prompt
 annotations are disabled.
 
-Future prompt context can add labels for web, mana, verifier, generated summaries,
+Future prompt context can add labels for web, workflow, verifier, generated summaries,
 and durable memory using the compact wrapper model described above.
 
 ## Policy behavior
@@ -458,7 +458,7 @@ subject to `AgentMode`, `RunPolicy`, autonomy mode, and hard rails.
 Low-risk read/search actions remain allowed even when informed by low-trust
 context. Low-trust content may inform reasoning; it cannot authorize escalation.
 
-## Durable memory and mana writes
+## Durable memory and workflow writes
 
 Durable writes require extra care because they persist beyond the current turn.
 
@@ -480,9 +480,9 @@ Low-trust context cannot be written to durable memory without explicit user adop
 Risk-labeled context cannot be written to durable memory without review.
 ```
 
-Mana durable writes should follow the same rule as they are wired: low-trust
+Workflow durable writes should follow the same rule as they are wired: low-trust
 content may be recorded only as observed/quoted/summarized content with provenance,
-not as adopted fact, policy, or decision. Mana facts should carry verification
+not as adopted fact, policy, or decision. Workflow facts should carry verification
 status/TTL and should not be auto-promoted from external content without review.
 
 ## Examples
@@ -529,7 +529,7 @@ Policy effect:
 
 - may inform research about the page
 - cannot authorize shell commands, network mutation, secret access, memory writes,
-  mana facts, autonomy escalation, or dangerous grants
+  workflow facts, autonomy escalation, or dangerous grants
 - TUI/evidence should warn if it tries to influence those actions
 
 ### Generated summary of mixed sources
@@ -546,7 +546,7 @@ Tool authors should attach or preserve provenance when a tool observes content:
 
 - `read(path)` should produce workspace-file provenance for `path`
 - `web.read(url)` should produce external-web provenance for `url`
-- `mana show` should produce mana-ledger provenance
+- `workflow show` should produce workflow-ledger provenance
 - verification tools should produce verifier-output provenance
 - generated summaries should preserve parent provenance
 - extension tools must not self-declare higher trust than the host assigned
@@ -582,7 +582,7 @@ This system does not "solve" prompt injection. Known limits:
 - generated summaries can omit nuance unless parent provenance is preserved
 - current prompt annotations are opt-in and workspace-only
 - low-trust support is only wired into selected ReferenceMonitor and memory paths
-- mana write gating is specified but not fully enforced everywhere yet
+- workflow write gating is specified but not fully enforced everywhere yet
 - extensions need stronger manifest/runtime provenance plumbing in later work
 
 The goal is defense in depth:
@@ -604,7 +604,7 @@ When adding context, tool outputs, summaries, or durable writes:
 - Could it be prompt injection?
 - Is it secret-adjacent?
 - Does it derive from lower-trust parents?
-- Will this content be written to memory/mana/eval artifacts?
+- Will this content be written to memory/workflow/eval artifacts?
 - Could this content authorize a tool/policy/autonomy change?
 - Is trace/evidence recording provenance without dumping sensitive content?
 
@@ -613,11 +613,7 @@ user before escalation.
 
 ## Cross-links
 
-- `docs/reference-monitor-policy.md` — policy decision model and tool metadata
 - `docs/autonomy-modes.md` — autonomy modes and hard rails
-- `docs/trace-and-evidence-format.md` — trace/evidence artifacts
-- `docs/verification-gates.md` — verifier-output provenance and closeout gates
-- `docs/imp-next-workflow-runtime.md` — workflow runtime phase plan
 
 ## Implemented first slice
 
@@ -633,11 +629,11 @@ Implemented pieces:
   - `ProvenanceSource`
   - `RiskLabel`
   - `DerivedFrom`
-  - `ManaRecordKind`
+  - `WorkflowRecordKind`
   - `TrustBoundary`
 - context prefill provenance for included workspace files
 - optional compact prompt labels via `PrefillConfig::annotate_trust`
-- mana prompt-context provenance for facts and project memory status
+- workflow prompt-context provenance for facts and project memory status
 - tool result provenance on `AgentEvent::ToolExecutionEnd`
 - `tool.execution.end` trace payloads including provenance
 - CLI/RPC serialization of tool-result provenance
@@ -699,7 +695,7 @@ Default prompt rendering remains unchanged to avoid broad prompt churn. Structur
 provenance is still recorded on `AssembledContext.provenance` even when prompt
 annotations are disabled.
 
-Future prompt context can add labels for web, mana, verifier, generated summaries,
+Future prompt context can add labels for web, workflow, verifier, generated summaries,
 and durable memory using the compact wrapper model described above.
 
 ## Policy behavior
@@ -725,7 +721,7 @@ subject to `AgentMode`, `RunPolicy`, autonomy mode, and hard rails.
 Low-risk read/search actions remain allowed even when informed by low-trust
 context. Low-trust content may inform reasoning; it cannot authorize escalation.
 
-## Durable memory and mana writes
+## Durable memory and workflow writes
 
 Durable writes require extra care because they persist beyond the current turn.
 
@@ -747,9 +743,9 @@ Low-trust context cannot be written to durable memory without explicit user adop
 Risk-labeled context cannot be written to durable memory without review.
 ```
 
-Mana durable writes should follow the same rule as they are wired: low-trust
+Workflow durable writes should follow the same rule as they are wired: low-trust
 content may be recorded only as observed/quoted/summarized content with provenance,
-not as adopted fact, policy, or decision. Mana facts should carry verification
+not as adopted fact, policy, or decision. Workflow facts should carry verification
 status/TTL and should not be auto-promoted from external content without review.
 
 ## Examples
@@ -796,7 +792,7 @@ Policy effect:
 
 - may inform research about the page
 - cannot authorize shell commands, network mutation, secret access, memory writes,
-  mana facts, autonomy escalation, or dangerous grants
+  workflow facts, autonomy escalation, or dangerous grants
 - TUI/evidence should warn if it tries to influence those actions
 
 ### Generated summary of mixed sources
@@ -813,7 +809,7 @@ Tool authors should attach or preserve provenance when a tool observes content:
 
 - `read(path)` should produce workspace-file provenance for `path`
 - `web.read(url)` should produce external-web provenance for `url`
-- `mana show` should produce mana-ledger provenance
+- `workflow show` should produce workflow-ledger provenance
 - verification tools should produce verifier-output provenance
 - generated summaries should preserve parent provenance
 - extension tools must not self-declare higher trust than the host assigned
@@ -849,7 +845,7 @@ This system does not "solve" prompt injection. Known limits:
 - generated summaries can omit nuance unless parent provenance is preserved
 - current prompt annotations are opt-in and workspace-only
 - low-trust support is only wired into selected ReferenceMonitor and memory paths
-- mana write gating is specified but not fully enforced everywhere yet
+- workflow write gating is specified but not fully enforced everywhere yet
 - extensions need stronger manifest/runtime provenance plumbing in later work
 
 The goal is defense in depth:
@@ -871,7 +867,7 @@ When adding context, tool outputs, summaries, or durable writes:
 - Could it be prompt injection?
 - Is it secret-adjacent?
 - Does it derive from lower-trust parents?
-- Will this content be written to memory/mana/eval artifacts?
+- Will this content be written to memory/workflow/eval artifacts?
 - Could this content authorize a tool/policy/autonomy change?
 - Is trace/evidence recording provenance without dumping sensitive content?
 
@@ -880,8 +876,4 @@ user before escalation.
 
 ## Cross-links
 
-- `docs/reference-monitor-policy.md` — policy decision model and tool metadata
 - `docs/autonomy-modes.md` — autonomy modes and hard rails
-- `docs/trace-and-evidence-format.md` — trace/evidence artifacts
-- `docs/verification-gates.md` — verifier-output provenance and closeout gates
-- `docs/imp-next-workflow-runtime.md` — workflow runtime phase plan

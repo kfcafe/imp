@@ -1,6 +1,6 @@
 # Imp workflow responsibility boundaries
 
-This note records the current consolidation boundary between imp-native workflows, mana work, prototype experiments, workflow profiles, and child/subagent infrastructure.
+This note records the current consolidation boundary between imp-native workflows, workflow work, prototype experiments, workflow profiles, and child/subagent infrastructure.
 
 ## Current owners
 
@@ -16,11 +16,11 @@ This note records the current consolidation boundary between imp-native workflow
 
 `crates/imp-core/src/tools/workflow.rs` is the tool surface for this ledger: list, show, validate, run the next advisory action, and update workflow state.
 
-### Mana graph and worker runtime
+### Workflow graph and worker runtime
 
-Mana remains the durable project graph and existing work-unit runtime. `crates/imp-core/src/tools/mana.rs` owns mana discovery, unit operations, native run orchestration, and transitional compatibility with existing mana workflows.
+Workflow remains the durable project graph and existing work-unit runtime. `crates/imp-core/src/tools/workflow.rs` owns workflow discovery, unit operations, native run orchestration, and transitional compatibility with existing workflow workflows.
 
-`crates/imp-core/src/mana_worker.rs` is the canonical single-unit mana worker runtime. Workflow-native orchestration should bridge to it when a workflow step is explicitly mana-unit-backed, rather than duplicating mana assignment loading.
+`crates/imp-core/src/workflow_worker.rs` is the canonical single-unit workflow worker runtime. Workflow-native orchestration should bridge to it when a workflow step is explicitly workflow-unit-backed, rather than duplicating workflow assignment loading.
 
 ### Prototype experiments
 
@@ -34,22 +34,22 @@ Mana remains the durable project graph and existing work-unit runtime. `crates/i
 
 `crates/imp-core/src/workflow/child_workflow.rs` and `crates/imp-core/src/agent/subagent.rs` define child workflow/subagent contracts and lifecycle vocabulary. `workflow run` currently remains advisory, but now emits worker assignment contracts that can later feed these execution paths.
 
-### Transitional mana compatibility
+### Transitional workflow compatibility
 
-`crates/imp-core/src/agent/workflow_integration/mana_compat.rs` infers durable workflow progress from mana/work tool result shapes. Treat this as migration glue. As workflow-native checks/events mature, this inference layer should shrink.
+`crates/imp-core/src/agent/workflow_integration/workflow_compat.rs` infers durable workflow progress from workflow/work tool result shapes. Treat this as migration glue. As workflow-native checks/events mature, this inference layer should shrink.
 
 ## Consolidation decisions
 
 1. Keep `.imp/workflows` as the imp-native process ledger.
-2. Keep mana as the durable graph and canonical mana-unit worker substrate.
+2. Keep workflow as the durable graph and canonical workflow-unit worker substrate.
 3. Keep workflow profiles as UX modes, not persistent workflow state.
 4. Keep prototype execution isolated; record useful observations through workflow artifacts/checks later.
-5. Bridge workflow steps to mana/prototype/child-run evidence explicitly instead of merging all systems into one tool.
+5. Bridge workflow steps to workflow/prototype/child-run evidence explicitly instead of merging all systems into one tool.
 6. Keep `workflow run` advisory until assignment contracts, verification gates, and installed-runtime behavior are stable.
 
 ## Follow-up seams
 
 - Add workflow check kinds or evidence refs for prototype observations.
-- Add explicit workflow-native progress events to replace parts of `mana_compat` inference.
+- Add explicit workflow-native progress events to replace parts of `workflow_compat` inference.
 - Add role-aware child workflow spawning from `WorkflowWorkerAssignmentContract`.
-- Add mana-backed workflow step references when a workflow step corresponds to a mana unit.
+- Add workflow-backed workflow step references when a workflow step corresponds to a workflow unit.

@@ -6,7 +6,11 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## [Unreleased]
 
-Use this section for changes that have landed on nightly after the 0.3.0 release.
+### Changed
+
+- Removed legacy mana integration from the active public surface; native file-backed workflows are now the durable orchestration path.
+- Removed unused direct `mana-core` dependency from the experimental `imp-gui` crate.
+- Clarified that the ACP editor adapter scaffold is internal/out-of-scope for 0.3.0 unless separately verified.
 
 ## [0.3.0] - 2026-05-29
 

@@ -69,7 +69,7 @@ Runtime events should stay presentation-neutral and be consumable by TUI, CLI, v
    - Grounding: `StreamEvent::MessageStart`, `TextDelta`, `ThinkingDelta`, `ToolCall`, `MessageEnd`, `Error`.
    - Shared meaning: model output/progress, not a surface rendering instruction.
 2. **Tool/runtime progress**
-   - Grounding: existing TUI runtime signals and tool-call rendering, mana stream handling, and CLI JSON stream serializers.
+   - Grounding: existing TUI runtime signals and tool-call rendering, workflow stream handling, and CLI JSON stream serializers.
    - Shared meaning: tool started/progressed/finished, with tool name, call id, status, and bounded display summary.
 3. **Session lifecycle**
    - Shared meaning: session loaded, turn started, turn completed, interrupted, cancelled, or failed.

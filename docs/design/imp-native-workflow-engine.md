@@ -13,7 +13,7 @@ The current `/plan` direction should become workflow-backed. `/status` should re
 ## Product decisions
 
 - Product surface: `imp workflows`, exposed to the model as a first-class `workflow tool` and to users mostly through `/plan`, `/status`, and `/run`.
-- The `workflow` tool may eventually replace normal imp use of `mana`, `work`, and `prototype`.
+- The `workflow` tool may eventually replace normal imp use of `workflow`, `work`, and `prototype`.
 - Workflow instances are compact YAML with map-based IDs.
 - Global/project config and reusable profiles are TOML.
 - Global config lives in `~/.imp/config.toml`; project config overrides global config.
@@ -68,7 +68,7 @@ close      attempt closeout and render final factual skeleton
 
 Additional actions such as `list`, `select`, and `archive` can be added if the minimal surface becomes awkward with multiple workflows.
 
-The tool owns workflow artifacts directly, similar to how mana mutates its work graph. It may write:
+The tool owns workflow artifacts directly, similar to how workflow mutates its work graph. It may write:
 
 ```text
 .imp/workflows/**/workflow.yaml
@@ -79,11 +79,11 @@ The tool owns workflow artifacts directly, similar to how mana mutates its work 
 
 It should not write production code/tests directly. Builder workers do that under workflow policy.
 
-This tool could replace current agent-facing `mana`, `work`, and `prototype` responsibilities for imp-native work:
+This tool could replace current agent-facing `workflow`, `work`, and `prototype` responsibilities for imp-native work:
 
 - `work` replacement: local project artifacts, status, events, results, and resume.
 - `prototype` replacement: prototype experiments become workflow step items with structured results.
-- `mana` replacement for everyday imp execution: bounded execution, verification, review, and closeout live in imp. Mana remains optional indexing/aggregation if needed.
+- `workflow` replacement for everyday imp execution: bounded execution, verification, review, and closeout live in imp. Workflow remains optional indexing/aggregation if needed.
 
 User-facing commands stay small:
 
@@ -264,16 +264,16 @@ Workers can receive full workflow-backed assignments rather than thin task slice
 
 A workflow can include prototype experiments when the right approach is uncertain. Prototype code is disposable by default. The workflow records question, hypothesis, experiment, result, recommendation, selected approach, and rationale. Prototype results feed decisions and plan updates.
 
-## Relationship to mana/work/prototype
+## Relationship to workflow/work/prototype
 
-This direction redefines the tool and mana/imp split:
+This direction redefines the tool and workflow/imp split:
 
 - imp owns bounded programmatic workflow execution;
 - imp workflows are durable project artifacts when committed;
 - the workflow tool can absorb normal imp-native `work` and `prototype` responsibilities;
-- the workflow tool can absorb everyday imp execution responsibilities currently routed through `mana`;
-- mana, if retained, owns optional indexing, aggregation, GUI/board views, and long-horizon project graph behavior;
-- mana should not be required for normal imp workflow execution.
+- the workflow tool can absorb everyday imp execution responsibilities currently routed through `workflow`;
+- workflow, if retained, owns optional indexing, aggregation, GUI/board views, and long-horizon project graph behavior;
+- workflow should not be required for normal imp workflow execution.
 
 ## Existing workflow terminology to revisit
 
@@ -282,9 +282,9 @@ Audit and consolidate:
 - `crates/imp-core/src/workflow/*`: align useful contract/check/worktree/worker concepts with schema-first `workflow.yaml`.
 - `crates/imp-core/src/workflow_profiles.rs`: convert prompt-wrapper profiles into workflow profiles/templates.
 - TUI `/workflow` and `/workflows` commands: simplify around `/plan`, `/status`, `/run`.
-- `WorkflowRunController`: evolve into workflow engine or retire mana/imp-work-specific assumptions.
+- `WorkflowRunController`: evolve into workflow engine or retire workflow/imp-work-specific assumptions.
 - `ChildWorkflow*`: likely rename UX to worker runs or workflow calls depending on context.
-- Existing `mana`, `work`, and `prototype` tool responsibilities: evaluate replacement by native workflow tool.
+- Existing `workflow`, `work`, and `prototype` tool responsibilities: evaluate replacement by native workflow tool.
 
 ## Git tracking policy
 
@@ -317,7 +317,7 @@ This should be implemented deliberately later; this design turn does not change 
 9. Add worker-run dispatch for builder/verifier/reviewer.
 10. Add branch/worktree creation settings.
 11. Migrate existing workflow profile/slash-command system into workflow profiles.
-12. Evaluate replacing existing `mana`, `work`, and `prototype` tools with workflow-tool actions.
+12. Evaluate replacing existing `workflow`, `work`, and `prototype` tools with workflow-tool actions.
 
 ## Test plan
 
@@ -344,6 +344,6 @@ This should be implemented deliberately later; this design turn does not change 
 
 - What is the first minimal Rust schema validation implementation?
 - Which existing workflow structs can be reused versus renamed or retired?
-- How much of `mana`, `work`, and `prototype` should be retired once workflow-tool parity exists?
+- How much of `workflow`, `work`, and `prototype` should be retired once workflow-tool parity exists?
 - What exact setting controls branch/worktree creation for prototype and build steps?
 - Should `/workflow` exist as a public advanced command or remain hidden/debug-only?

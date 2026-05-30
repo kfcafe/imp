@@ -21,10 +21,9 @@ pub fn styled_tool_output_lines(
         "bash" | "shell" => styled_terminal_output(tc, theme),
         "git" => styled_git_output(tc, theme),
         "scan" => styled_scan_output(tc, theme),
-        "mana" => styled_mana_output(tc, theme),
+        "workflow" => styled_workflow_output(tc, theme),
         "work" => styled_work_output(tc, theme),
         "web" => styled_web_output(tc, theme),
-        "workflow" => styled_workflow_output(tc, theme),
         "ask_user" | "extend" | "audit_scan" | "openrouter_secret_run" => {
             styled_status_output(tc, theme)
         }
@@ -48,13 +47,6 @@ pub fn styled_sidebar_tool_output_lines(
         "git" => styled_git_sidebar_output(tc, theme),
         "scan" => styled_scan_sidebar_output(tc, theme),
         "workflow" => styled_workflow_output(tc, theme),
-        "mana" => tool_card_output(
-            "Mana",
-            tc.details.get("action").and_then(Value::as_str),
-            "•",
-            styled_plain_output_with(tc, theme, mana_line_style),
-            theme,
-        ),
         "web" => styled_web_sidebar_output(tc, theme),
         "prototype" => styled_prototype_sidebar_output(tc, theme),
         "work" => styled_work_output(tc, theme),
@@ -785,10 +777,6 @@ fn styled_scan_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>>
     styled_plain_output_with(tc, theme, scan_line_style)
 }
 
-fn styled_mana_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
-    styled_plain_output_with(tc, theme, mana_line_style)
-}
-
 fn styled_work_output(tc: &DisplayToolCall, theme: &Theme) -> Vec<Line<'static>> {
     let action = tc
         .details
@@ -1303,29 +1291,6 @@ fn scan_line_style(line: &str, theme: &Theme, is_error: bool) -> Style {
         || line.contains("Types")
     {
         Style::default().fg(theme.tool_name)
-    } else {
-        Style::default().fg(theme.fg)
-    }
-}
-
-fn mana_line_style(line: &str, theme: &Theme, is_error: bool) -> Style {
-    if is_error || line.contains("failed") || line.contains("blocked") {
-        return theme.error_style();
-    }
-
-    let trimmed = line.trim_start();
-    if line.starts_with("mana delta") || trimmed.starts_with('✓') || trimmed.starts_with("done") {
-        theme.success_style()
-    } else if trimmed.starts_with('▶') || trimmed.starts_with("running") {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    } else if trimmed.starts_with('!') || line.contains("awaiting") || line.contains("skipped") {
-        theme.warning_style()
-    } else if line.ends_with(':') || matches!(line, "summary" | "units") {
-        Style::default()
-            .fg(theme.tool_name)
-            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.fg)
     }

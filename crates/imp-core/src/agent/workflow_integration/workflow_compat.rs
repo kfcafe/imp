@@ -1,35 +1,53 @@
-//! Mana/work-graph compatibility support for imp workflow integration.
-
-#[cfg(feature = "mana-api")]
-use std::path::{Path, PathBuf};
+//! Durable workflow compatibility support for imp workflow integration.
 
 use crate::agent::{
-    mana_loop::{self, ManaActionClass},
     Agent, AgentEvent, ContentBlock, ContinueReason, ContinueRecommendation, LoopDecision, Message,
     StopReason,
 };
 use crate::config::AgentMode;
-use crate::mana_review::{
-    ManaMutationAction, ManaMutationRecord, ManaReviewScope, ManaReviewScopeKind, ManaReviewState,
-    ManaUnitSnapshot, TurnManaReview, TurnManaReviewAccumulator,
-};
 use crate::storage;
+use crate::workflow_review::{
+    TurnWorkflowReview, TurnWorkflowReviewAccumulator, WorkflowMutationAction,
+    WorkflowMutationRecord, WorkflowReviewScope, WorkflowReviewScopeKind, WorkflowReviewState,
+    WorkflowUnitSnapshot,
+};
 use imp_llm::AssistantMessage;
 
 use super::super::{
-    assistant_message_contains_mana_tool_call, assistant_message_text,
+    assistant_message_contains_workflow_tool_call, assistant_message_text,
     bash_result_is_successful_check,
 };
 
-#[cfg(feature = "mana-api")]
-fn find_mana_dir(cwd: &Path) -> Option<PathBuf> {
-    let mut current = if cwd.is_file() { cwd.parent()? } else { cwd };
-    loop {
-        let candidate = current.join(".mana");
-        if candidate.is_dir() {
-            return Some(candidate);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowActionClass {
+    ReadHelp,
+    Inspect,
+    ProgressCheckpoint,
+    GraphMutation,
+    DecisionFact,
+    Lifecycle,
+    Orchestration,
+    Destructive,
+    Unknown,
+}
+
+fn classify_workflow_action(action: &str) -> WorkflowActionClass {
+    match action {
+        "guide" | "template" => WorkflowActionClass::ReadHelp,
+        "status" | "list" | "show" | "logs" | "agents" | "next" | "tree" | "search" | "runs"
+        | "validate" | "scope" => WorkflowActionClass::Inspect,
+        "update" | "notes_append" | "context" | "refresh_context" | "outcome"
+        | "prototype_outcome" | "remember" => WorkflowActionClass::ProgressCheckpoint,
+        "create" | "dep_add" | "dep_remove" | "reparent" => WorkflowActionClass::GraphMutation,
+        "decision_add" | "decision_resolve" | "fact_create" | "fact_verify" => {
+            WorkflowActionClass::DecisionFact
         }
-        current = current.parent()?;
+        "claim" | "release" | "verify" | "close" | "reopen" | "fail" => {
+            WorkflowActionClass::Lifecycle
+        }
+        "run" | "evaluate" | "run_state" => WorkflowActionClass::Orchestration,
+        "delete" => WorkflowActionClass::Destructive,
+        _ => WorkflowActionClass::Unknown,
     }
 }
 
@@ -43,65 +61,65 @@ pub(crate) struct WorkflowPostTurnSignals {
     pub(crate) stop_reason: Option<StopReason>,
 }
 
-fn mana_review_scope_from_result(result: &imp_llm::ToolResultMessage) -> ManaReviewScope {
+fn workflow_review_scope_from_result(result: &imp_llm::ToolResultMessage) -> WorkflowReviewScope {
     let display = result
         .details
         .get("path")
-        .or_else(|| result.details.get("mana_dir"))
+        .or_else(|| result.details.get("workflow_dir"))
         .and_then(|value| value.as_str())
         .unwrap_or("auto")
         .to_string();
 
-    ManaReviewScope {
+    WorkflowReviewScope {
         kind: if display == "auto" {
-            ManaReviewScopeKind::None
+            WorkflowReviewScopeKind::None
         } else {
-            ManaReviewScopeKind::ExplicitPath
+            WorkflowReviewScopeKind::ExplicitPath
         },
         display,
     }
 }
 
-fn unit_snapshot_from_value(value: &serde_json::Value) -> Option<ManaUnitSnapshot> {
+fn unit_snapshot_from_value(value: &serde_json::Value) -> Option<WorkflowUnitSnapshot> {
     serde_json::from_value(value.clone()).ok()
 }
 
-fn unit_snapshot_from_result(result: &imp_llm::ToolResultMessage) -> Option<ManaUnitSnapshot> {
+fn unit_snapshot_from_result(result: &imp_llm::ToolResultMessage) -> Option<WorkflowUnitSnapshot> {
     result
         .details
         .get("unit")
         .and_then(unit_snapshot_from_value)
 }
 
-fn mana_mutation_action(action: &str) -> Option<ManaMutationAction> {
+fn workflow_mutation_action(action: &str) -> Option<WorkflowMutationAction> {
     match action {
-        "create" => Some(ManaMutationAction::Create),
-        "close" => Some(ManaMutationAction::Close),
-        "update" => Some(ManaMutationAction::Update),
-        "notes_append" => Some(ManaMutationAction::NotesAppend),
-        "decision_add" => Some(ManaMutationAction::DecisionAdd),
-        "decision_resolve" => Some(ManaMutationAction::DecisionResolve),
-        "reopen" => Some(ManaMutationAction::Reopen),
-        "fail" => Some(ManaMutationAction::Fail),
-        "delete" => Some(ManaMutationAction::Delete),
-        "dep_add" => Some(ManaMutationAction::DepAdd),
-        "dep_remove" => Some(ManaMutationAction::DepRemove),
-        "fact_create" => Some(ManaMutationAction::FactCreate),
+        "create" => Some(WorkflowMutationAction::Create),
+        "close" => Some(WorkflowMutationAction::Close),
+        "update" => Some(WorkflowMutationAction::Update),
+        "notes_append" => Some(WorkflowMutationAction::NotesAppend),
+        "decision_add" => Some(WorkflowMutationAction::DecisionAdd),
+        "decision_resolve" => Some(WorkflowMutationAction::DecisionResolve),
+        "reopen" => Some(WorkflowMutationAction::Reopen),
+        "fail" => Some(WorkflowMutationAction::Fail),
+        "delete" => Some(WorkflowMutationAction::Delete),
+        "dep_add" => Some(WorkflowMutationAction::DepAdd),
+        "dep_remove" => Some(WorkflowMutationAction::DepRemove),
+        "fact_create" => Some(WorkflowMutationAction::FactCreate),
         _ => None,
     }
 }
 
-fn mutation_record_from_mana_result(
+fn mutation_record_from_workflow_result(
     result: &imp_llm::ToolResultMessage,
-) -> Option<ManaMutationRecord> {
-    if result.is_error || result.tool_name != "mana" {
+) -> Option<WorkflowMutationRecord> {
+    if result.is_error || result.tool_name != "workflow" {
         return None;
     }
 
-    let action_name = mana_result_action(result)?;
-    let action = mana_mutation_action(action_name)?;
+    let action_name = workflow_result_action(result)?;
+    let action = workflow_mutation_action(action_name)?;
     let after_unit = unit_snapshot_from_result(result);
-    let deleted_unit = if action == ManaMutationAction::Delete {
+    let deleted_unit = if action == WorkflowMutationAction::Delete {
         let id = result.details.get("id")?.as_str()?.to_string();
         let title = result
             .details
@@ -109,7 +127,9 @@ fn mutation_record_from_mana_result(
             .and_then(|value| value.as_str())
             .unwrap_or(&id)
             .to_string();
-        Some(crate::mana_review::ManaUnitRef::new(id, title, None))
+        Some(crate::workflow_review::WorkflowUnitRef::new(
+            id, title, None,
+        ))
     } else {
         None
     };
@@ -118,15 +138,15 @@ fn mutation_record_from_mana_result(
         && deleted_unit.is_none()
         && !matches!(
             action,
-            ManaMutationAction::DepAdd | ManaMutationAction::DepRemove
+            WorkflowMutationAction::DepAdd | WorkflowMutationAction::DepRemove
         )
     {
         return None;
     }
 
-    Some(ManaMutationRecord {
+    Some(WorkflowMutationRecord {
         action,
-        scope: mana_review_scope_from_result(result),
+        scope: workflow_review_scope_from_result(result),
         before_unit: None,
         after_unit,
         deleted_unit,
@@ -138,20 +158,20 @@ fn mutation_record_from_mana_result(
     })
 }
 
-fn mana_workflow_follow_up_text() -> &'static str {
+fn durable_workflow_follow_up_text() -> &'static str {
     "An imp-work task was closed, verified, or materially advanced, but that only proves the current task changed. Inspect the active work scope with work(action=\"next\") or work(action=\"validate\"), continue any ready work, and only stop when the requested outcome is complete, blocked by a concrete decision, or no runnable work remains."
 }
 
 fn durable_workflow_action(result: &imp_llm::ToolResultMessage) -> Option<&str> {
     match result.tool_name.as_str() {
-        "mana" | "work" => result
+        "workflow" | "work" => result
             .details
             .get("action")
             .and_then(|value| value.as_str())
             .or_else(|| {
                 result
                     .details
-                    .get("mana_loop_policy")
+                    .get("workflow_loop_policy")
                     .and_then(|policy| policy.get("action"))
                     .and_then(|value| value.as_str())
             }),
@@ -159,32 +179,32 @@ fn durable_workflow_action(result: &imp_llm::ToolResultMessage) -> Option<&str> 
     }
 }
 
-fn durable_workflow_action_class(action: &str) -> mana_loop::ManaActionClass {
+fn durable_workflow_action_class(action: &str) -> WorkflowActionClass {
     match action {
-        // Native imp-work names that do not exist in legacy mana but mutate or
+        // Native imp-work names that do not exist in legacy workflow but mutate or
         // materially advance durable work state.
         "context" | "refresh_context" | "outcome" | "prototype_outcome" | "remember" => {
-            mana_loop::ManaActionClass::ProgressCheckpoint
+            WorkflowActionClass::ProgressCheckpoint
         }
         // Native imp-work inspection/read-only actions.
-        "search" | "runs" | "validate" | "scope" => mana_loop::ManaActionClass::Inspect,
-        _ => mana_loop::classify_mana_action(action),
+        "search" | "runs" | "validate" | "scope" => WorkflowActionClass::Inspect,
+        _ => classify_workflow_action(action),
     }
 }
 
 fn durable_workflow_mutation_is_execution_debt(action: &str) -> bool {
     matches!(
         durable_workflow_action_class(action),
-        mana_loop::ManaActionClass::ProgressCheckpoint
-            | mana_loop::ManaActionClass::GraphMutation
-            | mana_loop::ManaActionClass::DecisionFact
+        WorkflowActionClass::ProgressCheckpoint
+            | WorkflowActionClass::GraphMutation
+            | WorkflowActionClass::DecisionFact
     )
 }
 
 fn durable_workflow_lifecycle_is_execution_evidence(action: &str) -> bool {
     matches!(
         durable_workflow_action_class(action),
-        mana_loop::ManaActionClass::Lifecycle | mana_loop::ManaActionClass::Orchestration
+        WorkflowActionClass::Lifecycle | WorkflowActionClass::Orchestration
     )
 }
 
@@ -207,11 +227,11 @@ fn durable_workflow_verify_passed(result: &imp_llm::ToolResultMessage) -> bool {
     result.details.get("passed").and_then(|v| v.as_bool()) == Some(true)
 }
 
-fn mana_result_action(result: &imp_llm::ToolResultMessage) -> Option<&str> {
+fn workflow_result_action(result: &imp_llm::ToolResultMessage) -> Option<&str> {
     durable_workflow_action(result)
 }
 
-fn mana_unit_id_from_result(result: &imp_llm::ToolResultMessage) -> Option<String> {
+fn workflow_unit_id_from_result(result: &imp_llm::ToolResultMessage) -> Option<String> {
     result
         .details
         .get("id")
@@ -220,7 +240,7 @@ fn mana_unit_id_from_result(result: &imp_llm::ToolResultMessage) -> Option<Strin
         .map(ToString::to_string)
 }
 
-fn mana_result_parent_id(result: &imp_llm::ToolResultMessage) -> Option<String> {
+fn workflow_result_parent_id(result: &imp_llm::ToolResultMessage) -> Option<String> {
     result
         .details
         .get("parent")
@@ -229,10 +249,10 @@ fn mana_result_parent_id(result: &imp_llm::ToolResultMessage) -> Option<String> 
         .map(ToString::to_string)
 }
 
-pub(crate) fn mana_run_status_from_result(
+pub(crate) fn workflow_run_status_from_result(
     result: &imp_llm::ToolResultMessage,
 ) -> Option<(String, crate::workflow::WorkflowChildRunStatus)> {
-    if result.is_error || result.tool_name != "mana" {
+    if result.is_error || result.tool_name != "workflow" {
         return None;
     }
     let run_id = result
@@ -248,7 +268,7 @@ pub(crate) fn mana_run_status_from_result(
         .and_then(|v| v.as_u64());
     Some((
         run_id,
-        crate::workflow::WorkflowChildRunStatus::from_mana_run_status(status, total_failed),
+        crate::workflow::WorkflowChildRunStatus::from_workflow_run_status(status, total_failed),
     ))
 }
 
@@ -265,19 +285,19 @@ fn tool_results_indicate_execution_debt(
 
     tool_results.iter().any(|result| {
         !result.is_error
-            && matches!(result.tool_name.as_str(), "mana" | "work")
+            && matches!(result.tool_name.as_str(), "workflow" | "work")
             && durable_workflow_action(result)
                 .is_some_and(durable_workflow_mutation_is_execution_debt)
     })
 }
 
-fn mana_orchestration_run_id(tool_results: &[imp_llm::ToolResultMessage]) -> Option<String> {
+fn workflow_orchestration_run_id(tool_results: &[imp_llm::ToolResultMessage]) -> Option<String> {
     tool_results.iter().find_map(|result| {
-        if result.is_error || !matches!(result.tool_name.as_str(), "mana" | "work") {
+        if result.is_error || !matches!(result.tool_name.as_str(), "workflow" | "work") {
             return None;
         }
         let action = durable_workflow_action(result)?;
-        if durable_workflow_action_class(action) != mana_loop::ManaActionClass::Orchestration {
+        if durable_workflow_action_class(action) != WorkflowActionClass::Orchestration {
             return None;
         }
         result
@@ -298,9 +318,9 @@ fn tool_results_indicate_orchestration_started(
 
     tool_results.iter().any(|result| {
         !result.is_error
-            && matches!(result.tool_name.as_str(), "mana" | "work")
+            && matches!(result.tool_name.as_str(), "workflow" | "work")
             && durable_workflow_action(result).is_some_and(|action| {
-                durable_workflow_action_class(action) == mana_loop::ManaActionClass::Orchestration
+                durable_workflow_action_class(action) == WorkflowActionClass::Orchestration
             })
     })
 }
@@ -324,7 +344,7 @@ pub(super) fn tool_results_indicate_execution_evidence(
         match result.tool_name.as_str() {
             "write" | "edit" | "multi_edit" | "openrouter_secret_run" => true,
             "bash" | "shell" => true,
-            "mana" | "work" => durable_workflow_action(result)
+            "workflow" | "work" => durable_workflow_action(result)
                 .is_some_and(durable_workflow_lifecycle_is_execution_evidence),
             _ => false,
         }
@@ -343,7 +363,7 @@ fn tool_results_indicate_durable_workflow_progress(
     }
 
     tool_results.iter().any(|result| {
-        if result.is_error || !matches!(result.tool_name.as_str(), "mana" | "work") {
+        if result.is_error || !matches!(result.tool_name.as_str(), "workflow" | "work") {
             return false;
         }
 
@@ -355,15 +375,18 @@ fn tool_results_indicate_durable_workflow_progress(
     })
 }
 
-fn mana_review_stop_reason(mana_review: &TurnManaReview, mode: AgentMode) -> Option<StopReason> {
-    match mana_review.state {
-        ManaReviewState::NeedsDecision => Some(StopReason::UserBlocker),
-        ManaReviewState::Changed if matches!(mode, AgentMode::Planner) => {
-            if !mana_review.proposed_children.is_empty()
-                || !mana_review.touched_units.is_empty()
-                || !mana_review.material_field_changes.is_empty()
-                || !mana_review.notes_appended.is_empty()
-                || !mana_review.decision_events.is_empty()
+fn workflow_review_stop_reason(
+    workflow_review: &TurnWorkflowReview,
+    mode: AgentMode,
+) -> Option<StopReason> {
+    match workflow_review.state {
+        WorkflowReviewState::NeedsDecision => Some(StopReason::UserBlocker),
+        WorkflowReviewState::Changed if matches!(mode, AgentMode::Planner) => {
+            if !workflow_review.proposed_children.is_empty()
+                || !workflow_review.touched_units.is_empty()
+                || !workflow_review.material_field_changes.is_empty()
+                || !workflow_review.notes_appended.is_empty()
+                || !workflow_review.decision_events.is_empty()
             {
                 Some(StopReason::DecompositionCompleted)
             } else {
@@ -374,11 +397,11 @@ fn mana_review_stop_reason(mana_review: &TurnManaReview, mode: AgentMode) -> Opt
     }
 }
 
-fn should_queue_mana_externalization_follow_up(
+fn should_queue_workflow_externalization_follow_up(
     message: &AssistantMessage,
     user_prompt: &str,
     mode: AgentMode,
-    _has_mana_skill: bool,
+    _has_workflow_skill: bool,
     already_queued: bool,
 ) -> bool {
     if already_queued {
@@ -392,7 +415,7 @@ fn should_queue_mana_externalization_follow_up(
         return false;
     }
 
-    if assistant_message_contains_mana_tool_call(message) {
+    if assistant_message_contains_workflow_tool_call(message) {
         return false;
     }
 
@@ -462,17 +485,17 @@ fn assistant_described_externalizable_plan(text: &str) -> bool {
     has_plan_shape && has_work_product
 }
 
-fn mana_externalization_follow_up_text() -> &'static str {
+fn workflow_externalization_follow_up_text() -> &'static str {
     "Before you continue: the user explicitly asked for durable work structure. Externalize the plan or decomposition you just described into native imp-work now. Create or update the relevant task(s) with native work actions, prefer global project scope, and avoid extra chat restatement when the work tool/UI already makes the delta obvious."
 }
 
-fn mana_skill_follow_up_hint(
+fn workflow_skill_follow_up_hint(
     prompt: &str,
     mode: AgentMode,
     tools_available: bool,
-    _has_mana_skill: bool,
-    _has_mana_basics_skill: bool,
-    _has_mana_delegation_skill: bool,
+    _has_workflow_skill: bool,
+    _has_workflow_basics_skill: bool,
+    _has_workflow_delegation_skill: bool,
 ) -> Option<&'static str> {
     if !tools_available {
         return None;
@@ -536,18 +559,18 @@ pub(crate) fn orchestration_follow_up_text(run_id: Option<&str>) -> String {
 }
 
 impl Agent {
-    pub fn set_workflow_mana_skill_available(&mut self, available: bool) {
-        self.workflow_layer.set_mana_skill_available(available);
+    pub fn set_workflow_skill_available(&mut self, available: bool) {
+        self.workflow_layer.set_workflow_skill_available(available);
     }
 
-    pub fn set_workflow_mana_basics_skill_available(&mut self, available: bool) {
+    pub fn set_workflow_basics_skill_available(&mut self, available: bool) {
         self.workflow_layer
-            .set_mana_basics_skill_available(available);
+            .set_workflow_basics_skill_available(available);
     }
 
-    pub fn set_workflow_mana_delegation_skill_available(&mut self, available: bool) {
+    pub fn set_workflow_delegation_skill_available(&mut self, available: bool) {
         self.workflow_layer
-            .set_mana_delegation_skill_available(available);
+            .set_workflow_delegation_skill_available(available);
     }
 
     pub(in crate::agent) fn mark_workflow_externalization_nudge_queued(&mut self) {
@@ -559,13 +582,13 @@ impl Agent {
         prompt: &str,
         tools_available: bool,
     ) -> Option<&'static str> {
-        mana_skill_follow_up_hint(
+        workflow_skill_follow_up_hint(
             prompt,
             self.mode,
             tools_available,
-            self.workflow_layer.has_mana_skill,
-            self.workflow_layer.has_mana_basics_skill,
-            self.workflow_layer.has_mana_delegation_skill,
+            self.workflow_layer.has_workflow_skill,
+            self.workflow_layer.has_workflow_basics_skill,
+            self.workflow_layer.has_workflow_delegation_skill,
         )
     }
 
@@ -573,14 +596,14 @@ impl Agent {
         &self,
         message: &AssistantMessage,
     ) -> Option<&'static str> {
-        should_queue_mana_externalization_follow_up(
+        should_queue_workflow_externalization_follow_up(
             message,
             self.initial_user_prompt(),
             self.mode,
-            self.workflow_layer.has_mana_skill,
-            self.workflow_layer.queued_mana_externalization_nudge,
+            self.workflow_layer.has_workflow_skill,
+            self.workflow_layer.queued_workflow_externalization_nudge,
         )
-        .then(mana_externalization_follow_up_text)
+        .then(workflow_externalization_follow_up_text)
     }
 
     #[cfg(test)]
@@ -589,21 +612,21 @@ impl Agent {
         message: &AssistantMessage,
         user_prompt: &str,
     ) -> bool {
-        should_queue_mana_externalization_follow_up(
+        should_queue_workflow_externalization_follow_up(
             message,
             user_prompt,
             self.mode,
-            self.workflow_layer.has_mana_skill,
-            self.workflow_layer.queued_mana_externalization_nudge,
+            self.workflow_layer.has_workflow_skill,
+            self.workflow_layer.queued_workflow_externalization_nudge,
         )
     }
 
     pub(in crate::agent) fn workflow_post_turn_signals(
         &self,
         tool_results: &[imp_llm::ToolResultMessage],
-        mana_review: &TurnManaReview,
+        workflow_review: &TurnWorkflowReview,
     ) -> WorkflowPostTurnSignals {
-        let orchestration_run_id = mana_orchestration_run_id(tool_results);
+        let orchestration_run_id = workflow_orchestration_run_id(tool_results);
         WorkflowPostTurnSignals {
             execution_debt: tool_results_indicate_execution_debt(tool_results, self.mode),
             execution_evidence: tool_results_indicate_execution_evidence(tool_results, self.mode),
@@ -614,7 +637,7 @@ impl Agent {
                 tool_results,
                 self.mode,
             ),
-            stop_reason: mana_review_stop_reason(mana_review, self.mode),
+            stop_reason: workflow_review_stop_reason(workflow_review, self.mode),
         }
     }
 
@@ -629,8 +652,8 @@ impl Agent {
             })
         } else if signals.durable_workflow_progress {
             Some(ContinueRecommendation {
-                prompt: mana_workflow_follow_up_text().to_string(),
-                reason: ContinueReason::ManaWorkflowProgress,
+                prompt: durable_workflow_follow_up_text().to_string(),
+                reason: ContinueReason::WorkflowProgress,
             })
         } else {
             None
@@ -658,7 +681,7 @@ impl Agent {
         &self,
         tool_results: &[imp_llm::ToolResultMessage],
     ) -> Option<String> {
-        mana_orchestration_run_id(tool_results)
+        workflow_orchestration_run_id(tool_results)
     }
 
     #[cfg(test)]
@@ -680,49 +703,49 @@ impl Agent {
     #[cfg(test)]
     pub(in crate::agent) fn workflow_review_stop_reason_for_test(
         &self,
-        mana_review: &TurnManaReview,
+        workflow_review: &TurnWorkflowReview,
     ) -> Option<StopReason> {
-        mana_review_stop_reason(mana_review, self.mode)
+        workflow_review_stop_reason(workflow_review, self.mode)
     }
 
-    pub(in crate::agent) fn turn_mana_review_accumulator(
+    pub(in crate::agent) fn turn_workflow_review_accumulator(
         &self,
-    ) -> std::sync::Arc<std::sync::Mutex<TurnManaReviewAccumulator>> {
-        self.workflow_layer.turn_mana_review()
+    ) -> std::sync::Arc<std::sync::Mutex<TurnWorkflowReviewAccumulator>> {
+        self.workflow_layer.turn_workflow_review()
     }
 
-    pub(in crate::agent) fn begin_turn_mana_review(&self, turn: u32) {
-        if let Ok(mut review) = self.workflow_layer.turn_mana_review.lock() {
+    pub(in crate::agent) fn begin_turn_workflow_review(&self, turn: u32) {
+        if let Ok(mut review) = self.workflow_layer.turn_workflow_review.lock() {
             review.begin_turn(turn);
         }
     }
 
-    pub(in crate::agent) fn record_turn_mana_mutations(
+    pub(in crate::agent) fn record_turn_workflow_mutations(
         &self,
         tool_results: &[imp_llm::ToolResultMessage],
     ) {
-        let Ok(mut review) = self.workflow_layer.turn_mana_review.lock() else {
+        let Ok(mut review) = self.workflow_layer.turn_workflow_review.lock() else {
             return;
         };
 
         for result in tool_results {
-            if let Some(record) = mutation_record_from_mana_result(result) {
+            if let Some(record) = mutation_record_from_workflow_result(result) {
                 review.push(record);
             }
         }
     }
 
-    pub(in crate::agent) fn finish_turn_mana_review(&self, turn: u32) -> TurnManaReview {
-        match self.workflow_layer.turn_mana_review.lock() {
+    pub(in crate::agent) fn finish_turn_workflow_review(&self, turn: u32) -> TurnWorkflowReview {
+        match self.workflow_layer.turn_workflow_review.lock() {
             Ok(review) => {
                 let review = review.finalize();
                 if review.turn_index == turn {
                     review
                 } else {
-                    TurnManaReview::no_change(turn)
+                    TurnWorkflowReview::no_change(turn)
                 }
             }
-            Err(_) => TurnManaReview::no_change(turn),
+            Err(_) => TurnWorkflowReview::no_change(turn),
         }
     }
 
@@ -786,39 +809,9 @@ impl Agent {
             self.workflow_layer.controller_mut(),
             &shape,
         );
-
-        #[cfg(feature = "mana-api")]
-        {
-            let Some(mana_dir) = find_mana_dir(&self.cwd) else {
-                self.workflow_layer.controller_mut().skip_bootstrap(format!(
-                    "mana bootstrap unavailable: no .mana found for {}",
-                    self.cwd.display()
-                ));
-                return;
-            };
-
-            let request = crate::workflow::WorkflowBootstrapRequest::from_prompt(prompt, &self.cwd);
-            match crate::workflow::create_native_mana_root(&mana_dir, request) {
-                Ok(root) => {
-                    self.workflow_layer
-                        .controller_mut()
-                        .bind_mana_root(root.mana_root_id);
-                    self.workflow_layer
-                        .controller_mut()
-                        .record_mana_graph_changed();
-                }
-                Err(err) => {
-                    self.workflow_layer.controller_mut().closeout.blocker = Some(format!(
-                        "workflow bootstrap failed to create mana root: {err}"
-                    ));
-                }
-            }
-        }
-
-        #[cfg(not(feature = "mana-api"))]
-        self.workflow_layer.controller_mut().skip_bootstrap(
-            "mana bootstrap unavailable: imp-core built without mana-api".to_string(),
-        );
+        self.workflow_layer
+            .controller_mut()
+            .skip_bootstrap("workflow bootstrap now uses native workflow artifacts".to_string());
     }
 
     pub fn resume_workflow_controller_from_project_run(
@@ -857,7 +850,7 @@ impl Agent {
             }
 
             match result.tool_name.as_str() {
-                "mana" | "work" => self.record_workflow_mana_obligation(result),
+                "workflow" | "work" => self.record_workflow_obligation(result),
                 "write" | "edit" | "multi_edit" => {
                     self.workflow_layer
                         .controller_mut()
@@ -875,15 +868,15 @@ impl Agent {
         }
     }
 
-    fn record_workflow_mana_obligation(&mut self, result: &imp_llm::ToolResultMessage) {
-        let Some(action) = mana_result_action(result) else {
+    fn record_workflow_obligation(&mut self, result: &imp_llm::ToolResultMessage) {
+        let Some(action) = workflow_result_action(result) else {
             return;
         };
 
         match durable_workflow_action_class(action) {
-            ManaActionClass::Orchestration => {
+            WorkflowActionClass::Orchestration => {
                 if matches!(action, "run_state" | "evaluate") {
-                    if let Some((run_id, status)) = mana_run_status_from_result(result) {
+                    if let Some((run_id, status)) = workflow_run_status_from_result(result) {
                         self.workflow_layer
                             .controller_mut()
                             .update_child_run_status(&run_id, status);
@@ -891,47 +884,49 @@ impl Agent {
                 } else {
                     self.workflow_layer
                         .controller_mut()
-                        .record_mana_orchestration_started(mana_orchestration_run_id(
+                        .record_workflow_orchestration_started(workflow_orchestration_run_id(
                             std::slice::from_ref(result),
                         ));
                 }
             }
-            ManaActionClass::ProgressCheckpoint
-            | ManaActionClass::GraphMutation
-            | ManaActionClass::DecisionFact => {
+            WorkflowActionClass::ProgressCheckpoint
+            | WorkflowActionClass::GraphMutation
+            | WorkflowActionClass::DecisionFact => {
                 if matches!(action, "create") {
-                    if let Some(unit_id) = mana_unit_id_from_result(result) {
-                        if mana_result_parent_id(result).as_deref()
-                            == self.workflow_layer.controller().mana_root_id.as_deref()
+                    if let Some(unit_id) = workflow_unit_id_from_result(result) {
+                        if workflow_result_parent_id(result).as_deref()
+                            == self.workflow_layer.controller().workflow_root_id.as_deref()
                         {
                             self.workflow_layer
                                 .controller_mut()
                                 .record_child_unit(unit_id);
                         } else {
-                            self.workflow_layer.controller_mut().bind_mana_root(unit_id);
+                            self.workflow_layer
+                                .controller_mut()
+                                .bind_workflow_root(unit_id);
                         }
                     }
                 }
                 self.workflow_layer
                     .controller_mut()
-                    .record_mana_graph_changed();
+                    .record_workflow_graph_changed();
             }
-            ManaActionClass::Lifecycle => {
+            WorkflowActionClass::Lifecycle => {
                 if matches!(action, "verify" | "close") {
-                    if let Some(unit_id) = mana_unit_id_from_result(result) {
+                    if let Some(unit_id) = workflow_unit_id_from_result(result) {
                         self.workflow_layer.controller_mut().complete_unit(&unit_id);
                     }
                     self.workflow_layer.controller_mut().record_closeout_ready();
                 } else {
                     self.workflow_layer
                         .controller_mut()
-                        .record_mana_graph_changed();
+                        .record_workflow_graph_changed();
                 }
             }
-            ManaActionClass::ReadHelp
-            | ManaActionClass::Inspect
-            | ManaActionClass::Destructive
-            | ManaActionClass::Unknown => {}
+            WorkflowActionClass::ReadHelp
+            | WorkflowActionClass::Inspect
+            | WorkflowActionClass::Destructive
+            | WorkflowActionClass::Unknown => {}
         }
     }
 

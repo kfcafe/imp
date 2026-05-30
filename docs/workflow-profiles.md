@@ -71,4 +71,4 @@ Use /security-review?
 
 ## Architecture note
 
-Workflow profiles are backend-neutral. They should use imp-native-ready concepts such as plan, task, evidence, decision, verification, artifact, and closeout. Current mana compatibility should stay behind adapters; normal users should not need to understand mana terminology.
+Workflow profiles are backend-neutral. They should use imp-native-ready concepts such as plan, task, evidence, decision, verification, artifact, and closeout. Current workflow compatibility should stay behind adapters; normal users should not need to understand workflow terminology.

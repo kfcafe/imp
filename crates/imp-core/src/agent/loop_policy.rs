@@ -22,7 +22,7 @@ impl LoopPolicy for DefaultLoopPolicy {
             .or_else(|| RuntimeStopRule.decide(assessment))
             .or_else(|| WorkCompletedRule.decide(assessment))
             .or_else(|| OrchestrationProgressRule.decide(assessment))
-            .or_else(|| ManaStopRule.decide(assessment))
+            .or_else(|| WorkflowStopRule.decide(assessment))
             .or_else(|| TextFallbackStopRule.decide(assessment))
             .or_else(|| ContinueRecommendationRule.decide(assessment))
             .or_else(|| PlanningOnlyNoProgressRule.decide(assessment))
@@ -80,11 +80,11 @@ impl LoopPolicyRule for OrchestrationProgressRule {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-struct ManaStopRule;
+struct WorkflowStopRule;
 
-impl LoopPolicyRule for ManaStopRule {
+impl LoopPolicyRule for WorkflowStopRule {
     fn decide(&self, assessment: &PostTurnAssessment) -> Option<LoopDecision> {
-        assessment.mana.stop_reason.map(finish)
+        assessment.workflow.stop_reason.map(finish)
     }
 }
 
@@ -143,7 +143,7 @@ impl super::Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{ContinueReason, ManaEvidence, RuntimeEvidence, TextFallbackEvidence};
+    use crate::agent::{ContinueReason, RuntimeEvidence, TextFallbackEvidence, WorkflowEvidence};
 
     fn assessment() -> PostTurnAssessment {
         PostTurnAssessment {
@@ -156,7 +156,7 @@ mod tests {
                 planning_only_progress: false,
                 orchestration_started: false,
             },
-            mana: ManaEvidence { stop_reason: None },
+            workflow: WorkflowEvidence { stop_reason: None },
             text_fallback: TextFallbackEvidence {
                 planner_stop_reason: None,
                 execution_stop_reason: None,
@@ -207,9 +207,9 @@ mod tests {
     }
 
     #[test]
-    fn mana_stop_wins_over_text_fallback_and_continue() {
+    fn workflow_stop_wins_over_text_fallback_and_continue() {
         let mut assessment = assessment();
-        assessment.mana.stop_reason = Some(StopReason::UserBlocker);
+        assessment.workflow.stop_reason = Some(StopReason::UserBlocker);
         assessment.text_fallback.execution_stop_reason = Some(StopReason::WorkCompleted);
         assessment.continue_recommendation = Some(super::super::ContinueRecommendation {
             prompt: "continue".into(),

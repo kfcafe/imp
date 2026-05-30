@@ -560,7 +560,7 @@ fn known_tool(name: &str) -> bool {
             | "edit"
             | "extend"
             | "git"
-            | "mana"
+            | "workflow"
             | "openrouter_secret_run"
             | "read"
             | "scan"
@@ -653,7 +653,7 @@ pub fn builtin_roles() -> Vec<(&'static str, RoleDef)> {
             role(
                 "Implement focused code changes within policy.",
                 false,
-                vec!["read".into(), "scan".into(), "edit".into(), "write".into(), "bash".into(), "git".into(), "mana".into()],
+                vec!["read".into(), "scan".into(), "edit".into(), "write".into(), "bash".into(), "git".into(), "workflow".into()],
                 &[
                     "Make the smallest coherent code change that satisfies the task.",
                     "Run narrow verification for changed behavior and report unresolved concerns.",
@@ -725,7 +725,7 @@ pub fn builtin_roles() -> Vec<(&'static str, RoleDef)> {
             role(
                 "Combine role outputs into a coherent final result and resolve integration concerns.",
                 false,
-                vec!["read".into(), "scan".into(), "edit".into(), "write".into(), "bash".into(), "git".into(), "mana".into()],
+                vec!["read".into(), "scan".into(), "edit".into(), "write".into(), "bash".into(), "git".into(), "workflow".into()],
                 &[
                     "Synthesize child outputs, preserve decisions, and avoid broadening scope.",
                     "Ensure required verification gates are present or clearly explain blockers.",

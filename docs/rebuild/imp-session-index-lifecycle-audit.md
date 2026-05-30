@@ -1,6 +1,6 @@
 # Session Index Lifecycle Audit
 
-This audit resolves mana unit `264.4`: determine whether imp indexes saved sessions during normal runtime lifecycle and define the smallest correct ownership seam for reliable `session_search`.
+This audit resolves workflow unit `264.4`: determine whether imp indexes saved sessions during normal runtime lifecycle and define the smallest correct ownership seam for reliable `session_search`.
 
 ## Inspected files
 
@@ -18,7 +18,7 @@ This audit resolves mana unit `264.4`: determine whether imp indexes saved sessi
 `crates/imp-core/src/session_index.rs` defines `SessionIndex`:
 
 - `SessionIndex::open(path)` creates parent dirs, opens SQLite, creates `sessions`, and creates `session_content` FTS5 table.
-- `SessionIndex::index_session(&SessionManager)` extracts searchable text from user/assistant text blocks and compaction summaries.
+- `SessionIndex::index_session(&SessionWorkflowger)` extracts searchable text from user/assistant text blocks and compaction summaries.
 - Tool results are intentionally skipped as too noisy.
 - Re-indexing is idempotent: metadata is upserted and old FTS content is deleted/reinserted.
 - `SessionIndex::search(query, limit)` queries FTS and returns snippets plus first-message/session metadata.
@@ -53,7 +53,7 @@ Repo search found production creation/list/open of sessions in CLI and TUI, but 
 
 Observed non-test callsites:
 
-- `SessionManager::new`, `open`, `continue_recent`, `list`, and `in_memory` appear in `imp-cli`, `imp-tui`, and `imp-core` session runtime paths.
+- `SessionWorkflowger::new`, `open`, `continue_recent`, `list`, and `in_memory` appear in `imp-cli`, `imp-tui`, and `imp-core` session runtime paths.
 - `SessionIndex::index_session(...)` appears only in `session_index.rs` tests and `session_search.rs` tests.
 - `SessionIndex::open(...)` appears only in the `recall` search tool and tests.
 
@@ -78,13 +78,13 @@ Proposed imp-core API:
 
 ```rust
 pub fn index_session_file(path: &Path) -> Result<IndexSessionOutcome>
-pub fn index_session_manager(session: &SessionManager) -> Result<IndexSessionOutcome>
+pub fn index_session_workflowger(session: &SessionWorkflowger) -> Result<IndexSessionOutcome>
 pub fn rebuild_global_session_index() -> Result<SessionIndexRebuildReport>
 ```
 
 Expected behavior:
 
-- `index_session_manager` indexes the active session into `storage::global_session_index_path()` if the session has a persisted path.
+- `index_session_workflowger` indexes the active session into `storage::global_session_index_path()` if the session has a persisted path.
 - in-memory sessions are skipped with a clear outcome.
 - `index_session_file` opens a raw `.jsonl` session and indexes it.
 - `rebuild_global_session_index` scans `storage::global_sessions_dir()` plus legacy session dirs and indexes all valid `.jsonl` sessions.
@@ -100,7 +100,7 @@ First slice:
 
 1. Add an `imp-core` helper module around `SessionIndex` for explicit indexing/rebuild.
 2. Add focused unit tests with temp raw sessions:
-   - index one persisted session manager;
+   - index one persisted session workflowger;
    - skip in-memory session;
    - rebuild indexes multiple session files;
    - invalid/unreadable files are reported without aborting all good files.

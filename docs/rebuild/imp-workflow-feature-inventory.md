@@ -1,8 +1,8 @@
 # imp Workflow Feature Inventory for 0.3
 
-Status: decision inventory for mana task 365.9.
+Status: decision inventory for workflow task 365.9.
 
-This inventory reconciles the current 0.3 direction with existing imp/mana/work/prototype surfaces. The working direction comes from `.imp/workflows`, especially:
+This inventory reconciles the current 0.3 direction with existing imp/workflow/work/prototype surfaces. The working direction comes from `.imp/workflows`, especially:
 
 - `.imp/workflows/prototype-imp-workflow-engine/workflow.yaml`
 - `.imp/workflows/prototype-imp-workflow-engine/results.md`
@@ -11,7 +11,7 @@ This inventory reconciles the current 0.3 direction with existing imp/mana/work/
 - `.imp/workflows/define-workflow-schema/artifacts/rust-parser-plan.md`
 - `.imp/workflows/prototype-rust-workflow-schema-parser/workflow.yaml`
 
-The important direction change: imp-native workflows are the intended primary orchestration capability for imp 0.3. They may replace normal imp use of mana, work, and prototype once workflow parity exists. Older mana-first docs and tasks are historical context, not normative 0.3 product direction unless explicitly revived.
+The important direction change: imp-native workflows are the intended primary orchestration capability for imp 0.3. They may replace normal imp use of workflow, work, and prototype once workflow parity exists. Older workflow-first docs and tasks are historical context, not normative 0.3 product direction unless explicitly revived.
 
 ## Disposition vocabulary
 
@@ -28,9 +28,9 @@ The important direction change: imp-native workflows are the intended primary or
 | Prototype tool | Bounded disposable experiments with evidence/learnings/followups | Fold into workflows; then compatibility-only; later remove standalone model-facing tool | Workflow schema already has top-level `prototypes` and `kind: prototype` steps. Prototypes are stronger when tied to workflow context, checks, results, and closeout. | Blocked on workflow prototype executor that creates sandboxes, runs commands, captures evidence, records followups, and can promote/discard artifacts. |
 | imp-work / work tool | Durable tasks, epics, memory, decisions, context packs, runs, checks, handoff | Remove from default imp; keep archived/compatibility-only outside default runtime | Default imp 0.2.6 already removed imp-work from `imp-cli` dependency tree. Workflow artifacts should replace normal imp use of work/task state. | Safe to keep stripped from default. Any reintroduction must be explicit migration/import only. |
 | `imp run` / WorkRun path | Native WorkRun planning/execution CLI | Remove from default; do not revive except as migration/import | Workflow `steps`, `checks`, `workers`, and `results.md` are the new execution model. | Already removed from default; avoid adding new WorkRun-specific surfaces. |
-| mana integration | Optional mana command/tool/UI integration | Compatibility-only / optional adapter | 0.3 should not depend on mana for normal execution. mana may remain useful for old graphs or external experiments. | Keep behind `mana-ui` / `mana-tool`; default dependency tree must stay free of `mana-core` and `mana-cli`. |
-| mana-first 365 child specs | Prior target architecture around mana harness | Defer/supersede for 0.3 | The active workflow artifacts contradict mana-first acceptance. Continuing those specs would create stale product direction. | Create a superseding workflow epic or rewrite 365 before doing more mana-harness spec work. |
-| Runbooks | Executable plans previously discussed as mana feature | Fold into workflows | A workflow is already an executable plan with steps, checks, workers, context, and closeout. A separate runbook concept adds naming/abstraction debt. | Use “workflow template/profile” if reusable runbook-like behavior is needed. |
+| workflow integration | Optional workflow command/tool/UI integration | Compatibility-only / optional adapter | 0.3 should not depend on workflow for normal execution. workflow may remain useful for old graphs or external experiments. | Keep behind `workflow-ui` / `workflow-tool`; default dependency tree must stay free of `workflow-core` and `workflow-cli`. |
+| workflow-first 365 child specs | Prior target architecture around workflow harness | Defer/supersede for 0.3 | The active workflow artifacts contradict workflow-first acceptance. Continuing those specs would create stale product direction. | Create a superseding workflow epic or rewrite 365 before doing more workflow-harness spec work. |
+| Runbooks | Executable plans previously discussed as workflow feature | Fold into workflows | A workflow is already an executable plan with steps, checks, workers, context, and closeout. A separate runbook concept adds naming/abstraction debt. | Use “workflow template/profile” if reusable runbook-like behavior is needed. |
 | Freeform planning notes | Human/agent scratch planning | Fold into workflows as non-authoritative notes | Plans should be structured in `workflow.yaml`, while results/decisions live in `results.md` or structured workflow fields. | Safe to keep as comments/notes; final source of truth should be workflow state. |
 | Checks / verification | Scattered task verify commands, CI commands, manual checks | Fold into workflows | `.imp/workflows` already defines `checks` as requirement/verification primitive. | Workflow runner must support command/artifact/aggregate/manual checks and closeout enforcement. |
 | Context packs | Prepared context for tasks/workers/prototypes | Fold into workflows | Context belongs near the workflow step that needs it. Workflows should define required files, symbols, searches, freshness, and worker-specific bundles. | Blocked on workflow context schema/runtime support. Do not create a separate durable context-pack store for 0.3. |
@@ -54,10 +54,10 @@ These are safe to strip or keep stripped before full workflow parity:
 1. Keep `imp-work` out of the default workspace/dependency tree.
 2. Keep `work` tool absent from the default model-facing tool surface.
 3. Keep legacy `imp run` / WorkRun command absent from the default CLI.
-4. Keep mana command/tool/UI integration optional behind `mana-ui` / `mana-tool`.
+4. Keep workflow command/tool/UI integration optional behind `workflow-ui` / `workflow-tool`.
 5. Remove README claims that imp-work is the active durable work system.
 6. Remove README/tool docs that advertise `prototype` as the long-term standalone primitive; describe it as moving into workflows.
-7. Avoid implementing new mana-first harness docs under 365 until the epic is reconciled with the workflow direction.
+7. Avoid implementing new workflow-first harness docs under 365 until the epic is reconciled with the workflow direction.
 8. Avoid adding a separate runbook abstraction; use workflows and workflow templates/profiles.
 
 ## Removals blocked on workflow parity
@@ -69,11 +69,11 @@ Do not fully remove these until workflows can replace their useful behavior:
 3. Any human closeout/final-claim discipline currently implemented outside workflows: blocked on workflow closeout enforcement.
 4. Any context-pack-like behavior still useful for accuracy: blocked on workflow context assembly and freshness checks.
 5. Manual verification guidance: blocked on workflow check runner and required-check enforcement.
-6. Mana compatibility code that users still depend on: keep optional until migration/import story exists.
+6. Workflow compatibility code that users still depend on: keep optional until migration/import story exists.
 
 ## Workflow parity requirements
 
-Minimum parity before workflows can replace normal use of mana/work/prototype:
+Minimum parity before workflows can replace normal use of workflow/work/prototype:
 
 1. Rust parser and validator for `imp.workflow/v1`.
 2. Workflow status/read model: active, blocked, failed, done, cancelled, and per-step/check status.
@@ -94,7 +94,7 @@ Minimum parity before workflows can replace normal use of mana/work/prototype:
 
 2. **Update README for 0.3 workflow direction**
    - Remove stale imp-work-as-active-system language.
-   - Describe workflows, bounded subagents, prototype steps, checks, and optional mana compatibility.
+   - Describe workflows, bounded subagents, prototype steps, checks, and optional workflow compatibility.
 
 3. **Implement workflow check runner**
    - Start with command, artifact, aggregate, and manual check kinds.
@@ -113,17 +113,17 @@ Minimum parity before workflows can replace normal use of mana/work/prototype:
 7. **Add TUI workflow read model**
    - Show active workflow, runnable steps, blockers, checks, worker/subagent activity, and closeout state.
 
-8. **Reconcile mana epic 365**
-   - Either supersede old mana-first children or rewrite the epic into workflow-first 0.3 planning.
+8. **Reconcile workflow epic 365**
+   - Either supersede old workflow-first children or rewrite the epic into workflow-first 0.3 planning.
 
 9. **Create compatibility/migration notes**
-   - Explain how old prototype/work/mana users should map behavior to workflows.
+   - Explain how old prototype/work/workflow users should map behavior to workflows.
 
 ## 0.3 release gate
 
 Before bumping to 0.3, imp should have:
 
-- default standalone dependency tree still clean of `imp-work`, `mana-core`, and `mana-cli`;
+- default standalone dependency tree still clean of `imp-work`, `workflow-core`, and `workflow-cli`;
 - workflow parser/validator;
 - workflow check runner;
 - prototype-as-workflow capability or an explicit compatibility-only bridge;

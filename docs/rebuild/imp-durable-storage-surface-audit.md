@@ -1,6 +1,6 @@
 # imp Durable Storage Surface Audit
 
-This audit inventories current durable imp-managed file surfaces and path-resolution behavior for mana unit `264.1`.
+This audit inventories current durable imp-workflowged file surfaces and path-resolution behavior for workflow unit `264.1`.
 
 ## Current path helpers
 

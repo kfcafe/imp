@@ -1,6 +1,6 @@
 # Prompt-template and shell-tool storage wiring audit
 
-This audit resolves mana unit `264.9`, a follow-up from the broader storage topology audit. It determines whether prompt-template files and TOML-defined shell-tool roots are active production storage surfaces or should be treated as experimental/unwired before the storage contract preserves them.
+This audit resolves workflow unit `264.9`, a follow-up from the broader storage topology audit. It determines whether prompt-template files and TOML-defined shell-tool roots are active production storage surfaces or should be treated as experimental/unwired before the storage contract preserves them.
 
 ## Inspected files and searches
 

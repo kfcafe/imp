@@ -136,31 +136,6 @@ pub fn merge_skill_commands(
     by_name.into_values().collect()
 }
 
-/// Merge workflow commands into the slash menu without overriding real commands.
-pub fn merge_workflow_commands(
-    mut commands: Vec<SlashCommand>,
-    workflows: impl IntoIterator<Item = (String, String)>,
-) -> Vec<SlashCommand> {
-    let mut by_name: BTreeMap<String, SlashCommand> = commands
-        .drain(..)
-        .map(|command| (command.name.clone(), command))
-        .collect();
-
-    for (name, description) in workflows {
-        by_name.entry(name.clone()).or_insert_with(|| SlashCommand {
-            name,
-            kind: SlashCommandKind::Workflow,
-            description: if description.trim().is_empty() {
-                "Workflow".into()
-            } else {
-                format!("Workflow: {description}")
-            },
-        });
-    }
-
-    by_name.into_values().collect()
-}
-
 pub fn builtin_commands() -> Vec<SlashCommand> {
     [
         ("new", "Start a new session"),

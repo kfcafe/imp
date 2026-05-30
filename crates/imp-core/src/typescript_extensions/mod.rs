@@ -843,7 +843,7 @@ export default function dynamicToolsExtension(pi: ExtensionAPI) {
 
     fn test_tool_context(cwd: &Path) -> ToolContext {
         use crate::config::AgentMode;
-        use crate::mana_review::TurnManaReviewAccumulator;
+        use crate::workflow_review::TurnWorkflowReviewAccumulator;
         use crate::tools::{CheckpointState, FileCache, FileTracker};
         use crate::ui::NullInterface;
         use std::sync::atomic::AtomicBool;
@@ -865,7 +865,7 @@ export default function dynamicToolsExtension(pi: ExtensionAPI) {
             lua_tool_loader: None,
             mode: AgentMode::Full,
             read_max_lines: 0,
-            turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
+            turn_workflow_review: Arc::new(std::sync::Mutex::new(TurnWorkflowReviewAccumulator::default())),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
             supporting_provenance: Vec::new(),

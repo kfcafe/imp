@@ -4,13 +4,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ManaReviewState {
+pub enum WorkflowReviewState {
     NoChange,
     Changed,
     NeedsDecision,
 }
 
-impl ManaReviewState {
+impl WorkflowReviewState {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::NoChange => "no_change",
@@ -22,7 +22,7 @@ impl ManaReviewState {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ManaReviewScopeKind {
+pub enum WorkflowReviewScopeKind {
     None,
     Project,
     Root,
@@ -31,30 +31,30 @@ pub enum ManaReviewScopeKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManaReviewScope {
-    pub kind: ManaReviewScopeKind,
+pub struct WorkflowReviewScope {
+    pub kind: WorkflowReviewScopeKind,
     pub display: String,
 }
 
-impl Default for ManaReviewScope {
+impl Default for WorkflowReviewScope {
     fn default() -> Self {
         Self {
-            kind: ManaReviewScopeKind::None,
+            kind: WorkflowReviewScopeKind::None,
             display: "none".to_string(),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct ManaUnitRef {
+pub struct WorkflowUnitRef {
     pub id: String,
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
 }
 
-impl ManaUnitRef {
-    pub fn from_snapshot(unit: &ManaUnitSnapshot) -> Self {
+impl WorkflowUnitRef {
+    pub fn from_snapshot(unit: &WorkflowUnitSnapshot) -> Self {
         Self {
             id: unit.id.clone(),
             title: unit.title.clone(),
@@ -72,10 +72,10 @@ impl ManaUnitRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManaUnitSnapshot {
+pub struct WorkflowUnitSnapshot {
     pub id: String,
     pub title: String,
-    pub kind: ManaReviewUnitKind,
+    pub kind: WorkflowReviewUnitKind,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
@@ -97,21 +97,21 @@ pub struct ManaUnitSnapshot {
     pub is_archived: bool,
 }
 
-impl ManaUnitSnapshot {
-    pub fn unit_ref(&self) -> ManaUnitRef {
-        ManaUnitRef::from_snapshot(self)
+impl WorkflowUnitSnapshot {
+    pub fn unit_ref(&self) -> WorkflowUnitRef {
+        WorkflowUnitRef::from_snapshot(self)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ManaReviewUnitKind {
+pub enum WorkflowReviewUnitKind {
     Epic,
     Job,
     Fact,
 }
 
-impl ManaReviewUnitKind {
+impl WorkflowReviewUnitKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Epic => "epic",
@@ -131,7 +131,7 @@ impl ManaReviewUnitKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ManaMutationAction {
+pub enum WorkflowMutationAction {
     Create,
     Close,
     Update,
@@ -146,7 +146,7 @@ pub enum ManaMutationAction {
     FactCreate,
 }
 
-impl ManaMutationAction {
+impl WorkflowMutationAction {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Create => "create",
@@ -179,14 +179,14 @@ pub enum ManaTouchKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ManaUnitOrigin {
+pub enum WorkflowUnitOrigin {
     Preexisting,
     CreatedInTurn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ManaUnitRole {
+pub enum WorkflowUnitRole {
     Anchor,
     Child,
     Fact,
@@ -211,27 +211,27 @@ pub enum ManaAnchorReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnManaAnchorUnit {
-    pub unit: ManaUnitRef,
+pub struct TurnWorkflowAnchorUnit {
+    pub unit: WorkflowUnitRef,
     pub anchor_kind: ManaAnchorKind,
     pub reason: ManaAnchorReason,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnManaTouchedUnit {
-    pub unit: ManaUnitRef,
+pub struct TurnWorkflowTouchedUnit {
+    pub unit: WorkflowUnitRef,
     pub touch_kind: ManaTouchKind,
-    pub unit_origin: ManaUnitOrigin,
+    pub unit_origin: WorkflowUnitOrigin,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub roles: Vec<ManaUnitRole>,
+    pub roles: Vec<WorkflowUnitRole>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnManaProposedChild {
-    pub unit: ManaUnitRef,
-    pub parent: ManaUnitRef,
-    pub child_kind: ManaReviewUnitKind,
-    pub child_origin: ManaUnitOrigin,
+pub struct TurnWorkflowProposedChild {
+    pub unit: WorkflowUnitRef,
+    pub parent: WorkflowUnitRef,
+    pub child_kind: WorkflowReviewUnitKind,
+    pub child_origin: WorkflowUnitOrigin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,8 +244,8 @@ pub enum ManaFieldChangeKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnManaFieldChange {
-    pub unit: ManaUnitRef,
+pub struct TurnWorkflowFieldChange {
+    pub unit: WorkflowUnitRef,
     pub field: String,
     pub change_kind: ManaFieldChangeKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -256,8 +256,8 @@ pub struct TurnManaFieldChange {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnManaNoteAppend {
-    pub unit: ManaUnitRef,
+pub struct TurnWorkflowNoteAppend {
+    pub unit: WorkflowUnitRef,
     pub appended_text: String,
     pub source_action: String,
 }
@@ -270,8 +270,8 @@ pub enum ManaDecisionEventKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnManaDecisionEvent {
-    pub unit: ManaUnitRef,
+pub struct TurnWorkflowDecisionEvent {
+    pub unit: WorkflowUnitRef,
     pub event_kind: ManaDecisionEventKind,
     pub decision_text: String,
     pub source_action: String,
@@ -289,8 +289,8 @@ pub enum ManaConsequentialChoiceCategory {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnManaConsequentialChoice {
-    pub unit: ManaUnitRef,
+pub struct TurnWorkflowConsequentialChoice {
+    pub unit: WorkflowUnitRef,
     pub decision_text: String,
     pub category: ManaConsequentialChoiceCategory,
     pub why_consequential: String,
@@ -299,34 +299,34 @@ pub struct TurnManaConsequentialChoice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnManaReview {
+pub struct TurnWorkflowReview {
     pub turn_index: u32,
-    pub state: ManaReviewState,
-    pub scope: ManaReviewScope,
+    pub state: WorkflowReviewState,
+    pub scope: WorkflowReviewScope,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub anchor_unit: Option<TurnManaAnchorUnit>,
+    pub anchor_unit: Option<TurnWorkflowAnchorUnit>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub touched_units: Vec<TurnManaTouchedUnit>,
+    pub touched_units: Vec<TurnWorkflowTouchedUnit>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub proposed_children: Vec<TurnManaProposedChild>,
+    pub proposed_children: Vec<TurnWorkflowProposedChild>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub material_field_changes: Vec<TurnManaFieldChange>,
+    pub material_field_changes: Vec<TurnWorkflowFieldChange>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notes_appended: Vec<TurnManaNoteAppend>,
+    pub notes_appended: Vec<TurnWorkflowNoteAppend>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub decision_events: Vec<TurnManaDecisionEvent>,
+    pub decision_events: Vec<TurnWorkflowDecisionEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unresolved_consequential_choices: Vec<TurnManaConsequentialChoice>,
+    pub unresolved_consequential_choices: Vec<TurnWorkflowConsequentialChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_question: Option<String>,
 }
 
-impl TurnManaReview {
+impl TurnWorkflowReview {
     pub fn no_change(turn_index: u32) -> Self {
         Self {
             turn_index,
-            state: ManaReviewState::NoChange,
-            scope: ManaReviewScope::default(),
+            state: WorkflowReviewState::NoChange,
+            scope: WorkflowReviewScope::default(),
             anchor_unit: None,
             touched_units: Vec::new(),
             proposed_children: Vec::new(),
@@ -340,46 +340,46 @@ impl TurnManaReview {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManaMutationRecord {
-    pub action: ManaMutationAction,
-    pub scope: ManaReviewScope,
+pub struct WorkflowMutationRecord {
+    pub action: WorkflowMutationAction,
+    pub scope: WorkflowReviewScope,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub before_unit: Option<ManaUnitSnapshot>,
+    pub before_unit: Option<WorkflowUnitSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub after_unit: Option<ManaUnitSnapshot>,
+    pub after_unit: Option<WorkflowUnitSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleted_unit: Option<ManaUnitRef>,
+    pub deleted_unit: Option<WorkflowUnitRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_unit: Option<ManaUnitRef>,
+    pub parent_unit: Option<WorkflowUnitRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub related_unit: Option<ManaUnitRef>,
+    pub related_unit: Option<WorkflowUnitRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub field_changes: Vec<TurnManaFieldChange>,
+    pub field_changes: Vec<TurnWorkflowFieldChange>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notes_appended: Vec<TurnManaNoteAppend>,
+    pub notes_appended: Vec<TurnWorkflowNoteAppend>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub decision_events: Vec<TurnManaDecisionEvent>,
+    pub decision_events: Vec<TurnWorkflowDecisionEvent>,
 }
 
 #[derive(Debug, Default)]
-pub struct TurnManaReviewAccumulator {
+pub struct TurnWorkflowReviewAccumulator {
     turn_index: u32,
-    mutations: Vec<ManaMutationRecord>,
+    mutations: Vec<WorkflowMutationRecord>,
 }
 
-impl TurnManaReviewAccumulator {
+impl TurnWorkflowReviewAccumulator {
     pub fn begin_turn(&mut self, turn_index: u32) {
         self.turn_index = turn_index;
         self.mutations.clear();
     }
 
-    pub fn push(&mut self, record: ManaMutationRecord) {
+    pub fn push(&mut self, record: WorkflowMutationRecord) {
         self.mutations.push(record);
     }
 
-    pub fn finalize(&self) -> TurnManaReview {
+    pub fn finalize(&self) -> TurnWorkflowReview {
         if self.mutations.is_empty() {
-            return TurnManaReview::no_change(self.turn_index);
+            return TurnWorkflowReview::no_change(self.turn_index);
         }
 
         let scope = summarize_scope(&self.mutations);
@@ -387,14 +387,14 @@ impl TurnManaReviewAccumulator {
 
         for mutation in &self.mutations {
             match mutation.action {
-                ManaMutationAction::Delete => {
+                WorkflowMutationAction::Delete => {
                     if let Some(unit) = &mutation.deleted_unit {
                         let aggregate = aggregates
                             .entry(unit.id.clone())
                             .or_insert_with(|| UnitAggregate::new(unit.clone()));
                         aggregate.deleted_in_turn = true;
                         aggregate.touch_actions.insert(ManaTouchKind::Deleted);
-                        aggregate.roles.insert(ManaUnitRole::DirectTarget);
+                        aggregate.roles.insert(WorkflowUnitRole::DirectTarget);
                     }
                 }
                 _ => {
@@ -422,41 +422,41 @@ impl TurnManaReviewAccumulator {
                     if let Some(after) = &mutation.after_unit {
                         aggregate.latest_after = Some(after.clone());
                     }
-                    aggregate.roles.insert(ManaUnitRole::DirectTarget);
-                    if matches!(unit.kind, ManaReviewUnitKind::Fact) {
-                        aggregate.roles.insert(ManaUnitRole::Fact);
+                    aggregate.roles.insert(WorkflowUnitRole::DirectTarget);
+                    if matches!(unit.kind, WorkflowReviewUnitKind::Fact) {
+                        aggregate.roles.insert(WorkflowUnitRole::Fact);
                     }
                     if let Some(parent) = &mutation.parent_unit {
                         aggregate.parent_unit = Some(parent.clone());
-                        aggregate.roles.insert(ManaUnitRole::Child);
+                        aggregate.roles.insert(WorkflowUnitRole::Child);
                     } else if let Some(parent_id) = unit.parent.as_ref() {
                         aggregate.parent_unit.get_or_insert_with(|| {
-                            ManaUnitRef::new(
+                            WorkflowUnitRef::new(
                                 parent_id.clone(),
                                 parent_id.clone(),
                                 Some("epic".into()),
                             )
                         });
-                        aggregate.roles.insert(ManaUnitRole::Child);
+                        aggregate.roles.insert(WorkflowUnitRole::Child);
                     }
 
                     match mutation.action {
-                        ManaMutationAction::Create => {
+                        WorkflowMutationAction::Create => {
                             aggregate.created_in_turn = true;
                             aggregate.touch_actions.insert(ManaTouchKind::Created);
                         }
-                        ManaMutationAction::FactCreate => {
+                        WorkflowMutationAction::FactCreate => {
                             aggregate.created_in_turn = true;
                             aggregate.touch_actions.insert(ManaTouchKind::FactCreated);
-                            aggregate.roles.insert(ManaUnitRole::Fact);
+                            aggregate.roles.insert(WorkflowUnitRole::Fact);
                         }
-                        ManaMutationAction::Close => {
+                        WorkflowMutationAction::Close => {
                             aggregate.touch_actions.insert(ManaTouchKind::Closed);
                         }
-                        ManaMutationAction::Reopen => {
+                        WorkflowMutationAction::Reopen => {
                             aggregate.touch_actions.insert(ManaTouchKind::Reopened);
                         }
-                        ManaMutationAction::Fail => {
+                        WorkflowMutationAction::Fail => {
                             aggregate.touch_actions.insert(ManaTouchKind::Failed);
                         }
                         _ => {
@@ -470,7 +470,7 @@ impl TurnManaReviewAccumulator {
                 let aggregate = aggregates
                     .entry(related.id.clone())
                     .or_insert_with(|| UnitAggregate::new(related.clone()));
-                aggregate.roles.insert(ManaUnitRole::Related);
+                aggregate.roles.insert(WorkflowUnitRole::Related);
             }
 
             for field_change in &mutation.field_changes {
@@ -524,13 +524,13 @@ impl TurnManaReviewAccumulator {
 
             if has_surviving_material {
                 let unit_ref = aggregate.display_unit_ref();
-                touched_units.push(TurnManaTouchedUnit {
+                touched_units.push(TurnWorkflowTouchedUnit {
                     unit: unit_ref.clone(),
                     touch_kind: aggregate.touch_kind(),
                     unit_origin: if aggregate.created_in_turn {
-                        ManaUnitOrigin::CreatedInTurn
+                        WorkflowUnitOrigin::CreatedInTurn
                     } else {
-                        ManaUnitOrigin::Preexisting
+                        WorkflowUnitOrigin::Preexisting
                     },
                     roles: aggregate.roles.iter().copied().collect(),
                 });
@@ -539,13 +539,13 @@ impl TurnManaReviewAccumulator {
                     if let (Some(parent), Some(after)) = (&aggregate.parent_unit, final_unit) {
                         if matches!(
                             after.kind,
-                            ManaReviewUnitKind::Epic | ManaReviewUnitKind::Job
+                            WorkflowReviewUnitKind::Epic | WorkflowReviewUnitKind::Job
                         ) {
-                            proposed_children.push(TurnManaProposedChild {
+                            proposed_children.push(TurnWorkflowProposedChild {
                                 unit: unit_ref,
                                 parent: parent.clone(),
                                 child_kind: after.kind,
-                                child_origin: ManaUnitOrigin::CreatedInTurn,
+                                child_origin: WorkflowUnitOrigin::CreatedInTurn,
                             });
                         }
                     }
@@ -603,14 +603,14 @@ impl TurnManaReviewAccumulator {
             && decision_events.is_empty()
             && unresolved_consequential_choices.is_empty()
         {
-            ManaReviewState::NoChange
+            WorkflowReviewState::NoChange
         } else if unresolved_consequential_choices.is_empty() {
-            ManaReviewState::Changed
+            WorkflowReviewState::Changed
         } else {
-            ManaReviewState::NeedsDecision
+            WorkflowReviewState::NeedsDecision
         };
 
-        TurnManaReview {
+        TurnWorkflowReview {
             turn_index: self.turn_index,
             state,
             scope,
@@ -628,7 +628,7 @@ impl TurnManaReviewAccumulator {
 
 #[derive(Debug, Clone)]
 struct FieldAggregate {
-    unit: ManaUnitRef,
+    unit: WorkflowUnitRef,
     field: String,
     change_kind: ManaFieldChangeKind,
     before: Option<String>,
@@ -638,25 +638,25 @@ struct FieldAggregate {
 
 #[derive(Debug, Clone)]
 struct UnitAggregate {
-    display_unit: ManaUnitRef,
-    first_before: Option<ManaUnitSnapshot>,
-    latest_after: Option<ManaUnitSnapshot>,
-    parent_unit: Option<ManaUnitRef>,
+    display_unit: WorkflowUnitRef,
+    first_before: Option<WorkflowUnitSnapshot>,
+    latest_after: Option<WorkflowUnitSnapshot>,
+    parent_unit: Option<WorkflowUnitRef>,
     created_in_turn: bool,
     deleted_in_turn: bool,
     touch_actions: BTreeSet<ManaTouchKind>,
-    roles: BTreeSet<ManaUnitRole>,
+    roles: BTreeSet<WorkflowUnitRole>,
     singular_field_changes: BTreeMap<String, FieldAggregate>,
     label_changes: BTreeMap<String, i32>,
     dependency_changes: BTreeMap<String, i32>,
-    notes: Vec<TurnManaNoteAppend>,
+    notes: Vec<TurnWorkflowNoteAppend>,
     decision_added: HashMap<String, usize>,
     decision_resolved: HashMap<String, usize>,
-    decision_event_order: Vec<TurnManaDecisionEvent>,
+    decision_event_order: Vec<TurnWorkflowDecisionEvent>,
 }
 
 impl UnitAggregate {
-    fn new(display_unit: ManaUnitRef) -> Self {
+    fn new(display_unit: WorkflowUnitRef) -> Self {
         Self {
             display_unit,
             first_before: None,
@@ -676,14 +676,14 @@ impl UnitAggregate {
         }
     }
 
-    fn display_unit_ref(&self) -> ManaUnitRef {
+    fn display_unit_ref(&self) -> WorkflowUnitRef {
         self.latest_after
             .as_ref()
-            .map(ManaUnitSnapshot::unit_ref)
+            .map(WorkflowUnitSnapshot::unit_ref)
             .unwrap_or_else(|| self.display_unit.clone())
     }
 
-    fn record_field_change(&mut self, change: TurnManaFieldChange) {
+    fn record_field_change(&mut self, change: TurnWorkflowFieldChange) {
         match change.field.as_str() {
             "labels" => {
                 if let Some(label) = change.after.clone().or(change.before.clone()) {
@@ -726,7 +726,7 @@ impl UnitAggregate {
         }
     }
 
-    fn record_decision_event(&mut self, event: TurnManaDecisionEvent) {
+    fn record_decision_event(&mut self, event: TurnWorkflowDecisionEvent) {
         match event.event_kind {
             ManaDecisionEventKind::Added => {
                 *self
@@ -744,7 +744,7 @@ impl UnitAggregate {
         self.decision_event_order.push(event);
     }
 
-    fn surviving_decision_events(&self) -> Vec<TurnManaDecisionEvent> {
+    fn surviving_decision_events(&self) -> Vec<TurnWorkflowDecisionEvent> {
         let mut remaining_added = self.decision_added.clone();
         let mut remaining_resolved = self.decision_resolved.clone();
 
@@ -780,14 +780,14 @@ impl UnitAggregate {
             .collect()
     }
 
-    fn surviving_field_changes(&self) -> Vec<TurnManaFieldChange> {
+    fn surviving_field_changes(&self) -> Vec<TurnWorkflowFieldChange> {
         let mut out = Vec::new();
 
         for aggregate in self.singular_field_changes.values() {
             if aggregate.before == aggregate.after {
                 continue;
             }
-            out.push(TurnManaFieldChange {
+            out.push(TurnWorkflowFieldChange {
                 unit: aggregate.unit.clone(),
                 field: aggregate.field.clone(),
                 change_kind: aggregate.change_kind,
@@ -799,44 +799,44 @@ impl UnitAggregate {
 
         for (label, delta) in &self.label_changes {
             if *delta > 0 {
-                out.push(TurnManaFieldChange {
+                out.push(TurnWorkflowFieldChange {
                     unit: self.display_unit_ref(),
                     field: "labels".to_string(),
                     change_kind: ManaFieldChangeKind::Added,
                     before: None,
                     after: Some(label.clone()),
-                    source_action: ManaMutationAction::Update.as_str().to_string(),
+                    source_action: WorkflowMutationAction::Update.as_str().to_string(),
                 });
             } else if *delta < 0 {
-                out.push(TurnManaFieldChange {
+                out.push(TurnWorkflowFieldChange {
                     unit: self.display_unit_ref(),
                     field: "labels".to_string(),
                     change_kind: ManaFieldChangeKind::Removed,
                     before: Some(label.clone()),
                     after: None,
-                    source_action: ManaMutationAction::Update.as_str().to_string(),
+                    source_action: WorkflowMutationAction::Update.as_str().to_string(),
                 });
             }
         }
 
         for (dep, delta) in &self.dependency_changes {
             if *delta > 0 {
-                out.push(TurnManaFieldChange {
+                out.push(TurnWorkflowFieldChange {
                     unit: self.display_unit_ref(),
                     field: "dependencies".to_string(),
                     change_kind: ManaFieldChangeKind::Added,
                     before: None,
                     after: Some(dep.clone()),
-                    source_action: ManaMutationAction::DepAdd.as_str().to_string(),
+                    source_action: WorkflowMutationAction::DepAdd.as_str().to_string(),
                 });
             } else if *delta < 0 {
-                out.push(TurnManaFieldChange {
+                out.push(TurnWorkflowFieldChange {
                     unit: self.display_unit_ref(),
                     field: "dependencies".to_string(),
                     change_kind: ManaFieldChangeKind::Removed,
                     before: Some(dep.clone()),
                     after: None,
-                    source_action: ManaMutationAction::DepRemove.as_str().to_string(),
+                    source_action: WorkflowMutationAction::DepRemove.as_str().to_string(),
                 });
             }
         }
@@ -849,7 +849,7 @@ impl UnitAggregate {
             ManaTouchKind::Deleted
         } else if self.created_in_turn {
             match self.latest_after.as_ref().map(|unit| unit.kind) {
-                Some(ManaReviewUnitKind::Fact) => ManaTouchKind::FactCreated,
+                Some(WorkflowReviewUnitKind::Fact) => ManaTouchKind::FactCreated,
                 _ => ManaTouchKind::Created,
             }
         } else if self.touch_actions.contains(&ManaTouchKind::Failed) {
@@ -864,22 +864,22 @@ impl UnitAggregate {
     }
 }
 
-fn summarize_scope(mutations: &[ManaMutationRecord]) -> ManaReviewScope {
-    let unique: BTreeSet<(ManaReviewScopeKind, String)> = mutations
+fn summarize_scope(mutations: &[WorkflowMutationRecord]) -> WorkflowReviewScope {
+    let unique: BTreeSet<(WorkflowReviewScopeKind, String)> = mutations
         .iter()
         .map(|mutation| (mutation.scope.kind.clone(), mutation.scope.display.clone()))
         .collect();
 
     if unique.is_empty() {
-        return ManaReviewScope::default();
+        return WorkflowReviewScope::default();
     }
     if unique.len() == 1 {
         let (kind, display) = unique.into_iter().next().unwrap();
-        return ManaReviewScope { kind, display };
+        return WorkflowReviewScope { kind, display };
     }
 
-    ManaReviewScope {
-        kind: ManaReviewScopeKind::Mixed,
+    WorkflowReviewScope {
+        kind: WorkflowReviewScopeKind::Mixed,
         display: "mixed".to_string(),
     }
 }
@@ -887,11 +887,11 @@ fn summarize_scope(mutations: &[ManaMutationRecord]) -> ManaReviewScope {
 fn derive_anchor_unit(
     aggregates: &BTreeMap<String, UnitAggregate>,
     created_and_deleted: &BTreeSet<String>,
-    proposed_children: &[TurnManaProposedChild],
-    touched_units: &[TurnManaTouchedUnit],
-) -> Option<TurnManaAnchorUnit> {
+    proposed_children: &[TurnWorkflowProposedChild],
+    touched_units: &[TurnWorkflowTouchedUnit],
+) -> Option<TurnWorkflowAnchorUnit> {
     if !proposed_children.is_empty() {
-        let mut parent_counts: BTreeMap<String, (&ManaUnitRef, usize)> = BTreeMap::new();
+        let mut parent_counts: BTreeMap<String, (&WorkflowUnitRef, usize)> = BTreeMap::new();
         for child in proposed_children {
             parent_counts
                 .entry(child.parent.id.clone())
@@ -908,7 +908,7 @@ fn derive_anchor_unit(
                     aggregate.created_in_turn && !created_and_deleted.contains(&parent_id)
                 })
                 .unwrap_or(false);
-            return Some(TurnManaAnchorUnit {
+            return Some(TurnWorkflowAnchorUnit {
                 unit: parent_ref.clone(),
                 anchor_kind: if created_in_turn {
                     ManaAnchorKind::CreatedInTurn
@@ -926,17 +926,17 @@ fn derive_anchor_unit(
 
     if touched_units.len() == 1 {
         let touched = touched_units.first().unwrap();
-        let reason = if touched.roles.contains(&ManaUnitRole::Fact) {
+        let reason = if touched.roles.contains(&WorkflowUnitRole::Fact) {
             ManaAnchorReason::PrimaryFact
         } else {
             ManaAnchorReason::PrimaryTarget
         };
-        let anchor_kind = if matches!(touched.unit_origin, ManaUnitOrigin::CreatedInTurn) {
+        let anchor_kind = if matches!(touched.unit_origin, WorkflowUnitOrigin::CreatedInTurn) {
             ManaAnchorKind::CreatedInTurn
         } else {
             ManaAnchorKind::ReusedExisting
         };
-        return Some(TurnManaAnchorUnit {
+        return Some(TurnWorkflowAnchorUnit {
             unit: touched.unit.clone(),
             anchor_kind,
             reason,
@@ -946,7 +946,9 @@ fn derive_anchor_unit(
     None
 }
 
-fn classify_unresolved_choices(unit: &ManaUnitSnapshot) -> Vec<TurnManaConsequentialChoice> {
+fn classify_unresolved_choices(
+    unit: &WorkflowUnitSnapshot,
+) -> Vec<TurnWorkflowConsequentialChoice> {
     unit.decisions
         .iter()
         .filter_map(|decision| classify_consequential_choice(&unit.unit_ref(), decision))
@@ -954,14 +956,21 @@ fn classify_unresolved_choices(unit: &ManaUnitSnapshot) -> Vec<TurnManaConsequen
 }
 
 fn classify_consequential_choice(
-    unit: &ManaUnitRef,
+    unit: &WorkflowUnitRef,
     decision: &str,
-) -> Option<TurnManaConsequentialChoice> {
+) -> Option<TurnWorkflowConsequentialChoice> {
     let lower = decision.to_ascii_lowercase();
 
     let (category, why) = if contains_any(
         &lower,
-        &["mana", "imp", "root", "project", "ownership", "boundary"],
+        &[
+            "workflow",
+            "imp",
+            "root",
+            "project",
+            "ownership",
+            "boundary",
+        ],
     ) {
         (
             ManaConsequentialChoiceCategory::OwnershipBoundary,
@@ -1005,7 +1014,7 @@ fn classify_consequential_choice(
         return None;
     };
 
-    Some(TurnManaConsequentialChoice {
+    Some(TurnWorkflowConsequentialChoice {
         unit: unit.clone(),
         decision_text: decision.to_string(),
         category,
@@ -1022,15 +1031,15 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
 mod tests {
     use super::*;
 
-    fn scope() -> ManaReviewScope {
-        ManaReviewScope {
-            kind: ManaReviewScopeKind::Project,
+    fn scope() -> WorkflowReviewScope {
+        WorkflowReviewScope {
+            kind: WorkflowReviewScopeKind::Project,
             display: "project".to_string(),
         }
     }
 
-    fn unit(id: &str, title: &str, kind: ManaReviewUnitKind) -> ManaUnitSnapshot {
-        ManaUnitSnapshot {
+    fn unit(id: &str, title: &str, kind: WorkflowReviewUnitKind) -> WorkflowUnitSnapshot {
+        WorkflowUnitSnapshot {
             id: id.to_string(),
             title: title.to_string(),
             kind,
@@ -1050,39 +1059,39 @@ mod tests {
 
     #[test]
     fn no_mutations_becomes_no_change() {
-        let mut acc = TurnManaReviewAccumulator::default();
+        let mut acc = TurnWorkflowReviewAccumulator::default();
         acc.begin_turn(3);
         let review = acc.finalize();
-        assert_eq!(review.state, ManaReviewState::NoChange);
+        assert_eq!(review.state, WorkflowReviewState::NoChange);
         assert_eq!(review.state.as_str(), "no_change");
     }
 
     #[test]
     fn create_then_delete_same_unit_is_net_zero() {
-        let mut acc = TurnManaReviewAccumulator::default();
+        let mut acc = TurnWorkflowReviewAccumulator::default();
         acc.begin_turn(1);
-        let created = unit("28.5", "child", ManaReviewUnitKind::Job);
-        acc.push(ManaMutationRecord {
-            action: ManaMutationAction::Create,
+        let created = unit("28.5", "child", WorkflowReviewUnitKind::Job);
+        acc.push(WorkflowMutationRecord {
+            action: WorkflowMutationAction::Create,
             scope: scope(),
             before_unit: None,
             after_unit: Some(created.clone()),
             deleted_unit: None,
-            parent_unit: Some(ManaUnitRef::new("28", "parent", Some("epic".into()))),
+            parent_unit: Some(WorkflowUnitRef::new("28", "parent", Some("epic".into()))),
             related_unit: None,
             field_changes: Vec::new(),
             notes_appended: Vec::new(),
             decision_events: Vec::new(),
         });
-        acc.push(ManaMutationRecord {
-            action: ManaMutationAction::Delete,
+        acc.push(WorkflowMutationRecord {
+            action: WorkflowMutationAction::Delete,
             scope: scope(),
             before_unit: Some(created.clone()),
             after_unit: None,
             deleted_unit: Some(created.unit_ref()),
             parent_unit: None,
             related_unit: None,
-            field_changes: vec![TurnManaFieldChange {
+            field_changes: vec![TurnWorkflowFieldChange {
                 unit: created.unit_ref(),
                 field: "lifecycle.deleted".into(),
                 change_kind: ManaFieldChangeKind::Set,
@@ -1094,35 +1103,35 @@ mod tests {
             decision_events: Vec::new(),
         });
         let review = acc.finalize();
-        assert_eq!(review.state, ManaReviewState::NoChange);
+        assert_eq!(review.state, WorkflowReviewState::NoChange);
         assert!(review.touched_units.is_empty());
     }
 
     #[test]
     fn unresolved_architecture_decision_requires_decision() {
-        let mut acc = TurnManaReviewAccumulator::default();
+        let mut acc = TurnWorkflowReviewAccumulator::default();
         acc.begin_turn(2);
-        let mut after = unit("28", "boundary work", ManaReviewUnitKind::Epic);
-        after.decisions = vec!["Choose architecture boundary between mana and imp".into()];
-        acc.push(ManaMutationRecord {
-            action: ManaMutationAction::DecisionAdd,
+        let mut after = unit("28", "boundary work", WorkflowReviewUnitKind::Epic);
+        after.decisions = vec!["Choose architecture boundary between workflow and imp".into()];
+        acc.push(WorkflowMutationRecord {
+            action: WorkflowMutationAction::DecisionAdd,
             scope: scope(),
-            before_unit: Some(unit("28", "boundary work", ManaReviewUnitKind::Epic)),
+            before_unit: Some(unit("28", "boundary work", WorkflowReviewUnitKind::Epic)),
             after_unit: Some(after.clone()),
             deleted_unit: None,
             parent_unit: None,
             related_unit: None,
             field_changes: Vec::new(),
             notes_appended: Vec::new(),
-            decision_events: vec![TurnManaDecisionEvent {
+            decision_events: vec![TurnWorkflowDecisionEvent {
                 unit: after.unit_ref(),
                 event_kind: ManaDecisionEventKind::Added,
-                decision_text: "Choose architecture boundary between mana and imp".into(),
+                decision_text: "Choose architecture boundary between workflow and imp".into(),
                 source_action: "decision_add".into(),
             }],
         });
         let review = acc.finalize();
-        assert_eq!(review.state, ManaReviewState::NeedsDecision);
+        assert_eq!(review.state, WorkflowReviewState::NeedsDecision);
         assert_eq!(review.unresolved_consequential_choices.len(), 1);
         assert!(review.next_question.is_some());
     }

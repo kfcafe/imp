@@ -71,7 +71,7 @@ imp should launch as an open-source developer tool, not as a perfect commercial 
 - [ ] Add a safety/trust section.
 - [ ] Add contribution links.
 - [ ] Add roadmap links.
-- [ ] Make sure old mana language is removed or clearly marked legacy.
+- [ ] Make sure old workflow language is removed or clearly marked legacy.
 
 ## 3. Documentation library
 
@@ -141,7 +141,7 @@ docs/
 - [ ] `docs/using-imp/tui.md`: core TUI controls and mental model.
 - [ ] `docs/using-imp/cli.md`: one-shot, chat, file attachment, continuation.
 - [ ] `docs/using-imp/sessions.md`: durable sessions, compaction, continuation.
-- [ ] `docs/work/overview.md`: native imp-work overview, no mana terminology.
+- [ ] `docs/work/overview.md`: native imp-work overview, no workflow terminology.
 - [ ] `docs/work/tasks.md`: tasks, epics, dependencies, checks, outcomes.
 - [ ] `docs/work/memory.md`: what memory is and when imp records it.
 - [ ] `docs/work/prototypes.md`: disposable prototype workflow and evidence.
@@ -166,7 +166,7 @@ docs/
 - [ ] Every advanced concept has a beginner explanation first.
 - [ ] Safety docs distinguish model instructions, hooks, policy, and user approval.
 - [ ] Docs avoid stale future-tense promises unless clearly marked planned.
-- [ ] Docs use native imp-work vocabulary, not mana, except in migration/legacy notes.
+- [ ] Docs use native imp-work vocabulary, not workflow, except in migration/legacy notes.
 - [ ] Docs link back to the next useful page.
 - [ ] Docs include expected outputs where helpful.
 - [ ] Docs include troubleshooting notes for failure-prone flows.
@@ -233,7 +233,7 @@ docs/
 
 ## 8. Native imp-work readiness
 
-- [ ] Remove or clearly deprecate mana-first flows from launch docs.
+- [ ] Remove or clearly deprecate workflow-first flows from launch docs.
 - [ ] Document imp-work storage layout.
 - [ ] Verify task create/list/show/update/claim flows.
 - [ ] Verify dependencies and ready queue behavior.

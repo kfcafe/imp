@@ -27,7 +27,7 @@ Branch policy:
 | Commit | Initial status | Notes |
 | --- | --- | --- |
 | `9e6cd9c` Clean release branch artifacts | release-only | Likely stable-branch cleanup; verify exact deleted artifacts before keeping. |
-| `eb3f46f` Use published mana crates for release build | release-only | Expected stable packaging behavior if release should build against published mana crates. |
+| `eb3f46f` Use published workflow crates for release build | release-only | Expected stable packaging behavior if release should build against published workflow crates. |
 | `42634db` Merge branch 'nightly' into release | suspicious | Ambiguous curated-release history; avoid this pattern going forward. |
 | `b472ead` Merge branch 'nightly' into release | suspicious | Ambiguous curated-release history; avoid this pattern going forward. |
 | `371150f` Merge branch 'nightly' into release | suspicious | Ambiguous curated-release history; avoid this pattern going forward. |
@@ -41,4 +41,4 @@ These are shown in the board with `--include-workflow`. Initial default is **def
 
 | Commit/range | Initial status | Required evidence before release |
 | --- | --- | --- |
-| `0184de6..31e1a04` workflow sprint branch | defer | Demonstrated performance/UX gain, mana worker contract smoke, TUI event-loop smoke, and full release gate. |
+| `0184de6..31e1a04` workflow sprint branch | defer | Demonstrated performance/UX gain, workflow worker contract smoke, TUI event-loop smoke, and full release gate. |

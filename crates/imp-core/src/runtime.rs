@@ -101,7 +101,7 @@ pub enum RuntimeEventKind {
         worktree: RuntimeWorktreeState,
     },
     ManaUpdated {
-        mana_ref: RuntimeManaRef,
+        workflow_ref: RuntimeManaRef,
     },
     Warning {
         message: String,
@@ -148,7 +148,7 @@ pub struct RuntimeStateSnapshot {
     pub evidence_refs: Vec<RuntimeArtifactRef>,
     pub child_workflows: Vec<RuntimeChildWorkflowSummary>,
     pub final_status: Option<RuntimeFinalStatus>,
-    pub mana_refs: Vec<RuntimeManaRef>,
+    pub workflow_refs: Vec<RuntimeManaRef>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
     pub status_items: BTreeMap<String, String>,
@@ -359,8 +359,8 @@ impl RuntimeStateAccumulator {
                         .insert("worktree-closeout".into(), closeout.message.clone());
                 }
             }
-            RuntimeEventKind::ManaUpdated { mana_ref } => {
-                upsert_mana_ref(&mut self.snapshot.mana_refs, mana_ref.clone());
+            RuntimeEventKind::ManaUpdated { workflow_ref } => {
+                upsert_workflow_ref(&mut self.snapshot.workflow_refs, workflow_ref.clone());
             }
             RuntimeEventKind::Warning { message } => {
                 self.snapshot.warnings.push(message.clone());
@@ -470,11 +470,14 @@ fn upsert_child_workflow(
     }
 }
 
-fn upsert_mana_ref(mana_refs: &mut Vec<RuntimeManaRef>, mana_ref: RuntimeManaRef) {
-    if let Some(existing) = mana_refs.iter_mut().find(|item| item.id == mana_ref.id) {
-        *existing = mana_ref;
+fn upsert_workflow_ref(workflow_refs: &mut Vec<RuntimeManaRef>, workflow_ref: RuntimeManaRef) {
+    if let Some(existing) = workflow_refs
+        .iter_mut()
+        .find(|item| item.id == workflow_ref.id)
+    {
+        *existing = workflow_ref;
     } else {
-        mana_refs.push(mana_ref);
+        workflow_refs.push(workflow_ref);
     }
 }
 
@@ -512,7 +515,7 @@ impl Default for RuntimeStateSnapshot {
             evidence_refs: Vec::new(),
             child_workflows: Vec::new(),
             final_status: None,
-            mana_refs: Vec::new(),
+            workflow_refs: Vec::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
             status_items: BTreeMap::new(),
@@ -736,7 +739,7 @@ mod runtime_events {
         assert!(snapshot.verification_gates.is_empty());
         assert!(snapshot.evidence_refs.is_empty());
         assert!(snapshot.final_status.is_none());
-        assert!(snapshot.mana_refs.is_empty());
+        assert!(snapshot.workflow_refs.is_empty());
     }
 
     #[test]
@@ -776,7 +779,7 @@ mod runtime_events {
         snapshot.final_status = Some(RuntimeFinalStatus::DoneWithConcerns {
             concerns: vec!["unrelated warning".into()],
         });
-        snapshot.mana_refs.push(RuntimeManaRef {
+        snapshot.workflow_refs.push(RuntimeManaRef {
             id: "394.11.2".into(),
             title: Some("Define runtime types".into()),
             status: Some("in_progress".into()),

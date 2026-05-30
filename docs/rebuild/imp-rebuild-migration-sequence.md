@@ -16,8 +16,8 @@ Goal: stabilize the current imp-local boundary before creating or moving shared 
 
 Order:
 1. Keep `imp_core::contracts` as the current contract home.
-2. Document `WorkerAssignment` as the live assignment snapshot from mana-owned durable state.
-3. Keep `mana_worker.rs` re-exports for compatibility shim stability.
+2. Document `WorkerAssignment` as the live assignment snapshot from workflow-owned durable state.
+3. Keep `workflow_worker.rs` re-exports for compatibility shim stability.
 4. Add serialization/shape tests for reference-first DTOs.
 
 Verify gate:
@@ -55,29 +55,29 @@ Rollback:
 
 ## Phase 3 — runner and lease boundary
 
-Goal: move toward mana-owned run/node/lease state while preserving `imp run <unit-id>`.
+Goal: move toward workflow-owned run/node/lease state while preserving `imp run <unit-id>`.
 
 Order:
-1. Add mana run/node schema in shadow mode.
+1. Add workflow run/node schema in shadow mode.
 2. Dual-write imp worker outcomes into compatibility run records.
 3. Add shadow scheduling validation.
 4. Introduce single-unit lease attach behind current `imp run`.
-5. Only then narrow `mana run` into attach orchestration.
+5. Only then narrow `workflow run` into attach orchestration.
 
 Compatibility shim:
 
 - `imp run <unit-id>` remains the user-visible path.
-- `mana run` may continue spawning imp during transition.
+- `workflow run` may continue spawning imp during transition.
 
 Verify gate:
 
 - one-shot `imp run <unit-id>` smoke
-- mana dry-run/shadow validation tests
+- workflow dry-run/shadow validation tests
 - lease acquire/heartbeat/resolve unit tests once APIs exist
 
 Rollback:
 
-- Disable dual-write or lease attach flag and fall back to current `mana_worker` execution.
+- Disable dual-write or lease attach flag and fall back to current `workflow_worker` execution.
 
 ## Phase 4 — evidence and verification model
 
@@ -86,11 +86,11 @@ Goal: make durable evidence summaries explicit without persisting live runtime s
 Order:
 1. Keep `ArtifactRef`, `VerifierResult`, and `EvidenceBundleRef` reference-first.
 2. Add mappings from worker/verify outcomes into durable evidence summaries.
-3. Promote summaries to mana only at checkpoint/verify/result boundaries.
+3. Promote summaries to workflow only at checkpoint/verify/result boundaries.
 
 Compatibility shim:
 
-- Existing mana notes/logs remain accepted storage until a typed boundary has multiple consumers.
+- Existing workflow notes/logs remain accepted storage until a typed boundary has multiple consumers.
 
 Verify gate:
 
@@ -154,7 +154,7 @@ Throughout the migration:
 - `imp chat` remains available.
 - `imp print` remains available for one-shot model calls.
 - `imp run <unit-id>` remains the preferred worker entrypoint.
-- `mana run` compatibility does not disappear until attach orchestration is proven.
+- `workflow run` compatibility does not disappear until attach orchestration is proven.
 - Human output remains readable; machine output remains parseable and versioned when changed.
 
 ## Safe independently landable slices
@@ -168,7 +168,7 @@ Throughout the migration:
 ## Slices that require preparatory adapters
 
 - Lease-based execution.
-- Changing `mana run` dispatch ownership.
+- Changing `workflow run` dispatch ownership.
 - Shared event schema migration across CLI/TUI/RPC.
 - Removing any public re-export or compatibility shim.
 

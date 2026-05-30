@@ -4,13 +4,12 @@ This contract defines how imp separates human-readable output from machine-reada
 
 It is grounded in current repo reality:
 
-- planning notes in `.mana/50.16.1` document duplicated headless/RPC JSON encoders and the target split;
-- `.mana/50.17` captures the follow-on output-contract requirement;
+- planning notes in `.imp/workflows/50.16.1` document duplicated headless/RPC JSON encoders and the target split;
+- `.imp/workflows/50.17` captures the follow-on output-contract requirement;
 - `docs/rebuild/imp-cli-interactive-shell.md` defines transcript-oriented shell behavior;
 - `docs/rebuild/imp-shared-ui-event-seam.md` defines shared UI request/runtime-event ownership;
-- `IMP_REVIEW.md` identifies approvals, checkpoints, planning, detached/background execution, and session/search surfaces as underexposed runtime capabilities.
 
-The referenced historical docs (`imp-cli-affordance-sequence`, `imp-shared-runtime-startup-map`, `imp-command-grammar`, and shell transcript UX) are not present in this worktree, so this contract uses their durable mana summaries plus currently restored rebuild docs.
+The referenced historical docs (`imp-cli-affordance-sequence`, `imp-shared-runtime-startup-map`, `imp-command-grammar`, and shell transcript UX) are not present in this worktree, so this contract uses their durable workflow summaries plus currently restored rebuild docs.
 
 ## Problem: fragmented output handling
 

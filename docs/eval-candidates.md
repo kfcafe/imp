@@ -143,9 +143,9 @@ Initial JSON shape:
     "acceptance": "cargo test -p imp-core parser"
   },
   "workflow_contract_ref": {
-    "kind": "mana-unit",
+    "kind": "workflow",
     "id": "394.12.3",
-    "path": ".mana"
+    "path": ".imp/workflows"
   },
   "expected_behavior": {
     "summary": "Parser handles empty input without panic",
@@ -207,7 +207,7 @@ Required:
 
 Optional but recommended:
 
-- workflow id / mana unit id
+- workflow id / workflow id
 - workflow contract reference
 - verification metadata
 - trace/evidence refs

@@ -1701,7 +1701,7 @@ mod tests {
         let persisted = session.persist_event_entries(&AgentEvent::TurnEnd {
             index: 2,
             message: message.clone(),
-            mana_review: crate::mana_review::TurnManaReview::no_change(2),
+            workflow_review: crate::workflow_review::TurnWorkflowReview::no_change(2),
         });
 
         assert_eq!(persisted, vec!["assistant message", "canonical usage"]);
@@ -1750,7 +1750,7 @@ mod tests {
         let persisted = session.persist_event_entries(&AgentEvent::TurnEnd {
             index: 0,
             message: test_assistant_message(456, None),
-            mana_review: crate::mana_review::TurnManaReview::no_change(0),
+            workflow_review: crate::workflow_review::TurnWorkflowReview::no_change(0),
         });
 
         assert_eq!(persisted, vec!["assistant message"]);

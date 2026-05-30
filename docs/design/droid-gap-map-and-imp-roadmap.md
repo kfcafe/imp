@@ -16,8 +16,8 @@ The best direction is to wrap imp's primitives in stronger product surfaces rath
 ## Non-goals for now
 
 - Do not prioritize installable extension bundles or a public extension marketplace yet.
-- Do not reintroduce mana terminology. New workflow surfaces should use native `imp-work` terms.
-- Do not turn every workflow into project management UI. Keep chat and terminal flow primary.
+- Do not reintroduce workflow terminology. New workflow surfaces should use native `imp-work` terms.
+- Do not turn every workflow into project workflowgement UI. Keep chat and terminal flow primary.
 - Do not build SaaS/team surfaces before local runtime/product quality is strong.
 
 ## 1. `.imp/agents`: first-class custom agents
@@ -91,7 +91,7 @@ Droid Missions provide collaborative planning, features/milestones, orchestrator
 
 ### Current imp position
 
-imp is moving from mana to native imp-work. imp-work already has tasks, epics, prototypes, context packs, runs, attempts, leases, path locks, checks, outcomes, memory, and structured scheduler state.
+imp is moving from workflow to native imp-work. imp-work already has tasks, epics, prototypes, context packs, runs, attempts, leases, path locks, checks, outcomes, memory, and structured scheduler state.
 
 ### Gap
 
@@ -150,7 +150,7 @@ Validation model:
 - validators can be named agents using reviewer/auditor modes
 - evidence packets should attach to task outcomes
 
-Key imp distinction: Droid Missions feel like multi-agent project management. imp Work Control should feel like inspectable local execution with proof.
+Key imp distinction: Droid Missions feel like multi-agent project workflowgement. imp Work Control should feel like inspectable local execution with proof.
 
 ## 3. MCP support
 
@@ -187,7 +187,7 @@ Config:
 
 TUI:
 
-- `/mcp` manager
+- `/mcp` workflowger
 - list servers and connection state
 - inspect tools
 - enable/disable server or individual tools
@@ -208,7 +208,7 @@ Initial priority:
 2. HTTP MCP
 3. project/user config layering
 4. policy integration
-5. TUI manager
+5. TUI workflowger
 6. curated registry later
 
 ## 4. Hooks UX improvements
@@ -532,7 +532,7 @@ If imp gains traction, monetize around things that naturally cost money or requi
 - hosted sync for imp-work and sessions
 - team policy/admin
 - Slack/GitHub/Linear hosted adapters
-- managed remote workers
+- workflowged remote workers
 - private extension/agent registry
 - enterprise support
 - signed builds and auto-update channel

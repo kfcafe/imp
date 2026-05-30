@@ -1,6 +1,6 @@
 //! Recipe/runtime support for imp workflow integration.
 
-use super::mana_compat::tool_results_indicate_execution_evidence;
+use super::workflow_compat::tool_results_indicate_execution_evidence;
 use crate::agent::{
     autonomy::{
         edited_files_verification_obligation, failed_command_recovery_obligation, ObligationKind,
@@ -14,10 +14,10 @@ use crate::evidence::{
     EvidenceActions, EvidenceArtifact, EvidencePacket, EvidencePolicy, EvidenceTrustSummary,
     EvidenceVerificationGate,
 };
-use crate::mana_review::TurnManaReviewAccumulator;
 use crate::storage;
 use crate::trust::{Provenance, RiskLabel, TrustLabel};
 use crate::workflow::{AutonomyMode, WorkflowContract, WorkflowRunController, WorktreeRunMetadata};
+use crate::workflow_review::TurnWorkflowReviewAccumulator;
 
 use super::super::{
     tool_results_include_successful_check, tool_results_include_successful_edit,
@@ -28,11 +28,12 @@ use super::super::{
 pub(crate) struct WorkflowRuntimeLayer {
     controller: WorkflowRunController,
     contract: WorkflowContract,
-    pub(crate) turn_mana_review: std::sync::Arc<std::sync::Mutex<TurnManaReviewAccumulator>>,
-    pub(crate) has_mana_skill: bool,
-    pub(crate) has_mana_basics_skill: bool,
-    pub(crate) has_mana_delegation_skill: bool,
-    pub(crate) queued_mana_externalization_nudge: bool,
+    pub(crate) turn_workflow_review:
+        std::sync::Arc<std::sync::Mutex<TurnWorkflowReviewAccumulator>>,
+    pub(crate) has_workflow_skill: bool,
+    pub(crate) has_workflow_basics_skill: bool,
+    pub(crate) has_workflow_delegation_skill: bool,
+    pub(crate) queued_workflow_externalization_nudge: bool,
 }
 
 impl WorkflowRuntimeLayer {
@@ -40,13 +41,13 @@ impl WorkflowRuntimeLayer {
         Self {
             controller: WorkflowRunController::new(),
             contract,
-            turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(
-                TurnManaReviewAccumulator::default(),
+            turn_workflow_review: std::sync::Arc::new(std::sync::Mutex::new(
+                TurnWorkflowReviewAccumulator::default(),
             )),
-            has_mana_skill: false,
-            has_mana_basics_skill: false,
-            has_mana_delegation_skill: false,
-            queued_mana_externalization_nudge: false,
+            has_workflow_skill: false,
+            has_workflow_basics_skill: false,
+            has_workflow_delegation_skill: false,
+            queued_workflow_externalization_nudge: false,
         }
     }
 
@@ -70,26 +71,26 @@ impl WorkflowRuntimeLayer {
         self.contract = contract;
     }
 
-    pub(crate) fn turn_mana_review(
+    pub(crate) fn turn_workflow_review(
         &self,
-    ) -> std::sync::Arc<std::sync::Mutex<TurnManaReviewAccumulator>> {
-        self.turn_mana_review.clone()
+    ) -> std::sync::Arc<std::sync::Mutex<TurnWorkflowReviewAccumulator>> {
+        self.turn_workflow_review.clone()
     }
 
-    pub(crate) fn set_mana_skill_available(&mut self, available: bool) {
-        self.has_mana_skill = available;
+    pub(crate) fn set_workflow_skill_available(&mut self, available: bool) {
+        self.has_workflow_skill = available;
     }
 
-    pub(crate) fn set_mana_basics_skill_available(&mut self, available: bool) {
-        self.has_mana_basics_skill = available;
+    pub(crate) fn set_workflow_basics_skill_available(&mut self, available: bool) {
+        self.has_workflow_basics_skill = available;
     }
 
-    pub(crate) fn set_mana_delegation_skill_available(&mut self, available: bool) {
-        self.has_mana_delegation_skill = available;
+    pub(crate) fn set_workflow_delegation_skill_available(&mut self, available: bool) {
+        self.has_workflow_delegation_skill = available;
     }
 
     pub(crate) fn mark_externalization_nudge_queued(&mut self) {
-        self.queued_mana_externalization_nudge = true;
+        self.queued_workflow_externalization_nudge = true;
     }
 
     pub(crate) fn replace_controller(&mut self, controller: WorkflowRunController) {
@@ -323,7 +324,7 @@ impl Agent {
                 .workflow_contract()
                 .id
                 .clone()
-                .or_else(|| self.workflow_contract().mana_unit_ref.clone()),
+                .or_else(|| self.workflow_contract().workflow_unit_ref.clone()),
             session_id: None,
             prompt: Some(prompt.to_string()),
             expected_summary: Some(
@@ -381,7 +382,7 @@ impl Agent {
             .workflow_contract()
             .id
             .clone()
-            .or_else(|| self.workflow_contract().mana_unit_ref.clone());
+            .or_else(|| self.workflow_contract().workflow_unit_ref.clone());
         packet.workflow_type = Some(format!("{:?}", self.workflow_contract().workflow_type));
         packet.risk_level = Some(format!("{:?}", self.workflow_contract().risk_level));
         packet.autonomy_mode = Some(self.workflow_contract().autonomy_mode.to_string());

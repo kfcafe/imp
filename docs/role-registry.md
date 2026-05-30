@@ -273,7 +273,7 @@ lowercase kebab-case.
 [roles.coder]
 instructions = "Make focused code changes and verify them before reporting done."
 readonly = false
-tools = ["read", "scan", "edit", "write", "bash", "git", "mana"]
+tools = ["read", "scan", "edit", "write", "bash", "git", "workflow"]
 
 [roles.coder.autonomy]
 can_modify_files = true

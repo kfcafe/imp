@@ -1,6 +1,6 @@
 # JSONL-first run evidence
 
-Status: nightly slice for mana epic 432
+Status: nightly slice for workflow epic 432
 
 imp records run evidence as structured JSONL first, with optional human views derived from that data.
 
@@ -40,4 +40,4 @@ Each JSONL line is a versioned event with:
 - `kind`
 - optional turn/tool/status/summary fields
 
-The schema is intentionally compact for nightly. Workflow-branch work can extend it with richer policy, verification, diff, and mana references.
+The schema is intentionally compact for nightly. Workflow-branch work can extend it with richer policy, verification, diff, and workflow references.

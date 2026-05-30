@@ -110,7 +110,7 @@ Creating files with auto-mkdir, line ending preservation, overwrite warnings. Be
 
 Find-and-replace with fuzzy matching, diff output, CRLF handling, unread-file warnings. This is imp's strongest tool — nothing in bash does this.
 
-### `ask`, `web`, `mana`, `extend`, `memory`, `scan` — keep
+### `ask`, `web`, `workflow`, `extend`, `memory`, `scan` — keep
 
 These have no bash equivalent.
 
@@ -134,13 +134,13 @@ This prevents post-compression loops and is cheap to implement.
 
 ```
 ask, bash, diff, diff_show, diff_apply, edit, extend, find, grep, ls,
-mana, memory, read, scan, session_search, web, write
+workflow, memory, read, scan, session_search, web, write
 ```
 
 ### After (11 tools)
 
 ```
-ask, bash, edit, extend, mana, memory, read, scan,
+ask, bash, edit, extend, workflow, memory, read, scan,
 session_search, web, write
 ```
 

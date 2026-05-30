@@ -1,6 +1,6 @@
 # imp-work Implementation Plan
 
-`imp-work` is the native replacement for mana inside imp. The center is prepared work: durable memory, tasks, prototypes, context packs, runs, leases, and structured outcomes that let imp coordinate many low-memory subagents without losing conversational context.
+`imp-work` is the native replacement for workflow inside imp. The center is prepared work: durable memory, tasks, prototypes, context packs, runs, leases, and structured outcomes that let imp coordinate many low-memory subagents without losing conversational context.
 
 ## Foundation Sprint
 
@@ -31,7 +31,7 @@ Implemented product primitives:
 - runs and attempts
 - persisted leases, path locks, and coordinator summaries
 
-Defer broad product surfaces until the foundation is proven: full TUI replacement, embeddings/semantic search, massive live concurrency, container sandboxing, and committed mana import code.
+Defer broad product surfaces until the foundation is proven: full TUI replacement, embeddings/semantic search, massive live concurrency, container sandboxing, and committed workflow import code.
 
 ## Vocabulary
 
@@ -44,11 +44,11 @@ Defer broad product surfaces until the foundation is proven: full TUI replacemen
 - **Lease**: temporary worker claim on a schedulable work item.
 - **Check**: verification command or manual criterion.
 
-Avoid user-facing `mana`, `unit`, or generic `graph` terminology.
+Avoid user-facing `workflow`, `unit`, or generic `graph` terminology.
 
 ## Conversational Memory
 
-imp-work must preserve the best mana behavior: while chatting, the agent can capture durable ideas that would otherwise be forgotten. The improvement is retrieval: the user should not need to remember where a note was stored.
+imp-work must preserve the best workflow behavior: while chatting, the agent can capture durable ideas that would otherwise be forgotten. The improvement is retrieval: the user should not need to remember where a note was stored.
 
 Memory items should be classifiable as:
 
@@ -218,7 +218,7 @@ The current store is intentionally file-backed and append-friendly. It provides 
 
 ## Native `work` Tool Surface
 
-`imp-core` now exposes a native `work` tool backed by `imp_work::WorkStore`. This is the first user/agent-facing replacement surface for mana task and memory workflows.
+`imp-core` now exposes a native `work` tool backed by `imp_work::WorkStore`. This is the first user/agent-facing replacement surface for workflow task and memory workflows.
 
 Implemented actions:
 
@@ -260,15 +260,15 @@ At the time of this plan update, `imp-work` has 54 passing tests covering model,
 
 The foundation crate is in place. The next work should connect it to user-visible imp surfaces:
 
-1. Route selected agent memory/task behaviors from mana to the native `work` tool / `imp_work::WorkStore`.
+1. Route selected agent memory/task behaviors from workflow to the native `work` tool / `imp_work::WorkStore`.
 2. Add a real imp-core subagent executor implementing `TaskExecutor` / `PrototypeExecutor`.
 3. Surface `.imp/work` memory/tasks/prototypes/context packs in CLI/TUI views.
 4. Add stricter source-controlled file format validation for `tasks.md`, `memory.md`, `decisions.md`, `prototypes.md`, and `contexts/*.md`.
 5. Add provider-aware cache controls in `imp-llm` using imp-work's provider-neutral context block stability metadata.
-6. Keep mana migration as an off-repo/local script only.
+6. Keep workflow migration as an off-repo/local script only.
 
-## Mana Migration
+## Workflow Migration
 
-Mana is a reference and local migration source, not a runtime dependency. Do not commit `import/mana.rs` or a mana import module into `crates/imp-work`.
+Workflow is a reference and local migration source, not a runtime dependency. Do not commit `import/workflow.rs` or a workflow import module into `crates/imp-work`.
 
 If migration is needed, use a local/off-repo script that emits imp-work files, validate the result, and discard the script.

@@ -419,8 +419,8 @@ mod tests {
             lua_tool_loader: None,
             mode: crate::config::AgentMode::Full,
             read_max_lines: 500,
-            turn_mana_review: Arc::new(std::sync::Mutex::new(
-                crate::mana_review::TurnManaReviewAccumulator::default(),
+            turn_workflow_review: Arc::new(std::sync::Mutex::new(
+                crate::workflow_review::TurnWorkflowReviewAccumulator::default(),
             )),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),

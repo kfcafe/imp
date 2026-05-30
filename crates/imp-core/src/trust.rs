@@ -79,9 +79,9 @@ impl Provenance {
         provenance
     }
 
-    pub fn mana_record(kind: ManaRecordKind, unit_id: impl Into<String>) -> Self {
+    pub fn workflow_record(kind: WorkflowRecordKind, unit_id: impl Into<String>) -> Self {
         let unit_id = unit_id.into();
-        let mut provenance = Self::new(ProvenanceSource::ManaRecord {
+        let mut provenance = Self::new(ProvenanceSource::WorkflowRecord {
             kind,
             unit_id: Some(unit_id.clone()),
         });
@@ -160,7 +160,7 @@ pub enum TrustLabel {
     DurableMemory,
     GeneratedSummary,
     VerifierOutput,
-    ManaLedger,
+    WorkflowLedger,
     #[default]
     Unknown,
 }
@@ -182,7 +182,7 @@ impl TrustLabel {
             Self::DurableMemory => 4,
             Self::ProjectTrusted => 5,
             Self::VerifierOutput => 6,
-            Self::ManaLedger => 7,
+            Self::WorkflowLedger => 7,
             Self::UserInstruction => 8,
         }
     }
@@ -208,8 +208,8 @@ pub enum ProvenanceSource {
         key: Option<String>,
     },
     GeneratedSummary,
-    ManaRecord {
-        kind: ManaRecordKind,
+    WorkflowRecord {
+        kind: WorkflowRecordKind,
         unit_id: Option<String>,
     },
     SystemPolicy,
@@ -230,7 +230,7 @@ impl ProvenanceSource {
             Self::VerifierOutput { .. } => TrustLabel::VerifierOutput,
             Self::DurableMemory { .. } => TrustLabel::DurableMemory,
             Self::GeneratedSummary => TrustLabel::GeneratedSummary,
-            Self::ManaRecord { .. } => TrustLabel::ManaLedger,
+            Self::WorkflowRecord { .. } => TrustLabel::WorkflowLedger,
             Self::Extension { .. } => TrustLabel::ToolObserved,
         }
     }
@@ -248,7 +248,7 @@ impl ProvenanceSource {
             Self::VerifierOutput { .. } => vec![RiskLabel::VerificationArtifact],
             Self::DurableMemory { .. } => vec![RiskLabel::DurableLedger],
             Self::GeneratedSummary => vec![RiskLabel::Generated],
-            Self::ManaRecord { .. } => vec![RiskLabel::DurableLedger],
+            Self::WorkflowRecord { .. } => vec![RiskLabel::DurableLedger],
             Self::Extension { .. } => vec![RiskLabel::ToolOutput],
             Self::Unknown => vec![RiskLabel::LowTrust],
         }
@@ -309,7 +309,7 @@ impl Default for DerivedFrom {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum ManaRecordKind {
+pub enum WorkflowRecordKind {
     Fact,
     Note,
     Decision,
@@ -324,7 +324,7 @@ pub enum TrustBoundary {
     Tool,
     Verifier,
     Memory,
-    ManaLedger,
+    WorkflowLedger,
     Generated,
     Extension,
     Unknown,
@@ -342,7 +342,7 @@ impl From<&ProvenanceSource> for TrustBoundary {
             ProvenanceSource::VerifierOutput { .. } => Self::Verifier,
             ProvenanceSource::DurableMemory { .. } => Self::Memory,
             ProvenanceSource::GeneratedSummary => Self::Generated,
-            ProvenanceSource::ManaRecord { .. } => Self::ManaLedger,
+            ProvenanceSource::WorkflowRecord { .. } => Self::WorkflowLedger,
             ProvenanceSource::Extension { .. } => Self::Extension,
             ProvenanceSource::Unknown => Self::Unknown,
         }
@@ -397,8 +397,8 @@ mod tests {
             TrustLabel::DurableMemory
         );
         assert_eq!(
-            Provenance::mana_record(ManaRecordKind::Fact, "394.8").trust,
-            TrustLabel::ManaLedger
+            Provenance::workflow_record(WorkflowRecordKind::Fact, "394.8").trust,
+            TrustLabel::WorkflowLedger
         );
     }
 

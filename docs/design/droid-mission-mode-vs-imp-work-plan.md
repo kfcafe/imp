@@ -6,13 +6,13 @@ Scope: `~/imp` native `imp-work` and CLI run surfaces, compared against Droid Mi
 
 ## Key finding
 
-`imp-work` already has many of the right primitives for a Droid Mission-style system, but the existing `run` surface is still **mana compatibility**, not native imp-work orchestration.
+`imp-work` already has many of the right primitives for a Droid Mission-style system, but the existing `run` surface is still **workflow compatibility**, not native imp-work orchestration.
 
 Evidence:
 
-- `crates/imp-cli/src/lib.rs:409` defines hidden `Run(HeadlessManaArgs)` as a compatibility alias.
+- `crates/imp-cli/src/lib.rs:409` defines hidden `Run(HeadlessWorkflowArgs)` as a compatibility alias.
 - `crates/imp-cli/src/lib.rs:1200` routes `Commands::Run` through `run_headless_mode(...)`.
-- `HeadlessManaArgs` requires `unit_id` and `mana_dir`, confirming `imp run` currently targets mana units, not native work tasks/epics.
+- `HeadlessWorkflowArgs` requires `unit_id` and `workflow_dir`, confirming `imp run` currently targets workflow units, not native work tasks/epics.
 - `crates/imp-work/src/scheduler.rs` already has native scheduler concepts:
   - `WorkerProfile`
   - `RunPolicy`
@@ -24,7 +24,7 @@ Evidence:
   - worker completion aggregation
 - `crates/imp-core/src/tools/work.rs` exposes native work actions including `next`, `claim`, `outcome`, `runs`, `tree`, `verify`, `close`, and `fail`, but **not `run`**.
 
-The correct direction is not to invent `run` from scratch. It is to **promote the existing imp-work scheduler/run primitives into a real native `work run` / Work Control product surface, then migrate `imp run` from mana compatibility to native work orchestration once parity is proven.**
+The correct direction is not to invent `run` from scratch. It is to **promote the existing imp-work scheduler/run primitives into a real native `work run` / Work Control product surface, then migrate `imp run` from workflow compatibility to native work orchestration once parity is proven.**
 
 ---
 
@@ -240,13 +240,13 @@ Droid Mission Mode's biggest product advantage is the “mission control” loop
 
 ### Gap 7: `imp run` namespace conflict
 
-There is already an `imp run`, but it is hidden mana compatibility.
+There is already an `imp run`, but it is hidden workflow compatibility.
 
 This matters because adding native `imp run` directly would be a migration/UX decision, not just implementation. Safer path:
 
 1. Add `work(action="run")` tool.
 2. Add `imp work run ...` CLI.
-3. Keep hidden `imp run` alias for mana during transition.
+3. Keep hidden `imp run` alias for workflow during transition.
 4. Later repoint `imp run` to native work when parity is proven.
 
 ---
@@ -255,11 +255,11 @@ This matters because adding native `imp run` directly would be a migration/UX de
 
 ### Phase 0 — Decide naming and compatibility boundary
 
-Goal: avoid breaking existing mana workflows.
+Goal: avoid breaking existing workflow workflows.
 
 Recommendation:
 
-- Keep current hidden `imp run <mana-id>` behavior for now.
+- Keep current hidden `imp run <workflow-id>` behavior for now.
 - Add native:
   - tool: `work(action="run")`
   - CLI: `imp work run <task-or-epic-id>`
@@ -543,7 +543,7 @@ TUI:
 - evidence refs
 - next action
 
-This should be simple, inspectable, local-first — not project-management bloat.
+This should be simple, inspectable, local-first — not project-workflowgement bloat.
 
 ---
 
@@ -679,7 +679,7 @@ Files:
 
 Acceptance:
 
-- Does not disturb hidden mana `imp run`.
+- Does not disturb hidden workflow `imp run`.
 - `imp work run <id> --dry-run --jobs N` calls native work planning.
 - `imp work runs` lists native coordinator runs.
 

@@ -1,6 +1,6 @@
 # Semantic Write Execution Contract
 
-This contract specifies runtime sequencing for write-oriented semantic actions in imp. It was reconstructed from mana unit `44.1.5.5` because the originally referenced source docs were not present in this worktree.
+This contract specifies runtime sequencing for write-oriented semantic actions in imp. It was reconstructed from workflow unit `44.1.5.5` because the originally referenced source docs were not present in this worktree.
 
 ## Scope
 
@@ -69,7 +69,7 @@ Applies only to semantic writes such as rename, organize imports, and allowliste
 ## Hosted Apply Path
 
 - Semantic backends may propose edits; imp owns applying them.
-- Backends must not run arbitrary write commands, shell commands, package-manager commands, or formatter commands as the apply mechanism.
+- Backends must not run arbitrary write commands, shell commands, package-workflowger commands, or formatter commands as the apply mechanism.
 - All edits pass through the same workspace boundary checks as other hosted edits.
 - File creation/deletion is denied unless the action kind explicitly allows it.
 
@@ -129,4 +129,4 @@ Durable evidence includes final outcome, affected paths, verification result, ch
 
 - Preview, checkpoint, approval, apply, refresh, verify, and receipt are distinct states.
 - Backend success never replaces explicit verification.
-- Mana may store the final durable evidence summary; imp owns live runtime state, semantic backend lifecycle, and restore UX.
+- Workflow may store the final durable evidence summary; imp owns live runtime state, semantic backend lifecycle, and restore UX.

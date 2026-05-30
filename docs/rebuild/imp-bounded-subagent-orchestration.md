@@ -1,6 +1,6 @@
 # imp Bounded Subagent Orchestration
 
-Status: target design for mana unit 365.9.
+Status: target design for workflow unit 365.9.
 
 This document defines how imp should autonomously orchestrate bounded work while keeping durable work orchestration outside the core runtime. It updates the earlier workflow direction: imp should not own the durable work graph, but it should be capable of coordinating helper agents inside a run.
 
@@ -8,12 +8,12 @@ This document defines how imp should autonomously orchestrate bounded work while
 
 imp owns **runtime orchestration inside a run**.
 
-mana or another harness owns **durable work orchestration across runs**.
+workflow or another harness owns **durable work orchestration across runs**.
 
 A simple rule:
 
 - If child work is bounded by the current run and returns results to the parent, it belongs in imp.
-- If child work must survive the parent run, appear on a board, be scheduled independently, hold a lease, or own close/fail/review lifecycle, it belongs in mana or another harness.
+- If child work must survive the parent run, appear on a board, be scheduled independently, hold a lease, or own close/fail/review lifecycle, it belongs in workflow or another harness.
 
 This means imp can be an autonomous runtime conductor without becoming the system of record for projects.
 
@@ -42,7 +42,7 @@ Examples:
 
 ## Durable workers
 
-A durable worker is different from a bounded subagent. Durable workers are created and tracked by mana or another host.
+A durable worker is different from a bounded subagent. Durable workers are created and tracked by workflow or another host.
 
 A durable worker:
 
@@ -80,7 +80,7 @@ A runtime recipe must not own:
 - close/fail/reopen lifecycle;
 - long-running cross-session worker state.
 
-Those belong to mana or another harness.
+Those belong to workflow or another harness.
 
 ## Subagent execution packet
 
@@ -168,9 +168,9 @@ Resource limits should include:
 
 ## Host promotion
 
-A host such as mana may promote a bounded subagent into durable work when the work becomes too large or needs independent lifecycle.
+A host such as workflow may promote a bounded subagent into durable work when the work becomes too large or needs independent lifecycle.
 
-Promotion should be explicit. The parent imp run may request promotion, but mana owns the durable record after promotion.
+Promotion should be explicit. The parent imp run may request promotion, but workflow owns the durable record after promotion.
 
 Promotion inputs:
 
@@ -181,7 +181,7 @@ Promotion inputs:
 - reason for durable promotion;
 - parent run reference.
 
-After promotion, imp may continue as a worker assigned by mana, but the work graph is no longer imp-owned.
+After promotion, imp may continue as a worker assigned by workflow, but the work graph is no longer imp-owned.
 
 ## Relationship to current workflow code
 
@@ -194,18 +194,18 @@ The current `WorkflowRuntimeLayer` should evolve toward two concerns:
    - bounded child execution;
    - runtime events and outcomes.
 
-2. **Mana/work-graph compatibility** that should move out or become explicit host integration:
-   - mana root bootstrap;
-   - child mana unit creation;
-   - mana graph closeout;
+2. **Workflow/work-graph compatibility** that should move out or become explicit host integration:
+   - workflow root bootstrap;
+   - child workflow unit creation;
+   - workflow graph closeout;
    - imp-work run-state nudges;
    - durable task lifecycle.
 
 ## Next implementation slices
 
-1. Split `WorkflowRuntimeLayer` internally into recipe/runtime support and mana-work-graph compatibility modules without behavior changes.
+1. Split `WorkflowRuntimeLayer` internally into recipe/runtime support and workflow-work-graph compatibility modules without behavior changes.
 2. Introduce runtime DTOs for bounded subagent input, events, outcome, merge policy, and resource limits.
-3. Add a no-op/default recipe layer for standalone imp runs and make mana/work-graph compatibility explicitly enabled by host/builder configuration.
+3. Add a no-op/default recipe layer for standalone imp runs and make workflow/work-graph compatibility explicitly enabled by host/builder configuration.
 
 ## Done criteria for this model
 
@@ -216,4 +216,4 @@ This model is working when:
 - parent runs receive structured child outcomes;
 - recipes can define subagent roles and merge behavior;
 - durable work graph promotion is explicit and host-owned;
-- imp remains useful without mana or imp-work enabled.
+- imp remains useful without workflow or imp-work enabled.

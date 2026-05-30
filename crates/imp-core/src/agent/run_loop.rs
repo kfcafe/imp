@@ -255,7 +255,7 @@ impl Agent {
 
             turn_state.enter(TurnPhase::PreTurn);
             self.emit(AgentEvent::TurnStart { index: turn }).await;
-            self.begin_turn_mana_review(turn);
+            self.begin_turn_workflow_review(turn);
             let turn_started_at = Instant::now();
             turn_state.enter(TurnPhase::BuildContext);
             self.emit_timing(
@@ -528,11 +528,11 @@ impl Agent {
                                 };
                                 self.messages.push(Message::Assistant(err_msg.clone()));
                                 turn_state.enter(TurnPhase::RecordObservations);
-                                let mana_review = self.finish_turn_mana_review(turn);
+                                let workflow_review = self.finish_turn_workflow_review(turn);
                                 self.emit(AgentEvent::TurnEnd {
                                     index: turn,
                                     message: err_msg,
-                                    mana_review,
+                                    workflow_review,
                                 })
                                 .await;
                                 let cost = total_usage.cost(&self.model.meta.pricing);
@@ -616,11 +616,11 @@ impl Agent {
                     build_assistant_message(&ordered_content, &tool_calls, None)
                 });
                 self.messages.push(Message::Assistant(partial.clone()));
-                let mana_review = self.finish_turn_mana_review(turn);
+                let workflow_review = self.finish_turn_workflow_review(turn);
                 self.emit(AgentEvent::TurnEnd {
                     index: turn,
                     message: partial,
-                    mana_review,
+                    workflow_review,
                 })
                 .await;
                 break;
@@ -679,11 +679,11 @@ impl Agent {
 
             if tool_calls.is_empty() {
                 // No tool calls — the model is done unless a queued follow-up exists.
-                let mana_review = self.finish_turn_mana_review(turn);
+                let workflow_review = self.finish_turn_workflow_review(turn);
                 self.emit(AgentEvent::TurnEnd {
                     index: turn,
                     message: msg.clone(),
-                    mana_review: mana_review.clone(),
+                    workflow_review: workflow_review.clone(),
                 })
                 .await;
 
@@ -696,7 +696,7 @@ impl Agent {
                 .await;
                 turn_state.enter(TurnPhase::AssessTurn);
                 let assessment_started_at = Instant::now();
-                let assessment = self.assess_post_turn(&msg, &[], false, &mana_review);
+                let assessment = self.assess_post_turn(&msg, &[], false, &workflow_review);
                 self.emit_timing_with_details(
                     TimingEvent::new(
                         turn,
@@ -774,14 +774,14 @@ impl Agent {
                 self.messages.push(Message::ToolResult(result.clone()));
             }
 
-            self.record_turn_mana_mutations(&results);
+            self.record_turn_workflow_mutations(&results);
             self.record_obligations_from_tool_results(&results);
             self.record_workflow_obligations_from_tool_results(&results);
-            let mana_review = self.finish_turn_mana_review(turn);
+            let workflow_review = self.finish_turn_workflow_review(turn);
             self.emit(AgentEvent::TurnEnd {
                 index: turn,
                 message: msg.clone(),
-                mana_review: mana_review.clone(),
+                workflow_review: workflow_review.clone(),
             })
             .await;
 
@@ -794,7 +794,7 @@ impl Agent {
             .await;
             turn_state.enter(TurnPhase::AssessTurn);
             let assessment_started_at = Instant::now();
-            let assessment = self.assess_post_turn(&msg, &results, true, &mana_review);
+            let assessment = self.assess_post_turn(&msg, &results, true, &workflow_review);
             self.emit_timing_with_details(
                 TimingEvent::new(
                     turn,

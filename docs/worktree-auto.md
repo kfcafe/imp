@@ -54,7 +54,7 @@ Out of scope:
 - `worktree remove`
 
 It validates refs/paths, prevents removing the main/current worktree, and uses
-`mana_core::worktree::detect_worktree(cwd)` in list output to distinguish a
+`workflow worktree detection` in list output to distinguish a
 secondary worktree from the main checkout.
 
 `worktree-auto` should reuse the same git safety assumptions but should not depend
@@ -218,7 +218,7 @@ No automatic conflict resolution in 394.9.
 
 Keep leaves the worktree and branch in place for manual review.
 
-Evidence/mana should record:
+Evidence/workflow should record:
 
 - worktree path
 - branch
@@ -284,9 +284,9 @@ result. `apply` refuses dirty main workspaces and reports conflicts instead of
 resolving them. `discard` removes the worktree and deletes the branch through the
 runtime closeout helper; use it only when the worktree result is no longer needed.
 
-## Mana/evidence refs
+## Workflow/evidence refs
 
-Mana should store durable refs, not huge diffs:
+Workflow should store durable refs, not huge diffs:
 
 - run id
 - branch
@@ -334,7 +334,7 @@ Hard requirements:
 - 394.9.4: diff/status artifact capture
 - 394.9.5: apply/keep/discard lifecycle commands or runtime actions
 - 394.9.6: TUI status and closeout choices
-- 394.9.7: trace/evidence/mana metadata refs
+- 394.9.7: trace/evidence/workflow metadata refs
 - 394.9.8: final user docs and limitations
 
 Current implementation exposes lifecycle actions through `imp worktree` metadata
