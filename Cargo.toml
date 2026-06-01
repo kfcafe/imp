@@ -23,7 +23,6 @@ default-members = [
     "crates/imp-lua",
     "crates/imp-tui",
     "crates/imp-cli",
-    "crates/mcp-shim",
 ]
 members = [
     "crates/imp-llm",
@@ -32,7 +31,6 @@ members = [
     "crates/imp-tui",
     "crates/imp-cli",
     "crates/imp-gui",
-    "crates/mcp-shim",
 ]
 
 [workspace.package]
@@ -63,7 +61,7 @@ toml = "0.8"
 similar = "2"
 walkdir = "2"
 clap = { version = "4", features = ["derive"] }
-ratatui = "0.30"
+ratatui = "0.29"
 crossterm = "0.28"
 eframe = "0.31"
 egui = "0.31"
@@ -96,6 +94,7 @@ tree-sitter-scala = "0.26"
 tree-sitter-dart = "0.2"
 readability-rust = "0.1"
 project-detect = "0.1"
+mana-core = "0.3.2"
 
 imp-llm = { version = "0.3.0", path = "crates/imp-llm" }
 imp-core = { version = "0.3.0", path = "crates/imp-core" }

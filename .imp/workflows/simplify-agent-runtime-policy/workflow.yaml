@@ -1,0 +1,157 @@
+schema: imp.workflow/v1
+id: simplify-agent-runtime-policy
+title: Simplify agent runtime policy
+status: done
+kind: implementation
+settings:
+  worktree: current
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Remove prose/text-based stop detection and hard-coded behavioral instruction text from imp's generated system prompt so normal coding autonomy is governed by the simple model/tool loop plus mechanical policy boundaries.
+  user_value: |
+    Make imp less brittle and less likely to stop prematurely. Users can express their preferred working style in AGENTS.md instead of imp baking product opinions into the runtime prompt.
+  non_goals:
+  - Remove safety checks around destructive tools, approvals, cancellation, or runtime failures.
+  - Redesign workflow state machines in this pass.
+  - Remove project/user AGENTS.md loading.
+  - Change provider protocol behavior.
+  acceptance:
+    text_stop_detection_removed:
+      text: Normal execution no longer classifies assistant prose like "done", "blocked", or "before continuing" into runtime stop reasons.
+      status: done
+      checks:
+      - agent_runtime_changed
+      - text_stop_classifier_removed
+      - text_stop_tests_passed
+    prompt_policy_trimmed:
+      text: Generated system prompt no longer hard-codes broad working-style instructions that belong in AGENTS.md.
+      status: done
+      checks:
+      - system_prompt_changed
+      - prompt_operating_rules_removed
+      - prompt_tests_passed
+    mechanical_continuation_preserved:
+      text: The agent still continues after tool calls/tool results and still stops for mechanical runtime blockers.
+      status: done
+      checks:
+      - agent_loop_tests_passed
+    narrow_verification_passed:
+      text: Relevant imp-core tests pass.
+      status: done
+      checks:
+      - narrow_tests_passed
+  approval_required_for:
+  - Removing tool approval or write policy enforcement.
+  - Removing AGENTS.md/project instruction loading.
+  - Changing workflow controller semantics beyond prose stop detection.
+context:
+  system_prompt:
+    file: crates/imp-core/src/system_prompt.rs
+    status: todo
+  stop_classifier:
+    file: crates/imp-core/src/agent/mod.rs
+    status: todo
+  turn_assessment:
+    file: crates/imp-core/src/agent/turn_assessment.rs
+    status: todo
+steps:
+  inspect_current_policy:
+    kind: context
+    status: done
+    checks:
+    - policy_context_reviewed
+  remove_text_stop_detection:
+    kind: build
+    status: done
+    depends_on:
+    - inspect_current_policy
+    checks:
+    - agent_runtime_changed
+    - text_stop_classifier_removed
+    - text_stop_tests_passed
+  trim_generated_prompt:
+    kind: build
+    status: done
+    depends_on:
+    - inspect_current_policy
+    checks:
+    - system_prompt_changed
+    - prompt_operating_rules_removed
+    - prompt_tests_passed
+  verify_runtime_loop:
+    kind: verify
+    status: done
+    depends_on:
+    - remove_text_stop_detection
+    - trim_generated_prompt
+    checks:
+    - agent_loop_tests_passed
+    - narrow_tests_passed
+  review_closeout:
+    kind: closeout
+    status: done
+    depends_on:
+    - verify_runtime_loop
+    checks:
+    - required_checks_passed
+prototypes: {}
+checks:
+  policy_context_reviewed:
+    kind: context
+    status: passed
+  agent_runtime_changed:
+    kind: command
+    status: passed
+    command: git show --name-only --format= HEAD~1 | grep -qx crates/imp-core/src/agent/mod.rs
+  text_stop_classifier_removed:
+    kind: command
+    status: passed
+    command: '! rg -q ''classify_stop_reason_from_text|fn planner_stop_reason|fn execution_stop_reason'' crates/imp-core/src/agent/mod.rs'
+  system_prompt_changed:
+    kind: command
+    status: passed
+    command: git show --name-only --format= HEAD~1 | grep -qx crates/imp-core/src/system_prompt.rs
+  prompt_operating_rules_removed:
+    kind: command
+    status: passed
+    command: '! rg -q ''Operating rules:'' crates/imp-core/src/system_prompt.rs'
+  text_stop_tests_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core text_stop --lib
+  prompt_tests_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core system_prompt --lib
+  agent_loop_tests_passed:
+    kind: command
+    status: passed
+    command: 'cargo test -p imp-core agent:: --lib'
+  narrow_tests_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core --lib
+  required_checks_passed:
+    kind: aggregate
+    status: passed
+workers: {}
+results:
+  path: .imp/workflows/simplify-agent-runtime-policy/results.md
+  required_claims:
+  - text-based stop detection removed or disabled for normal execution
+  - generated prompt policy text trimmed
+  - tests run and results
+  - any remaining runtime policy concerns
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

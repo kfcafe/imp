@@ -13,7 +13,11 @@ use crate::hooks::HookEvent;
 use crate::reference_monitor::{PolicyReason, PolicySource, ToolPolicyContext, ToolPolicyDecision};
 use crate::trust::{Provenance, RiskLabel};
 
-use super::{extract_file_path, RepeatedToolCallCheck, RepeatedToolCallState};
+use super::{
+    extract_file_path, mana_bash_equivalent_hint,
+    mana_loop::{enrich_mana_result_details, evaluate_mana_policy},
+    RepeatedToolCallCheck, RepeatedToolCallState,
+};
 
 fn legacy_policy_error_message(
     tool_name: &str,
@@ -67,6 +71,11 @@ fn tool_result_provenance(tool_name: &str, args: &serde_json::Value) -> Provenan
             .unwrap_or_else(|| {
                 Provenance::tool_observation(tool_name).with_risk(RiskLabel::NetworkDerived)
             }),
+        "mana" => args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .map(|action| Provenance::mana_record(crate::trust::ManaRecordKind::Note, action))
+            .unwrap_or_else(|| Provenance::tool_observation(tool_name)),
         _ => Provenance::tool_observation(tool_name),
     }
 }
@@ -121,7 +130,7 @@ impl Agent {
             .map(|(index, (id, name, args))| {
                 let risk = if self.tools.get(&name).is_some_and(|tool| tool.is_readonly()) {
                     ToolRisk::ReadOnly
-                } else if matches!(name.as_str(), "bash" | "git") {
+                } else if matches!(name.as_str(), "bash" | "git" | "mana") {
                     ToolRisk::ExternalSideEffect
                 } else {
                     ToolRisk::Mutable
@@ -331,7 +340,7 @@ impl Agent {
             .workflow_contract()
             .id
             .clone()
-            .or_else(|| self.workflow_contract().workflow_unit_ref.clone());
+            .or_else(|| self.workflow_contract().mana_unit_ref.clone());
         policy_context.turn = Some(turn);
         policy_context.tool_call_id = Some(call_id.to_string());
         policy_context.args = args.clone();
@@ -402,6 +411,62 @@ impl Agent {
             return result;
         }
 
+        if tool_name == "bash" {
+            if let Some(command) = args.get("command").and_then(|v| v.as_str()) {
+                if let Some(hint) = mana_bash_equivalent_hint(command) {
+                    let result =
+                        crate::tools::ToolOutput::error(hint).into_tool_result(call_id, tool_name);
+                    self.emit(AgentEvent::ToolExecutionEnd {
+                        tool_call_id: call_id.to_string(),
+                        result: result.clone(),
+                        provenance: Some(tool_result_provenance(tool_name, &args)),
+                    })
+                    .await;
+                    self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+                        turn,
+                        RecoveryCheckpointKind::ToolExecutionEnd,
+                        Some(call_id.to_string()),
+                        Some(tool_name.to_string()),
+                        Some(args_hash.clone()),
+                        Some(false),
+                        Some("policy_blocked".to_string()),
+                    ))
+                    .await;
+                    return result;
+                }
+            }
+        }
+
+        if tool_name == "mana" {
+            let policy = evaluate_mana_policy(self.mode, &args);
+            if !policy.allowed {
+                let reason = policy
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "Mana action blocked by loop policy".to_string());
+                let mut result =
+                    crate::tools::ToolOutput::error(reason).into_tool_result(call_id, tool_name);
+                result.details = policy.details();
+                self.emit(AgentEvent::ToolExecutionEnd {
+                    tool_call_id: call_id.to_string(),
+                    result: result.clone(),
+                    provenance: Some(tool_result_provenance(tool_name, &args)),
+                })
+                .await;
+                self.emit_recovery_checkpoint(Self::recovery_checkpoint(
+                    turn,
+                    RecoveryCheckpointKind::ToolExecutionEnd,
+                    Some(call_id.to_string()),
+                    Some(tool_name.to_string()),
+                    Some(args_hash.clone()),
+                    Some(false),
+                    Some("mana_policy_blocked".to_string()),
+                ))
+                .await;
+                return result;
+            }
+        }
+
         // Validate args against the tool's JSON schema before execution so the
         // model can self-correct on bad types or missing required fields.
         if let Some(tool) = self.tools.get(tool_name) {
@@ -445,8 +510,8 @@ impl Agent {
                     lua_tool_loader: self.lua_tool_loader.clone(),
                     mode: self.mode,
                     read_max_lines: self.read_max_lines,
+                    turn_mana_review: self.turn_mana_review_accumulator(),
                     config: self.config.clone(),
-                    turn_workflow_review: self.turn_workflow_review_accumulator(),
                     run_policy: self.run_policy.clone(),
                     supporting_provenance: policy_context.supporting_provenance.clone(),
                 };
@@ -470,7 +535,14 @@ impl Agent {
                 });
 
                 let exec_result = match tool.execute(call_id, args.clone(), ctx).await {
-                    Ok(output) => output.into_tool_result(call_id, tool_name),
+                    Ok(output) => {
+                        let mut result = output.into_tool_result(call_id, tool_name);
+                        if tool_name == "mana" {
+                            let policy = evaluate_mana_policy(self.mode, &args);
+                            result.details = enrich_mana_result_details(result.details, &policy);
+                        }
+                        result
+                    }
                     Err(e) => crate::tools::ToolOutput::error(e.to_string())
                         .into_tool_result(call_id, tool_name),
                 };

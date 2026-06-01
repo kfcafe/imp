@@ -1,0 +1,71 @@
+schema: imp.workflow/v1
+id: cli-tui-regression-smoke
+title: Run final CLI/TUI regression smoke
+status: done_with_concerns
+kind: release
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: Run a narrow automated regression pass over the public CLI/TUI/core release surface.
+  user_value: Catch regressions in the surfaces HN users will immediately try.
+  non_goals:
+  - Manual TUI testing.
+  - Live provider API calls.
+  acceptance:
+    regression_smoke_passed:
+      text: Format, build, targeted tests, CLI smoke, secrets scan, dependency scan, and diff checks are recorded.
+      status: done
+      checks:
+      - regression_plan_written
+      - regression_commands_passed
+steps:
+  write_regression_plan:
+    kind: plan
+    status: done
+    checks:
+    - regression_plan_written
+  run_regression_commands:
+    kind: verify
+    status: done_with_concerns
+    depends_on:
+    - write_regression_plan
+    checks:
+    - regression_commands_passed
+checks:
+  regression_plan_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/cli-tui-regression-smoke/artifacts/regression-plan.md
+  regression_commands_passed:
+    kind: command
+    status: passed
+    command: cargo fmt --check && cargo check --workspace && cargo test -p imp-core --lib && cargo test -p imp-cli --lib && cargo test -p imp-tui --lib && git diff --check
+workers:
+  owner:
+    role: owner
+    writes_code: true
+    responsibilities:
+    - execute this workflow
+    - record evidence and blockers
+    - keep changes focused and verified
+results:
+  path: .imp/workflows/cli-tui-regression-smoke/results.md
+  required_claims:
+  - commands run
+  - outcomes
+  - remaining warnings or blockers
+closeout:
+  done:
+    requires:
+    - regression_plan_written
+    - regression_commands_passed
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

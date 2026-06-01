@@ -1,45 +1,24 @@
-mod event_kinds;
-mod git_status;
-mod helpers;
-mod model_auth;
-mod state_types;
-mod verification_status;
-
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::hash::Hasher;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use event_kinds::{agent_event_kind, runtime_signal_kind};
-use git_status::compact_git_label;
-use helpers::{
-    bump_epoch, command_option_value, lua_result_requests_restart, parse_secret_field_names,
-    single_line_preview, stable_hash, strip_lua_restart_directive,
-};
 use imp_core::eval_candidate::{
     redact_eval_candidate, EvalActualBehavior, EvalCandidate, EvalExpectedBehavior,
     EvalFailureMode, EvalPrivacy, EvalRedactionStatus, EvalVerifier,
 };
 use imp_core::format_error_for_display;
 use imp_core::ui::WidgetContent;
-use imp_core::WorkflowUnitRef;
-use model_auth::{
-    filtered_model_options, include_current_model_option, oauth_provider, provider_logged_in,
-    resolve_provider_api_key, should_use_chatgpt_provider,
-};
-use state_types::{
-    ChatRenderCache, ChatRenderCacheKey, DragAutoScroll, RepoStatsState, ScrollDirection,
-    SidebarDetailCache, SidebarDetailCacheKey, SidebarStreamCache, SidebarStreamCacheKey,
-    StartupSkillHit, StartupSurfaceData, StartupSurfaceMetadata, StartupWorkflowHit,
-    StartupWorkflowItem, ThemeKind,
-};
-use verification_status::{verification_gate_label, verification_status_text};
+use imp_core::ManaUnitRef;
+#[cfg(feature = "mana-ui")]
+use imp_core::{mana_run_summary, stop_mana_run, ManaRunSummary};
 #[cfg(not(feature = "mana-ui"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct WorkflowRunSummary {
+struct ManaRunSummary {
     run_id: String,
     scope: String,
     status: String,
@@ -49,23 +28,27 @@ struct WorkflowRunSummary {
     total_awaiting_verify: u32,
     latest: Option<String>,
     logs: Vec<String>,
-    agents: Vec<WorkflowRunAgentSummary>,
+    agents: Vec<ManaRunAgentSummary>,
 }
 #[cfg(not(feature = "mana-ui"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct WorkflowRunAgentSummary {
+struct ManaRunAgentSummary {
     unit_id: String,
     status: String,
     action: String,
     title: String,
 }
+#[cfg(not(feature = "mana-ui"))]
 #[allow(dead_code)]
-fn workflow_run_summary(_id: &str) -> Result<Option<WorkflowRunSummary>, String> {
+fn mana_run_summary(_id: &str) -> Result<Option<ManaRunSummary>, String> {
     Ok(None)
 }
-fn stop_workflow_run(_id: &str) -> Result<Option<WorkflowRunSummary>, String> {
+#[cfg(not(feature = "mana-ui"))]
+fn stop_mana_run(_id: &str) -> Result<Option<ManaRunSummary>, String> {
     Ok(None)
 }
+#[cfg(feature = "mana-ui")]
+use mana_core::api;
 
 use imp_lua::LuaRuntime;
 
@@ -82,7 +65,10 @@ use imp_core::runtime::{RuntimeStateAccumulator, RuntimeStateSnapshot};
 use imp_core::session::{SessionEntry, SessionInfo, SessionManager};
 use imp_core::tools::ToolRegistry;
 use imp_core::trust::{Provenance, RiskLabel, TrustLabel};
-use imp_core::workflow::{AutonomyMode, VerificationCloseoutEffect};
+use imp_core::workflow::{
+    AutonomyMode, VerificationCloseoutEffect, VerificationGate, VerificationGateStatus,
+};
+use imp_core::workflow_profiles::{WorkflowProfile, WorkflowSuggest};
 use imp_core::Error as ImpCoreError;
 use imp_llm::auth::AuthStore;
 use imp_llm::model::{ModelMeta, ModelRegistry, ProviderRegistry};
@@ -116,8 +102,8 @@ use crate::views::chat::{
     DisplayMessage, MessageRole, RenderedChatView,
 };
 use crate::views::command_palette::{
-    builtin_commands, merge_extension_commands, merge_skill_commands, CommandPaletteState,
-    CommandPaletteView,
+    builtin_commands, merge_extension_commands, merge_skill_commands, merge_workflow_commands,
+    CommandPaletteState, CommandPaletteView,
 };
 use crate::views::editor::{EditorState, EditorView, WorkflowMode};
 use crate::views::login_picker::{login_providers, LoginPickerState, LoginPickerView};
@@ -132,13 +118,32 @@ use crate::views::sidebar::{
     sidebar_sub_areas, thinking_detail_render_data, Sidebar, SidebarDetailRenderData, SidebarView,
 };
 use crate::views::startup::{
-    action_block_height, summarize_lines, truncate_preview, visible_section_count, StartupAction,
-    StartupPanelData, StartupPanelView, StartupSection,
+    action_block_height, visible_section_count, StartupAction, StartupPanelData, StartupPanelView,
+    StartupSection,
 };
 use crate::views::status::StatusInfo;
 use crate::views::tools::{tool_display_icon, tool_display_name, DisplayToolCall};
 use crate::views::tree::{flatten_tree, TreeView, TreeViewState};
 use crate::views::welcome::{needs_welcome, WelcomeState, WelcomeStep, WelcomeView};
+
+const LUA_RESTART_DIRECTIVE: &str = "__IMP_RESTART_AFTER_COMMAND__";
+
+fn lua_result_requests_restart(result: Option<&str>) -> bool {
+    result.is_some_and(|text| {
+        text.lines()
+            .any(|line| line.trim() == LUA_RESTART_DIRECTIVE)
+    })
+}
+
+fn strip_lua_restart_directive(result: &str) -> String {
+    result
+        .lines()
+        .filter(|line| line.trim() != LUA_RESTART_DIRECTIVE)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
@@ -182,6 +187,10 @@ pub enum AskReply {
     Select(tokio::sync::oneshot::Sender<Option<usize>>),
     MultiSelect(tokio::sync::oneshot::Sender<Option<Vec<usize>>>),
     Input(tokio::sync::oneshot::Sender<Option<String>>),
+    WorkflowSuggestion {
+        profile: WorkflowProfile,
+        prompt: String,
+    },
 }
 
 #[derive(Debug)]
@@ -284,7 +293,7 @@ struct AgentStartRequest {
     role_name: Option<String>,
     thinking_level: ThinkingLevel,
     config: Config,
-    active_workflow_scope: Option<WorkflowUnitRef>,
+    active_mana_scope: Option<ManaUnitRef>,
     autonomy_mode: AutonomyMode,
     runtime_signal_tx: tokio::sync::mpsc::Sender<RuntimeSignal>,
     ui_tx: tokio::sync::mpsc::Sender<crate::tui_interface::UiRequest>,
@@ -355,8 +364,118 @@ enum RuntimeSignal {
     UiRequest(crate::tui_interface::UiRequest),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollDirection {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DragAutoScroll {
+    pane: SelectablePane,
+    direction: ScrollDirection,
+    speed: usize,
+    column: u16,
+    row: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ThemeKind {
+    is_light: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChatRenderCacheKey {
+    width: u16,
+    messages_epoch: u64,
+    chat_tool_focus: Option<usize>,
+    word_wrap: bool,
+    chat_tool_display: imp_core::config::ChatToolDisplay,
+    thinking_lines: usize,
+    show_timestamps: bool,
+    animation_level: imp_core::config::AnimationLevel,
+    activity_state: AnimationState,
+    theme: ThemeKind,
+    tick: u64,
+}
+
+#[derive(Debug)]
+struct ChatRenderCache {
+    key: ChatRenderCacheKey,
+    render: crate::views::chat::ChatRenderData,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SidebarStreamCacheKey {
+    width: u16,
+    messages_epoch: u64,
+    selected: Option<usize>,
+    word_wrap: bool,
+    tool_output: imp_core::config::ToolOutputDisplay,
+    tool_output_lines: usize,
+    animation_level: imp_core::config::AnimationLevel,
+    theme: ThemeKind,
+}
+
+#[derive(Debug)]
+struct SidebarStreamCache {
+    key: SidebarStreamCacheKey,
+    lines: Vec<Line<'static>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SidebarDetailCacheKey {
+    width: u16,
+    messages_epoch: u64,
+    selected_tool_id_hash: u64,
+    thinking_hash: u64,
+    run_hash: u64,
+    word_wrap: bool,
+    tool_output_lines: usize,
+    animation_level: imp_core::config::AnimationLevel,
+    theme: ThemeKind,
+}
+
+#[derive(Debug)]
+struct SidebarDetailCache {
+    key: SidebarDetailCacheKey,
+    render: SidebarDetailRenderData,
+}
+
+#[derive(Debug, Clone, Default)]
+struct StartupSurfaceMetadata {
+    skills: Vec<imp_core::resources::Skill>,
+    workflows: Vec<WorkflowProfile>,
+    recent_sessions: Vec<SessionInfo>,
+    repo_stats: Option<RepoStatsState>,
+    rule_files: Vec<PathBuf>,
+    provider_id: String,
+    web_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RepoStatsState {
+    Scanning,
+    Ready(crate::repo_stats::RepoStats),
+    HomeDirectory,
+    NoRepo,
+    Empty,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct StartupSurfaceData {
+    panel: StartupPanelData,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StartupSkillHit {
+    index: usize,
+    rect: Rect,
+}
+
 #[cfg(feature = "mana-ui")]
-fn workflow_run_summary_cache_key(run: &WorkflowRunSummary) -> String {
+fn mana_run_summary_cache_key(run: &ManaRunSummary) -> String {
     format!(
         "{}|{}|{}|{}|{}|{}|{}|{}|{}",
         run.run_id,
@@ -372,34 +491,28 @@ fn workflow_run_summary_cache_key(run: &WorkflowRunSummary) -> String {
 }
 
 #[cfg(not(feature = "mana-ui"))]
-fn workflow_run_detail_render_data(
-    run: &WorkflowRunSummary,
-    theme: &Theme,
-) -> SidebarDetailRenderData {
+fn mana_run_detail_render_data(run: &ManaRunSummary, theme: &Theme) -> SidebarDetailRenderData {
     let lines = vec![Line::from(vec![
         Span::styled("╭─", theme.muted_style()),
         Span::styled(
-            " workflow run ",
+            " mana run ",
             theme.accent_style().add_modifier(Modifier::BOLD),
         ),
         Span::styled("─╮", theme.muted_style()),
     ])];
     let plain_lines = vec![
         format!("run: {}", run.run_id),
-        "Workflow run details are unavailable in this standalone build.".to_string(),
+        "Mana run details are unavailable in this standalone build.".to_string(),
     ];
     SidebarDetailRenderData { lines, plain_lines }
 }
 
 #[cfg(feature = "mana-ui")]
-fn workflow_run_detail_render_data(
-    run: &WorkflowRunSummary,
-    theme: &Theme,
-) -> SidebarDetailRenderData {
+fn mana_run_detail_render_data(run: &ManaRunSummary, theme: &Theme) -> SidebarDetailRenderData {
     let mut lines = vec![Line::from(vec![
         Span::styled("╭─", theme.muted_style()),
         Span::styled(
-            " workflow run ",
+            " mana run ",
             theme.accent_style().add_modifier(Modifier::BOLD),
         ),
         Span::styled("─╮", theme.muted_style()),
@@ -464,6 +577,25 @@ fn workflow_run_detail_render_data(
         lines.push(Line::from(Span::styled(line.clone(), style)));
     }
     SidebarDetailRenderData { lines, plain_lines }
+}
+
+fn workflow_sort_key(workflow: &WorkflowProfile) -> std::time::SystemTime {
+    let root = PathBuf::from(".imp").join("workflows").join(&workflow.name);
+    std::fs::metadata(root.join("events.jsonl"))
+        .and_then(|metadata| metadata.modified())
+        .or_else(|_| {
+            std::fs::metadata(root.join("workflow.yaml")).and_then(|metadata| metadata.modified())
+        })
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+}
+
+fn workflow_age(workflow: &WorkflowProfile) -> String {
+    let modified = workflow_sort_key(workflow);
+    let updated_at = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    format_age(updated_at)
 }
 
 enum RepoStatsScanRoot {
@@ -607,122 +739,178 @@ fn display_rule_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-fn discover_startup_workflows(cwd: &Path) -> Vec<StartupWorkflowItem> {
-    let workflows_root = cwd.join(".imp").join("workflows");
-    let Ok(entries) = std::fs::read_dir(workflows_root) else {
+fn load_recent_sessions(cwd: &Path, limit: usize) -> Vec<SessionInfo> {
+    let session_dir = imp_core::storage::global_sessions_dir();
+    let Ok(entries) = std::fs::read_dir(&session_dir) else {
         return Vec::new();
     };
 
-    let mut workflows = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path().join("workflow.yaml");
-            path.exists().then_some(path)
-        })
-        .filter_map(|path| load_startup_workflow_item(&path))
-        .collect::<Vec<_>>();
-    workflows.sort_by(|a, b| {
-        workflow_status_rank(&a.status)
-            .cmp(&workflow_status_rank(&b.status))
-            .then(a.id.cmp(&b.id))
+    let cwd_string = cwd.display().to_string();
+    let mut sessions = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "jsonl")
+        {
+            continue;
+        }
+
+        let updated_at = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let reader = std::io::BufReader::new(file);
+        let mut created_at = 0;
+        let mut session_cwd = String::new();
+        let mut name = None;
+        let mut summary = None;
+        let mut first_message = None;
+        let mut message_count = 0;
+        let mut compaction_count = 0;
+
+        for line in reader.lines().map_while(Result::ok) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(entry) = serde_json::from_str::<SessionEntry>(&line) else {
+                continue;
+            };
+            match entry {
+                SessionEntry::Header {
+                    created_at: at,
+                    cwd,
+                    ..
+                } => {
+                    created_at = at;
+                    session_cwd = cwd;
+                    if session_cwd != cwd_string {
+                        break;
+                    }
+                }
+                SessionEntry::Message { message, .. } => {
+                    message_count += 1;
+                    if first_message.is_none() {
+                        first_message = message_text(&message);
+                    }
+                }
+                SessionEntry::Compaction { .. } => {
+                    compaction_count += 1;
+                }
+                SessionEntry::SessionMeta {
+                    name: meta_name,
+                    summary: meta_summary,
+                    ..
+                } => {
+                    name = meta_name;
+                    summary = meta_summary;
+                }
+                _ => {}
+            }
+        }
+
+        if session_cwd != cwd_string {
+            continue;
+        }
+
+        sessions.push(SessionInfo {
+            id: path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            path,
+            cwd: session_cwd,
+            created_at,
+            updated_at,
+            message_count: if message_count == 0 {
+                compaction_count
+            } else {
+                message_count
+            },
+            first_message,
+            last_message: None,
+            name,
+            summary,
+        });
+    }
+
+    sessions.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| b.created_at.cmp(&a.created_at))
     });
-    workflows
+    sessions.truncate(limit);
+    sessions
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct StartupWorkflowYaml {
-    id: String,
-    title: String,
-    status: String,
-    kind: String,
-}
-
-fn load_startup_workflow_item(path: &Path) -> Option<StartupWorkflowItem> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let workflow = serde_yaml::from_str::<StartupWorkflowYaml>(&content).ok()?;
-    Some(StartupWorkflowItem {
-        id: workflow.id,
-        title: workflow.title,
-        status: workflow.status,
-        kind: workflow.kind,
-        path: path.to_path_buf(),
+fn message_text(message: &Message) -> Option<String> {
+    let blocks = match message {
+        Message::User(user) => &user.content,
+        Message::Assistant(assistant) => &assistant.content,
+        Message::ToolResult(tool_result) => &tool_result.content,
+    };
+    blocks.iter().find_map(|block| match block {
+        ContentBlock::Text { text } => Some(text.clone()),
+        _ => None,
     })
 }
 
-fn workflow_status_rank(status: &str) -> u8 {
-    match status {
-        "active" => 0,
-        "waiting" | "needs_context" => 1,
-        "blocked" | "failed" => 2,
-        "planned" => 3,
-        "done_with_concerns" => 4,
-        "done" | "cancelled" => 5,
-        _ => 6,
+fn recent_session_lines(sessions: &[SessionInfo]) -> Vec<String> {
+    if sessions.is_empty() {
+        return vec!["• none yet".to_string()];
     }
-}
-
-fn workflow_startup_lines(workflows: &[StartupWorkflowItem]) -> Vec<String> {
-    if workflows.is_empty() {
-        return vec![
-            "• none found".to_string(),
-            "• create: ask imp to make a workflow plan".to_string(),
-        ];
-    }
-
-    summarize_lines(
-        workflows
-            .iter()
-            .map(|workflow| {
-                format!(
-                    "• {}: {} · {} · {}",
-                    workflow.id, workflow.status, workflow.kind, workflow.title
-                )
-            })
-            .collect(),
-        6,
-    )
-}
-
-fn startup_workflow_detail_render_data(
-    workflow: &StartupWorkflowItem,
-    theme: &Theme,
-) -> SidebarDetailRenderData {
-    let mut plain_lines = vec![
-        format!("workflow: {}", workflow.id),
-        format!("title: {}", workflow.title),
-        format!("status: {}", workflow.status),
-        format!("kind: {}", workflow.kind),
-        format!("path: {}", workflow.path.display()),
-        String::new(),
-    ];
-
-    match std::fs::read_to_string(&workflow.path) {
-        Ok(content) => plain_lines.extend(
-            truncate_preview(&content, 24, 4000)
-                .lines()
-                .map(str::to_string),
-        ),
-        Err(err) => plain_lines.push(format!("Failed to read workflow: {err}")),
-    }
-
-    let lines = plain_lines
+    sessions
         .iter()
-        .enumerate()
-        .map(|(index, line)| {
-            if index == 0 {
-                Line::from(Span::styled(
-                    line.clone(),
-                    theme.accent_style().add_modifier(Modifier::BOLD),
-                ))
-            } else if index <= 4 && !line.is_empty() {
-                Line::from(Span::styled(line.clone(), theme.muted_style()))
-            } else {
-                Line::from(Span::raw(line.clone()))
-            }
+        .take(5)
+        .map(|session| {
+            let title = session
+                .name
+                .as_deref()
+                .or(session.summary.as_deref())
+                .or(session.first_message.as_deref())
+                .unwrap_or("unnamed session");
+            format!(
+                "• {} · {}",
+                truncate_text(title, 30),
+                format_age(session.updated_at)
+            )
         })
-        .collect();
+        .collect()
+}
 
-    SidebarDetailRenderData { lines, plain_lines }
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+fn format_age(updated_at: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(updated_at);
+    let seconds = now.saturating_sub(updated_at);
+    if seconds < 60 {
+        "now".to_string()
+    } else if seconds < 3_600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h ago", seconds / 3_600)
+    } else {
+        format!("{}d ago", seconds / 86_400)
+    }
 }
 
 fn startup_skill_detail_render_data(
@@ -764,29 +952,6 @@ fn startup_skill_detail_render_data(
 }
 
 fn startup_skill_hits(area: Rect, panel: &StartupPanelData) -> Vec<StartupSkillHit> {
-    startup_section_hits(
-        area,
-        panel,
-        |section| section.title.starts_with("skills"),
-        |index, rect| StartupSkillHit { index, rect },
-    )
-}
-
-fn startup_workflow_hits(area: Rect, panel: &StartupPanelData) -> Vec<StartupWorkflowHit> {
-    startup_section_hits(
-        area,
-        panel,
-        |section| section.title.starts_with("workflows"),
-        |index, rect| StartupWorkflowHit { index, rect },
-    )
-}
-
-fn startup_section_hits<T>(
-    area: Rect,
-    panel: &StartupPanelData,
-    matches_section: impl Fn(&StartupSection) -> bool + Copy,
-    make_hit: impl Fn(usize, Rect) -> T + Copy,
-) -> Vec<T> {
     if area.width < 24 || area.height < 8 {
         return Vec::new();
     }
@@ -813,15 +978,10 @@ fn startup_section_hits<T>(
         }
     };
 
-    startup_hits_in_sections(sections_area, &panel.sections, matches_section, make_hit)
+    startup_skill_hits_in_sections(sections_area, &panel.sections)
 }
 
-fn startup_hits_in_sections<T>(
-    area: Rect,
-    sections: &[StartupSection],
-    matches_section: impl Fn(&StartupSection) -> bool + Copy,
-    make_hit: impl Fn(usize, Rect) -> T + Copy,
-) -> Vec<T> {
+fn startup_skill_hits_in_sections(area: Rect, sections: &[StartupSection]) -> Vec<StartupSkillHit> {
     if sections.is_empty() || area.height == 0 || area.width == 0 {
         return Vec::new();
     }
@@ -843,14 +1003,14 @@ fn startup_hits_in_sections<T>(
                     width,
                     ..area
                 };
-                startup_hits_in_section(rect, section, matches_section, make_hit)
+                startup_skill_hits_in_section(rect, section)
             })
             .collect();
     }
 
     match visible_sections.len() {
         0 => Vec::new(),
-        1 => startup_hits_in_section(area, &visible_sections[0], matches_section, make_hit),
+        1 => startup_skill_hits_in_section(area, &visible_sections[0]),
         2 => {
             let rects = if area.width >= 90 {
                 split_horizontal(area, &[50, 50])
@@ -860,9 +1020,7 @@ fn startup_hits_in_sections<T>(
             visible_sections
                 .iter()
                 .zip(rects)
-                .flat_map(|(section, rect)| {
-                    startup_hits_in_section(rect, section, matches_section, make_hit)
-                })
+                .flat_map(|(section, rect)| startup_skill_hits_in_section(rect, section))
                 .collect()
         }
         3 => {
@@ -878,9 +1036,7 @@ fn startup_hits_in_sections<T>(
             visible_sections
                 .iter()
                 .zip(rects)
-                .flat_map(|(section, rect)| {
-                    startup_hits_in_section(rect, section, matches_section, make_hit)
-                })
+                .flat_map(|(section, rect)| startup_skill_hits_in_section(rect, section))
                 .collect()
         }
         _ => {
@@ -894,20 +1050,15 @@ fn startup_hits_in_sections<T>(
                         height: row_height,
                         ..area
                     };
-                    startup_hits_in_section(rect, section, matches_section, make_hit)
+                    startup_skill_hits_in_section(rect, section)
                 })
                 .collect()
         }
     }
 }
 
-fn startup_hits_in_section<T>(
-    area: Rect,
-    section: &StartupSection,
-    matches_section: impl Fn(&StartupSection) -> bool,
-    make_hit: impl Fn(usize, Rect) -> T,
-) -> Vec<T> {
-    if !matches_section(section) || area.height < 3 || area.width < 12 {
+fn startup_skill_hits_in_section(area: Rect, section: &StartupSection) -> Vec<StartupSkillHit> {
+    if !section.title.starts_with("skills") || area.height < 3 || area.width < 12 {
         return Vec::new();
     }
 
@@ -923,20 +1074,19 @@ fn startup_hits_in_section<T>(
         .iter()
         .enumerate()
         .filter(|(_, line)| {
-            line.strip_prefix("• ").is_some_and(|name| {
-                name != "none discovered" && name != "none found" && !name.starts_with("create:")
-            })
+            line.strip_prefix("• ")
+                .is_some_and(|name| name != "none discovered")
         })
         .filter_map(|(index, _)| {
             let y = inner.y + index as u16;
-            (y < inner.y + inner.height).then_some(make_hit(
+            (y < inner.y + inner.height).then_some(StartupSkillHit {
                 index,
-                Rect {
+                rect: Rect {
                     y,
                     height: 1,
                     ..inner
                 },
-            ))
+            })
         })
         .collect()
 }
@@ -1089,8 +1239,8 @@ pub struct App {
     pub ask_state: Option<crate::views::ask_bar::AskState>,
     pub ask_reply: Option<AskReply>,
     pub workflow_mode: WorkflowMode,
-    active_workflow_scope: Option<WorkflowUnitRef>,
-    active_workflow_run: Option<WorkflowRunSummary>,
+    active_mana_scope: Option<ManaUnitRef>,
+    active_mana_run: Option<ManaRunSummary>,
     autonomy_mode: AutonomyMode,
     loop_state: Option<LoopState>,
     secrets_flow: Option<SecretsFlowState>,
@@ -1132,7 +1282,6 @@ pub struct App {
 
     /// Startup skill selected for display in the inspector sidebar.
     selected_startup_skill: Option<imp_core::resources::Skill>,
-    selected_startup_workflow: Option<StartupWorkflowItem>,
 
     // Sidebar
     pub sidebar: Sidebar,
@@ -1170,6 +1319,80 @@ pub struct App {
     pub theme: Theme,
     pub highlighter: Highlighter,
     pub model_registry: ModelRegistry,
+}
+
+fn runtime_signal_kind(signal: &RuntimeSignal) -> &'static str {
+    match signal {
+        RuntimeSignal::AgentEvent(_) => "agent_event",
+        RuntimeSignal::AgentTaskCompleted => "agent_task_completed",
+        RuntimeSignal::AgentTaskFailed(_) => "agent_task_failed",
+        RuntimeSignal::CompactionTaskCompleted(_) => "compaction_completed",
+        RuntimeSignal::CompactionTaskFailed(_) => "compaction_failed",
+        RuntimeSignal::LuaCommandCompleted { .. } => "lua_command_completed",
+        RuntimeSignal::LuaCommandRestartRequested { .. } => "lua_command_restart_requested",
+        RuntimeSignal::LuaCommandFailed { .. } => "lua_command_failed",
+        RuntimeSignal::LoginTaskSucceeded(_) => "login_task_succeeded",
+        RuntimeSignal::LoginTaskFailed(_) => "login_task_failed",
+        RuntimeSignal::SessionListLoaded(_) => "session_list_loaded",
+        RuntimeSignal::SessionListFailed(_) => "session_list_failed",
+        RuntimeSignal::SessionOpened(_) => "session_opened",
+        RuntimeSignal::SessionOpenFailed(_) => "session_open_failed",
+        RuntimeSignal::UserMessagePersisted { .. } => "user_message_persisted",
+        RuntimeSignal::UserMessagePersistFailed(_) => "user_message_persist_failed",
+        RuntimeSignal::AgentStartCompleted(_) => "agent_start_completed",
+        RuntimeSignal::AgentStartFailed(_) => "agent_start_failed",
+        RuntimeSignal::AgentStartStatus { .. } => "agent_start_status",
+        #[cfg(feature = "mana-ui")]
+        RuntimeSignal::ManaNavigatorLoaded(_) => "mana_navigator_loaded",
+        #[cfg(feature = "mana-ui")]
+        RuntimeSignal::ManaNavigatorLoadFailed { .. } => "mana_navigator_load_failed",
+        RuntimeSignal::RepoStatsLoaded(_) => "repo_stats_loaded",
+        RuntimeSignal::RepoStatsSkipped(_) => "repo_stats_skipped",
+        RuntimeSignal::UiRequest(_) => "ui_request",
+    }
+}
+
+fn agent_event_kind(event: &AgentEvent) -> &'static str {
+    match event {
+        AgentEvent::AgentStart { .. } => "agent_start",
+        AgentEvent::TurnStart { .. } => "turn_start",
+        AgentEvent::TurnAssessment { .. } => "turn_assessment",
+        AgentEvent::MessageStart { .. } => "message_start",
+        AgentEvent::MessageEnd { .. } => "message_end",
+        AgentEvent::MessageDelta { .. } => "message_delta",
+        AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
+        AgentEvent::ToolOutputDelta { .. } => "tool_output_delta",
+        AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
+        AgentEvent::AgentEnd { .. } => "agent_end",
+        AgentEvent::Warning { .. } => "warning",
+        AgentEvent::RecoveryCheckpoint { .. } => "recovery_checkpoint",
+        AgentEvent::WorktreeCreated { .. } => "worktree_created",
+        AgentEvent::WorktreeDiffCaptured { .. } => "worktree_diff_captured",
+        AgentEvent::WorktreeCloseout { .. } => "worktree_closeout",
+        AgentEvent::EvidenceWritten { .. } => "evidence_written",
+        AgentEvent::WorkflowControllerSnapshot { .. } => "workflow_controller_snapshot",
+        AgentEvent::VerificationStarted { .. } => "verification_started",
+        AgentEvent::VerificationCompleted { .. } => "verification_completed",
+        AgentEvent::PolicyChecked { .. } => "policy_checked",
+        AgentEvent::Timing { .. } => "timing",
+        AgentEvent::TurnEnd { .. } => "turn_end",
+        AgentEvent::Error { .. } => "error",
+    }
+}
+
+fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|err| format!("failed to run git {}: {err}", args.join(" ")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(format!("git {} failed: {detail}", args.join(" ")));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn trust_policy_warning(record: &imp_core::reference_monitor::PolicyTraceRecord) -> Option<String> {
@@ -1232,6 +1455,71 @@ fn provenance_warning(provenance: &Provenance) -> Option<String> {
     } else {
         None
     }
+}
+
+fn verification_status_text(
+    gate: &VerificationGate,
+    status: Option<&str>,
+    closeout_effect: Option<VerificationCloseoutEffect>,
+) -> String {
+    let label = verification_gate_label(gate);
+    let status = status.unwrap_or(match gate.status {
+        VerificationGateStatus::Pending => "pending",
+        VerificationGateStatus::Running => "running",
+        VerificationGateStatus::Passed => "passed",
+        VerificationGateStatus::Failed => "failed",
+        VerificationGateStatus::Skipped => "skipped",
+        VerificationGateStatus::Blocked => "blocked",
+    });
+    let mut text = format!("{label} {status}");
+    if gate.is_required() {
+        text.push_str(" required");
+    }
+    if matches!(
+        closeout_effect,
+        Some(VerificationCloseoutEffect::BlocksDone)
+            | Some(VerificationCloseoutEffect::BlocksDoneWithConcerns)
+    ) {
+        text.push_str(" blocks closeout");
+    }
+    text
+}
+
+fn verification_gate_label(gate: &VerificationGate) -> String {
+    if !gate.name.is_empty() {
+        gate.name.clone()
+    } else if !gate.id.is_empty() {
+        gate.id.clone()
+    } else if let Some(command) = &gate.command {
+        command.command.clone()
+    } else {
+        "verification".into()
+    }
+}
+
+fn compact_git_label(cwd: &Path) -> Option<String> {
+    let branch = run_git(cwd, &["branch", "--show-current"]).ok()?;
+    let branch = if branch.trim().is_empty() {
+        run_git(cwd, &["rev-parse", "--short", "HEAD"]).ok()?
+    } else {
+        branch
+    };
+    let status = run_git(cwd, &["status", "--short"]).unwrap_or_default();
+    let dirty = status.lines().count();
+    let mut label = if dirty == 0 {
+        format!("git {branch}")
+    } else {
+        format!("git {branch} ±{dirty}")
+    };
+    if let Ok(counts) = run_git(cwd, &["rev-list", "--left-right", "--count", "HEAD...@{u}"]) {
+        let mut parts = counts.split_whitespace();
+        if let (Some(ahead), Some(behind)) = (parts.next(), parts.next()) {
+            if ahead != "0" || behind != "0" {
+                label.push_str(&format!(" ↑{ahead}↓{behind}"));
+            }
+        }
+    }
+    Some(label)
 }
 
 fn trace_tui_to(trace: Option<&TuiTrace>, message: impl AsRef<str>) {
@@ -1451,18 +1739,15 @@ fn agent_start_join_result_to_signal(
 
 fn workflow_context_prompt_for_request(request: &AgentStartRequest) -> Option<String> {
     let mut context = String::new();
-    if let Some(scope) = request.active_workflow_scope.as_ref() {
+    if let Some(scope) = request.active_mana_scope.as_ref() {
         if !context.is_empty() {
             context.push(' ');
         }
         let title = scope.title.trim();
         if title.is_empty() {
-            context.push_str(&format!(" Active workflow scope: {}.", scope.id));
+            context.push_str(&format!(" Active mana scope: {}.", scope.id));
         } else {
-            context.push_str(&format!(
-                " Active workflow scope: {} — {}.",
-                scope.id, title
-            ));
+            context.push_str(&format!(" Active mana scope: {} — {}.", scope.id, title));
         }
     }
     if context.is_empty() {
@@ -1515,6 +1800,414 @@ fn open_path_in_editor(path: &Path) -> std::io::Result<()> {
             .spawn()
             .map(|_| ())
     }
+}
+
+fn model_supports_provider(registry: &ModelRegistry, provider: &str, model_id: &str) -> bool {
+    if provider == "openai-codex" {
+        return imp_llm::model::builtin_openai_codex_models()
+            .iter()
+            .any(|model| model.id == model_id);
+    }
+
+    registry
+        .list_by_provider(provider)
+        .iter()
+        .any(|model| model.id == model_id)
+}
+
+fn should_use_chatgpt_provider(
+    auth_store: &AuthStore,
+    registry: &ModelRegistry,
+    meta: &ModelMeta,
+) -> bool {
+    meta.provider == "openai"
+        && auth_store.resolve_api_key_only("openai").is_err()
+        && (auth_store.get_oauth("openai").is_some()
+            || auth_store.get_oauth("openai-codex").is_some())
+        && model_supports_provider(registry, "openai-codex", &meta.id)
+}
+
+async fn resolve_provider_api_key(
+    auth_store: &mut AuthStore,
+    provider_name: &str,
+) -> Result<String, imp_llm::Error> {
+    match provider_name {
+        "openai" => auth_store.resolve_api_key_only(provider_name),
+        "openai-codex" => auth_store.resolve_chatgpt_oauth().await,
+        _ => auth_store.resolve_with_refresh(provider_name).await,
+    }
+}
+
+fn provider_logged_in(auth_store: &AuthStore, provider: &str) -> bool {
+    match provider {
+        "openai" => {
+            auth_store.get_oauth("openai").is_some()
+                || auth_store.get_oauth("openai-codex").is_some()
+                || auth_store.has_credentials("openai")
+        }
+        _ => auth_store.has_credentials(provider),
+    }
+}
+
+fn oauth_provider(provider: &str) -> bool {
+    matches!(
+        provider,
+        "anthropic" | "openai" | "openai-codex" | "kimi-code"
+    )
+}
+
+fn parse_secret_field_names(input: &str) -> Vec<String> {
+    let names: Vec<String> = input
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string())
+        .collect();
+    if names.is_empty() {
+        vec!["api_key".to_string()]
+    } else {
+        names
+    }
+}
+
+fn bump_epoch(epoch: &mut u64) {
+    *epoch = epoch.wrapping_add(1);
+}
+
+fn stable_hash<T: std::hash::Hash>(value: &T) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn model_picker_chatgpt_oauth_models(
+    registry: &ModelRegistry,
+    auth_store: &AuthStore,
+) -> Vec<ModelMeta> {
+    let has_chatgpt_oauth =
+        auth_store.get_oauth("openai").is_some() || auth_store.get_oauth("openai-codex").is_some();
+    if !has_chatgpt_oauth || auth_store.resolve_api_key_only("openai").is_ok() {
+        return Vec::new();
+    }
+
+    imp_llm::model::builtin_openai_codex_models()
+        .into_iter()
+        .filter(|model| registry.find(&model.id).is_none())
+        .map(|mut model| {
+            model.provider = "openai".into();
+            model
+        })
+        .collect()
+}
+
+fn merge_model_options_with_oauth_only_models(
+    mut models: Vec<ModelMeta>,
+    oauth_only_models: Vec<ModelMeta>,
+) -> Vec<ModelMeta> {
+    if oauth_only_models.is_empty() {
+        return models;
+    }
+
+    let insert_at = models
+        .iter()
+        .rposition(|model| model.provider == "openai")
+        .map_or(models.len(), |index| index + 1);
+    models.splice(insert_at..insert_at, oauth_only_models);
+    models
+}
+
+fn filtered_model_options(
+    registry: &ModelRegistry,
+    config: &Config,
+    auth_store: &AuthStore,
+) -> Vec<ModelMeta> {
+    let oauth_only_models = model_picker_chatgpt_oauth_models(registry, auth_store);
+
+    match &config.enabled_models {
+        Some(enabled) if !enabled.is_empty() => {
+            let available_models = merge_model_options_with_oauth_only_models(
+                registry.list().to_vec(),
+                oauth_only_models,
+            );
+
+            let available_ids: HashSet<&str> =
+                available_models.iter().map(|m| m.id.as_str()).collect();
+            let enabled_ids: HashSet<String> = enabled
+                .iter()
+                .filter_map(|name| registry.resolve_meta(name, None).map(|model| model.id))
+                .filter(|id| available_ids.contains(id.as_str()))
+                .collect();
+
+            available_models
+                .into_iter()
+                .filter(|model| enabled_ids.contains(&model.id))
+                .collect()
+        }
+        _ => {
+            let visible_models: Vec<ModelMeta> = registry
+                .list()
+                .iter()
+                .filter(|model| auth_store.has_credentials(&model.provider))
+                .cloned()
+                .collect();
+            merge_model_options_with_oauth_only_models(visible_models, oauth_only_models)
+        }
+    }
+}
+
+fn include_current_model_option(
+    mut models: Vec<ModelMeta>,
+    registry: &ModelRegistry,
+    current_model: &str,
+) -> (Vec<ModelMeta>, String) {
+    let Some(meta) = registry.resolve_meta(current_model, None) else {
+        return (models, current_model.to_string());
+    };
+
+    let canonical_id = meta.id.clone();
+    if !models.iter().any(|model| model.id == canonical_id) {
+        models.insert(0, meta);
+    }
+
+    (models, canonical_id)
+}
+
+fn render_tui_workflow_list(workflows_root: &Path) -> Result<String, String> {
+    let mut workflows = Vec::new();
+    for (_, workflow) in load_tui_workflows(workflows_root)? {
+        let id = workflow
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let status = workflow
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let title = workflow
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        workflows.push(format!("- {id} [{status}] {title}"));
+    }
+    if workflows.is_empty() {
+        Ok("No workflows found under .imp/workflows.".to_string())
+    } else {
+        workflows.sort();
+        Ok(format!("Workflows:\n{}", workflows.join("\n")))
+    }
+}
+
+fn render_tui_workflow_show(workflow: &serde_yaml::Value) -> Result<String, String> {
+    let id = yaml_str(workflow, "id");
+    let status = yaml_str(workflow, "status");
+    let title = yaml_str(workflow, "title");
+    let goal = workflow
+        .get("spec")
+        .and_then(|spec| spec.get("goal"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim();
+    let acceptance = workflow
+        .get("spec")
+        .and_then(|spec| spec.get("acceptance"))
+        .and_then(|value| value.as_mapping());
+    let acceptance_total = acceptance.map(|map| map.len()).unwrap_or(0);
+    let acceptance_done = acceptance
+        .map(|map| {
+            map.values()
+                .filter(|item| item.get("status").and_then(|value| value.as_str()) == Some("done"))
+                .count()
+        })
+        .unwrap_or(0);
+    let mut text = format!(
+        "Workflow: {id} [{status}]\nTitle: {title}\nGoal: {goal}\nAcceptance: {acceptance_done}/{acceptance_total} done"
+    );
+    if let Some(steps) = workflow.get("steps").and_then(|value| value.as_mapping()) {
+        text.push_str("\nSteps:");
+        for (key, step) in steps {
+            let step_id = key.as_str().unwrap_or("unknown");
+            let step_status = step
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let step_kind = step
+                .get("kind")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            text.push_str(&format!("\n- {step_id} [{step_status}] {step_kind}"));
+        }
+    }
+    Ok(text)
+}
+
+fn render_tui_workflow_validate(workflows_root: &Path, id: Option<&str>) -> Result<String, String> {
+    let paths = if let Some(id) = id {
+        vec![workflows_root.join(id).join("workflow.yaml")]
+    } else {
+        load_tui_workflows(workflows_root)?
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>()
+    };
+    if paths.is_empty() {
+        return Ok("No workflows found under .imp/workflows.".to_string());
+    }
+
+    let mut ok_count = 0usize;
+    let mut lines = Vec::new();
+    for path in paths {
+        let workflow = imp_core::workflow::load_workflow(&path)
+            .map_err(|err| format!("failed to load {}: {err}", path.display()))?;
+        let root = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| workflows_root.to_path_buf());
+        let diagnostics = imp_core::workflow::validate_workflow(
+            &workflow,
+            &imp_core::workflow::ValidateOptions::strict(root),
+        );
+        if diagnostics.is_empty() {
+            ok_count += 1;
+            lines.push(format!("- {}: ok", workflow.id));
+        } else {
+            lines.push(format!("- {}: diagnostics", workflow.id));
+            for diagnostic in diagnostics {
+                lines.push(format!("  - {}: {}", diagnostic.path, diagnostic.message));
+            }
+        }
+    }
+
+    Ok(format!(
+        "Validated {} workflow(s): {} ok, {} with diagnostics.\n{}",
+        lines.iter().filter(|line| line.starts_with("- ")).count(),
+        ok_count,
+        lines
+            .iter()
+            .filter(|line| line.ends_with(": diagnostics"))
+            .count(),
+        lines.join("\n")
+    ))
+}
+
+fn render_tui_workflow_run(workflow: &serde_yaml::Value) -> Result<String, String> {
+    let id = yaml_str(workflow, "id");
+    let Some(steps) = workflow.get("steps").and_then(|value| value.as_mapping()) else {
+        return Ok(format!("Workflow `{id}` has no steps."));
+    };
+    for (key, step) in steps {
+        let step_id = key.as_str().unwrap_or("unknown");
+        let status = step
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        if status != "todo" && status != "ready" {
+            continue;
+        }
+        if !step_dependencies_done(workflow, step) {
+            continue;
+        }
+        let kind = step
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let mut text = format!("Next workflow action: run step {step_id} [{kind}]");
+        if let Some(worker) = step.get("worker").and_then(|value| value.as_str()) {
+            text.push_str(&format!("\nWorker: {worker}"));
+        }
+        if let Some(child) = step.get("workflow").and_then(|value| value.as_str()) {
+            text.push_str(&format!("\nWorkflow: {child}"));
+        }
+        return Ok(text);
+    }
+    Ok(format!("No runnable workflow steps for `{id}`."))
+}
+
+fn step_dependencies_done(workflow: &serde_yaml::Value, step: &serde_yaml::Value) -> bool {
+    let Some(deps) = step.get("depends_on").and_then(|value| value.as_sequence()) else {
+        return true;
+    };
+    let Some(steps) = workflow.get("steps").and_then(|value| value.as_mapping()) else {
+        return false;
+    };
+    deps.iter().all(|dep| {
+        let Some(dep_id) = dep.as_str() else {
+            return false;
+        };
+        let key = serde_yaml::Value::String(dep_id.to_string());
+        let Some(dep_step) = steps.get(&key) else {
+            return false;
+        };
+        matches!(
+            dep_step.get("status").and_then(|value| value.as_str()),
+            Some("done") | Some("done_with_concerns")
+        )
+    })
+}
+
+fn load_tui_workflow(
+    workflows_root: &Path,
+    id: Option<&str>,
+) -> Result<(PathBuf, serde_yaml::Value), String> {
+    let workflows = load_tui_workflows(workflows_root)?;
+    if let Some(id) = id {
+        workflows
+            .into_iter()
+            .find(|(_, workflow)| workflow.get("id").and_then(|value| value.as_str()) == Some(id))
+            .ok_or_else(|| format!("workflow `{id}` not found"))
+    } else {
+        let active = workflows
+            .iter()
+            .filter(|(_, workflow)| {
+                workflow.get("status").and_then(|value| value.as_str()) == Some("active")
+            })
+            .count();
+        if active == 1 {
+            workflows
+                .into_iter()
+                .find(|(_, workflow)| {
+                    workflow.get("status").and_then(|value| value.as_str()) == Some("active")
+                })
+                .ok_or_else(|| "active workflow not found".to_string())
+        } else if workflows.len() == 1 {
+            workflows
+                .into_iter()
+                .next()
+                .ok_or_else(|| "workflow not found".to_string())
+        } else if workflows.is_empty() {
+            Err("no workflows found under .imp/workflows".to_string())
+        } else {
+            Err("multiple workflows found; pass a workflow id".to_string())
+        }
+    }
+}
+
+fn load_tui_workflows(workflows_root: &Path) -> Result<Vec<(PathBuf, serde_yaml::Value)>, String> {
+    if !workflows_root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut workflows = Vec::new();
+    let entries = std::fs::read_dir(workflows_root).map_err(|err| err.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path().join("workflow.yaml");
+        if !path.exists() {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        let workflow = serde_yaml::from_str(&raw)
+            .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
+        workflows.push((path, workflow));
+    }
+    workflows.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(workflows)
+}
+
+fn yaml_str<'a>(workflow: &'a serde_yaml::Value, key: &str) -> &'a str {
+    workflow
+        .get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
 }
 
 impl App {
@@ -1604,8 +2297,8 @@ impl App {
             lua_command_ui: None,
             ask_state: None,
             ask_reply: None,
-            active_workflow_scope: None,
-            active_workflow_run: None,
+            active_mana_scope: None,
+            active_mana_run: None,
             autonomy_mode: AutonomyMode::Safe,
             loop_state: None,
             secrets_flow: None,
@@ -1637,7 +2330,6 @@ impl App {
             widgets: HashMap::new(),
             lua_runtime: None,
             selected_startup_skill: None,
-            selected_startup_workflow: None,
             sidebar: Sidebar::default(),
             active_pane: Pane::Chat,
             sidebar_list_rect: None,
@@ -1979,25 +2671,11 @@ impl App {
 
                 // Drain one more time after confirmed completion. The agent can finish with final
                 // events already queued in event_rx; if we clear the handle first,
-                // those late ToolExecutionEnd / TurnEnd / AgentEnd events are lost. Prefer the
-                // bridge task's receiver, since AgentStartResult intentionally installs a dummy
-                // AgentHandle receiver after handing the real receiver to the bridge.
-                let drain_started = Instant::now();
-                loop {
-                    while let Ok(signal) = self.runtime_signal_rx.try_recv() {
-                        signals.push(signal);
+                // those late ToolExecutionEnd / TurnEnd / AgentEnd events are lost.
+                if let Some(handle) = self.agent_handle.as_mut() {
+                    while let Ok(event) = handle.event_rx.try_recv() {
+                        signals.push(RuntimeSignal::AgentEvent(event));
                     }
-                    if self
-                        .agent_event_task
-                        .as_ref()
-                        .is_none_or(tokio::task::JoinHandle::is_finished)
-                    {
-                        break;
-                    }
-                    if drain_started.elapsed() >= std::time::Duration::from_millis(25) {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
                 }
 
                 match outcome {
@@ -2528,7 +3206,7 @@ impl App {
         width: u16,
         selected_tc: Option<&DisplayToolCall>,
         thinking: Option<&str>,
-        _run: Option<&WorkflowRunSummary>,
+        _run: Option<&ManaRunSummary>,
     ) -> SidebarDetailCacheKey {
         SidebarDetailCacheKey {
             width,
@@ -2538,7 +3216,7 @@ impl App {
             run_hash: {
                 #[cfg(feature = "mana-ui")]
                 {
-                    stable_hash(&_run.map(workflow_run_summary_cache_key))
+                    stable_hash(&_run.map(mana_run_summary_cache_key))
                 }
                 #[cfg(not(feature = "mana-ui"))]
                 {
@@ -2583,7 +3261,7 @@ impl App {
         width: u16,
         selected_tc: Option<&DisplayToolCall>,
         thinking: Option<&str>,
-        run: Option<&WorkflowRunSummary>,
+        run: Option<&ManaRunSummary>,
     ) -> &SidebarDetailRenderData {
         let key = self.sidebar_detail_cache_key(width, selected_tc, thinking, run);
         let cache_hit = self
@@ -2592,7 +3270,7 @@ impl App {
             .is_some_and(|cache| cache.key == key);
         if !cache_hit {
             let render = if let Some(run) = run {
-                workflow_run_detail_render_data(run, &self.theme)
+                mana_run_detail_render_data(run, &self.theme)
             } else if let Some(thinking) = thinking {
                 thinking_detail_render_data(
                     thinking,
@@ -2640,48 +3318,6 @@ impl App {
         startup_skill_hits(chat_area, &startup.panel)
     }
 
-    fn startup_workflow_hits(&self, chat_area: Rect) -> Vec<StartupWorkflowHit> {
-        let startup = self.build_startup_surface();
-        startup_workflow_hits(chat_area, &startup.panel)
-    }
-
-    fn select_startup_workflow_at(&mut self, col: u16, row: u16) -> bool {
-        if !matches!(self.mode, UiMode::Normal) || !self.messages.is_empty() {
-            return false;
-        }
-
-        let Some(chat_area) = self.chat_surface.as_ref().map(|surface| surface.rect) else {
-            return false;
-        };
-
-        let Some(hit) = self
-            .startup_workflow_hits(chat_area)
-            .into_iter()
-            .find(|hit| point_in_rect(col, row, Some(hit.rect)))
-        else {
-            return false;
-        };
-
-        let Some(workflow) = self
-            .startup_surface_metadata
-            .workflows
-            .get(hit.index)
-            .cloned()
-        else {
-            return false;
-        };
-
-        self.selected_startup_workflow = Some(workflow);
-        self.selected_startup_skill = None;
-        self.sidebar.open = true;
-        self.sidebar.reset_detail_scroll();
-        self.sidebar_auto_follow = false;
-        self.tool_focus = None;
-        self.tool_focus_pinned = false;
-        self.sidebar_detail_cache = None;
-        true
-    }
-
     fn select_startup_skill_at(&mut self, col: u16, row: u16) -> bool {
         if !matches!(self.mode, UiMode::Normal) || !self.messages.is_empty() {
             return false;
@@ -2704,7 +3340,6 @@ impl App {
         };
 
         self.selected_startup_skill = Some(skill);
-        self.selected_startup_workflow = None;
         self.sidebar.open = true;
         self.sidebar.reset_detail_scroll();
         self.sidebar_auto_follow = false;
@@ -2743,9 +3378,13 @@ impl App {
 
         StartupSurfaceMetadata {
             skills: imp_core::resources::discover_skills(cwd, &user_config_dir),
-            workflows: discover_startup_workflows(cwd),
+            workflows: config
+                .workflow_registry()
+                .map(|registry| registry.iter().cloned().collect())
+                .unwrap_or_default(),
             provider_id,
             web_summary,
+            recent_sessions: load_recent_sessions(cwd, 5),
             repo_stats: Some(RepoStatsState::Scanning),
             rule_files: discover_rule_files(cwd),
         }
@@ -2832,19 +3471,22 @@ impl App {
                 .collect::<Vec<_>>()
         };
 
-        let workflow_lines = workflow_startup_lines(&self.startup_surface_metadata.workflows);
+        let workflow_lines = if self.startup_surface_metadata.workflows.is_empty() {
+            vec!["• none configured".to_string()]
+        } else {
+            let mut workflows = self.startup_surface_metadata.workflows.clone();
+            workflows.sort_by_key(|workflow| std::cmp::Reverse(workflow_sort_key(workflow)));
+            workflows
+                .iter()
+                .take(5)
+                .map(|workflow| format!("• {} · {}", workflow.name, workflow_age(workflow)))
+                .collect::<Vec<_>>()
+        };
 
         let sections = vec![
             StartupSection {
                 title: "session".to_string(),
                 lines: session_lines,
-            },
-            StartupSection {
-                title: format!(
-                    "workflows · {} found",
-                    self.startup_surface_metadata.workflows.len()
-                ),
-                lines: workflow_lines,
             },
             StartupSection {
                 title: "tools".to_string(),
@@ -2854,18 +3496,19 @@ impl App {
                 title: format!("skills · {} installed", skills.len()),
                 lines: skill_lines,
             },
+            StartupSection {
+                title: "workflows".to_string(),
+                lines: workflow_lines,
+            },
+            StartupSection {
+                title: "recent sessions".to_string(),
+                lines: recent_session_lines(&self.startup_surface_metadata.recent_sessions),
+            },
         ];
 
         StartupSurfaceData {
             panel: StartupPanelData { actions, sections },
         }
-    }
-
-    fn startup_workflow_detail_render(
-        &mut self,
-        workflow: &StartupWorkflowItem,
-    ) -> SidebarDetailRenderData {
-        startup_workflow_detail_render_data(workflow, &self.theme)
     }
 
     fn startup_skill_detail_render(
@@ -3019,7 +3662,6 @@ impl App {
 
         if !matches!(self.mode, UiMode::Normal) || !self.messages.is_empty() {
             self.selected_startup_skill = None;
-            self.selected_startup_workflow = None;
         }
 
         // Sidebar
@@ -3032,9 +3674,7 @@ impl App {
                 } else {
                     None
                 };
-            let selected_index = if self.selected_startup_skill.is_some()
-                || self.selected_startup_workflow.is_some()
-            {
+            let selected_index = if self.selected_startup_skill.is_some() {
                 None
             } else {
                 self.tool_focus.or_else(|| {
@@ -3043,9 +3683,7 @@ impl App {
                         .flatten()
                 })
             };
-            let detail_render = if let Some(workflow) = self.selected_startup_workflow.clone() {
-                Some(self.startup_workflow_detail_render(&workflow))
-            } else if let Some(skill) = self.selected_startup_skill.clone() {
+            let detail_render = if let Some(skill) = self.selected_startup_skill.clone() {
                 Some(self.startup_skill_detail_render(&skill))
             } else if matches!(
                 self.config.ui.sidebar_style,
@@ -3056,7 +3694,7 @@ impl App {
                     {
                         #[cfg(feature = "mana-ui")]
                         {
-                            self.active_workflow_run.clone()
+                            self.active_mana_run.clone()
                         }
                         #[cfg(not(feature = "mana-ui"))]
                         {
@@ -3158,8 +3796,8 @@ impl App {
                 .animation_level(self.config.ui.animations)
                 .activity_state(activity_state)
                 .workflow_mode(self.workflow_mode)
-                .workflow_scope_label(self.active_workflow_scope_label())
-                .workflow_run_label(self.active_workflow_run_label())
+                .mana_scope_label(self.active_mana_scope_label())
+                .mana_run_label(self.active_mana_run_label())
                 .loop_label(self.loop_label())
                 .git_label(git_label);
             frame.render_widget(editor, editor_area);
@@ -4538,9 +5176,7 @@ impl App {
                 }
 
                 self.active_pane = Pane::Chat;
-                if self.select_startup_workflow_at(col, row)
-                    || self.select_startup_skill_at(col, row)
-                {
+                if self.select_startup_skill_at(col, row) {
                     self.clear_selection();
                     return;
                 }
@@ -4621,23 +5257,19 @@ impl App {
         self.message_queue.clear();
         self.loop_state = None;
         self.suppress_completion_notification = true;
-        if let Some(run_id) = self
-            .active_workflow_run
-            .as_ref()
-            .map(|run| run.run_id.clone())
-        {
-            match stop_workflow_run(&run_id) {
+        if let Some(run_id) = self.active_mana_run.as_ref().map(|run| run.run_id.clone()) {
+            match stop_mana_run(&run_id) {
                 Ok(Some(summary)) => {
-                    self.active_workflow_run = Some(summary);
+                    self.active_mana_run = Some(summary);
                     self.push_system_msg(&format!(
-                        "Stopped active workflow run {run_id}. External workers may need manual cleanup."
+                        "Stopped active mana run {run_id}. External workers may need manual cleanup."
                     ));
                 }
                 Ok(None) => {
-                    self.push_system_msg(&format!("Active workflow run {run_id} was not found."))
+                    self.push_system_msg(&format!("Active mana run {run_id} was not found."))
                 }
                 Err(err) => {
-                    self.push_system_msg(&format!("Could not stop workflow run {run_id}: {err}"))
+                    self.push_system_msg(&format!("Could not stop mana run {run_id}: {err}"))
                 }
             }
         }
@@ -4769,16 +5401,16 @@ impl App {
         if let Some(visible) = self.pending_agent_visible_text.as_ref() {
             return visible.clone();
         }
-        if let Some(scope) = self.active_workflow_scope.as_ref() {
+        if let Some(scope) = self.active_mana_scope.as_ref() {
             return format!(
                 "Continue working on active mana scope {} until the requested outcome is complete, blocked, or no runnable work remains.",
                 scope.id
             );
         }
         #[cfg(feature = "mana-ui")]
-        if let Some(run) = self.active_workflow_run.as_ref() {
+        if let Some(run) = self.active_mana_run.as_ref() {
             return format!(
-                "Continue supervising active workflow run {} until it is complete, blocked, or no runnable work remains.",
+                "Continue supervising active mana run {} until it is complete, blocked, or no runnable work remains.",
                 run.run_id
             );
         }
@@ -4857,7 +5489,7 @@ impl App {
             role_name: self.role_name.clone(),
             thinking_level: self.thinking_level,
             config: self.config.clone(),
-            active_workflow_scope: self.active_workflow_scope.clone(),
+            active_mana_scope: self.active_mana_scope.clone(),
             autonomy_mode: self.autonomy_mode,
             runtime_signal_tx: self.runtime_signal_tx.clone(),
             ui_tx,
@@ -5208,6 +5840,11 @@ impl App {
         if !text.contains('\n') {
             if let Some(cmd_text) = text.strip_prefix('/') {
                 let typed = cmd_text.trim();
+                if self.try_workflow_command(typed) {
+                    self.editor.push_history();
+                    self.editor.clear();
+                    return;
+                }
                 let canonical_typed = if typed.eq_ignore_ascii_case("improve safe") {
                     "improve safe"
                 } else {
@@ -5249,8 +5886,13 @@ impl App {
             return;
         }
 
-        // Send natural-language prompts directly; workflow profiles are not surfaced
-        // as slash-command takeover UX in the TUI.
+        if let Some(suggestion) = self.workflow_suggestion_for_prompt(&text) {
+            self.editor.push_history();
+            self.editor.clear();
+            self.ask_workflow_suggestion(suggestion, text.clone());
+            self.needs_redraw = true;
+            return;
+        }
         // Add user message, assistant placeholder, and session entry before deferring agent start.
         self.enqueue_visible_agent_turn(text.clone());
         self.editor.push_history();
@@ -5314,14 +5956,14 @@ impl App {
         }
     }
 
-    fn active_workflow_run_label(&self) -> Option<String> {
-        self.active_workflow_run
+    fn active_mana_run_label(&self) -> Option<String> {
+        self.active_mana_run
             .as_ref()
             .map(|run| format!("run {} {}", run.run_id, run.status))
     }
 
-    fn active_workflow_scope_label(&self) -> Option<String> {
-        self.active_workflow_scope.as_ref().map(|scope| {
+    fn active_mana_scope_label(&self) -> Option<String> {
+        self.active_mana_scope.as_ref().map(|scope| {
             let mut title = scope.title.trim().to_string();
             const MAX_TITLE_CHARS: usize = 42;
             if title.chars().count() > MAX_TITLE_CHARS {
@@ -5338,33 +5980,30 @@ impl App {
 
     #[cfg(feature = "mana-ui")]
     #[allow(dead_code)]
-    fn set_active_workflow_run(&mut self, id: &str) {
+    fn set_active_mana_run(&mut self, id: &str) {
         let id = id.trim();
         if id.is_empty() {
-            let Some(active_id) = self
-                .active_workflow_run
-                .as_ref()
-                .map(|run| run.run_id.clone())
+            let Some(active_id) = self.active_mana_run.as_ref().map(|run| run.run_id.clone())
             else {
                 self.push_system_msg("Usage: /run <run-id> or /run clear");
                 return;
             };
-            self.refresh_active_workflow_run(&active_id);
+            self.refresh_active_mana_run(&active_id);
             return;
         }
         if id.eq_ignore_ascii_case("clear") || id.eq_ignore_ascii_case("none") {
-            self.active_workflow_run = None;
-            self.push_system_msg("Active workflow run cleared");
+            self.active_mana_run = None;
+            self.push_system_msg("Active mana run cleared");
             return;
         }
 
-        self.refresh_active_workflow_run(id);
+        self.refresh_active_mana_run(id);
     }
 
     #[cfg(feature = "mana-ui")]
     #[allow(dead_code)]
-    fn refresh_active_workflow_run(&mut self, id: &str) {
-        match workflow_run_summary(id) {
+    fn refresh_active_mana_run(&mut self, id: &str) {
+        match mana_run_summary(id) {
             Ok(Some(summary)) => {
                 self.push_system_msg(&format!(
                     "Active mana run: {} {} ({}/{}, failed {})",
@@ -5374,10 +6013,10 @@ impl App {
                     summary.total_units,
                     summary.total_failed
                 ));
-                self.active_workflow_run = Some(summary);
+                self.active_mana_run = Some(summary);
             }
-            Ok(None) => self.push_system_msg(&format!("Could not find workflow run {id}")),
-            Err(err) => self.push_system_msg(&format!("Could not read workflow run {id}: {err}")),
+            Ok(None) => self.push_system_msg(&format!("Could not find mana run {id}")),
+            Err(err) => self.push_system_msg(&format!("Could not read mana run {id}: {err}")),
         }
     }
 
@@ -5475,10 +6114,220 @@ impl App {
         }
     }
 
+    fn workflow_plan_command(&mut self, goal: &str) {
+        let goal = goal.trim();
+        if goal.is_empty() {
+            self.push_system_msg("Usage: /plan <goal>");
+            return;
+        }
+        let prompt = format!(
+            "Plan this as an imp-native workflow. Use the `workflow` tool and `.imp/workflows` schema as the source of truth. Goal: {goal}"
+        );
+        self.push_system_msg("Planning with native workflow tool. The agent should create or update a workflow artifact before implementation.");
+        self.enqueue_visible_agent_turn_with_prompt(format!("/plan {goal}"), prompt);
+    }
+
+    fn workflow_run_command(&mut self, id: &str) {
+        let mut params = serde_json::json!({ "action": "run" });
+        let id = id.trim();
+        if !id.is_empty() {
+            params["id"] = serde_json::Value::String(id.to_string());
+        }
+        match self.execute_workflow_tool(params) {
+            Ok(text) => self.push_system_msg(&text),
+            Err(err) => self.push_error_msg(&format!("Workflow run failed: {err}")),
+        }
+    }
+
+    fn workflow_inspect_command(&mut self, args: &str) {
+        let mut parts = args.split_whitespace();
+        let action = parts.next().unwrap_or("show");
+        let id = parts.next();
+        let action = match action {
+            "list" | "show" | "validate" | "run" | "update" => action,
+            other => {
+                self.push_system_msg(&format!(
+                    "Usage: /workflow [list|show|validate|run|update] [id] (unknown action `{other}`)"
+                ));
+                return;
+            }
+        };
+        let mut params = serde_json::json!({ "action": action });
+        if let Some(id) = id {
+            params["id"] = serde_json::Value::String(id.to_string());
+        }
+        match self.execute_workflow_tool(params) {
+            Ok(text) => self.push_system_msg(&text),
+            Err(err) => self.push_error_msg(&format!("Workflow command failed: {err}")),
+        }
+    }
+
+    fn execute_workflow_tool(&self, params: serde_json::Value) -> Result<String, String> {
+        let action = params
+            .get("action")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "workflow command missing action".to_string())?;
+        let id = params.get("id").and_then(|value| value.as_str());
+        let workflows_root = self.cwd.join(".imp/workflows");
+        match action {
+            "list" => render_tui_workflow_list(&workflows_root),
+            "show" => {
+                let (_, workflow) = load_tui_workflow(&workflows_root, id)?;
+                render_tui_workflow_show(&workflow)
+            }
+            "validate" => render_tui_workflow_validate(&workflows_root, id),
+            "run" => {
+                let (_, workflow) = load_tui_workflow(&workflows_root, id)?;
+                render_tui_workflow_run(&workflow)
+            }
+            other => Err(format!("unsupported workflow action `{other}`")),
+        }
+    }
+
+    fn workflow_registry(&mut self) -> Option<imp_core::workflow_profiles::WorkflowRegistry> {
+        match self.config.workflow_registry() {
+            Ok(registry) => Some(registry),
+            Err(err) => {
+                self.push_warning_msg(&format!("Workflow config error: {err}"));
+                None
+            }
+        }
+    }
+
+    fn try_workflow_command(&mut self, typed: &str) -> bool {
+        let mut parts = typed.splitn(2, char::is_whitespace);
+        let Some(name) = parts.next().filter(|name| !name.is_empty()) else {
+            return false;
+        };
+        if matches!(name, "workflow" | "workflows") {
+            return false;
+        }
+        let Some(registry) = self.workflow_registry() else {
+            return false;
+        };
+        let Some(profile) = registry.get(name).cloned() else {
+            return false;
+        };
+        let prompt = parts.next().unwrap_or_default().trim();
+        if prompt.is_empty() {
+            self.show_workflow_profile(&profile.name);
+            return true;
+        }
+        self.enqueue_workflow_turn(profile, prompt.to_string());
+        true
+    }
+
+    fn enqueue_workflow_turn(&mut self, profile: WorkflowProfile, prompt: String) {
+        let wrapped = profile.wrap_prompt(&prompt);
+        self.push_system_msg(&format!(
+            "Using /{} · {}",
+            profile.name, profile.confirm_body
+        ));
+        self.enqueue_visible_agent_turn_with_prompt(
+            format!("/{} {}", profile.name, prompt),
+            wrapped,
+        );
+    }
+
+    fn workflow_suggestion_for_prompt(&mut self, prompt: &str) -> Option<WorkflowProfile> {
+        let registry = self.workflow_registry()?;
+        let suggestion = registry.infer(prompt)?;
+        match suggestion.profile.suggest {
+            WorkflowSuggest::Never => None,
+            WorkflowSuggest::Auto => Some(suggestion.profile),
+            WorkflowSuggest::Ask => Some(suggestion.profile),
+        }
+    }
+
+    fn ask_workflow_suggestion(&mut self, profile: WorkflowProfile, prompt: String) {
+        let title = if profile.confirm_title.trim().is_empty() {
+            format!("Use /{}?", profile.name)
+        } else {
+            profile.confirm_title.clone()
+        };
+        let mut choices = vec![format!("Use /{}", profile.name), "Normal".to_string()];
+        if !profile.confirm_body.trim().is_empty() {
+            choices[0] = format!("{} · {}", choices[0], profile.confirm_body.trim());
+        }
+        let options = choices
+            .into_iter()
+            .map(|label| crate::views::ask_bar::AskOption {
+                label,
+                description: None,
+                checked: false,
+            })
+            .collect();
+        self.begin_ask(
+            AskState::new(title, String::new(), options, false),
+            AskReply::WorkflowSuggestion { profile, prompt },
+        );
+    }
+
+    fn show_workflows(&mut self) {
+        let Some(registry) = self.workflow_registry() else {
+            return;
+        };
+        let profiles = registry.iter().collect::<Vec<_>>();
+        if profiles.is_empty() {
+            self.push_system_msg("No workflows configured.");
+            return;
+        }
+        let mut lines = vec!["Workflows:".to_string()];
+        for profile in profiles {
+            lines.push(format!("/{} — {}", profile.name, profile.description));
+        }
+        self.push_system_msg(&lines.join("\n"));
+    }
+
+    fn show_workflow_profile(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.push_system_msg("Usage: /workflow <name>");
+            return;
+        }
+        let Some(registry) = self.workflow_registry() else {
+            return;
+        };
+        match registry.resolve(name) {
+            Ok(profile) => {
+                let aliases = if profile.aliases.is_empty() {
+                    "none".to_string()
+                } else {
+                    profile
+                        .aliases
+                        .iter()
+                        .map(|alias| format!("/{alias}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let triggers = if profile.triggers.is_empty() {
+                    "none".to_string()
+                } else {
+                    profile.triggers.join(", ")
+                };
+                self.push_system_msg(&format!(
+                    "/{}\n{}\naliases: {}\nsuggest: {:?}\nreadonly: {}\naction: {}\ntriggers: {}",
+                    profile.name,
+                    profile.description,
+                    aliases,
+                    profile.suggest,
+                    profile.readonly,
+                    profile.confirm_body,
+                    triggers
+                ));
+            }
+            Err(err) => self.push_warning_msg(&err.to_string()),
+        }
+    }
+
     fn execute_command(&mut self, cmd: &str) {
         let mut parts = cmd.splitn(2, char::is_whitespace);
         let command = parts.next().unwrap_or("");
         let args = parts.next().unwrap_or("").trim();
+
+        if self.try_workflow_command(cmd) {
+            return;
+        }
 
         match command {
             "quit" | "q" => {
@@ -5613,6 +6462,19 @@ impl App {
             "checkpoints" => self.checkpoints_command(),
             "restore" | "restore-checkpoint" => self.restore_checkpoint_command(args),
             "eval" => self.eval_candidate_command(args),
+            "plan" => self.workflow_plan_command(args),
+            "run" => self.workflow_run_command(args),
+            "workflow" => {
+                let first = args.split_whitespace().next().unwrap_or_default();
+                if matches!(first, "list" | "show" | "validate" | "run" | "update") {
+                    self.workflow_inspect_command(args);
+                } else if args.trim().is_empty() {
+                    self.show_workflows();
+                } else {
+                    self.show_workflow_profile(args.trim());
+                }
+            }
+            "workflows" => self.show_workflows(),
             _ => {
                 // Try Lua extension commands before reporting unknown
                 if !self.try_lua_command(cmd) && !self.try_skill_command(cmd) {
@@ -5838,6 +6700,16 @@ impl App {
             .and_then(|runtime| runtime.lock().ok().map(|guard| guard.command_summaries()))
             .unwrap_or_default();
         let commands = merge_extension_commands(builtin_commands(), extension_commands);
+        let commands = match self.config.workflow_registry() {
+            Ok(registry) => merge_workflow_commands(
+                commands,
+                registry
+                    .iter()
+                    .map(|profile| (profile.name.clone(), profile.description.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+            Err(_) => commands,
+        };
         merge_skill_commands(commands, self.skill_summaries())
     }
 
@@ -6516,6 +7388,51 @@ impl App {
         });
 
         match (&result, reply) {
+            (
+                AskResult::Selected(indices),
+                Some(AskReply::WorkflowSuggestion { profile, prompt }),
+            ) => {
+                let labels: Vec<String> = indices
+                    .iter()
+                    .filter_map(|&i| state.options.get(i).map(|o| o.label.clone()))
+                    .collect();
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::User,
+                    content: labels.join(", "),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+                self.invalidate_chat_render_cache();
+                if indices.first().copied() == Some(0) {
+                    self.enqueue_workflow_turn(profile, prompt);
+                } else {
+                    self.enqueue_visible_agent_turn(prompt);
+                }
+            }
+            (AskResult::Text(text), Some(AskReply::WorkflowSuggestion { profile, prompt })) => {
+                self.messages.push(DisplayMessage {
+                    role: MessageRole::User,
+                    content: text.clone(),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    assistant_blocks: Vec::new(),
+                    is_streaming: false,
+                    timestamp: imp_llm::now(),
+                });
+                self.invalidate_chat_render_cache();
+                if text
+                    .trim()
+                    .eq_ignore_ascii_case(&format!("Use /{}", profile.name))
+                    || text.trim().starts_with(&format!("Use /{} ·", profile.name))
+                {
+                    self.enqueue_workflow_turn(profile, prompt);
+                } else {
+                    self.enqueue_visible_agent_turn(prompt);
+                }
+            }
             (AskResult::Text(text), Some(AskReply::Input(tx))) => {
                 self.messages.push(DisplayMessage {
                     role: MessageRole::User,
@@ -6743,6 +7660,7 @@ impl App {
                 AskReply::Input(tx) => {
                     let _ = tx.send(None);
                 }
+                AskReply::WorkflowSuggestion { .. } => {}
             }
         }
         // Stop the agent — user wants control back
@@ -7564,7 +8482,7 @@ impl App {
                             Ok(Ok(())) => {}
                             Ok(Err(error)) => return Err(error),
                             Err(_) => {
-                                return Err("Compaction timed out after 180 seconds".to_string());
+                                return Err("Compaction timed out after 180 seconds".to_string())
                             }
                         }
 
@@ -7990,7 +8908,7 @@ impl App {
             AgentEvent::TurnEnd {
                 index,
                 message,
-                workflow_review: _,
+                mana_review: _,
             } => {
                 self.completed_turns_in_run += 1;
                 // Update context tracking from this turn's usage
@@ -8098,6 +9016,17 @@ fn command_arg(rest: &str) -> Option<&str> {
     }
 }
 
+fn command_option_value(args: &str, option: &str) -> Option<String> {
+    let needle = format!("--{option}");
+    let (_, tail) = args.split_once(&needle)?;
+    let value = tail.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let next_option = value.find(" --").unwrap_or(value.len());
+    Some(value[..next_option].trim().to_string()).filter(|value| !value.is_empty())
+}
+
 fn expand_prompt_path(path: &str, cwd: &Path) -> PathBuf {
     let expanded = if path == "~" {
         std::env::var_os("HOME").map(PathBuf::from)
@@ -8115,11 +9044,15 @@ fn expand_prompt_path(path: &str, cwd: &Path) -> PathBuf {
     }
 }
 
+fn single_line_preview(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod session_lifecycle {
     use super::*;
     use imp_core::config::Config;
-    use imp_core::workflow::VerificationGate;
+    use imp_core::session::{SessionEntry, SessionManager};
     use imp_llm::auth::{AuthStore, OAuthCredential, StoredCredential};
     use imp_llm::model::ModelRegistry;
     use imp_llm::ThinkingLevel;
@@ -9451,27 +10384,102 @@ mod session_lifecycle {
     }
 
     #[tokio::test]
-    async fn natural_prompt_sends_without_workflow_takeover_question() {
+    async fn workflow_command_wraps_prompt_for_one_turn() {
+        let mut app = make_app();
+        app.execute_command("plan add billing");
+        assert!(app
+            .pending_agent_prompt
+            .as_ref()
+            .unwrap()
+            .contains("Task workflow: plan"));
+        assert!(app
+            .pending_agent_prompt
+            .as_ref()
+            .unwrap()
+            .contains("add billing"));
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content.contains("Using /plan")));
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content == "/plan add billing"));
+    }
+
+    #[tokio::test]
+    async fn workflow_alias_resolves_to_profile() {
+        let mut app = make_app();
+        app.execute_command("spec add billing");
+        assert!(app
+            .pending_agent_prompt
+            .as_ref()
+            .unwrap()
+            .contains("Task workflow: plan"));
+        assert!(app
+            .messages
+            .iter()
+            .any(|message| message.content == "/plan add billing"));
+    }
+
+    #[test]
+    fn workflows_command_lists_profiles() {
+        let mut app = make_app();
+        app.execute_command("workflows");
+        let content = &app.messages.last().unwrap().content;
+        assert!(content.contains("/plan"));
+        assert!(content.contains("/review"));
+    }
+
+    #[test]
+    fn workflow_command_shows_profile_details() {
+        let mut app = make_app();
+        app.execute_command("workflow plan");
+        let content = &app.messages.last().unwrap().content;
+        assert!(content.contains("/plan"));
+        assert!(content.contains("aliases:"));
+        assert!(content.contains("action: Save plan"));
+    }
+
+    #[test]
+    fn natural_prompt_suggests_workflow_without_starting_agent() {
         let mut app = make_app();
         app.editor.set_content("please plan this feature");
         app.send_message();
-        assert!(matches!(app.ask_reply, None));
+        assert!(app.pending_agent_prompt.is_none());
+        assert!(matches!(
+            app.ask_reply,
+            Some(AskReply::WorkflowSuggestion { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn accepting_workflow_suggestion_wraps_prompt() {
+        let mut app = make_app();
+        app.editor.set_content("please plan this feature");
+        app.send_message();
+        app.finish_ask();
+        assert!(app
+            .pending_agent_prompt
+            .as_ref()
+            .unwrap()
+            .contains("Task workflow: plan"));
+    }
+
+    #[tokio::test]
+    async fn declining_workflow_suggestion_sends_original_prompt() {
+        let mut app = make_app();
+        app.editor.set_content("please plan this feature");
+        app.send_message();
+        if let Some(state) = app.ask_state.as_mut() {
+            state.cursor = 1;
+        }
+        app.finish_ask();
         assert_eq!(
             app.pending_agent_prompt.as_deref(),
             Some("please plan this feature")
         );
         assert!(app.editor.content().is_empty());
-    }
-
-    #[tokio::test]
-    async fn workflow_slash_commands_are_removed() {
-        let mut app = make_app();
-        app.editor.set_content("/plan this feature");
-        app.send_message();
-        assert!(app.pending_agent_prompt.is_none());
-        let last = app.messages.last().expect("unknown command message");
-        assert_eq!(last.role, MessageRole::Error);
-        assert!(last.content.contains("Unknown command: /plan this feature"));
     }
 
     #[test]
@@ -9832,134 +10840,6 @@ mod session_lifecycle {
 
         assert!(first.plain_lines.iter().any(|line| line == "first"));
         assert_eq!(first.plain_lines, second.plain_lines);
-    }
-
-    #[test]
-    fn startup_workflow_discovery_loads_valid_files_and_sorts_actionable_first() {
-        let tmp = TempDir::new().unwrap();
-        let cwd = tmp.path().join("project");
-        let workflows = cwd.join(".imp/workflows");
-        std::fs::create_dir_all(workflows.join("done")).unwrap();
-        std::fs::create_dir_all(workflows.join("active")).unwrap();
-        std::fs::create_dir_all(workflows.join("broken")).unwrap();
-        std::fs::write(
-            workflows.join("done/workflow.yaml"),
-            "schema: imp.workflow/v1\nid: done\ntitle: Done workflow\nstatus: done\nkind: feature\n",
-        )
-        .unwrap();
-        std::fs::write(
-            workflows.join("active/workflow.yaml"),
-            "schema: imp.workflow/v1\nid: active\ntitle: Active workflow\nstatus: active\nkind: fix\n",
-        )
-        .unwrap();
-        std::fs::write(workflows.join("broken/workflow.yaml"), "not: [valid").unwrap();
-
-        let discovered = discover_startup_workflows(&cwd);
-
-        assert_eq!(
-            discovered.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(),
-            vec!["active", "done"]
-        );
-        assert_eq!(discovered[0].status, "active");
-        assert_eq!(discovered[0].kind, "fix");
-        assert_eq!(
-            discover_startup_workflows(&tmp.path().join("missing")),
-            Vec::new()
-        );
-    }
-
-    #[test]
-    fn startup_workflow_detail_render_includes_identity_status_path_and_preview() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("workflow.yaml");
-        std::fs::write(
-            &path,
-            "schema: imp.workflow/v1\nid: wf\ntitle: Workflow title\nstatus: active\nkind: feature\n",
-        )
-        .unwrap();
-        let workflow = StartupWorkflowItem {
-            id: "wf".into(),
-            title: "Workflow title".into(),
-            status: "active".into(),
-            kind: "feature".into(),
-            path: path.clone(),
-        };
-
-        let detail = startup_workflow_detail_render_data(&workflow, &Theme::default());
-
-        assert!(detail.plain_lines.iter().any(|line| line == "workflow: wf"));
-        assert!(detail
-            .plain_lines
-            .iter()
-            .any(|line| line == "title: Workflow title"));
-        assert!(detail
-            .plain_lines
-            .iter()
-            .any(|line| line == "status: active"));
-        assert!(detail
-            .plain_lines
-            .iter()
-            .any(|line| line == "kind: feature"));
-        assert!(detail
-            .plain_lines
-            .iter()
-            .any(|line| line == &format!("path: {}", path.display())));
-        assert!(detail
-            .plain_lines
-            .iter()
-            .any(|line| line == "schema: imp.workflow/v1"));
-    }
-
-    #[test]
-    fn mouse_click_on_homepage_workflow_opens_workflow_in_inspector() {
-        let tmp = TempDir::new().unwrap();
-        let cwd = tmp.path().join("project");
-        let workflow_dir = cwd.join(".imp/workflows/startup-workflow");
-        std::fs::create_dir_all(&workflow_dir).unwrap();
-        std::fs::write(
-            workflow_dir.join("workflow.yaml"),
-            "schema: imp.workflow/v1\nid: startup-workflow\ntitle: Startup workflow\nstatus: active\nkind: feature\n",
-        )
-        .unwrap();
-        let mut app = make_app_with_session(SessionManager::in_memory(), cwd);
-        app.config.ui.sidebar_style = imp_core::config::SidebarStyle::Inspector;
-        app.chat_surface = Some(TextSurface::new(
-            SelectablePane::Chat,
-            Rect::new(0, 0, 160, 30),
-            Vec::new(),
-            0,
-        ));
-
-        let hit = app
-            .startup_workflow_hits(Rect::new(0, 0, 160, 30))
-            .into_iter()
-            .find(|hit| hit.index == 0)
-            .expect("workflow visible");
-        app.handle_mouse(crossterm::event::MouseEvent {
-            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            column: hit.rect.x,
-            row: hit.rect.y,
-            modifiers: KeyModifiers::empty(),
-        });
-
-        assert!(app.sidebar.open);
-        assert_eq!(
-            app.selected_startup_workflow
-                .as_ref()
-                .map(|w| w.id.as_str()),
-            Some("startup-workflow")
-        );
-        assert!(app.selected_startup_skill.is_none());
-        let detail = startup_workflow_detail_render_data(
-            app.selected_startup_workflow
-                .as_ref()
-                .expect("workflow selected"),
-            &app.theme,
-        );
-        assert!(detail
-            .plain_lines
-            .iter()
-            .any(|line| line == "title: Startup workflow"));
     }
 
     #[test]
@@ -10792,7 +11672,7 @@ mod session_lifecycle {
         app.handle_agent_event(AgentEvent::TurnEnd {
             index: 0,
             message: assistant,
-            workflow_review: imp_core::workflow_review::TurnWorkflowReview::no_change(0),
+            mana_review: imp_core::mana_review::TurnManaReview::no_change(0),
         });
         app.handle_agent_event(AgentEvent::AgentEnd {
             usage: Usage {
@@ -11045,11 +11925,9 @@ mod session_lifecycle {
             app.status_items.get("evidence").map(String::as_str),
             Some(".imp/runs/run_1/evidence.md")
         );
-        assert!(!app.messages.iter().any(|message| {
-            message
-                .content
-                .contains("Evidence: .imp/runs/run_1/evidence.md")
-        }));
+        assert!(!app.messages.iter().any(|message| message
+            .content
+            .contains("Evidence: .imp/runs/run_1/evidence.md")));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Context prefill assembly for workflow dispatch.
+//! Context prefill assembly for mana dispatch.
 //!
 //! When `imp run <unit_id>` dispatches an agent, the unit description often
 //! references files the agent will need. Instead of making the agent spend

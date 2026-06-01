@@ -758,7 +758,7 @@ fn tool_input_summary_rows(tc: &DisplayToolCall) -> Vec<String> {
         "edit" => summarize_edit_fields(args),
         "write" => summarize_write_fields(args),
         "scan" => summarize_named_fields(args, &["action", "directory", "files", "task"]),
-        "workflow" => summarize_named_fields(
+        "mana" => summarize_named_fields(
             args,
             &[
                 "action", "id", "title", "status", "priority", "parent", "deps", "verify", "notes",
@@ -934,8 +934,8 @@ fn styled_output_lines(
         return Vec::new();
     }
 
-    if tc.name == "workflow" {
-        let raw_lines = format_workflow_output(tc);
+    if tc.name == "mana" {
+        let raw_lines = format_mana_output(tc);
         let limited = apply_tool_output_limit(raw_lines, config);
         return wrap_plain_lines(limited, width, config, theme, tc.is_error);
     }
@@ -1047,7 +1047,7 @@ fn line_to_plain_text(line: &Line<'_>) -> String {
         .map(|span| span.content.as_ref())
         .collect()
 }
-fn format_workflow_output(tc: &DisplayToolCall) -> Vec<String> {
+fn format_mana_output(tc: &DisplayToolCall) -> Vec<String> {
     let mut lines = Vec::new();
     let action = tc
         .details
@@ -1060,7 +1060,7 @@ fn format_workflow_output(tc: &DisplayToolCall) -> Vec<String> {
         lines.push(format!("  action {action}"));
 
         match action {
-            "create" => push_workflow_request_fields(
+            "create" => push_mana_request_fields(
                 &mut lines,
                 tc,
                 &[
@@ -1073,12 +1073,12 @@ fn format_workflow_output(tc: &DisplayToolCall) -> Vec<String> {
                     "labels",
                 ],
             ),
-            "update" => push_workflow_request_fields(
+            "update" => push_mana_request_fields(
                 &mut lines,
                 tc,
                 &["id", "status", "title", "description", "priority", "notes"],
             ),
-            "run" => push_workflow_request_fields(
+            "run" => push_mana_request_fields(
                 &mut lines,
                 tc,
                 &[
@@ -1096,19 +1096,19 @@ fn format_workflow_output(tc: &DisplayToolCall) -> Vec<String> {
                 ],
             ),
             "close" | "reopen" | "fail" => {
-                push_workflow_request_fields(&mut lines, tc, &["id", "reason", "unit"])
+                push_mana_request_fields(&mut lines, tc, &["id", "reason", "unit"])
             }
-            "notes_append" | "decision_add" | "decision_resolve" => push_workflow_request_fields(
+            "notes_append" | "decision_add" | "decision_resolve" => push_mana_request_fields(
                 &mut lines,
                 tc,
                 &["id", "notes", "description", "resolve_decisions", "unit"],
             ),
             "dep_add" | "dep_remove" => {
-                push_workflow_request_fields(&mut lines, tc, &["from_id", "dep_id"])
+                push_mana_request_fields(&mut lines, tc, &["from_id", "dep_id"])
             }
-            "delete" => push_workflow_request_fields(&mut lines, tc, &["id", "title"]),
-            "fact_create" => push_workflow_request_fields(&mut lines, tc, &["unit_id", "unit"]),
-            _ => push_workflow_request_fields(
+            "delete" => push_mana_request_fields(&mut lines, tc, &["id", "title"]),
+            "fact_create" => push_mana_request_fields(&mut lines, tc, &["unit_id", "unit"]),
+            _ => push_mana_request_fields(
                 &mut lines,
                 tc,
                 &["id", "run_id", "reason", "by", "status", "count"],
@@ -1116,7 +1116,7 @@ fn format_workflow_output(tc: &DisplayToolCall) -> Vec<String> {
         }
     }
 
-    if has_live_workflow_output(tc) {
+    if has_live_mana_output(tc) {
         push_blank_if_needed(&mut lines);
         lines.push("live output".to_string());
         if !tc.streaming_output.is_empty() {
@@ -1130,7 +1130,7 @@ fn format_workflow_output(tc: &DisplayToolCall) -> Vec<String> {
         if let Some(summary) = view.get("summary") {
             push_blank_if_needed(&mut lines);
             lines.push("summary".to_string());
-            lines.push(format!("  {}", format_workflow_summary(summary)));
+            lines.push(format!("  {}", format_mana_summary(summary)));
         }
 
         if let Some(units) = view.get("units").and_then(Value::as_array) {
@@ -1139,7 +1139,7 @@ fn format_workflow_output(tc: &DisplayToolCall) -> Vec<String> {
                 lines.push("units".to_string());
             }
             for unit in units {
-                push_workflow_unit_lines(&mut lines, unit);
+                push_mana_unit_lines(&mut lines, unit);
             }
         }
     } else if !tc.streaming_output.is_empty() {
@@ -1157,7 +1157,7 @@ fn format_workflow_output(tc: &DisplayToolCall) -> Vec<String> {
     }
 }
 
-fn has_live_workflow_output(tc: &DisplayToolCall) -> bool {
+fn has_live_mana_output(tc: &DisplayToolCall) -> bool {
     tc.output.is_none() && (!tc.streaming_output.is_empty() || !tc.streaming_lines.is_empty())
 }
 
@@ -1167,13 +1167,13 @@ fn push_blank_if_needed(lines: &mut Vec<String>) {
     }
 }
 
-fn push_workflow_request_fields(lines: &mut Vec<String>, tc: &DisplayToolCall, keys: &[&str]) {
+fn push_mana_request_fields(lines: &mut Vec<String>, tc: &DisplayToolCall, keys: &[&str]) {
     for key in keys {
-        push_workflow_detail_line(lines, key, tc.details.get(*key));
+        push_mana_detail_line(lines, key, tc.details.get(*key));
     }
 }
 
-fn format_workflow_summary(summary: &Value) -> String {
+fn format_mana_summary(summary: &Value) -> String {
     let total = summary
         .get("total_units")
         .and_then(Value::as_u64)
@@ -1211,7 +1211,7 @@ fn format_workflow_summary(summary: &Value) -> String {
     parts.join(" · ")
 }
 
-fn push_workflow_unit_lines(lines: &mut Vec<String>, unit: &Value) {
+fn push_mana_unit_lines(lines: &mut Vec<String>, unit: &Value) {
     let status = unit
         .get("status")
         .and_then(Value::as_str)
@@ -1246,7 +1246,7 @@ fn push_workflow_unit_lines(lines: &mut Vec<String>, unit: &Value) {
     }
 }
 
-fn push_workflow_detail_line(lines: &mut Vec<String>, key: &str, value: Option<&Value>) {
+fn push_mana_detail_line(lines: &mut Vec<String>, key: &str, value: Option<&Value>) {
     let Some(value) = value else {
         return;
     };
@@ -1515,10 +1515,10 @@ mod tests {
     }
 
     #[test]
-    fn format_workflow_output_renders_summary_and_units() {
+    fn format_mana_output_renders_summary_and_units() {
         let tc = DisplayToolCall {
             id: "1".into(),
-            name: "workflow".into(),
+            name: "mana".into(),
             args_summary: "run".into(),
             output: None,
             details: serde_json::json!({
@@ -1545,7 +1545,7 @@ mod tests {
             streaming_output: String::new(),
         };
 
-        let lines = format_workflow_output(&tc);
+        let lines = format_mana_output(&tc);
         assert_eq!(lines[0], "request");
         assert!(lines.iter().any(|l| l == "  action run"));
         assert!(lines.iter().any(|l| l == "  jobs 4"));
@@ -1563,10 +1563,10 @@ mod tests {
     }
 
     #[test]
-    fn format_workflow_output_renders_scope_target_and_runtime() {
+    fn format_mana_output_renders_scope_target_and_runtime() {
         let tc = DisplayToolCall {
             id: "run-1".into(),
-            name: "workflow".into(),
+            name: "mana".into(),
             args_summary: "run".into(),
             output: None,
             details: serde_json::json!({
@@ -1592,19 +1592,19 @@ mod tests {
             streaming_output: String::new(),
         };
 
-        let lines = format_workflow_output(&tc);
+        let lines = format_mana_output(&tc);
         assert!(lines.iter().any(|l| l == "  scope targets 1, 2"));
         assert!(lines.iter().any(|l| l == "  target explicit: 1, 2"));
         assert!(lines.iter().any(|l| l == "  runtime imp · sonnet"));
     }
 
     #[test]
-    fn format_workflow_output_renders_delta_actions() {
+    fn format_mana_output_renders_delta_actions() {
         let tc = DisplayToolCall {
             id: "delta-1".into(),
-            name: "workflow".into(),
+            name: "mana".into(),
             args_summary: "decision_add".into(),
-            output: Some("workflow delta: decision added on 1 · Test unit".into()),
+            output: Some("mana delta: decision added on 1 · Test unit".into()),
             details: serde_json::json!({
                 "action": "decision_add",
                 "id": "1",
@@ -1622,7 +1622,7 @@ mod tests {
             streaming_output: String::new(),
         };
 
-        let lines = format_workflow_output(&tc);
+        let lines = format_mana_output(&tc);
         assert!(lines.iter().any(|l| l == "  action decision_add"));
         assert!(lines.iter().any(|l| l == "  id 1"));
         assert!(lines
@@ -1631,7 +1631,7 @@ mod tests {
         assert!(lines.iter().any(|l| l == "  unit 1 · Test unit · open"));
         assert!(lines
             .iter()
-            .any(|l| l.contains("workflow delta: decision added on 1 · Test unit")));
+            .any(|l| l.contains("mana delta: decision added on 1 · Test unit")));
     }
 
     #[test]

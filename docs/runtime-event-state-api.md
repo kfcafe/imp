@@ -68,7 +68,7 @@ Current event coverage:
 - `verification_updated`
 - `evidence_updated`
 - `worktree_updated`
-- `workflow_updated`
+- `mana_updated`
 - `warning`
 - `error`
 - `timing`
@@ -113,7 +113,7 @@ pub struct RuntimeStateSnapshot {
     pub verification_gates: Vec<VerificationGate>,
     pub evidence_refs: Vec<RuntimeArtifactRef>,
     pub final_status: Option<RuntimeFinalStatus>,
-    pub workflow_refs: Vec<RuntimeWorkflowRef>,
+    pub mana_refs: Vec<RuntimeManaRef>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
     pub status_items: BTreeMap<String, String>,
@@ -130,7 +130,7 @@ The snapshot answers reusable frontend questions:
 - verification gates
 - evidence artifacts
 - worktree path/branch/diff/closeout state
-- workflow refs
+- mana refs
 - compact status items useful for CLI/TUI/GUI rendering
 
 ## RuntimeStateAccumulator
@@ -151,7 +151,7 @@ impl RuntimeStateAccumulator {
 The accumulator is deterministic and side-effect free. It tracks lifecycle,
 model/final status, active/completed tools, tool output deltas, approvals, policy
 decisions, verification gates, evidence refs, worktree scope/status/diff/closeout,
-workflow refs, warnings/errors, timing/recovery status, and unknown future events.
+mana refs, warnings/errors, timing/recovery status, and unknown future events.
 
 Unknown runtime events are recorded in `status_items["last-unknown-event"]` and do
 not change phase.

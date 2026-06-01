@@ -79,7 +79,7 @@ impl Default for FunctionInfo {
 }
 
 /// Combined extraction result from one or more files.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct ScanResult {
     pub types: BTreeMap<String, TypeInfo>,
     pub functions: BTreeMap<String, FunctionInfo>,

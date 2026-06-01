@@ -8,7 +8,7 @@ use crate::resources::{AgentsMd, Skill, SoulDoc};
 use crate::roles::Role;
 use crate::tools::ToolRegistry;
 
-/// A project fact from durable project context.
+/// A project fact from mana-core.
 #[derive(Debug, Clone)]
 pub struct Fact {
     pub text: String,
@@ -91,7 +91,7 @@ pub struct AssembleParams<'a> {
 /// - Layer 1.5: Environment context
 /// - Layer 2: Project context from AGENTS.md files
 /// - Layer 3: Skills index
-/// - Layer 4: Workflow facts (skipped if empty)
+/// - Layer 4: Mana facts (skipped if empty)
 /// - Layer 4.25: Compact project memory status (skipped if empty)
 /// - Layer 5: Task context (only in headless/task mode)
 /// - Layer 6: Agent memory (if present)
@@ -136,7 +136,7 @@ fn assemble_inner(p: &AssembleParams<'_>) -> AssembledPrompt {
         parts.push(skills_layer(p.skills, p.mode));
     }
 
-    // Layer 4: Workflow facts
+    // Layer 4: Mana facts
     if !p.facts.is_empty() {
         parts.push(facts_layer(p.facts));
     }
@@ -796,10 +796,10 @@ mod tests {
         assert!(!result.text.contains("Imp-work doctrine:"));
         assert!(!result
             .text
-            .contains("between-turn workflow update before the substantive reply"));
+            .contains("between-turn mana update before the substantive reply"));
         assert!(!result
             .text
-            .contains("include a concise workflow delta summary in the response"));
+            .contains("include a concise mana delta summary in the response"));
     }
 
     #[test]
@@ -820,7 +820,7 @@ mod tests {
         let mut reg = make_registry();
         reg.register(Arc::new(FakeTool {
             name: "workflow",
-            description: "Workflowge imp-native workflows",
+            description: "Manage imp-native workflows",
             readonly: false,
         }));
 
@@ -831,7 +831,7 @@ mod tests {
         assert!(!result
             .text
             .contains("Use native workflows when durable work"));
-        assert!(!result.text.contains("Use workflow when durable work"));
+        assert!(!result.text.contains("Use mana when durable work"));
     }
 
     #[test]
@@ -844,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_no_legacy_workflow_guidance_or_delegation_in_prompt() {
+    fn system_prompt_no_legacy_mana_guidance_or_delegation_in_prompt() {
         // Extended workflow guidance lives in native workflow affordances.
         // Verify large legacy prompt blocks no longer appear regardless of tool availability.
         let mut reg = make_registry();
@@ -854,18 +854,18 @@ mod tests {
             readonly: false,
         }));
         reg.register(Arc::new(FakeTool {
-            name: "workflow",
-            description: "Workflowge workflow work",
+            name: "mana",
+            description: "Manage mana work",
             readonly: false,
         }));
 
         let result = test_assemble(&reg, &[], &[], &[], None, None, None);
         assert!(
-            !result.text.contains("Workflow guidance:"),
-            "workflow guidance block should not appear in system prompt"
+            !result.text.contains("Mana guidance:"),
+            "mana guidance block should not appear in system prompt"
         );
         assert!(
-            !result.text.contains("## Workflow delegation"),
+            !result.text.contains("## Mana delegation"),
             "delegation guidance should not appear in system prompt"
         );
     }
@@ -1019,12 +1019,12 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_does_not_add_mode_aware_workflow_skill_trigger() {
+    fn system_prompt_does_not_add_mode_aware_mana_skill_trigger() {
         let reg = make_registry();
         let skills = vec![make_skill(
-            "workflow",
-            "Coordinate explicit work through workflows",
-            "/home/.imp/skills/workflow/SKILL.md",
+            "mana",
+            "Coordinate explicit work through mana",
+            "/home/.imp/skills/mana/SKILL.md",
         )];
         let result = assemble(&AssembleParams {
             tools: &reg,
@@ -1046,16 +1046,16 @@ mod tests {
         });
 
         assert!(!result.text.contains("- Trigger:"));
-        assert!(!result.text.contains("Load `workflow`"));
+        assert!(!result.text.contains("Load `mana`"));
     }
 
     #[test]
-    fn system_prompt_orchestrator_does_not_add_workflow_skill_trigger() {
+    fn system_prompt_orchestrator_does_not_add_mana_skill_trigger() {
         let reg = make_registry();
         let skills = vec![make_skill(
-            "workflow",
-            "Coordinate explicit work through workflows",
-            "/home/.imp/skills/workflow/SKILL.md",
+            "mana",
+            "Coordinate explicit work through mana",
+            "/home/.imp/skills/mana/SKILL.md",
         )];
         let result = assemble(&AssembleParams {
             tools: &reg,
@@ -1077,22 +1077,22 @@ mod tests {
         });
 
         assert!(!result.text.contains("- Trigger:"));
-        assert!(!result.text.contains("Load `workflow`"));
+        assert!(!result.text.contains("Load `mana`"));
     }
 
     #[test]
-    fn system_prompt_worker_does_not_add_workflow_basics_trigger() {
+    fn system_prompt_worker_does_not_add_mana_basics_trigger() {
         let reg = make_registry();
         let skills = vec![
             make_skill(
-                "workflow",
-                "Coordinate multi-step work through workflows",
-                "/home/.imp/skills/workflow/SKILL.md",
+                "mana",
+                "Coordinate multi-step work through mana",
+                "/home/.imp/skills/mana/SKILL.md",
             ),
             make_skill(
-                "workflow-basics",
-                "Use native workflow actions safely and efficiently",
-                "/home/.imp/skills/workflow-basics/SKILL.md",
+                "mana-basics",
+                "Use native mana actions safely and efficiently",
+                "/home/.imp/skills/mana-basics/SKILL.md",
             ),
         ];
         let result = assemble(&AssembleParams {
@@ -1115,11 +1115,11 @@ mod tests {
         });
 
         assert!(!result.text.contains("- Trigger:"));
-        assert!(!result.text.contains("Load `workflow-basics`"));
+        assert!(!result.text.contains("Load `mana-basics`"));
     }
 
     #[test]
-    fn system_prompt_omits_workflow_trigger_without_workflow_skill() {
+    fn system_prompt_omits_mana_trigger_without_mana_skill() {
         let reg = make_registry();
         let skills = vec![make_skill(
             "rust",
@@ -1149,12 +1149,12 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_reviewer_mode_omits_workflow_trigger() {
+    fn system_prompt_reviewer_mode_omits_mana_trigger() {
         let reg = make_registry();
         let skills = vec![make_skill(
-            "workflow",
-            "Coordinate multi-step work through workflows",
-            "/home/.imp/skills/workflow/SKILL.md",
+            "mana",
+            "Coordinate multi-step work through mana",
+            "/home/.imp/skills/mana/SKILL.md",
         )];
         let result = assemble(&AssembleParams {
             tools: &reg,
@@ -1185,7 +1185,7 @@ mod tests {
         assert!(!result.text.contains("Available skills"));
     }
 
-    // -- Layer 4: Workflow facts --
+    // -- Layer 4: Mana facts --
 
     #[test]
     fn system_prompt_facts_included() {

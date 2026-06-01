@@ -1,0 +1,247 @@
+schema: imp.workflow/v1
+id: workflow-api-surface
+title: Expose workflows through a local API
+status: planned
+kind: feature
+
+settings:
+  worktree: per_workflow
+  branch: imp/workflow/workflow-api-surface
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+
+spec:
+  goal: >
+    Expose imp workflows through a stable local API so apps can list, inspect,
+    run, update, and observe workflow state without duplicating workflow engine logic.
+  user_value: >
+    Let apps and dashboards be built around imp workflows as durable runtime objects,
+    while preserving the native workflow tool as the source of truth.
+  non_goals:
+    - Build a hosted or multi-tenant workflow service.
+    - Replace file-backed workflow storage in the first version.
+    - Add remote authentication or collaboration semantics before the local API is proven.
+  acceptance:
+    benchmark_passed_first:
+      text: End-to-end workflow benchmark passes before API implementation begins.
+      status: todo
+      checks: [benchmark_workflow_done]
+    api_contract_documented:
+      text: The first local API contract is documented with endpoints, request/response shapes, and error behavior.
+      status: todo
+      checks: [api_contract_written]
+    workflows_can_be_listed:
+      text: API can list workflow summaries.
+      status: todo
+      checks: [list_endpoint_verified]
+    workflow_can_be_read:
+      text: API can return full structured workflow state by id.
+      status: todo
+      checks: [read_endpoint_verified]
+    workflow_can_be_run:
+      text: API can ask the run engine for the next action.
+      status: todo
+      checks: [run_endpoint_verified]
+    workflow_can_be_updated_safely:
+      text: API updates use the same safe mutation and event append path as the native workflow tool.
+      status: todo
+      checks: [update_endpoint_verified, event_append_verified]
+    events_can_be_read:
+      text: API exposes workflow event history.
+      status: todo
+      checks: [events_endpoint_verified]
+    no_duplicate_engine_logic:
+      text: API delegates to existing workflow core rather than reimplementing parsing, validation, run, or update behavior.
+      status: todo
+      checks: [core_boundary_reviewed]
+  approval_required_for:
+    - changing spec.goal
+    - removing or weakening spec.acceptance
+    - removing required checks
+    - adding network-exposed or authenticated service behavior
+
+context:
+  benchmark_workflow:
+    file: .imp/workflows/benchmark-workflow-e2e/workflow.yaml
+    status: todo
+  workflow_core_code:
+    search: workflow parser validator run update event code
+    status: todo
+  existing_server_surfaces:
+    search: imp local server rpc http api surfaces
+    status: todo
+
+steps:
+  wait_for_benchmark:
+    kind: workflow
+    status: todo
+    workflow: benchmark-workflow-e2e
+    checks:
+      - benchmark_workflow_done
+
+  context:
+    kind: context
+    status: todo
+    depends_on: [wait_for_benchmark]
+    checks:
+      - workflow_core_inspected
+      - existing_server_surface_inspected
+
+  design_api_contract:
+    kind: plan
+    status: todo
+    depends_on: [context]
+    checks:
+      - api_contract_written
+
+  extract_workflow_core_boundary:
+    kind: build
+    status: todo
+    depends_on: [design_api_contract]
+    checks:
+      - core_boundary_reviewed
+
+  implement_local_api:
+    kind: build
+    status: todo
+    depends_on: [extract_workflow_core_boundary]
+    checks:
+      - list_endpoint_verified
+      - read_endpoint_verified
+      - run_endpoint_verified
+      - update_endpoint_verified
+      - events_endpoint_verified
+
+  add_api_tests:
+    kind: verify
+    status: todo
+    depends_on: [implement_local_api]
+    checks:
+      - api_tests_passed
+      - event_append_verified
+
+  dogfood_with_small_client:
+    kind: prototype
+    status: todo
+    depends_on: [add_api_tests]
+    checks:
+      - small_client_demo_recorded
+
+  review:
+    kind: review
+    status: todo
+    worker: reviewer
+    depends_on: [dogfood_with_small_client]
+    checks:
+      - results_rendered
+      - final_claims_validated
+
+  closeout:
+    kind: closeout
+    status: todo
+    depends_on: [review]
+    checks:
+      - required_checks_passed
+
+prototypes:
+  local_api_client:
+    question: Can a tiny app/client drive workflow list, read, run, update, and events through the API without shelling out?
+    hypothesis: A thin local API over the existing workflow core is enough for early apps and dashboards.
+    status: proposed
+    criteria:
+      - no duplicate engine logic
+      - clear errors
+      - event consistency
+      - app ergonomics
+
+checks:
+  benchmark_workflow_done:
+    kind: aggregate
+    status: pending
+  workflow_core_inspected:
+    kind: context
+    status: pending
+  existing_server_surface_inspected:
+    kind: context
+    status: pending
+  api_contract_written:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/workflow-api-surface/artifacts/api-contract.md
+  core_boundary_reviewed:
+    kind: review
+    status: pending
+  list_endpoint_verified:
+    kind: command
+    status: pending
+  read_endpoint_verified:
+    kind: command
+    status: pending
+  run_endpoint_verified:
+    kind: command
+    status: pending
+  update_endpoint_verified:
+    kind: command
+    status: pending
+  event_append_verified:
+    kind: command
+    status: pending
+  events_endpoint_verified:
+    kind: command
+    status: pending
+  api_tests_passed:
+    kind: command
+    status: pending
+  small_client_demo_recorded:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/workflow-api-surface/artifacts/small-client-demo.md
+  results_rendered:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/workflow-api-surface/results.md
+  final_claims_validated:
+    kind: closeout
+    status: pending
+  required_checks_passed:
+    kind: aggregate
+    status: pending
+
+workers:
+  parent:
+    role: orchestrator
+    writes: [workflow, results, docs]
+    writes_code: false
+  builder:
+    role: builder
+    writes: [code, tests]
+    worktree: workflow
+  verifier:
+    role: verifier
+    writes: []
+  reviewer:
+    role: reviewer
+    writes: [review_artifacts]
+
+results:
+  path: .imp/workflows/workflow-api-surface/results.md
+  required_claims:
+    - benchmark prerequisite result
+    - API contract summary
+    - implementation summary
+    - verification performed
+    - app/client dogfood result
+    - concerns and follow-up work
+
+closeout:
+  done:
+    requires:
+      - required_checks_passed
+      - final_claims_validated
+  allowed_terminal_statuses:
+    - done
+    - done_with_concerns
+    - blocked
+    - needs_context

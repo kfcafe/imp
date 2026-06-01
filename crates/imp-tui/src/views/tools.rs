@@ -228,6 +228,7 @@ impl DisplayToolCall {
             "prototype" => format_prototype_args(args),
             "git" => format_git_args(args),
             "web" => format_web_args(args),
+            "mana" => format_mana_args(args),
             _ => summarize_json_object(args),
         }
     }
@@ -484,6 +485,192 @@ fn first_edit_path(args: &Value) -> Option<&str> {
         .and_then(|edits| edits.iter().find_map(|edit| edit.get("path")?.as_str()))
 }
 
+fn format_mana_args(args: &Value) -> String {
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("?");
+    let mut fields = Vec::new();
+
+    match action {
+        "create" => {
+            push_field(
+                &mut fields,
+                "title",
+                args.get("title")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "priority",
+                args.get("priority").and_then(value_to_short_string),
+            );
+            push_field(
+                &mut fields,
+                "parent",
+                args.get("parent")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "verify",
+                args.get("verify")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "deps",
+                args.get("deps").and_then(Value::as_str).map(str::to_string),
+            );
+        }
+        "update" => {
+            push_field(
+                &mut fields,
+                "id",
+                args.get("id").and_then(Value::as_str).map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "status",
+                args.get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "title",
+                args.get("title")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "priority",
+                args.get("priority").and_then(value_to_short_string),
+            );
+            push_field(
+                &mut fields,
+                "notes",
+                args.get("notes")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+        }
+        "run" => {
+            push_field(
+                &mut fields,
+                "id",
+                args.get("id").and_then(Value::as_str).map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "jobs",
+                args.get("jobs").and_then(value_to_short_string),
+            );
+            push_field(
+                &mut fields,
+                "background",
+                args.get("background").and_then(value_to_short_string),
+            );
+            push_field(
+                &mut fields,
+                "dry_run",
+                args.get("dry_run").and_then(value_to_short_string),
+            );
+            push_field(
+                &mut fields,
+                "review",
+                args.get("review").and_then(value_to_short_string),
+            );
+        }
+        "show" | "close" | "claim" | "release" | "logs" | "tree" => {
+            push_field(
+                &mut fields,
+                "id",
+                args.get("id").and_then(Value::as_str).map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "run_id",
+                args.get("run_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "reason",
+                args.get("reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "by",
+                args.get("by").and_then(Value::as_str).map(str::to_string),
+            );
+        }
+        "list" => {
+            push_field(
+                &mut fields,
+                "status",
+                args.get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "parent",
+                args.get("parent")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+            push_field(
+                &mut fields,
+                "priority",
+                args.get("priority").and_then(value_to_short_string),
+            );
+            push_field(
+                &mut fields,
+                "all",
+                args.get("all").and_then(value_to_short_string),
+            );
+        }
+        "next" => {
+            push_field(
+                &mut fields,
+                "count",
+                args.get("count").and_then(value_to_short_string),
+            );
+        }
+        "status" | "agents" | "run_state" | "evaluate" => {
+            push_field(
+                &mut fields,
+                "run_id",
+                args.get("run_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            );
+        }
+        _ => {
+            for key in [
+                "id", "title", "status", "priority", "run_id", "reason", "count",
+            ] {
+                push_field(
+                    &mut fields,
+                    key,
+                    args.get(key).and_then(value_to_short_string),
+                );
+            }
+        }
+    }
+
+    if fields.is_empty() {
+        action.to_string()
+    } else {
+        format!("{action}  {}", fields.join("  "))
+    }
+}
+
 pub fn tool_display_icon(name: &str) -> &'static str {
     match name {
         "prototype" => "⚗",
@@ -497,6 +684,7 @@ pub fn tool_display_icon(name: &str) -> &'static str {
         "scan" => "⌕",
         "web" => "◎",
         "workflow" => "⚑",
+        "mana" => "•",
         _ => "•",
     }
 }
@@ -543,6 +731,14 @@ fn summarize_json_object(args: &Value) -> String {
         "{}".to_string()
     } else {
         fields.join("  ")
+    }
+}
+
+fn push_field(fields: &mut Vec<String>, key: &str, value: Option<String>) {
+    if let Some(value) = value {
+        if !value.is_empty() {
+            fields.push(format!("{key} {value}"));
+        }
     }
 }
 
@@ -736,6 +932,26 @@ mod tests {
             streaming_lines: Vec::new(),
             streaming_output: String::new(),
         }
+    }
+
+    #[test]
+    fn make_args_summary_formats_mana_compactly() {
+        let summary = DisplayToolCall::make_args_summary(
+            "mana",
+            &serde_json::json!({
+                "action": "create",
+                "title": "Fix hotkeys",
+                "priority": 1,
+                "verify": "cargo check -p imp-tui",
+                "deps": "1.2,1.3"
+            }),
+        );
+
+        assert!(summary.starts_with("create  "));
+        assert!(summary.contains("title Fix hotkeys"));
+        assert!(summary.contains("priority 1"));
+        assert!(summary.contains("verify cargo check -p imp-tui"));
+        assert!(summary.contains("deps 1.2,1.3"));
     }
 
     #[test]

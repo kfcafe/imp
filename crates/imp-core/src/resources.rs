@@ -622,22 +622,22 @@ mod tests {
     fn resource_discover_skills_project_overrides_user_by_name() {
         let dir = TempDir::new().unwrap();
         let user_dir = dir.path().join("config");
-        let user_skill = user_dir.join("skills").join("workflow");
+        let user_skill = user_dir.join("skills").join("mana");
         fs::create_dir_all(&user_skill).unwrap();
-        fs::write(user_skill.join("SKILL.md"), "# Workflow\n\nUser version.\n").unwrap();
+        fs::write(user_skill.join("SKILL.md"), "# Mana\n\nUser version.\n").unwrap();
 
         let project = dir.path().join("project");
-        let project_skill = project.join(".imp").join("skills").join("workflow");
+        let project_skill = project.join(".imp").join("skills").join("mana");
         fs::create_dir_all(&project_skill).unwrap();
         fs::write(
             project_skill.join("SKILL.md"),
-            "# Workflow\n\nProject version.\n",
+            "# Mana\n\nProject version.\n",
         )
         .unwrap();
 
         let skills = discover_skills(&project, &user_dir);
         assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].name, "workflow");
+        assert_eq!(skills[0].name, "mana");
         assert!(skills[0].description.contains("Project version"));
         assert_eq!(skills[0].path, project_skill.join("SKILL.md"));
     }

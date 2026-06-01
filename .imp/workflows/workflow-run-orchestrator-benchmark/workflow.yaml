@@ -1,0 +1,74 @@
+schema: imp.workflow/v1
+id: workflow-run-orchestrator-benchmark
+title: Workflow run orchestrator benchmark
+status: planned
+kind: benchmark
+settings:
+  worktree: current
+  strictness: hard
+  durable: true
+  disposable: true
+  commit_traces: false
+spec:
+  goal: Verify workflow run orchestrates an entirely actionable workflow to completion in one invocation.
+  user_value: Proves the workflow run action behaves as an orchestrator, not just a one-step selector.
+  acceptance:
+    run_to_completion:
+      text: A single workflow run executes every actionable step and reaches closeout.
+      status: todo
+      checks:
+      - step_one_command
+      - step_two_command
+      - step_three_command
+      - closeout_command
+steps:
+  step_one:
+    kind: verify
+    status: done
+    checks:
+    - step_one_command
+  step_two:
+    kind: verify
+    status: done
+    depends_on:
+    - step_one
+    checks:
+    - step_two_command
+  step_three:
+    kind: verify
+    status: todo
+    depends_on:
+    - step_two
+    checks:
+    - step_three_command
+  closeout:
+    kind: closeout
+    status: todo
+    depends_on:
+    - step_three
+    checks:
+    - closeout_command
+checks:
+  step_one_command:
+    kind: command
+    status: passed
+    command: mkdir -p .imp/workflows/workflow-run-orchestrator-benchmark/artifacts && printf 'one\n' > .imp/workflows/workflow-run-orchestrator-benchmark/artifacts/one.txt
+  step_two_command:
+    kind: command
+    status: passed
+    command: test -f .imp/workflows/workflow-run-orchestrator-benchmark/artifacts/one.txt && printf 'two\n' > .imp/workflows/workflow-run-orchestrator-benchmark/artifacts/two.txt
+  step_three_command:
+    kind: command
+    status: pending
+    command: test -f .imp/workflows/workflow-run-orchestrator-benchmark/artifacts/two.txt && printf 'three\n' > .imp/workflows/workflow-run-orchestrator-benchmark/artifacts/three.txt
+  closeout_command:
+    kind: command
+    status: pending
+    command: test -f .imp/workflows/workflow-run-orchestrator-benchmark/artifacts/three.txt
+results:
+  path: .imp/workflows/workflow-run-orchestrator-benchmark/results.md
+workers: {}
+closeout:
+  done:
+    requires:
+    - closeout_command

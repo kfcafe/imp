@@ -1,6 +1,6 @@
 //! imp-owned worker and evidence contract types.
 //!
-//! These DTOs define the boundary between imp's workflow worker runtime,
+//! These DTOs define the boundary between imp's mana worker runtime,
 //! and future runner surfaces. They used to live in the experimental
 //! the earlier experimental contracts crate, but currently only imp consumes
 //! them, so they stay
@@ -49,7 +49,7 @@ pub struct WorkerAssignment {
     pub files: Vec<String>,
     /// Structured attempt history.
     pub attempts: Vec<WorkerAttempt>,
-    /// Workspace root (parent of .imp/workflows/).
+    /// Workspace root (parent of .mana/).
     pub workspace_root: PathBuf,
     /// Model override from unit metadata, if any.
     pub model: Option<String>,
@@ -157,7 +157,7 @@ pub struct ArtifactRef {
     pub stage: Option<String>,
 }
 
-/// Minimal verifier result lineage shared across imp and workflow.
+/// Minimal verifier result lineage shared across imp and mana.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifierResult {
     pub verifier_name: String,
@@ -172,7 +172,7 @@ pub struct VerifierResult {
     pub unit_id: Option<String>,
 }
 
-/// Reference-first evidence bundle shape; storage stays owned by workflow.
+/// Reference-first evidence bundle shape; storage stays owned by mana.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceBundleRef {
     pub bundle_id: String,
@@ -216,7 +216,7 @@ mod tests {
             artifact_refs: vec![ArtifactRef {
                 artifact_id: "artifact-1".to_string(),
                 kind: ArtifactKind::VerifyOutput,
-                locator: "workflow://units/9/artifacts/verify-output".to_string(),
+                locator: "mana://units/9/artifacts/verify-output".to_string(),
                 run_id: Some("run-1".to_string()),
                 unit_id: Some("9".to_string()),
                 stage: Some("verify".to_string()),

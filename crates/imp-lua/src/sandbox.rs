@@ -83,8 +83,8 @@ impl LuaCallContext {
             lua_tool_loader: self.lua_tool_loader.clone(),
             mode: self.mode,
             read_max_lines: self.read_max_lines,
-            turn_workflow_review: Arc::new(std::sync::Mutex::new(
-                imp_core::workflow_review::TurnWorkflowReviewAccumulator::default(),
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                imp_core::mana_review::TurnManaReviewAccumulator::default(),
             )),
             run_policy: self.run_policy.clone(),
             config: Arc::clone(&self.config),

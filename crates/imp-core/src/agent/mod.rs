@@ -15,19 +15,24 @@ use imp_llm::provider::RetryPolicy;
 use crate::config::{AgentMode, Config, ContextConfig, ContinuePolicy};
 use crate::guardrails::{GuardrailConfig, GuardrailProfile};
 use crate::hooks::{HookBackgroundEvent, HookEvent, HookRunner};
+use crate::mana_review::TurnManaReview;
 use crate::policy::RunPolicy;
 use crate::roles::Role;
 use crate::tools::{LuaToolLoader, ToolRegistry};
 use crate::trace::TraceWriter;
 use crate::workflow::WorkflowContract;
-use crate::workflow_review::TurnWorkflowReview;
 
 mod autonomy;
 mod events;
 mod loop_policy;
 mod loop_state;
+mod mana_loop;
 mod subagent;
 mod workflow_integration;
+#[cfg(not(test))]
+pub(crate) use mana_loop::ManaPolicyDecision;
+#[cfg(test)]
+pub(crate) use mana_loop::{evaluate_mana_policy, ManaPolicyDecision};
 pub(super) use workflow_integration::orchestration_follow_up_text;
 mod recovery;
 mod run_loop;
@@ -63,8 +68,7 @@ mod turn_assessment;
 
 use autonomy::{failed_command_recovery_obligation, AutonomousObjective, ObligationLedger};
 use turn_assessment::{
-    ContinueRecommendation, PostTurnAssessment, RuntimeEvidence, TextFallbackEvidence,
-    WorkflowEvidence,
+    ContinueRecommendation, ManaEvidence, PostTurnAssessment, RuntimeEvidence, TextFallbackEvidence,
 };
 pub use turn_assessment::{NextActionAssessment, NextActionDebugView};
 
@@ -84,7 +88,7 @@ pub struct Agent {
     /// Optional auth store for automatic OAuth token refresh before LLM calls.
     pub auth_store: Option<std::sync::Arc<tokio::sync::Mutex<imp_llm::auth::AuthStore>>>,
     pub ui: Arc<dyn crate::ui::UserInterface>,
-    /// Context workflowgement thresholds (wired from Config via AgentBuilder).
+    /// Context management thresholds (wired from Config via AgentBuilder).
     pub context_config: ContextConfig,
     /// Retry policy for transient LLM stream failures.
     pub retry_policy: RetryPolicy,
@@ -126,7 +130,7 @@ pub struct Agent {
     pub config: Arc<Config>,
     /// Per-run tool/write policy layered on top of AgentMode.
     pub run_policy: RunPolicy,
-    /// Optional host/workflow runtime layer for workflow-backed obligations.
+    /// Optional host/workflow runtime layer for mana-backed obligations.
     pub(crate) workflow_layer: workflow_integration::WorkflowRuntimeLayer,
 
     /// Verification gates declared for this run.
@@ -261,16 +265,16 @@ impl Agent {
         message: &AssistantMessage,
         tool_results: &[imp_llm::ToolResultMessage],
         _used_tools: bool,
-        workflow_review: &TurnWorkflowReview,
+        mana_review: &TurnManaReview,
     ) -> PostTurnAssessment {
         let repeated_action = tool_results_indicate_repeated_action(tool_results);
         let runtime_execution_stop_reason =
             tool_results_indicate_execution_blocker(tool_results, self.mode);
         let work_completed = tool_results_indicate_work_completed(tool_results, self.mode);
-        let workflow_signals = self.workflow_post_turn_signals(tool_results, workflow_review);
+        let workflow_signals = self.workflow_post_turn_signals(tool_results, mana_review);
         let planning_only_progress =
             workflow_signals.execution_debt && !workflow_signals.execution_evidence;
-        let workflow_stop_reason = workflow_signals.stop_reason;
+        let mana_stop_reason = workflow_signals.stop_reason;
         let planner_text_stop_reason = None;
 
         let failed_bash_needs_recovery =
@@ -341,8 +345,8 @@ impl Agent {
                 planning_only_progress,
                 orchestration_started: workflow_signals.orchestration_started,
             },
-            workflow: WorkflowEvidence {
-                stop_reason: workflow_stop_reason,
+            mana: ManaEvidence {
+                stop_reason: mana_stop_reason,
             },
             text_fallback: TextFallbackEvidence {
                 planner_stop_reason: planner_text_stop_reason,
@@ -370,7 +374,7 @@ impl Agent {
             ContinueReason::ToolResultsNeedInterpretation
             | ContinueReason::QueuedUserFollowUp
             | ContinueReason::OrchestrationProgress
-            | ContinueReason::WorkflowProgress
+            | ContinueReason::ManaWorkflowProgress
             | ContinueReason::WorkflowCloseout
             | ContinueReason::WorkflowBootstrap
             | ContinueReason::WorkflowDecomposition => {}
@@ -410,7 +414,7 @@ impl Agent {
             .workflow_contract()
             .id
             .as_ref()
-            .or(self.workflow_contract().workflow_unit_ref.as_ref())
+            .or(self.workflow_contract().mana_unit_ref.as_ref())
         {
             trace_event = trace_event.with_workflow_id(workflow_id.clone());
         }
@@ -520,9 +524,9 @@ fn assistant_message_text(message: &AssistantMessage) -> String {
         .join("\n")
 }
 
-fn assistant_message_contains_workflow_tool_call(message: &AssistantMessage) -> bool {
+fn assistant_message_contains_mana_tool_call(message: &AssistantMessage) -> bool {
     message.content.iter().any(|block| match block {
-        ContentBlock::ToolCall { name, .. } => name == "workflow",
+        ContentBlock::ToolCall { name, .. } => name == "mana",
         _ => false,
     })
 }
@@ -553,7 +557,7 @@ fn should_queue_confidence_continue_follow_up(
         return false;
     }
 
-    if !assistant_message_contains_workflow_tool_call(message) {
+    if !assistant_message_contains_mana_tool_call(message) {
         return false;
     }
 
@@ -760,7 +764,7 @@ fn tool_results_indicate_work_completed(
             return true;
         }
 
-        if result.tool_name == "workflow" {
+        if result.tool_name == "mana" {
             continue;
         }
 
@@ -821,6 +825,25 @@ fn extract_file_path(cwd: &Path, args: &serde_json::Value) -> Option<PathBuf> {
         Some(path)
     } else {
         Some(cwd.join(path))
+    }
+}
+
+fn mana_bash_equivalent_hint(command: &str) -> Option<&'static str> {
+    let trimmed = command.trim();
+    let rest = trimmed.strip_prefix("mana")?;
+    if rest.chars().next().is_some_and(|c| !c.is_whitespace()) {
+        return None;
+    }
+
+    let action = rest.split_whitespace().next().unwrap_or("");
+    match action {
+        "status" | "list" | "ls" | "show" | "read" | "create" | "close" | "update" | "run"
+        | "run_state" | "evaluate" | "agents" | "logs" | "next" | "claim" | "release" | "tree" => {
+            Some(
+                "Mana is retired from the default workflow. Use native workflow actions instead, starting with `workflow(action=\"list\")`, `workflow(action=\"show\")`, or `workflow(action=\"run\")` as appropriate.",
+            )
+        }
+        _ => None,
     }
 }
 
@@ -990,7 +1013,7 @@ mod tests {
     fn workflow_closeout_does_not_override_repeated_action_finish() {
         use crate::agent::loop_policy::{DefaultLoopPolicy, LoopPolicy};
         use crate::agent::turn_assessment::{
-            PostTurnAssessment, RuntimeEvidence, TextFallbackEvidence, WorkflowEvidence,
+            ManaEvidence, PostTurnAssessment, RuntimeEvidence, TextFallbackEvidence,
         };
         use crate::agent::workflow_integration::workflow_layer_may_override_finish;
 
@@ -1004,7 +1027,7 @@ mod tests {
                 planning_only_progress: false,
                 orchestration_started: false,
             },
-            workflow: WorkflowEvidence { stop_reason: None },
+            mana: ManaEvidence { stop_reason: None },
             text_fallback: TextFallbackEvidence {
                 planner_stop_reason: None,
                 execution_stop_reason: None,
@@ -1033,7 +1056,7 @@ mod tests {
         agent
             .workflow_layer
             .controller_mut()
-            .record_workflow_graph_changed();
+            .record_mana_graph_changed();
 
         let decision = LoopDecision::Finish {
             status: RunFinalStatus::Done {
@@ -1528,15 +1551,15 @@ mod tests {
     }
 
     #[test]
-    fn agent_queues_workflow_hint_for_planner_requests() {
+    fn agent_queues_mana_hint_for_planner_requests() {
         let provider = Arc::new(MockProvider::new(vec![
-            text_response("Loaded workflow skill", 100, 20),
+            text_response("Loaded mana skill", 100, 20),
             text_response("Done", 120, 25),
         ]));
 
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.set_workflow_skill_available(true);
+        agent.set_workflow_mana_skill_available(true);
         agent.mode = AgentMode::Planner;
 
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1564,19 +1587,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_queues_workflow_externalization_follow_up_after_planning_turn() {
+    async fn agent_queues_mana_externalization_follow_up_after_planning_turn() {
         let provider = Arc::new(MockProvider::new(vec![
             text_response(
                 "Here is the rollout decomposition: split this into phases and tasks, add dependencies, and define verification steps.",
                 100,
                 20,
             ),
-            text_response("Externalized into workflow.", 120, 25),
+            text_response("Externalized into mana.", 120, 25),
         ]));
 
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.set_workflow_skill_available(true);
+        agent.set_workflow_mana_skill_available(true);
         agent.mode = AgentMode::Planner;
 
         agent
@@ -1611,7 +1634,7 @@ mod tests {
 
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.set_workflow_skill_available(true);
+        agent.set_workflow_mana_skill_available(true);
         agent.mode = AgentMode::Planner;
 
         agent
@@ -1653,7 +1676,7 @@ mod tests {
         )
         .0;
         agent.mode = AgentMode::Planner;
-        agent.set_workflow_skill_available(true);
+        agent.set_workflow_mana_skill_available(true);
         assert!(!agent.should_queue_workflow_externalization_for_test(
             &explanatory,
             "How do workflows differ from skills or subagents?",
@@ -1690,7 +1713,7 @@ mod tests {
             },
             &[imp_llm::ToolResultMessage {
                 tool_call_id: "call_verify".to_string(),
-                tool_name: "workflow".to_string(),
+                tool_name: "mana".to_string(),
                 content: vec![ContentBlock::Text {
                     text: "Verify failed".to_string(),
                 }],
@@ -1703,7 +1726,7 @@ mod tests {
                 timestamp: 0,
             }],
             true,
-            &TurnWorkflowReview::no_change(0),
+            &TurnManaReview::no_change(0),
         );
 
         let debug = assessment.debug_view();
@@ -1731,7 +1754,7 @@ mod tests {
                 planning_only_progress: false,
                 orchestration_started: false,
             },
-            workflow: WorkflowEvidence { stop_reason: None },
+            mana: ManaEvidence { stop_reason: None },
             text_fallback: TextFallbackEvidence {
                 planner_stop_reason: None,
                 execution_stop_reason: None,
@@ -2182,6 +2205,79 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mana-tool")]
+    #[tokio::test]
+    async fn emits_turn_assessment_event_for_continue_recommendation() {
+        let provider = Arc::new(MockProvider::new(vec![
+            vec![
+                StreamEvent::MessageStart {
+                    model: "test-model".to_string(),
+                },
+                StreamEvent::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "mana".to_string(),
+                    arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
+                },
+                StreamEvent::TextDelta {
+                    text: "Done. Updated mana and next step is ready to continue.".to_string(),
+                },
+                StreamEvent::MessageEnd {
+                    message: AssistantMessage {
+                        content: vec![
+                            ContentBlock::ToolCall {
+                                id: "call_1".to_string(),
+                                name: "mana".to_string(),
+                                arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
+                            },
+                            ContentBlock::Text {
+                                text: "Done. Updated mana and next step is ready to continue."
+                                    .to_string(),
+                            },
+                        ],
+                        usage: Some(Usage {
+                            input_tokens: 100,
+                            output_tokens: 20,
+                            cache_read_tokens: 0,
+                            cache_write_tokens: 0,
+                        }),
+                        stop_reason: LlmStopReason::ToolUse,
+                        timestamp: 1000,
+                    },
+                },
+            ],
+            text_response("Stopped after visible mana turn.", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Planner;
+        agent.continue_policy = ContinuePolicy::Balanced;
+        agent
+            .tools
+            .register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent.run("Do the next thing".to_string()).await.unwrap();
+        drop(agent);
+        let events = events_task.await.unwrap();
+
+        let assessment = events.iter().find_map(|event| match event {
+            AgentEvent::TurnAssessment { assessment, .. } => Some(assessment),
+            _ => None,
+        });
+
+        let assessment = assessment.expect("turn assessment emitted");
+        let recommendation = assessment
+            .continue_recommendation
+            .as_ref()
+            .expect("continue recommendation present");
+        assert_eq!(recommendation.reason, "high_confidence_visible_next_step");
+        assert!(matches!(
+            assessment.chosen_action,
+            NextActionDebugView::Continue { .. }
+        ));
+    }
+
     #[test]
     fn post_turn_assessment_prefers_execution_blocker_over_completion() {
         let assessment = PostTurnAssessment {
@@ -2194,7 +2290,7 @@ mod tests {
                 planning_only_progress: false,
                 orchestration_started: false,
             },
-            workflow: WorkflowEvidence {
+            mana: ManaEvidence {
                 stop_reason: Some(StopReason::DecompositionCompleted),
             },
             text_fallback: TextFallbackEvidence {
@@ -2227,7 +2323,7 @@ mod tests {
                 planning_only_progress: false,
                 orchestration_started: false,
             },
-            workflow: WorkflowEvidence { stop_reason: None },
+            mana: ManaEvidence { stop_reason: None },
             text_fallback: TextFallbackEvidence {
                 planner_stop_reason: None,
                 execution_stop_reason: None,
@@ -2259,7 +2355,7 @@ mod tests {
                 planning_only_progress: false,
                 orchestration_started: false,
             },
-            workflow: WorkflowEvidence { stop_reason: None },
+            mana: ManaEvidence { stop_reason: None },
             text_fallback: TextFallbackEvidence {
                 planner_stop_reason: None,
                 execution_stop_reason: None,
@@ -2280,10 +2376,10 @@ mod tests {
     }
 
     #[test]
-    fn workflow_planning_without_execution_creates_execution_debt_follow_up() {
+    fn mana_planning_without_execution_creates_execution_debt_follow_up() {
         let result = imp_llm::ToolResultMessage {
-            tool_call_id: "call_workflow".to_string(),
-            tool_name: "workflow".to_string(),
+            tool_call_id: "call_mana".to_string(),
+            tool_name: "mana".to_string(),
             content: vec![ContentBlock::Text {
                 text: "Created task".to_string(),
             }],
@@ -2334,7 +2430,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let artifacts = crate::storage::project_run_artifacts(temp.path(), "run_resume").unwrap();
         let mut controller = crate::workflow::WorkflowRunController::new();
-        controller.record_workflow_graph_changed();
+        controller.record_mana_graph_changed();
         controller
             .save_to_path(&artifacts.workflow_controller_path())
             .unwrap();
@@ -2351,10 +2447,10 @@ mod tests {
     }
 
     #[test]
-    fn workflow_run_status_result_extracts_terminal_status() {
+    fn mana_run_status_result_extracts_terminal_status() {
         let result = imp_llm::ToolResultMessage {
-            tool_call_id: "call_workflow".to_string(),
-            tool_name: "workflow".to_string(),
+            tool_call_id: "call_mana".to_string(),
+            tool_name: "mana".to_string(),
             content: vec![ContentBlock::Text {
                 text: "run done".to_string(),
             }],
@@ -2369,7 +2465,7 @@ mod tests {
         };
 
         assert_eq!(
-            crate::agent::workflow_integration::workflow_run_status_from_result(&result),
+            crate::agent::workflow_integration::mana_run_status_from_result(&result),
             Some((
                 "run-42".into(),
                 crate::workflow::WorkflowChildRunStatus::Done
@@ -2397,12 +2493,12 @@ mod tests {
     }
 
     #[test]
-    fn workflow_run_result_extracts_run_id_for_supervision() {
+    fn mana_run_result_extracts_run_id_for_supervision() {
         let result = imp_llm::ToolResultMessage {
-            tool_call_id: "call_workflow".to_string(),
-            tool_name: "workflow".to_string(),
+            tool_call_id: "call_mana".to_string(),
+            tool_name: "mana".to_string(),
             content: vec![ContentBlock::Text {
-                text: "Started native workflow orchestration".to_string(),
+                text: "Started native mana orchestration".to_string(),
             }],
             is_error: false,
             details: serde_json::json!({ "action": "run", "run_id": "run-42" }),
@@ -2424,17 +2520,17 @@ mod tests {
     }
 
     #[test]
-    fn workflow_run_assessment_prefers_supervision_over_work_completed() {
+    fn mana_run_assessment_prefers_supervision_over_work_completed() {
         let agent = Agent::new(
             test_model(Arc::new(MockProvider::new(vec![]))),
             PathBuf::from("/tmp"),
         )
         .0;
         let result = imp_llm::ToolResultMessage {
-            tool_call_id: "call_workflow".to_string(),
-            tool_name: "workflow".to_string(),
+            tool_call_id: "call_mana".to_string(),
+            tool_name: "mana".to_string(),
             content: vec![ContentBlock::Text {
-                text: "Started native workflow orchestration".to_string(),
+                text: "Started native mana orchestration".to_string(),
             }],
             is_error: false,
             details: serde_json::json!({ "action": "run", "run_id": "run-42" }),
@@ -2453,7 +2549,7 @@ mod tests {
             &message,
             std::slice::from_ref(&result),
             true,
-            &TurnWorkflowReview::no_change(0),
+            &TurnManaReview::no_change(0),
         );
 
         assert!(assessment.runtime.orchestration_started);
@@ -2463,7 +2559,7 @@ mod tests {
                 prompt: agent
                     .workflow_continue_recommendation(&agent.workflow_post_turn_signals(
                         std::slice::from_ref(&result),
-                        &TurnWorkflowReview::no_change(0),
+                        &TurnManaReview::no_change(0),
                     ))
                     .expect("workflow recommendation")
                     .prompt,
@@ -2500,7 +2596,7 @@ mod tests {
     fn tool_results_indicate_execution_blocker_detects_failed_verify() {
         let result = imp_llm::ToolResultMessage {
             tool_call_id: "call_verify".to_string(),
-            tool_name: "workflow".to_string(),
+            tool_name: "mana".to_string(),
             content: vec![ContentBlock::Text {
                 text: "Verify failed".to_string(),
             }],
@@ -2694,10 +2790,10 @@ mod tests {
     }
 
     #[test]
-    fn workflow_close_is_workflow_progress_not_runtime_completion() {
+    fn mana_close_is_workflow_progress_not_runtime_completion() {
         let result = imp_llm::ToolResultMessage {
-            tool_call_id: "call_workflow".to_string(),
-            tool_name: "workflow".to_string(),
+            tool_call_id: "call_mana".to_string(),
+            tool_name: "mana".to_string(),
             content: vec![ContentBlock::Text {
                 text: "Closed task".to_string(),
             }],
@@ -2759,7 +2855,7 @@ mod tests {
     fn tool_results_indicate_work_completed_detects_closed_unit_details() {
         let result = imp_llm::ToolResultMessage {
             tool_call_id: "call_close".to_string(),
-            tool_name: "workflow".to_string(),
+            tool_name: "mana".to_string(),
             content: vec![ContentBlock::Text {
                 text: "Closed unit 1".to_string(),
             }],
@@ -2784,11 +2880,11 @@ mod tests {
     }
 
     #[test]
-    fn workflow_review_needs_decision_maps_to_user_blocker() {
-        let review = TurnWorkflowReview {
+    fn mana_review_needs_decision_maps_to_user_blocker() {
+        let review = TurnManaReview {
             turn_index: 0,
-            state: crate::workflow_review::WorkflowReviewState::NeedsDecision,
-            scope: crate::workflow_review::WorkflowReviewScope::default(),
+            state: crate::mana_review::ManaReviewState::NeedsDecision,
+            scope: crate::mana_review::ManaReviewScope::default(),
             anchor_unit: None,
             touched_units: Vec::new(),
             proposed_children: Vec::new(),
@@ -2814,26 +2910,26 @@ mod tests {
     }
 
     #[test]
-    fn workflow_review_changed_with_planner_children_maps_to_decomposition_completed() {
-        let review = TurnWorkflowReview {
+    fn mana_review_changed_with_planner_children_maps_to_decomposition_completed() {
+        let review = TurnManaReview {
             turn_index: 0,
-            state: crate::workflow_review::WorkflowReviewState::Changed,
-            scope: crate::workflow_review::WorkflowReviewScope::default(),
+            state: crate::mana_review::ManaReviewState::Changed,
+            scope: crate::mana_review::ManaReviewScope::default(),
             anchor_unit: None,
             touched_units: Vec::new(),
-            proposed_children: vec![crate::workflow_review::TurnWorkflowProposedChild {
-                unit: crate::workflow_review::WorkflowUnitRef::new(
+            proposed_children: vec![crate::mana_review::TurnManaProposedChild {
+                unit: crate::mana_review::ManaUnitRef::new(
                     "28.6.1",
                     "child",
                     Some("job".to_string()),
                 ),
-                parent: crate::workflow_review::WorkflowUnitRef::new(
+                parent: crate::mana_review::ManaUnitRef::new(
                     "28.6",
                     "parent",
                     Some("epic".to_string()),
                 ),
-                child_kind: crate::workflow_review::WorkflowReviewUnitKind::Job,
-                child_origin: crate::workflow_review::WorkflowUnitOrigin::CreatedInTurn,
+                child_kind: crate::mana_review::ManaReviewUnitKind::Job,
+                child_origin: crate::mana_review::ManaUnitOrigin::CreatedInTurn,
             }],
             material_field_changes: Vec::new(),
             notes_appended: Vec::new(),
@@ -2859,7 +2955,7 @@ mod tests {
     #[tokio::test]
     async fn planner_stops_after_decomposition_is_externalized() {
         let provider = Arc::new(MockProvider::new(vec![text_response(
-            "Externalized into workflow. Plan is complete and ready for handoff.",
+            "Externalized into mana. Plan is complete and ready for handoff.",
             100,
             20,
         )]));
@@ -2867,7 +2963,7 @@ mod tests {
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.mode = AgentMode::Planner;
-        agent.set_workflow_skill_available(true);
+        agent.set_workflow_mana_skill_available(true);
 
         agent.run("Plan the rollout".to_string()).await.unwrap();
 
@@ -2897,7 +2993,7 @@ mod tests {
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.mode = AgentMode::Planner;
-        agent.set_workflow_skill_available(true);
+        agent.set_workflow_mana_skill_available(true);
 
         agent.run("Plan the rollout".to_string()).await.unwrap();
 
@@ -2978,14 +3074,190 @@ mod tests {
             user_texts.iter().any(|text| {
                 text.contains("You have recorded or planned work")
                     || text.contains("Workflow state changed")
-                    || text.contains("Workflow graph state changed")
+                    || text.contains("Mana graph state changed")
             }),
             "expected execution-debt follow-up after workflow planning, got {user_texts:?}"
         );
     }
 
+    #[cfg(feature = "mana-tool")]
     #[tokio::test]
-    async fn agent_queues_workflow_basics_hint_for_worker_workflow_requests() {
+    async fn agent_queues_confidence_continue_follow_up_after_visible_mana_turn() {
+        let provider = Arc::new(MockProvider::new(vec![
+            vec![
+                StreamEvent::MessageStart {
+                    model: "test-model".to_string(),
+                },
+                StreamEvent::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "mana".to_string(),
+                    arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
+                },
+                StreamEvent::TextDelta {
+                    text: "Done. Updated mana and next step is ready to continue.".to_string(),
+                },
+                StreamEvent::MessageEnd {
+                    message: AssistantMessage {
+                        content: vec![
+                            ContentBlock::ToolCall {
+                                id: "call_1".to_string(),
+                                name: "mana".to_string(),
+                                arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
+                            },
+                            ContentBlock::Text {
+                                text: "Done. Updated mana and next step is ready to continue."
+                                    .to_string(),
+                            },
+                        ],
+                        usage: Some(Usage {
+                            input_tokens: 100,
+                            output_tokens: 20,
+                            cache_read_tokens: 0,
+                            cache_write_tokens: 0,
+                        }),
+                        stop_reason: LlmStopReason::ToolUse,
+                        timestamp: 1000,
+                    },
+                },
+            ],
+            text_response("Continuing.", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Planner;
+        agent.continue_policy = ContinuePolicy::Balanced;
+        agent
+            .tools
+            .register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        agent.run("Do the next thing".to_string()).await.unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts.len(), 2);
+        assert!(user_texts[1].contains("Confidence is high"));
+    }
+
+    #[cfg(feature = "mana-tool")]
+    #[tokio::test]
+    async fn agent_does_not_queue_confidence_continue_when_policy_disabled() {
+        let provider = Arc::new(MockProvider::new(vec![
+            vec![
+                StreamEvent::MessageStart {
+                    model: "test-model".to_string(),
+                },
+                StreamEvent::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "mana".to_string(),
+                    arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
+                },
+                StreamEvent::TextDelta {
+                    text: "Done. Updated mana and next step is ready to continue.".to_string(),
+                },
+                StreamEvent::MessageEnd {
+                    message: AssistantMessage {
+                        content: vec![
+                            ContentBlock::ToolCall {
+                                id: "call_1".to_string(),
+                                name: "mana".to_string(),
+                                arguments: serde_json::json!({"action": "update", "id": "1", "notes": "done"}),
+                            },
+                            ContentBlock::Text {
+                                text: "Done. Updated mana and next step is ready to continue."
+                                    .to_string(),
+                            },
+                        ],
+                        usage: Some(Usage {
+                            input_tokens: 100,
+                            output_tokens: 20,
+                            cache_read_tokens: 0,
+                            cache_write_tokens: 0,
+                        }),
+                        stop_reason: LlmStopReason::ToolUse,
+                        timestamp: 1000,
+                    },
+                },
+            ],
+            text_response("Stopped after visible mana turn.", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Planner;
+        agent.continue_policy = ContinuePolicy::Disabled;
+        agent
+            .tools
+            .register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        agent.run("Do the next thing".to_string()).await.unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts, vec!["Do the next thing".to_string()]);
+    }
+
+    #[cfg(feature = "mana-tool")]
+    #[tokio::test]
+    async fn agent_does_not_queue_externalization_follow_up_after_mana_tool_turn() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_1",
+                "mana",
+                serde_json::json!({"action": "status"}),
+                100,
+                20,
+            ),
+            text_response("Done after mana", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.set_workflow_mana_skill_available(true);
+        agent.mode = AgentMode::Planner;
+        agent
+            .tools
+            .register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        agent.run("Plan the rollout".to_string()).await.unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts, vec!["Plan the rollout".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn agent_queues_mana_basics_hint_for_worker_mana_requests() {
         let provider = Arc::new(MockProvider::new(vec![
             text_response("Loaded basics skill", 100, 20),
             text_response("Done", 120, 25),
@@ -2993,11 +3265,11 @@ mod tests {
 
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.set_workflow_basics_skill_available(true);
+        agent.set_workflow_mana_basics_skill_available(true);
         agent.mode = AgentMode::Worker;
 
         agent
-            .run("Check workflow status and logs for my unit".to_string())
+            .run("Check mana status and logs for my unit".to_string())
             .await
             .unwrap();
 
@@ -3014,16 +3286,16 @@ mod tests {
             .collect();
 
         assert_eq!(user_texts.len(), 1);
-        assert_eq!(user_texts[0], "Check workflow status and logs for my unit");
+        assert_eq!(user_texts[0], "Check mana status and logs for my unit");
     }
 
     #[tokio::test]
-    async fn agent_does_not_queue_workflow_hint_without_matching_signal() {
+    async fn agent_does_not_queue_mana_hint_without_matching_signal() {
         let provider = Arc::new(MockProvider::new(vec![text_response("No nudge", 100, 20)]));
 
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.set_workflow_skill_available(true);
+        agent.set_workflow_mana_skill_available(true);
         agent.mode = AgentMode::Planner;
 
         agent
@@ -3050,7 +3322,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_does_not_queue_workflow_basics_hint_when_no_tools_available() {
+    async fn agent_does_not_queue_mana_basics_hint_when_no_tools_available() {
         let provider = Arc::new(MockProvider::new(vec![text_response(
             "Loaded basics skill",
             100,
@@ -3059,12 +3331,12 @@ mod tests {
 
         let model = test_model(provider);
         let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
-        agent.set_workflow_basics_skill_available(true);
+        agent.set_workflow_mana_basics_skill_available(true);
         agent.mode = AgentMode::Worker;
         agent.tools.retain(|_| false);
 
         agent
-            .run("Check workflow status and logs for my unit".to_string())
+            .run("Check mana status and logs for my unit".to_string())
             .await
             .unwrap();
 
@@ -3082,7 +3354,7 @@ mod tests {
 
         assert_eq!(
             user_texts,
-            vec!["Check workflow status and logs for my unit".to_string()]
+            vec!["Check mana status and logs for my unit".to_string()]
         );
     }
 
@@ -3092,13 +3364,11 @@ mod tests {
         let model = test_model(provider);
         let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
         agent.mode = AgentMode::Worker;
-        agent.set_workflow_basics_skill_available(true);
+        agent.set_workflow_mana_basics_skill_available(true);
         agent.tools.retain(|_| false);
 
         let events_task = tokio::spawn(collect_events(handle));
-        let result = agent
-            .run("Check workflow status and finish".to_string())
-            .await;
+        let result = agent.run("Check mana status and finish".to_string()).await;
         drop(agent);
 
         assert!(result.is_ok());
@@ -3633,6 +3903,82 @@ mod tests {
 
     // ── Test 4: Cancel command mid-run ─────────────────────────────
 
+    #[cfg(feature = "mana-tool")]
+    #[tokio::test]
+    async fn execution_stops_after_failed_verify_tool_result_without_blocked_text() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_verify",
+                "mana",
+                serde_json::json!({"action": "verify", "id": "1"}),
+                100,
+                20,
+            ),
+            text_response("Verify failed.", 120, 20),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Full;
+        agent
+            .tools
+            .register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        agent.run("Verify the unit".to_string()).await.unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts, vec!["Verify the unit".to_string()]);
+    }
+
+    #[cfg(feature = "mana-tool")]
+    #[tokio::test]
+    async fn execution_stops_after_mana_close_tool_result_without_done_text() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_close",
+                "mana",
+                serde_json::json!({"action": "close", "id": "1"}),
+                100,
+                20,
+            ),
+            text_response("Unit closed.", 120, 20),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, _handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.mode = AgentMode::Full;
+        agent
+            .tools
+            .register(Arc::new(crate::tools::mana::ManaTool::default()));
+
+        agent.run("Close the unit".to_string()).await.unwrap();
+
+        let user_texts: Vec<String> = agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(user_texts, vec!["Close the unit".to_string()]);
+    }
+
     #[tokio::test]
     async fn execution_does_not_stop_after_work_completed_text() {
         let provider = Arc::new(MockProvider::new(vec![
@@ -3677,7 +4023,7 @@ mod tests {
                         .unwrap(),
                     &[],
                     false,
-                    &TurnWorkflowReview::no_change(0),
+                    &TurnManaReview::no_change(0),
                 )
                 .text_fallback
                 .execution_stop_reason,
@@ -3729,7 +4075,7 @@ mod tests {
                         .unwrap(),
                     &[],
                     false,
-                    &TurnWorkflowReview::no_change(0),
+                    &TurnManaReview::no_change(0),
                 )
                 .text_fallback
                 .execution_stop_reason,
@@ -3850,8 +4196,65 @@ mod tests {
         assert!(matches!(result, Err(crate::error::Error::Cancelled)));
     }
 
+    #[test]
+    fn mana_bash_equivalent_hint_handles_release_and_tree() {
+        assert!(mana_bash_equivalent_hint("mana release 1").is_some());
+        assert!(mana_bash_equivalent_hint("mana tree").is_some());
+    }
+
+    #[test]
+    fn mana_bash_equivalent_hint_ignores_non_mana_prefixes() {
+        assert!(mana_bash_equivalent_hint("manatee status").is_none());
+        assert!(mana_bash_equivalent_hint("./mana status").is_none());
+    }
+
     #[tokio::test]
-    async fn agent_allows_non_workflow_bash_commands() {
+    async fn agent_blocks_bash_mana_when_native_action_exists() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_call_response(
+                "call_1",
+                "bash",
+                serde_json::json!({"command": "mana status", "timeout": 5}),
+                100,
+                20,
+            ),
+            text_response("Recovered after native-workflow hint", 120, 25),
+        ]));
+
+        let model = test_model(provider);
+        let (mut agent, handle) = Agent::new(model, PathBuf::from("/tmp"));
+        agent.tools.register(Arc::new(crate::tools::bash::BashTool));
+
+        let events_task = tokio::spawn(collect_events(handle));
+        agent
+            .run("Check workflow state".to_string())
+            .await
+            .unwrap_err();
+        drop(agent);
+
+        let events = events_task.await.unwrap();
+        let tool_end = events.iter().find_map(|e| match e {
+            AgentEvent::ToolExecutionEnd { result, .. } => Some(result),
+            _ => None,
+        });
+        let tool_end = tool_end.expect("expected ToolExecutionEnd");
+        assert!(tool_end.is_error);
+        let text = tool_end
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        assert!(
+            text.contains("native workflow") || text.contains("Mana is retired"),
+            "unexpected bash block text: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_allows_non_mana_bash_commands() {
         let provider = Arc::new(MockProvider::new(vec![
             tool_call_response(
                 "call_1",

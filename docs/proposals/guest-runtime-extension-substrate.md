@@ -218,7 +218,7 @@ It is a sandboxed extension execution environment behind the Rust host.
 
 ### 2. Guest runtime is the execution environment for extension code
 
-A guest runtime is a host-workflowged execution environment that can:
+A guest runtime is a host-managed execution environment that can:
 - load extension code
 - register tools/hooks/commands through host-owned APIs
 - execute extension callbacks under a host-supplied call context
@@ -422,7 +422,7 @@ It must not become the substrate for:
 - direct task runtime routing
 - orchestration or handoff semantics
 
-Those stay in the Rust runtime / workflow worker boundary.
+Those stay in the Rust runtime / mana worker boundary.
 
 ---
 
@@ -533,7 +533,7 @@ Current role:
 
 Follow-on direction:
 - do not confuse this with the extension substrate itself
-- in future, treat it as authoring/workflowgement UX, not as the architecture boundary
+- in future, treat it as authoring/management UX, not as the architecture boundary
 
 ### `crates/imp-lua/src/lib.rs`
 

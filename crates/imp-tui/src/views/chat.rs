@@ -1215,9 +1215,7 @@ pub fn build_click_map_from_rendered_lines(
         };
         let id = id.split_whitespace().next().unwrap_or_default();
         if !id.is_empty() {
-            let screen_y = chat_area
-                .y
-                .saturating_add((line_index - window.start) as u16);
+            let screen_y = chat_area.y + (line_index - window.start) as u16;
             result.push((screen_y, id.to_string()));
         }
     }
@@ -1257,9 +1255,7 @@ pub fn build_click_map(
     let mut result = Vec::new();
     for (line_index, id) in &tool_line_indices {
         if *line_index >= window.start && *line_index < window.end {
-            let screen_y = chat_area
-                .y
-                .saturating_add((*line_index - window.start) as u16);
+            let screen_y = chat_area.y + (*line_index - window.start) as u16;
             result.push((screen_y, id.clone()));
         }
     }

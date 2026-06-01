@@ -1,0 +1,219 @@
+schema: imp.workflow/v1
+id: define-workflow-schema
+title: Define workflow schema
+status: done_with_concerns
+kind: schema_definition
+parent:
+  workflow: prototype-imp-workflow-engine
+  step: define_schema
+settings:
+  worktree: none
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Refine the concise map-based YAML schema enough to implement the first Rust parser and validator for imp workflows.
+  user_value: |
+    Give imp a tasteful, readable workflow artifact that is concise enough for everyday use while still being strict enough for programmatic enforcement.
+  non_goals:
+  - Compare against TOON in this slice.
+  - Implement agent-loop workflow execution.
+  - Implement worker dispatch.
+  - Change git ignore policy.
+  acceptance:
+    concise_schema_shape_defined:
+      text: The v1 compact YAML shape is defined with required and optional sections.
+      status: done
+      checks:
+      - schema_reference_written
+    status_enums_defined:
+      text: Workflow, step, check, prototype, and acceptance statuses are defined.
+      status: done
+      checks:
+      - status_reference_written
+    validation_rules_defined:
+      text: Validator rules for references, acceptance, checks, closeout, and workflow calls are defined.
+      status: done
+      checks:
+      - validation_rules_written
+    rust_parser_plan_ready:
+      text: The next Rust parser/validator prototype has clear DTOs and tests.
+      status: done
+      checks:
+      - rust_plan_written
+    parent_workflow_updated:
+      text: Parent workflow can track this child workflow through results and checks.
+      status: done
+      checks:
+      - results_rendered
+  approval_required_for:
+  - changing spec.goal
+  - removing or weakening spec.acceptance
+  - removing required checks
+context:
+  parent_workflow:
+    file: .imp/workflows/prototype-imp-workflow-engine/workflow.yaml
+    status: done
+  design_doc:
+    file: docs/design/imp-native-workflow-engine.md
+    status: done
+  current_schema_artifact:
+    file: .imp/workflows/prototype-imp-workflow-engine/workflow.yaml
+    status: done
+steps:
+  context:
+    kind: context
+    status: done
+    checks:
+    - parent_workflow_loaded
+    - design_doc_loaded
+  refine_shape:
+    kind: prototype
+    status: done
+    prototypes:
+    - concise_schema
+    depends_on:
+    - context
+    checks:
+    - schema_reference_written
+    - concise_schema_reviewed
+  define_statuses:
+    kind: plan
+    status: done
+    depends_on:
+    - refine_shape
+    checks:
+    - status_reference_written
+  define_validation:
+    kind: plan
+    status: done
+    depends_on:
+    - define_statuses
+    checks:
+    - validation_rules_written
+  plan_rust_validator:
+    kind: plan
+    status: done
+    depends_on:
+    - define_validation
+    checks:
+    - rust_plan_written
+  prototype_rust_parser:
+    kind: workflow
+    status: done
+    workflow: prototype-rust-workflow-schema-parser
+    depends_on:
+    - plan_rust_validator
+    checks:
+    - rust_parser_child_workflow_created
+  render_results:
+    kind: review
+    status: done
+    depends_on:
+    - plan_rust_validator
+    worker: reviewer
+    checks:
+    - results_rendered
+    - final_claims_validated
+  closeout:
+    kind: closeout
+    status: done_with_concerns
+    depends_on:
+    - render_results
+    checks:
+    - required_checks_passed
+    - parent_result_ready
+prototypes:
+  concise_schema:
+    question: What is the most concise tasteful YAML shape that still supports programmatic workflow enforcement?
+    hypothesis: |
+      Map-based IDs plus default assumptions can remove most repeated id/kind/status noise without sacrificing readability or validation.
+    status: selected
+    criteria:
+    - taste
+    - minimal_structure
+    - explicit_enough_for_validation
+    - readable_git_diff
+    - easy_agent_updates
+checks:
+  parent_workflow_loaded:
+    kind: context
+    status: passed
+    file: .imp/workflows/prototype-imp-workflow-engine/workflow.yaml
+  design_doc_loaded:
+    kind: context
+    status: passed
+    file: docs/design/imp-native-workflow-engine.md
+  schema_reference_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/define-workflow-schema/artifacts/schema-reference.md
+  concise_schema_reviewed:
+    kind: review
+    status: passed
+  status_reference_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/define-workflow-schema/artifacts/statuses.md
+  validation_rules_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/define-workflow-schema/artifacts/validation-rules.md
+  rust_plan_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/define-workflow-schema/artifacts/rust-parser-plan.md
+  rust_parser_child_workflow_created:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prototype-rust-workflow-schema-parser/workflow.yaml
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/define-workflow-schema/results.md
+  final_claims_validated:
+    kind: closeout
+    status: passed
+  required_checks_passed:
+    kind: aggregate
+    status: passed
+  parent_result_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/define-workflow-schema/results.md
+workers:
+  parent:
+    role: orchestrator
+    writes:
+    - workflow
+    - results
+    - docs
+    writes_code: false
+  reviewer:
+    role: reviewer
+    writes: []
+    checks:
+    - schema taste
+    - validation feasibility
+    - implementation readiness
+results:
+  path: .imp/workflows/define-workflow-schema/results.md
+  required_claims:
+  - chosen concise YAML schema shape
+  - status vocabulary
+  - validation rules
+  - Rust parser/validator implementation plan
+  - open questions
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+    - parent_result_ready
+    - final_claims_validated
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

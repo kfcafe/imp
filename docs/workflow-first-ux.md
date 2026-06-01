@@ -12,7 +12,7 @@ Use this guide progressively:
    evidence, and verification behind the scenes.
 3. **Add quick controls** — autonomy modes, verification commands, and closeout
    choices.
-4. **Review and audit** — evidence packets, traces, workflow ledger, runtime state.
+4. **Review and audit** — evidence packets, traces, mana ledger, runtime state.
 5. **Use advanced workflows** — worktree-auto, TypeScript extensions, roles,
    delegation, and CI/headless output.
 
@@ -29,7 +29,7 @@ imp run 394.10.4
 ```
 
 The TUI remains the default interactive experience. Direct natural-language tasks
-still work. Routine work does not require manually creating workflow tasks, choosing
+still work. Routine work does not require manually creating mana tasks, choosing
 roles, or reading evidence files.
 
 What changes is mostly invisible: imp has more durable runtime state available
@@ -48,8 +48,8 @@ Workflow-first imp is better at answering review questions:
 - What remains blocked or concerning?
 
 The implementation details are runtime events/snapshots, trace artifacts,
-evidence packets, ReferenceMonitor policy records, verification gates, and workflow
-ledger notes. You do not need to workflowge those pieces for small tasks; they are
+evidence packets, ReferenceMonitor policy records, verification gates, and mana
+ledger notes. You do not need to manage those pieces for small tasks; they are
 there when a run becomes long, autonomous, reviewable, or recoverable.
 
 ## 3. TUI-first workflow status
@@ -64,7 +64,7 @@ The TUI remains chat-first. Workflow-first state shows up as supporting context:
 - evidence links
 - final closeout status
 
-The goal is not to turn the TUI into a project-workflowgement dashboard. The chat is
+The goal is not to turn the TUI into a project-management dashboard. The chat is
 still primary; workflow state helps explain and review what happened.
 
 ## 4. Autonomy modes and quick examples
@@ -108,9 +108,9 @@ what failed, what policy decisions mattered, and what remains. You usually do no
 need to inspect evidence for small interactive tasks, but it is useful for code
 review, handoff, debugging, CI, and autonomous-run audit.
 
-## 6. Workflow workflow ledger
+## 6. Mana workflow ledger
 
-Workflow is imp’s durable workflow ledger. It is useful when work has acceptance
+Mana is imp’s durable workflow ledger. It is useful when work has acceptance
 criteria, dependencies, decisions, blockers, verification gates, or handoff notes.
 It is not required for every prompt.
 
@@ -122,7 +122,7 @@ imp "continue the 394 epic"
 imp "work on the next open task"
 ```
 
-Use workflow when the work should survive beyond one chat turn. Ignore it for simple
+Use mana when the work should survive beyond one chat turn. Ignore it for simple
 questions, small edits, or exploratory conversations.
 
 ## 7. Verification gates and closeout statuses
@@ -223,9 +223,9 @@ review.
 
 ## 12. FAQ and troubleshooting
 
-### Do I need to learn workflow?
+### Do I need to learn mana?
 
-No. Use workflow when work is durable, multi-step, blocked, delegated, or needs
+No. Use mana when work is durable, multi-step, blocked, delegated, or needs
 handoff. For normal questions and small edits, just ask imp.
 
 ### Why did imp ask for approval?

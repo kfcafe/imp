@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{ContinueReason, RunFinalStatus, StopReason};
 
-/// Runtime-owned state for a workflow-backed workflow run.
+/// Runtime-owned state for a mana-backed workflow run.
 ///
 /// This is intentionally policy-shaped rather than model-shaped: the model may
 /// propose work, but the runtime owns whether a workflow is still obligated to
@@ -12,7 +12,7 @@ use crate::agent::{ContinueReason, RunFinalStatus, StopReason};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkflowRunController {
     pub workflow_id: Option<String>,
-    pub workflow_root_id: Option<String>,
+    pub mana_root_id: Option<String>,
     pub active_unit_id: Option<String>,
     pub child_runs: Vec<WorkflowChildRun>,
     pub graph_closeout_required: bool,
@@ -35,10 +35,10 @@ impl WorkflowRunController {
         self
     }
 
-    pub fn with_workflow_root_id(mut self, workflow_root_id: impl Into<String>) -> Self {
-        let workflow_root_id = workflow_root_id.into();
-        self.workflow_root_id = Some(workflow_root_id.clone());
-        self.active_unit_id.get_or_insert(workflow_root_id);
+    pub fn with_mana_root_id(mut self, mana_root_id: impl Into<String>) -> Self {
+        let mana_root_id = mana_root_id.into();
+        self.mana_root_id = Some(mana_root_id.clone());
+        self.active_unit_id.get_or_insert(mana_root_id);
         self
     }
 
@@ -104,12 +104,12 @@ impl WorkflowRunController {
         };
     }
 
-    pub fn bind_workflow_root(&mut self, workflow_root_id: impl Into<String>) {
-        let workflow_root_id = workflow_root_id.into();
-        self.workflow_root_id = Some(workflow_root_id.clone());
+    pub fn bind_mana_root(&mut self, mana_root_id: impl Into<String>) {
+        let mana_root_id = mana_root_id.into();
+        self.mana_root_id = Some(mana_root_id.clone());
         self.active_unit_id
-            .get_or_insert_with(|| workflow_root_id.clone());
-        self.bootstrap = WorkflowBootstrapState::Complete { workflow_root_id };
+            .get_or_insert_with(|| mana_root_id.clone());
+        self.bootstrap = WorkflowBootstrapState::Complete { mana_root_id };
     }
 
     pub fn bootstrap_required(&self) -> bool {
@@ -145,7 +145,7 @@ impl WorkflowRunController {
                 };
             }
         }
-        if self.active_unit_id.as_deref() == self.workflow_root_id.as_deref() {
+        if self.active_unit_id.as_deref() == self.mana_root_id.as_deref() {
             self.active_unit_id = Some(child_unit_id);
         } else {
             self.active_unit_id.get_or_insert(child_unit_id);
@@ -159,7 +159,7 @@ impl WorkflowRunController {
         } = &mut self.planning
         else {
             if self.active_unit_id.as_deref() == Some(unit_id) {
-                self.active_unit_id = self.workflow_root_id.clone();
+                self.active_unit_id = self.mana_root_id.clone();
             }
             return;
         };
@@ -174,7 +174,7 @@ impl WorkflowRunController {
             .iter()
             .find(|id| !completed_child_unit_ids.iter().any(|done| done == *id))
             .cloned()
-            .or_else(|| self.workflow_root_id.clone());
+            .or_else(|| self.mana_root_id.clone());
     }
 
     pub fn update_child_run_status(&mut self, run_id: &str, status: WorkflowChildRunStatus) {
@@ -192,12 +192,12 @@ impl WorkflowRunController {
         }
     }
 
-    pub fn record_workflow_orchestration_started(&mut self, run_id: Option<String>) {
+    pub fn record_mana_orchestration_started(&mut self, run_id: Option<String>) {
         let run_id = run_id.unwrap_or_else(|| "unknown".to_string());
         self.update_child_run_status(&run_id, WorkflowChildRunStatus::Running);
     }
 
-    pub fn record_workflow_graph_changed(&mut self) {
+    pub fn record_mana_graph_changed(&mut self) {
         self.graph_closeout_required = true;
         self.closeout.ready = false;
     }
@@ -254,7 +254,7 @@ impl WorkflowRunController {
             }
         }
         if self.graph_closeout_required {
-            remaining.push("workflow graph changed and needs closeout inspection".to_string());
+            remaining.push("mana graph changed and needs closeout inspection".to_string());
         }
         if self.direct_closeout_required {
             remaining.push("direct work changed and needs verification closeout".to_string());
@@ -263,7 +263,7 @@ impl WorkflowRunController {
             remaining.push("workflow closeout checklist is not ready".to_string());
         }
         if self.bootstrap_required() {
-            remaining.push("durable workflow bootstrap requires a bound workflow root".to_string());
+            remaining.push("durable workflow bootstrap requires a bound mana root".to_string());
         }
 
         if let Some(blocker) = self.closeout.blocker.as_ref() {
@@ -394,7 +394,7 @@ pub enum WorkflowChildRunStatus {
 }
 
 impl WorkflowChildRunStatus {
-    pub fn from_workflow_run_status(status: &str, total_failed: Option<u64>) -> Self {
+    pub fn from_mana_run_status(status: &str, total_failed: Option<u64>) -> Self {
         match status {
             "starting" | "running" => Self::Running,
             "failed" | "interrupted" => Self::Failed,
@@ -425,7 +425,7 @@ impl Default for WorkflowCloseoutState {
 #[serde(default)]
 pub struct WorkflowControllerSnapshot {
     pub workflow_id: Option<String>,
-    pub workflow_root_id: Option<String>,
+    pub mana_root_id: Option<String>,
     pub active_unit_id: Option<String>,
     pub child_runs: Vec<WorkflowChildRun>,
     pub graph_closeout_required: bool,
@@ -450,7 +450,7 @@ impl WorkflowRunController {
 
         WorkflowControllerSnapshot {
             workflow_id: self.workflow_id.clone(),
-            workflow_root_id: self.workflow_root_id.clone(),
+            mana_root_id: self.mana_root_id.clone(),
             active_unit_id: self.active_unit_id.clone(),
             child_runs: self.child_runs.clone(),
             graph_closeout_required: self.graph_closeout_required,
@@ -473,7 +473,7 @@ pub enum WorkflowBootstrapState {
     Unspecified,
     Required,
     Complete {
-        workflow_root_id: String,
+        mana_root_id: String,
     },
     Skipped {
         reason: String,
@@ -566,19 +566,19 @@ pub enum WorkflowControllerDecision {
 }
 
 pub fn workflow_bootstrap_prompt() -> String {
-    "Durable workflow bootstrap is required before presenting the work as complete. Create or bind the root workflow work item for this goal, attach acceptance/verification, and continue from the graph; do not close out until the controller has a workflow root or bootstrap is explicitly skipped by runtime policy.".to_string()
+    "Durable workflow bootstrap is required before presenting the work as complete. Create or bind the root mana work item for this goal, attach acceptance/verification, and continue from the graph; do not close out until the controller has a mana root or bootstrap is explicitly skipped by runtime policy.".to_string()
 }
 
 pub fn workflow_supervision_prompt() -> String {
-    "Orchestration has started, so continue supervising it instead of presenting the work as complete. Inspect workflow run_state/logs for active child runs, coordinate ready work, retry or escalate failed units, and only stop when workflow closeout is verified, a concrete blocker exists, or no runnable work remains.".to_string()
+    "Orchestration has started, so continue supervising it instead of presenting the work as complete. Inspect mana run_state/logs for active child runs, coordinate ready work, retry or escalate failed units, and only stop when workflow closeout is verified, a concrete blocker exists, or no runnable work remains.".to_string()
 }
 
 pub fn workflow_decomposition_prompt() -> String {
-    "This workflow was classified as needing decomposition. Create real child workflow tasks for separable durable work products under the workflow root, then execute the first ready child. Do not create lifecycle-only tasks such as verify, closeout, or run tests.".to_string()
+    "This workflow was classified as needing decomposition. Create real child mana tasks for separable durable work products under the workflow root, then execute the first ready child. Do not create lifecycle-only tasks such as verify, closeout, or run tests.".to_string()
 }
 
 pub fn workflow_graph_closeout_prompt() -> String {
-    "Workflow graph state changed, so do not present the work as complete yet. Inspect the relevant workflow units/tree/next state, verify acceptance and blockers, run required checks, then close or update units before final closeout.".to_string()
+    "Mana graph state changed, so do not present the work as complete yet. Inspect the relevant mana units/tree/next state, verify acceptance and blockers, run required checks, then close or update units before final closeout.".to_string()
 }
 
 pub fn workflow_direct_closeout_prompt() -> String {
@@ -586,7 +586,7 @@ pub fn workflow_direct_closeout_prompt() -> String {
 }
 
 pub fn workflow_closeout_prompt() -> String {
-    "Workflow execution is not ready for closeout. Review remaining workflow units, child runs, required verification, unresolved decisions, and evidence before presenting the work as complete.".to_string()
+    "Workflow execution is not ready for closeout. Review remaining mana units, child runs, required verification, unresolved decisions, and evidence before presenting the work as complete.".to_string()
 }
 
 #[cfg(test)]
@@ -613,7 +613,7 @@ mod tests {
 
     #[test]
     fn decomposition_requires_real_child_units_before_done() {
-        let mut controller = WorkflowRunController::new().with_workflow_root_id("28.1");
+        let mut controller = WorkflowRunController::new().with_mana_root_id("28.1");
         controller.set_graph_shape(WorkflowGraphShape::NeedsDecomposition);
 
         assert_eq!(
@@ -628,7 +628,7 @@ mod tests {
 
     #[test]
     fn recording_child_unit_sets_decomposed_planning_and_active_unit() {
-        let mut controller = WorkflowRunController::new().with_workflow_root_id("28.1");
+        let mut controller = WorkflowRunController::new().with_mana_root_id("28.1");
         controller.set_graph_shape(WorkflowGraphShape::NeedsDecomposition);
         controller.record_child_unit("28.1.1");
 
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn completing_child_unit_advances_to_next_child_then_root() {
-        let mut controller = WorkflowRunController::new().with_workflow_root_id("28.1");
+        let mut controller = WorkflowRunController::new().with_mana_root_id("28.1");
         controller.set_graph_shape(WorkflowGraphShape::NeedsDecomposition);
         controller.record_child_unit("28.1.1");
         controller.record_child_unit("28.1.2");
@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn root_only_shape_does_not_require_decomposition() {
-        let mut controller = WorkflowRunController::new().with_workflow_root_id("28.1");
+        let mut controller = WorkflowRunController::new().with_mana_root_id("28.1");
         controller.set_graph_shape(WorkflowGraphShape::RootOnly);
 
         assert_eq!(controller.planning, WorkflowPlanningState::RootOnly);
@@ -683,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn required_bootstrap_continues_until_workflow_root_bound() {
+    fn required_bootstrap_continues_until_mana_root_bound() {
         let mut controller = WorkflowRunController::new();
         controller.require_bootstrap();
 
@@ -696,8 +696,8 @@ mod tests {
         );
         assert!(!controller.closeout_check().ready);
 
-        controller.bind_workflow_root("28.1.3.4");
-        assert_eq!(controller.workflow_root_id.as_deref(), Some("28.1.3.4"));
+        controller.bind_mana_root("28.1.3.4");
+        assert_eq!(controller.mana_root_id.as_deref(), Some("28.1.3.4"));
         assert_eq!(controller.active_unit_id.as_deref(), Some("28.1.3.4"));
         assert_eq!(
             controller.snapshot().active_unit_id.as_deref(),
@@ -716,10 +716,10 @@ mod tests {
     #[test]
     fn explicit_active_unit_overrides_root_binding() {
         let controller = WorkflowRunController::new()
-            .with_workflow_root_id("28.1")
+            .with_mana_root_id("28.1")
             .with_active_unit_id("28.1.2");
 
-        assert_eq!(controller.workflow_root_id.as_deref(), Some("28.1"));
+        assert_eq!(controller.mana_root_id.as_deref(), Some("28.1"));
         assert_eq!(controller.active_unit_id.as_deref(), Some("28.1.2"));
         assert_eq!(
             controller.snapshot().active_unit_id.as_deref(),
@@ -740,8 +740,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("workflow-controller.json");
         let mut controller = WorkflowRunController::new();
-        controller.record_workflow_graph_changed();
-        controller.record_workflow_orchestration_started(Some("run-1".into()));
+        controller.record_mana_graph_changed();
+        controller.record_mana_orchestration_started(Some("run-1".into()));
 
         controller.save_to_path(&path).expect("save controller");
         let loaded = WorkflowRunController::load_from_path(&path).expect("load controller");
@@ -774,7 +774,7 @@ mod tests {
     #[test]
     fn run_state_status_updates_child_run_terminal_state() {
         let mut controller = WorkflowRunController::new();
-        controller.record_workflow_orchestration_started(Some("run-1".into()));
+        controller.record_mana_orchestration_started(Some("run-1".into()));
         controller.update_child_run_status("run-1", WorkflowChildRunStatus::Done);
 
         assert!(controller.closeout_check().ready);
@@ -789,21 +789,21 @@ mod tests {
     }
 
     #[test]
-    fn workflow_run_status_maps_failures_to_failed_child_run() {
+    fn mana_run_status_maps_failures_to_failed_child_run() {
         assert_eq!(
-            WorkflowChildRunStatus::from_workflow_run_status("done", Some(1)),
+            WorkflowChildRunStatus::from_mana_run_status("done", Some(1)),
             WorkflowChildRunStatus::Failed
         );
         assert_eq!(
-            WorkflowChildRunStatus::from_workflow_run_status("running", None),
+            WorkflowChildRunStatus::from_mana_run_status("running", None),
             WorkflowChildRunStatus::Running
         );
     }
 
     #[test]
-    fn workflow_orchestration_creates_supervision_obligation() {
+    fn mana_orchestration_creates_supervision_obligation() {
         let mut controller = WorkflowRunController::new();
-        controller.record_workflow_orchestration_started(Some("run-1".into()));
+        controller.record_mana_orchestration_started(Some("run-1".into()));
 
         assert_eq!(
             controller.decide_next(),
@@ -829,9 +829,9 @@ mod tests {
     }
 
     #[test]
-    fn workflow_graph_change_requires_graph_closeout_without_workflow_run() {
+    fn mana_graph_change_requires_graph_closeout_without_mana_run() {
         let mut controller = WorkflowRunController::new();
-        controller.record_workflow_graph_changed();
+        controller.record_mana_graph_changed();
 
         assert_eq!(
             controller.decide_next(),
@@ -845,7 +845,7 @@ mod tests {
         assert!(check
             .remaining
             .iter()
-            .any(|item| item.contains("workflow graph changed")));
+            .any(|item| item.contains("mana graph changed")));
     }
 
     #[test]
@@ -865,7 +865,7 @@ mod tests {
     #[test]
     fn record_closeout_ready_clears_closeout_obligations() {
         let mut controller = WorkflowRunController::new();
-        controller.record_workflow_graph_changed();
+        controller.record_mana_graph_changed();
         controller.record_direct_work_changed();
         controller.record_closeout_ready();
 
@@ -875,7 +875,7 @@ mod tests {
     #[test]
     fn closeout_downgrades_done_when_child_run_is_still_running() {
         let mut controller = WorkflowRunController::new();
-        controller.record_workflow_orchestration_started(Some("run-1".into()));
+        controller.record_mana_orchestration_started(Some("run-1".into()));
 
         let status = controller.enforce_closeout_status(RunFinalStatus::Done {
             reason: StopReason::WorkCompleted,

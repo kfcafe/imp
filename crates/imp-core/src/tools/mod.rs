@@ -4,6 +4,8 @@ pub mod code_intel;
 pub mod edit;
 pub mod git;
 pub mod lua;
+#[cfg(feature = "mana-tool")]
+pub mod mana;
 pub mod memory;
 pub mod multi_edit;
 pub mod query;
@@ -28,10 +30,10 @@ use crate::agent::AgentCommand;
 use crate::config::AgentMode;
 use crate::config::LuaCapabilityPolicy;
 use crate::error::Result;
+use crate::mana_review::TurnManaReviewAccumulator;
 use crate::reference_monitor::ToolMetadata;
 use crate::trust::Provenance;
 use crate::ui::UserInterface;
-use crate::workflow_review::TurnWorkflowReviewAccumulator;
 
 /// Resolve a user-provided path: expands `~` to home dir, resolves relative paths against cwd.
 pub fn resolve_path(cwd: &Path, raw: &str) -> PathBuf {
@@ -221,8 +223,8 @@ pub struct ToolContext {
     pub mode: AgentMode,
     /// Max lines the read tool may return before truncating. 0 means unlimited.
     pub read_max_lines: usize,
-    /// Turn-scoped runtime accumulator for between-turn workflow review packets.
-    pub turn_workflow_review: Arc<std::sync::Mutex<TurnWorkflowReviewAccumulator>>,
+    /// Turn-scoped runtime accumulator for between-turn mana review packets.
+    pub turn_mana_review: Arc<std::sync::Mutex<TurnManaReviewAccumulator>>,
     /// Resolved runtime config for tool-specific policy checks.
     pub config: Arc<crate::config::Config>,
     /// Per-run tool/write policy layered on top of AgentMode.

@@ -17,12 +17,14 @@ path = "src/main.rs"
 
 [features]
 default = []
+mana-ui = ["dep:mana-core", "imp-core/mana-tool", "imp-tui/mana-ui"]
 
 [dependencies]
 imp-llm.workspace = true
 imp-core.workspace = true
 imp-tui.workspace = true
 imp-lua.workspace = true
+mana-core = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

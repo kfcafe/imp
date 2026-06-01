@@ -62,7 +62,7 @@ pub struct AgentBuilder {
     lua_tool_loader: Option<LuaToolLoader>,
     /// Per-run tool/write policy layered on top of AgentMode.
     run_policy: RunPolicy,
-    /// Preloaded workflow prompt context; avoids duplicate workflow reads for worker mode.
+    /// Preloaded mana prompt context; avoids duplicate mana reads for worker mode.
     preloaded_prompt_context: Option<PromptContext>,
     /// Optional workflow contract override. If absent, build creates an implicit contract.
     pub verification_gates: Vec<VerificationGate>,
@@ -186,7 +186,7 @@ impl AgentBuilder {
         self
     }
 
-    /// Use preloaded workflow prompt context instead of loading it during build.
+    /// Use preloaded mana prompt context instead of loading it during build.
     pub fn preloaded_prompt_context(mut self, context: PromptContext) -> Self {
         self.preloaded_prompt_context = Some(context);
         self
@@ -366,14 +366,13 @@ impl AgentBuilder {
             let agents_md = resources::discover_agents_md(&self.cwd, &user_config_dir);
             let skills = resources::discover_skills(&self.cwd, &user_config_dir);
             trace_phase("resources_discovery", resource_started);
-            agent.set_workflow_skill_available(skills.iter().any(|skill| skill.name == "workflow"));
-            agent.set_workflow_basics_skill_available(
-                skills.iter().any(|skill| skill.name == "workflow-basics"),
+            agent
+                .set_workflow_mana_skill_available(skills.iter().any(|skill| skill.name == "mana"));
+            agent.set_workflow_mana_basics_skill_available(
+                skills.iter().any(|skill| skill.name == "mana-basics"),
             );
-            agent.set_workflow_delegation_skill_available(
-                skills
-                    .iter()
-                    .any(|skill| skill.name == "workflow-delegation"),
+            agent.set_workflow_mana_delegation_skill_available(
+                skills.iter().any(|skill| skill.name == "mana-delegation"),
             );
 
             let prompt_context_started = Instant::now();
@@ -384,10 +383,10 @@ impl AgentBuilder {
             } else {
                 PromptContext::from_facts(self.facts.clone())
             };
-            trace_phase("prompt_context", prompt_context_started);
+            trace_phase("mana_prompt_context", prompt_context_started);
 
             let repo_context_started = Instant::now();
-            let repo_context = crate::repo_intelligence::summarize_repo_context_cached(&self.cwd)
+            let repo_context = crate::repo_intelligence::summarize_repo_context(&self.cwd)
                 .ok()
                 .flatten();
             trace_phase("repo_intelligence_context", repo_context_started);
@@ -703,12 +702,12 @@ mod tests {
         std::fs::create_dir_all(&imp_dir).unwrap();
         std::fs::write(
             imp_dir.join("memory.md"),
-            "Project lives at /Users/asher/tower and uses root workflow.",
+            "Project lives at /Users/test/tower and uses root mana.",
         )
         .unwrap();
         std::fs::write(
             imp_dir.join("user.md"),
-            "User prefers root workflow in /tower for Tower work.",
+            "User prefers root mana in /tower for Tower work.",
         )
         .unwrap();
 
@@ -724,7 +723,7 @@ mod tests {
         .build()
         .unwrap();
 
-        assert!(!agent.system_prompt.contains("/Users/asher/tower"));
+        assert!(!agent.system_prompt.contains("/Users/test/tower"));
         assert!(!agent.system_prompt.contains("/tower for Tower work"));
 
         if let Some(prev) = prev {
@@ -744,7 +743,7 @@ mod tests {
         std::fs::create_dir_all(&imp_dir).unwrap();
         std::fs::write(
             imp_dir.join("memory.md"),
-            "Project lives at /Users/asher/tower and uses root workflow.",
+            "Project lives at /Users/test/tower and uses root mana.",
         )
         .unwrap();
 
@@ -753,14 +752,14 @@ mod tests {
 
         let (agent, _handle) = AgentBuilder::new(
             config,
-            PathBuf::from("/Users/asher/tower/imp"),
+            PathBuf::from("/Users/test/tower/imp"),
             test_model(),
             "key".into(),
         )
         .build()
         .unwrap();
 
-        assert!(agent.system_prompt.contains("/Users/asher/tower"));
+        assert!(agent.system_prompt.contains("/Users/test/tower"));
 
         if let Some(prev) = prev {
             std::env::set_var("XDG_CONFIG_HOME", prev);
@@ -770,35 +769,35 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any())]
-    fn builder_injects_workflow_facts_into_system_prompt_when_available() {
+    #[cfg(feature = "mana-api")]
+    fn builder_injects_mana_facts_into_system_prompt_when_available() {
         let temp = tempfile::TempDir::new().unwrap();
-        let workflow_dir = temp.path().join(".imp/workflows");
-        std::fs::create_dir(&workflow_dir).unwrap();
+        let mana_dir = temp.path().join(".mana");
+        std::fs::create_dir(&mana_dir).unwrap();
 
-        let workflow_config = workflow_core::config::Config {
+        let mana_config = mana_core::config::Config {
             project: "test".to_string(),
             ..Default::default()
         };
-        workflow_config.save(&workflow_dir).unwrap();
+        mana_config.save(&mana_dir).unwrap();
 
-        let mut working = workflow_core::unit::Unit::new("1", "Implement auth flow");
-        working.status = workflow_core::unit::Status::InProgress;
+        let mut working = mana_core::unit::Unit::new("1", "Implement auth flow");
+        working.status = mana_core::unit::Status::InProgress;
         working.paths = vec!["src/auth.rs".to_string()];
         working.requires = vec!["AuthProvider".to_string()];
-        let working_slug = workflow_core::util::title_to_slug(&working.title);
+        let working_slug = mana_core::util::title_to_slug(&working.title);
         working
-            .to_file(workflow_dir.join(format!("1-{}.md", working_slug)))
+            .to_file(mana_dir.join(format!("1-{}.md", working_slug)))
             .unwrap();
 
-        let mut fact = workflow_core::unit::Unit::new("2", "Auth uses RS256 signing");
-        fact.kind = workflow_core::unit::UnitType::Fact;
+        let mut fact = mana_core::unit::Unit::new("2", "Auth uses RS256 signing");
+        fact.kind = mana_core::unit::UnitType::Fact;
         fact.unit_type = "fact".to_string();
         fact.paths = vec!["src/auth.rs".to_string()];
         fact.produces = vec!["AuthProvider".to_string()];
         fact.last_verified = Some(chrono::Utc::now() - chrono::Duration::hours(2));
-        let fact_slug = workflow_core::util::title_to_slug(&fact.title);
-        fact.to_file(workflow_dir.join(format!("2-{}.md", fact_slug)))
+        let fact_slug = mana_core::util::title_to_slug(&fact.title);
+        fact.to_file(mana_dir.join(format!("2-{}.md", fact_slug)))
             .unwrap();
 
         std::fs::create_dir(temp.path().join("src")).unwrap();
@@ -820,31 +819,31 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any())]
+    #[cfg(feature = "mana-api")]
     fn builder_injects_project_memory_status_into_system_prompt_when_available() {
         let temp = tempfile::TempDir::new().unwrap();
-        let workflow_dir = temp.path().join(".imp/workflows");
-        std::fs::create_dir(&workflow_dir).unwrap();
+        let mana_dir = temp.path().join(".mana");
+        std::fs::create_dir(&mana_dir).unwrap();
 
-        let workflow_config = workflow_core::config::Config {
+        let mana_config = mana_core::config::Config {
             project: "test".to_string(),
             ..Default::default()
         };
-        workflow_config.save(&workflow_dir).unwrap();
+        mana_config.save(&mana_dir).unwrap();
 
-        let mut working = workflow_core::unit::Unit::new("1", "Implement auth flow");
-        working.status = workflow_core::unit::Status::InProgress;
+        let mut working = mana_core::unit::Unit::new("1", "Implement auth flow");
+        working.status = mana_core::unit::Status::InProgress;
         working.claimed_by = Some("imp".to_string());
-        let working_slug = workflow_core::util::title_to_slug(&working.title);
+        let working_slug = mana_core::util::title_to_slug(&working.title);
         working
-            .to_file(workflow_dir.join(format!("1-{}.md", working_slug)))
+            .to_file(mana_dir.join(format!("1-{}.md", working_slug)))
             .unwrap();
 
-        let mut recent = workflow_core::unit::Unit::new("3", "Recently closed cleanup");
-        recent.status = workflow_core::unit::Status::Closed;
+        let mut recent = mana_core::unit::Unit::new("3", "Recently closed cleanup");
+        recent.status = mana_core::unit::Status::Closed;
         recent.closed_at = Some(chrono::Utc::now() - chrono::Duration::hours(2));
-        let recent_slug = workflow_core::util::title_to_slug(&recent.title);
-        let archive_dir = workflow_dir.join("archive").join("2026").join("05");
+        let recent_slug = mana_core::util::title_to_slug(&recent.title);
+        let archive_dir = mana_dir.join("archive").join("2026").join("05");
         std::fs::create_dir_all(&archive_dir).unwrap();
         recent
             .to_file(archive_dir.join(format!("3-{}.md", recent_slug)))

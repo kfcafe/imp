@@ -1,0 +1,154 @@
+schema: imp.workflow/v1
+id: remove-prototype-tool
+title: Remove prototype tool
+status: done
+kind: cleanup
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+spec:
+  goal: |
+    Remove the model-facing prototype tool and consolidate prototype execution around workflows for durable state and bash for ordinary scratch execution.
+  user_value: |
+    Reduce tool surface area and remove a redundant abstraction that agents are unlikely to prefer over bash unless it becomes a true sandbox.
+  non_goals:
+  - Remove workflow schema support for prototype/investigation steps used by existing workflow records.
+  - Introduce a new sandbox tool in this pass.
+  - Rewrite historical workflow artifacts beyond required doc wording.
+  acceptance:
+    prototype_not_registered:
+      text: The native tool registry no longer exposes a prototype tool.
+      status: done
+      checks:
+      - native_registry_updated
+    prototype_code_removed_or_unreachable:
+      text: Prototype tool implementation and model-facing UI formatting are removed or made unreachable without dead native registration.
+      status: done
+      checks:
+      - prototype_source_removed
+    docs_reframe_prototypes:
+      text: Documentation no longer presents prototype as a native tool and describes workflows as carrying investigation/evidence records while bash handles normal scratch execution.
+      status: done
+      checks:
+      - readme_updated
+    tests_pass:
+      text: Narrow relevant Rust checks pass after removal.
+      status: done
+      checks:
+      - cargo_check_passed
+context:
+  readme:
+    file: README.md
+    status: done
+  tool_registry:
+    file: crates/imp-core/src/builder.rs
+    status: done
+  prototype_tool:
+    file: crates/imp-core/src/tools/prototype.rs
+    status: done
+  tui_tool_rendering:
+    file: crates/imp-tui/src/views/tools.rs
+    status: todo
+steps:
+  inspect:
+    kind: context
+    status: done
+    checks:
+    - tool_surface_inspected
+  plan:
+    kind: plan
+    status: done
+    checks:
+    - workflow_created
+  remove_native_tool:
+    kind: build
+    status: done
+    depends_on:
+    - plan
+    checks:
+    - native_registry_updated
+    - prototype_source_removed
+  update_docs:
+    kind: build
+    status: done
+    depends_on:
+    - remove_native_tool
+    checks:
+    - readme_updated
+  verify:
+    kind: verify
+    status: done
+    depends_on:
+    - update_docs
+    checks:
+    - cargo_check_passed
+  review_closeout:
+    kind: closeout
+    status: done
+    depends_on:
+    - verify
+    checks:
+    - required_checks_passed
+    - results_rendered
+prototypes: {}
+checks:
+  tool_surface_inspected:
+    kind: context
+    status: passed
+    artifact: chat review plus rg/scan output
+  workflow_created:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/remove-prototype-tool/workflow.yaml
+  native_registry_updated:
+    kind: artifact
+    status: passed
+    file: crates/imp-core/src/builder.rs
+  prototype_source_removed:
+    kind: artifact
+    status: passed
+    file: crates/imp-core/src/tools/prototype.rs
+  readme_updated:
+    kind: artifact
+    status: passed
+    file: README.md
+  cargo_check_passed:
+    kind: command
+    status: passed
+    command: cargo check -p imp-core -p imp-tui
+  required_checks_passed:
+    kind: closeout
+    status: passed
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/remove-prototype-tool/results.md
+workers:
+  implementer:
+    role: implementer
+    writes_code: true
+    responsibilities:
+    - remove native prototype tool surface
+    - update docs
+    - run verification
+results:
+  path: .imp/workflows/remove-prototype-tool/results.md
+  required_claims:
+  - prototype tool removed from native surface
+  - docs updated
+  - verification performed
+closeout:
+  done:
+    requires:
+    - native_registry_updated
+    - prototype_source_removed
+    - readme_updated
+    - cargo_check_passed
+    - required_checks_passed
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

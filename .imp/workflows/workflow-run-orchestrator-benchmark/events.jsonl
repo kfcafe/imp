@@ -1,0 +1,4 @@
+{"timestamp":"2026-05-28T21:41:16.629492+00:00","action":"run","path":"checks.step_one_command.status","value":"passed","reason":"command `mkdir -p .imp/workflows/workflow-run-orchestrator-benchmark/artifacts && printf 'one\\n' > .imp/workflows/workflow-run-orchestrator-benchmark/artifacts/one.txt` exited with 0"}
+{"timestamp":"2026-05-28T21:41:16.629773+00:00","action":"run","path":"steps.step_one.status","value":"done","reason":"command checks completed with step status `done`"}
+{"timestamp":"2026-05-28T21:44:39.534148+00:00","action":"run","path":"checks.step_two_command.status","value":"passed","reason":"command `test -f .imp/workflows/workflow-run-orchestrator-benchmark/artifacts/one.txt && printf 'two\\n' > .imp/workflows/workflow-run-orchestrator-benchmark/artifacts/two.txt` exited with 0"}
+{"timestamp":"2026-05-28T21:44:39.534469+00:00","action":"run","path":"steps.step_two.status","value":"done","reason":"command checks completed with step status `done`"}

@@ -7,13 +7,10 @@ use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::thread;
-use std::time::{Duration, SystemTime};
 
 const CACHE_VERSION: u32 = 2;
 const MAX_REPO_INTELLIGENCE_FILES: usize = 2_000;
 const MAX_REPO_INTELLIGENCE_BYTES: u64 = 50 * 1024 * 1024;
-const MAX_STARTUP_REPO_INTELLIGENCE_FRESHNESS_WAIT: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoContextSummary {
@@ -67,45 +64,11 @@ pub fn index_repo(root: &Path) -> crate::Result<RepoIndexSummary> {
     Ok(index_files(&files, root))
 }
 
-pub fn refresh_repo_context_in_background(root: impl Into<PathBuf>) {
-    let root = root.into();
-    thread::Builder::new()
-        .name("imp-repo-intelligence-refresh".to_string())
-        .spawn(move || {
-            let _ = summarize_repo_context_uncapped(&root);
-        })
-        .ok();
-}
-
-pub fn summarize_repo_context_cached(root: &Path) -> crate::Result<Option<RepoContextSummary>> {
-    if !is_repo_intelligence_candidate(root) {
-        return Ok(None);
-    }
-
-    Ok(read_latest_cached_summary(root))
-}
-
-pub fn summarize_cached_repo_context(root: &Path) -> crate::Result<Option<RepoContextSummary>> {
-    summarize_repo_context_cached(root)
-}
-
 pub fn summarize_repo_context(root: &Path) -> crate::Result<Option<RepoContextSummary>> {
-    summarize_repo_context_with_startup_budget(root, true)
-}
-
-fn summarize_repo_context_uncapped(root: &Path) -> crate::Result<Option<RepoContextSummary>> {
-    summarize_repo_context_with_startup_budget(root, false)
-}
-
-fn summarize_repo_context_with_startup_budget(
-    root: &Path,
-    enforce_startup_budget: bool,
-) -> crate::Result<Option<RepoContextSummary>> {
     if !is_repo_intelligence_candidate(root) {
         return Ok(None);
     }
 
-    let started = SystemTime::now();
     let files = repo_context_files(root)?;
     if files.is_empty() || repo_context_too_large(&files) {
         return Ok(None);
@@ -114,14 +77,6 @@ fn summarize_repo_context_with_startup_budget(
     let fingerprint = repo_fingerprint(root, &files);
     if let Some(summary) = read_cached_summary(&fingerprint) {
         return Ok(Some(summary));
-    }
-
-    if enforce_startup_budget
-        && started
-            .elapsed()
-            .is_ok_and(|elapsed| elapsed >= MAX_STARTUP_REPO_INTELLIGENCE_FRESHNESS_WAIT)
-    {
-        return Ok(read_latest_cached_summary(root));
     }
 
     let index = index_files(&files, root);
@@ -330,35 +285,6 @@ fn read_cached_summary(fingerprint: &RepoFingerprint) -> Option<RepoContextSumma
     }
 }
 
-fn read_latest_cached_summary(root: &Path) -> Option<RepoContextSummary> {
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let dir = crate::storage::global_indexes_dir().join("repo-intelligence");
-    let entries = fs::read_dir(dir).ok()?;
-    let mut newest: Option<(SystemTime, RepoContextSummary)> = None;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let text = fs::read_to_string(&path).ok()?;
-        let cached: CachedRepoContextSummary = serde_json::from_str(&text).ok()?;
-        if cached.version != CACHE_VERSION || cached.fingerprint.root != canonical_root {
-            continue;
-        }
-        let modified = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        if newest
-            .as_ref()
-            .is_none_or(|(newest_modified, _)| modified > *newest_modified)
-        {
-            newest = Some((modified, cached.summary));
-        }
-    }
-    newest.map(|(_, summary)| summary)
-}
-
 fn write_cached_summary(
     fingerprint: &RepoFingerprint,
     summary: &RepoContextSummary,
@@ -477,38 +403,5 @@ fn builds_widget() {}
             .collect::<Vec<_>>();
 
         assert!(repo_context_too_large(&files));
-    }
-
-    #[test]
-    fn background_refresh_eventually_writes_cache() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().to_path_buf();
-        fs::write(
-            root.join("Cargo.toml"),
-            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("write marker");
-        fs::write(root.join("lib.rs"), "pub fn refreshed() {}\n").expect("write source");
-        Command::new("git")
-            .arg("init")
-            .current_dir(&root)
-            .output()
-            .expect("git init");
-
-        refresh_repo_context_in_background(root.clone());
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        let mut summary = None;
-        while std::time::Instant::now() < deadline {
-            summary = summarize_repo_context_cached(&root).expect("cached summary");
-            if summary.is_some() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-
-        let summary = summary.expect("background refresh writes cached summary");
-        assert_eq!(summary.files, 1);
-        assert_eq!(summary.symbols, 1);
     }
 }

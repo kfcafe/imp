@@ -223,6 +223,33 @@ impl ReferenceMonitor {
         )
     }
 
+    pub fn mana_policy_record(
+        &self,
+        context: &ToolPolicyContext,
+        decision: &crate::agent::ManaPolicyDecision,
+    ) -> PolicyTraceRecord {
+        let policy_decision = if decision.allowed {
+            ToolPolicyDecision::Allow {
+                reasons: vec![PolicyReason::new(
+                    PolicySource::ManaLoop,
+                    "compat_mana_policy_allowed",
+                    "Legacy mana action allowed by active compatibility policy",
+                )],
+            }
+        } else {
+            ToolPolicyDecision::Deny {
+                reason: PolicyReason::new(
+                    PolicySource::ManaLoop,
+                    "compat_mana_policy_blocked",
+                    decision.reason.clone().unwrap_or_else(|| {
+                        "Legacy mana action blocked by active compatibility policy".into()
+                    }),
+                ),
+            }
+        };
+        self.record(context, policy_decision, decision.details())
+    }
+
     pub fn bash_equivalent_record(
         &self,
         context: &ToolPolicyContext,
@@ -233,9 +260,8 @@ impl ReferenceMonitor {
             "policy_blocked",
             hint.to_string(),
         );
-        reason.suggestion = Some(
-            "Use the native workflow tool instead of shelling out to legacy workflow shell".into(),
-        );
+        reason.suggestion =
+            Some("Use the native workflow tool instead of shelling out to legacy mana".into());
         self.record(
             context,
             ToolPolicyDecision::Deny { reason },
@@ -611,7 +637,7 @@ impl ToolPolicyContext {
         self.workflow_id = contract
             .id
             .clone()
-            .or_else(|| contract.workflow_unit_ref.clone());
+            .or_else(|| contract.mana_unit_ref.clone());
         self.autonomy_mode = contract.autonomy_mode;
         self.workflow_type = contract.workflow_type;
         self.risk_level = contract.risk_level;
@@ -641,7 +667,7 @@ impl ToolPolicyContext {
                     | ToolActionKind::Execute
                     | ToolActionKind::Network
                     | ToolActionKind::Git
-                    | ToolActionKind::Workflow
+                    | ToolActionKind::Mana
                     | ToolActionKind::Secret
                     | ToolActionKind::Extension
             )
@@ -721,7 +747,7 @@ pub enum ToolActionKind {
     Search,
     Network,
     Git,
-    Workflow,
+    Mana,
     AskUser,
     Secret,
     Extension,
@@ -764,7 +790,7 @@ impl ToolMetadata {
                 ToolActionKind::Execute
                     | ToolActionKind::Network
                     | ToolActionKind::Git
-                    | ToolActionKind::Workflow
+                    | ToolActionKind::Mana
                     | ToolActionKind::Secret
                     | ToolActionKind::Extension
             ),
@@ -812,8 +838,8 @@ impl ToolMetadata {
                 return ResourceScope::Command { program };
             }
         }
-        if self.action_kind == ToolActionKind::Workflow {
-            return ResourceScope::Workflow {
+        if self.action_kind == ToolActionKind::Mana {
+            return ResourceScope::Mana {
                 action: args
                     .get("action")
                     .and_then(Value::as_str)
@@ -860,11 +886,11 @@ impl ToolMetadata {
                 metadata.external_side_effect = true;
                 metadata.workspace_write = true;
             }
-            "workflow" => {
+            "mana" => {
                 metadata.external_side_effect = true;
                 metadata
                     .resource_scopes
-                    .push(ResourceScope::Workflow { action: None });
+                    .push(ResourceScope::Mana { action: None });
             }
             "web" => {
                 metadata.network = true;
@@ -899,7 +925,7 @@ impl ToolActionKind {
             "edit" | "multi_edit" => Self::Edit,
             "bash" | "shell" => Self::Execute,
             "git" => Self::Git,
-            "workflow" => Self::Workflow,
+            "mana" => Self::Mana,
             "web" => Self::Network,
             "ask" | "ask_user" => Self::AskUser,
             "extend" => Self::Extension,
@@ -933,7 +959,7 @@ pub enum ResourceScope {
     Network {
         host: Option<String>,
     },
-    Workflow {
+    Mana {
         action: Option<String>,
     },
     Secret {
@@ -1029,7 +1055,7 @@ impl PolicyReason {
 pub enum PolicySource {
     AgentMode,
     RunPolicy,
-    WorkflowLoop,
+    ManaLoop,
     BashEquivalent,
     RepeatedCall,
     Hook,
@@ -1157,8 +1183,8 @@ impl PolicyTraceRecord {
             ResourceScope::Network { host } => {
                 serde_json::json!({ "kind": "network", "host": host })
             }
-            ResourceScope::Workflow { action } => {
-                serde_json::json!({ "kind": "workflow", "action": action })
+            ResourceScope::Mana { action } => {
+                serde_json::json!({ "kind": "mana", "action": action })
             }
             ResourceScope::Secret { name } => serde_json::json!({ "kind": "secret", "name": name }),
             ResourceScope::Extension { id } => serde_json::json!({ "kind": "extension", "id": id }),
@@ -1205,9 +1231,9 @@ mod reference_monitor_types_tests {
         assert!(git.external_side_effect);
         assert!(git.workspace_write);
 
-        let workflow = ToolMetadata::for_tool_name("workflow", false);
-        assert_eq!(workflow.action_kind, ToolActionKind::Workflow);
-        assert!(workflow.external_side_effect);
+        let mana = ToolMetadata::for_tool_name("mana", false);
+        assert_eq!(mana.action_kind, ToolActionKind::Mana);
+        assert!(mana.external_side_effect);
 
         let web = ToolMetadata::for_tool_name("web", true);
         assert_eq!(web.action_kind, ToolActionKind::Network);
@@ -1245,10 +1271,10 @@ mod reference_monitor_types_tests {
             }
         );
 
-        let workflow = ToolMetadata::for_tool_name("workflow", false);
+        let mana = ToolMetadata::for_tool_name("mana", false);
         assert_eq!(
-            workflow.resource_scope_for_args(None, &serde_json::json!({ "action": "close" })),
-            ResourceScope::Workflow {
+            mana.resource_scope_for_args(None, &serde_json::json!({ "action": "close" })),
+            ResourceScope::Mana {
                 action: Some("close".into())
             }
         );
@@ -1432,6 +1458,19 @@ mod reference_monitor_types_tests {
             PolicySource::Guardrail,
             "guardrail_enforced",
         );
+    }
+
+    #[test]
+    fn policy_trace_records_cover_legacy_mana_policy_outcomes() {
+        let monitor = ReferenceMonitor;
+        let mut context = ToolPolicyContext::new("mana", ToolActionKind::Mana);
+        context.mode = AgentMode::Reviewer;
+        let decision = crate::agent::evaluate_mana_policy(
+            context.mode,
+            &serde_json::json!({ "action": "close" }),
+        );
+        let record = monitor.mana_policy_record(&context, &decision);
+        assert_policy_record(record, PolicySource::ManaLoop, "compat_mana_policy_blocked");
     }
 
     fn assert_policy_record(record: PolicyTraceRecord, source: PolicySource, code: &str) {

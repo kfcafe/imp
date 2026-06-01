@@ -11,6 +11,8 @@ target/
 
 # Local mana runtime/work graph state. Existing tracked mana files remain tracked until removed from the index.
 .mana/
+.tmp/
+.vibecheck/
 
 # Private/local planning notes and scratch docs.
 *-idea.md

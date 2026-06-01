@@ -1,0 +1,1 @@
+Implemented /compact fail-fast behavior: provider summary prompts over 60% of the model context window now use deterministic fallback, provider errors propagate, and normal chat context-full conditions are reported clearly.

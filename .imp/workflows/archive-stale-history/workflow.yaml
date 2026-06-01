@@ -1,0 +1,84 @@
+schema: imp.workflow/v1
+id: archive-stale-history
+title: Archive stale historical launch-confusing files
+status: done
+kind: release
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: Move stale historical files that confuse the public 0.3.0 surface to ~/imp-archive with a manifest.
+  user_value: The repository looks intentional and current to public readers while preserving recoverable project history.
+  non_goals:
+  - Delete valuable history without archival.
+  - Rewrite old workflow event logs.
+  acceptance:
+    stale_history_disposed:
+      text: Stale public-confusing history is archived or explicitly retained with rationale.
+      status: done
+      checks:
+      - stale_history_inventory_written
+      - archive_manifest_written
+      - repo_references_clean
+steps:
+  inventory_stale_history:
+    kind: context
+    status: done
+    checks:
+    - stale_history_inventory_written
+  archive_or_retain:
+    kind: build
+    status: done
+    depends_on:
+    - inventory_stale_history
+    checks:
+    - archive_manifest_written
+  verify_references:
+    kind: verify
+    status: done
+    depends_on:
+    - archive_or_retain
+    checks:
+    - repo_references_clean
+checks:
+  stale_history_inventory_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/archive-stale-history/artifacts/stale-history-inventory.md
+  archive_manifest_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/archive-stale-history/artifacts/archive-manifest.md
+  repo_references_clean:
+    kind: command
+    status: passed
+    command: rg for archived paths and stale public claims
+workers:
+  owner:
+    role: owner
+    writes_code: true
+    responsibilities:
+    - execute this workflow
+    - record evidence and blockers
+    - keep changes focused and verified
+results:
+  path: .imp/workflows/archive-stale-history/results.md
+  required_claims:
+  - archived paths or retain rationale
+  - restore location
+  - reference verification
+closeout:
+  done:
+    requires:
+    - stale_history_inventory_written
+    - archive_manifest_written
+    - repo_references_clean
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

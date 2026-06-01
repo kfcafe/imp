@@ -2,7 +2,7 @@
 
 Status: grounded design draft  
 Scope: improve the current TUI first; keep the design GUI-ready through shared runtime state  
-Related epic: `394 Evolve imp into workflow-first agent runtime with workflow ledger and extension support`
+Related epic: `394 Evolve imp into workflow-first agent runtime with mana ledger and extension support`
 
 ## 1. Grounding: current TUI reality
 
@@ -22,7 +22,7 @@ Relevant current source:
   - `EditorView` is already a rich prompt box/superbar.
   - It has top-left identity: cwd + session name.
   - It has top-right turn elapsed time.
-  - It has bottom-left labels: workflow scope, workflow run, build loop/loop state.
+  - It has bottom-left labels: mana scope, mana run, build loop/loop state.
   - It has bottom-right labels: model, thinking level, context usage, git label, loop/activity.
   - Placeholder currently says: `Ask anything… ⇧↵ newline  @file attach context  / palette  ! or : shell  :cd cwd`.
 - `crates/imp-tui/src/views/chat.rs`
@@ -30,7 +30,7 @@ Relevant current source:
   - Tool calls can be focused/expanded.
 - `crates/imp-tui/src/views/sidebar.rs`
   - `SidebarView` already lists tool calls and detail.
-  - It can show workflow run detail or thinking when no tool is selected.
+  - It can show mana run detail or thinking when no tool is selected.
 - `crates/imp-tui/src/views/ask_bar.rs`
   - `AskBar` already supports prompt/question UX with options and free-form reply.
 
@@ -59,9 +59,9 @@ Not this:
 
 ## 2. Product direction
 
-The current imp TUI should remain conversation-first. Workflow-first features should make the existing TUI more legible, not turn it into a project-workflowgement dashboard.
+The current imp TUI should remain conversation-first. Workflow-first features should make the existing TUI more legible, not turn it into a project-management dashboard.
 
-A future GUI may make sense for richer evidence browsing, diff review, worktree workflowgement, and child workflow supervision. But the GUI should consume the same runtime state as the TUI:
+A future GUI may make sense for richer evidence browsing, diff review, worktree management, and child workflow supervision. But the GUI should consume the same runtime state as the TUI:
 
 ```text
 RuntimeEvent + RuntimeStateSnapshot
@@ -79,7 +79,7 @@ RuntimeEvent + RuntimeStateSnapshot
 5. **Reduce redundant words.** Prefer compact values over repeated labels like `workflow:`, `phase:`, `status:`.
 6. **Make autonomy visible.** `local-auto`, `worktree-auto`, and `ALLOW-ALL` must be obvious in the prompt box.
 7. **Make worktree scope obvious.** If editing an isolated worktree, the prompt identity/status must show that.
-8. **Closeout should be satisfying.** Final summaries should make evidence, verification, diff, and workflow status easy to inspect.
+8. **Closeout should be satisfying.** Final summaries should make evidence, verification, diff, and mana status easy to inspect.
 
 ## 4. Existing layout, annotated
 
@@ -96,12 +96,12 @@ RuntimeEvent + RuntimeStateSnapshot
 │                                              │ Optional SidebarView         ││
 │                                              │ - tool list/detail           ││
 │                                              │ - thinking detail            ││
-│                                              │ - workflow run detail            ││
+│                                              │ - mana run detail            ││
 │                                              └──────────────────────────────┘│
 ├ ~/cwd · session-name ──────────────────────────────────────────────── 00:08 ┤
 │ Ask anything… ⇧↵ newline  @file attach context  / palette  ! or : shell      │
 │                                                                              │
-│ bottom-left: workflow/build/loop labels                                           │
+│ bottom-left: mana/build/loop labels                                           │
 │ bottom-right: model · thinking · context · git · activity                     │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -207,7 +207,7 @@ Possible sidebar modes:
 Tool detail       current default when tool selected
 Workflow detail   when no tool selected or user selects workflow inspector
 Evidence detail   after evidence exists
-Workflow detail       current workflow run detail pattern
+Mana detail       current mana run detail pattern
 ```
 
 ## 8. Editor border states
@@ -398,7 +398,7 @@ imp
 │ Ask anything… ⇧↵ newline  @file attach context  / palette  ! or : shell      │
 │                                                                              │
 │ DONE · evidence ready                                                        │
-│ e open evidence · d diff · m workflow · gpt-5.1-codex · main                    │
+│ e open evidence · d diff · m mana · gpt-5.1-codex · main                    │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -437,13 +437,13 @@ imp
     Provide a local DATABASE_URL or mark integration test unavailable.
 ```
 
-## 14. Workflow ledger through existing sidebar/detail
+## 14. Mana ledger through existing sidebar/detail
 
-Current `SidebarView` can show workflow run detail when no tool is selected. Build on that.
+Current `SidebarView` can show mana run detail when no tool is selected. Build on that.
 
 ```text
 ┌──────────────────────────────┐
-│ Workflow                         │
+│ Mana                         │
 │                              │
 │ 394.2.3                      │
 │ Thread workflow contract...  │
@@ -463,7 +463,7 @@ Current `SidebarView` can show workflow run detail when no tool is selected. Bui
 └──────────────────────────────┘
 ```
 
-Do not put workflow in the main chat unless the user asked to inspect/update it.
+Do not put mana in the main chat unless the user asked to inspect/update it.
 
 ## 15. Worktree-auto in current layout
 
@@ -610,7 +610,7 @@ A future GUI can be richer, but it should still reflect the current TUI concepts
 
 ```text
 ┌ Detail ────────────────────────────┐
-│ [Tools] [Verify] [Evidence] [Workflow] │
+│ [Tools] [Verify] [Evidence] [Mana] │
 │ [Policy] [Worktree] [Children]     │
 │                                    │
 │ selected detail content            │
@@ -680,7 +680,7 @@ Everything important must remain possible through:
 - TUI
 - CLI/headless mode
 - trace/evidence artifacts
-- workflow ledger
+- mana ledger
 
 The GUI is richer inspection/control, not the source of truth.
 
@@ -699,7 +699,7 @@ The GUI is richer inspection/control, not the source of truth.
 - Existing tool detail remains default.
 - Add workflow detail when no tool is selected.
 - Add evidence detail after closeout.
-- Add workflow detail using current workflow run detail pattern.
+- Add mana detail using current mana run detail pattern.
 
 ## 27. Phase 3: AskBar workflows
 

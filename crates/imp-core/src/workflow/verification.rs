@@ -248,7 +248,7 @@ impl Default for VerificationArtifactRef {
 #[serde(rename_all = "kebab-case", tag = "source")]
 pub enum VerificationGateSource {
     WorkflowContract,
-    WorkflowTask { unit_id: Option<String> },
+    ManaTask { unit_id: Option<String> },
     User,
     Inferred,
     Policy,
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn verification_gate_serde_roundtrip_preserves_status_and_artifacts() {
         let mut gate = VerificationGate::command("fmt", "cargo fmt --check");
-        gate.source = VerificationGateSource::WorkflowTask {
+        gate.source = VerificationGateSource::ManaTask {
             unit_id: Some("394.7.2".into()),
         };
         gate.artifacts.push(VerificationArtifactRef::new(

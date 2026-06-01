@@ -1,0 +1,562 @@
+schema: imp.workflow/v1
+id: prepare-imp-0-3-0-release
+title: Prepare imp 0.3.0 release candidate
+status: done_with_concerns
+kind: release
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Prepare imp for a hardened 0.3.0 stable release candidate that is repository-ready for a Hacker News launch. The workflow focuses on codebase/release readiness only, not drafting the HN post.
+  user_value: |
+    Make imp credible for a public developer audience: a clear supported product surface, less dead or stale code, reliable install/run instructions, provider/auth paths that work for Anthropic and OpenAI-compatible users, and release artifacts that make 0.3.0 feel intentional rather than experimental.
+
+    Cleanup policy: archive only clearly unused/dead code and stale docs to ~/imp-archive. Do not archive merely experimental but still-live features unless the audit proves they are dead, stale, misleading, or blocking release clarity.
+
+    Product surface policy: decide the supported 0.3.0 public surface from audit evidence. ACP/editor integration is out of scope unless it is already polished and documented; do not promise blocked or half-supported editor integration.
+  non_goals:
+  - Write the Hacker News launch post or comment-response material.
+  - Create the final git tag without explicit user approval after release-candidate verification.
+  - Remove or archive live features only because they are experimental; require evidence that they are dead, stale, misleading, or release-blocking.
+  - Add major new product features beyond release-readiness fixes required by audit evidence.
+  - Perform destructive git history changes, network pushes, or publish artifacts without explicit approval.
+  acceptance:
+    audit_complete:
+      text: A full repository audit identifies dead code, stale docs, unnecessary or misleading features, release blockers, provider/auth risks, and docs/install gaps.
+      status: todo
+      checks:
+      - surface_audit_complete
+      - dead_code_inventory_complete
+      - stale_docs_inventory_complete
+      - surface_audit_complete
+      - provider_auth_audit_complete
+      - dependency_security_audit_complete
+    cleanup_complete:
+      text: Clearly unused/dead code and stale docs are removed from the active repo or moved to ~/imp-archive with a manifest, and no supported 0.3.0 surface is accidentally broken.
+      status: todo
+      checks:
+      - archive_root_ready
+      - archive_manifest_written
+      - dead_code_disposition_complete
+      - stale_docs_disposition_complete
+      - no_accidental_public_surface_loss
+    release_candidate_ready:
+      text: Cargo versions, changelog/release notes, README/install docs, and release checklist consistently describe imp 0.3.0 RC readiness.
+      status: todo
+      checks:
+      - cargo_versions_bumped
+      - changelog_updated
+      - readme_install_docs_verified
+      - release_checklist_written
+      - acp_scope_documented
+    automated_verification_passed:
+      text: 'Automated evidence only is sufficient: cargo checks/tests, audits, docs grep, and CLI smoke tests pass or have documented blockers.'
+      status: todo
+      checks:
+      - cargo_fmt_passed
+      - cargo_check_workspace_passed
+      - targeted_tests_passed
+      - cli_smoke_tests_passed
+      - docs_grep_passed
+      - audit_scans_passed
+    final_decision_ready:
+      text: The workflow produces a concise go/no-go summary with remaining risks and an explicit final tag approval prompt.
+      status: todo
+      checks:
+      - results_rendered
+      - go_no_go_summary_written
+      - final_tag_approval_pending
+  approval_required_for:
+  - final git tag creation for v0.3.0
+  - publishing or pushing to any non-local/network remote
+  - removing provider/auth support
+  - removing workflow runtime/tool support
+  - archiving live but experimental features without clear dead/stale evidence
+  - deleting files permanently instead of archiving when they contain nontrivial design/history
+  - large refactors touching more than five files
+context:
+  project_instructions:
+    file: AGENTS.md
+    status: todo
+  prior_surface_cleanup:
+    artifact: .imp/workflows/tighten-imp-product-surface/results.md
+    status: todo
+  archive_root:
+    artifact: ~/imp-archive
+    status: todo
+  current_version_sources:
+    artifact: Cargo.toml files, Cargo.lock, README/install docs, CLI version output
+    status: todo
+  release_scope_answers:
+    artifact: chat on 2026-05-29; decisions captured in spec.user_value and non_goals
+    status: done
+steps:
+  inspect_instructions_and_status:
+    kind: context
+    status: done
+    checks:
+    - project_instructions_read
+    - git_status_reviewed
+    - workflow_schema_validated_initially
+  inventory_release_surface:
+    kind: context
+    status: done
+    depends_on:
+    - inspect_instructions_and_status
+    checks:
+    - cli_surface_inventory_complete
+    - tui_surface_inventory_complete
+    - workflow_surface_inventory_complete
+    - lua_extension_surface_inventory_complete
+    - provider_surface_inventory_complete
+    - acp_surface_inventory_complete
+    - gui_surface_inventory_complete
+    - docs_surface_inventory_complete
+  audit_dead_code_and_stale_assets:
+    kind: context
+    status: done
+    depends_on:
+    - inventory_release_surface
+    checks:
+    - cargo_unused_feature_audit_complete
+    - symbol_reference_audit_complete
+    - stale_docs_inventory_complete
+    - orphaned_tests_inventory_complete
+    - archive_candidates_classified
+  audit_quality_security_dependencies:
+    kind: context
+    status: done
+    depends_on:
+    - inventory_release_surface
+    checks:
+    - audit_scan_quality_complete
+    - audit_scan_security_complete
+    - audit_scan_secrets_complete
+    - audit_scan_deps_complete
+    - blocker_findings_classified
+  audit_provider_auth_and_smoke_paths:
+    kind: context
+    status: done
+    depends_on:
+    - inventory_release_surface
+    checks:
+    - anthropic_auth_path_audited
+    - openai_compatible_auth_path_audited
+    - provider_error_messages_audited
+    - headless_cli_smoke_plan_written
+  decide_0_3_0_supported_surface:
+    kind: plan
+    status: done
+    depends_on:
+    - audit_dead_code_and_stale_assets
+    - audit_quality_security_dependencies
+    - audit_provider_auth_and_smoke_paths
+    checks:
+    - supported_surface_documented
+    - out_of_scope_surface_documented
+    - acp_scope_documented
+    - removal_archive_policy_applied
+  plan_cleanup_and_release_fixes:
+    kind: plan
+    status: done
+    depends_on:
+    - decide_0_3_0_supported_surface
+    checks:
+    - dead_code_cut_plan_written
+    - stale_docs_cut_plan_written
+    - release_blocker_fix_plan_written
+    - verification_plan_written
+  archive_dead_code_and_stale_docs:
+    kind: build
+    status: done
+    depends_on:
+    - plan_cleanup_and_release_fixes
+    checks:
+    - archive_root_ready
+    - files_moved_to_archive_when_needed
+    - archive_manifest_written
+    - repo_references_updated_after_archival
+  implement_release_blocker_fixes:
+    kind: build
+    status: done_with_concerns
+    depends_on:
+    - plan_cleanup_and_release_fixes
+    checks:
+    - provider_auth_blockers_fixed
+    - cli_smoke_blockers_fixed
+    - docs_blockers_fixed
+    - compile_blockers_fixed
+  bump_versions_to_0_3_0_rc:
+    kind: build
+    status: done
+    depends_on:
+    - implement_release_blocker_fixes
+    checks:
+    - cargo_versions_bumped
+    - cargo_lock_updated
+    - cli_version_output_checked
+  update_release_docs:
+    kind: build
+    status: done
+    depends_on:
+    - bump_versions_to_0_3_0_rc
+    checks:
+    - changelog_updated
+    - readme_install_docs_verified
+    - supported_surface_docs_updated
+    - release_checklist_written
+    - local_tag_checklist_written
+  run_automated_verification:
+    kind: verify
+    status: done_with_concerns
+    depends_on:
+    - archive_dead_code_and_stale_docs
+    - update_release_docs
+    checks:
+    - cargo_fmt_passed
+    - cargo_check_workspace_passed
+    - targeted_tests_passed
+    - cli_smoke_tests_passed
+    - docs_grep_passed
+    - audit_scans_passed
+    - git_diff_check_passed
+  review_release_candidate:
+    kind: closeout
+    status: done_with_concerns
+    depends_on:
+    - run_automated_verification
+    checks:
+    - focused_diff_reviewed
+    - go_no_go_summary_written
+    - final_tag_approval_pending
+    - results_rendered
+checks:
+  project_instructions_read:
+    kind: context
+    status: passed
+    file: AGENTS.md
+  git_status_reviewed:
+    kind: command
+    status: passed
+    command: git status --short
+  workflow_schema_validated_initially:
+    kind: command
+    status: passed
+    command: imp workflow validate prepare-imp-0-3-0-release
+  cli_surface_inventory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/surface-inventory.md
+  tui_surface_inventory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/surface-inventory.md
+  workflow_surface_inventory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/surface-inventory.md
+  lua_extension_surface_inventory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/surface-inventory.md
+  provider_surface_inventory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/surface-inventory.md
+  acp_surface_inventory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/surface-inventory.md
+  gui_surface_inventory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/surface-inventory.md
+  docs_surface_inventory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/surface-inventory.md
+  cargo_unused_feature_audit_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/dead-code-audit.md
+  symbol_reference_audit_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/dead-code-audit.md
+  dead_code_inventory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/dead-code-audit.md
+  stale_docs_inventory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/stale-docs-audit.md
+  orphaned_tests_inventory_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/dead-code-audit.md
+  archive_candidates_classified:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/archive-candidates.md
+  audit_scan_quality_complete:
+    kind: command
+    status: passed
+    command: audit_scan quality .
+  audit_scan_security_complete:
+    kind: command
+    status: passed
+    command: audit_scan security .
+  audit_scan_secrets_complete:
+    kind: command
+    status: passed
+    command: audit_scan secrets .
+  audit_scan_deps_complete:
+    kind: command
+    status: passed
+    command: audit_scan deps .
+  dependency_security_audit_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/audit-scans.md
+  blocker_findings_classified:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/blockers.md
+  anthropic_auth_path_audited:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/provider-auth-audit.md
+  openai_compatible_auth_path_audited:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/provider-auth-audit.md
+  provider_auth_audit_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/provider-auth-audit.md
+  provider_error_messages_audited:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/provider-auth-audit.md
+  headless_cli_smoke_plan_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/verification-plan.md
+  surface_audit_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/surface-inventory.md
+  supported_surface_documented:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/target-surface.md
+  out_of_scope_surface_documented:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/target-surface.md
+  acp_scope_documented:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/target-surface.md
+  removal_archive_policy_applied:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/archive-candidates.md
+  dead_code_cut_plan_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/cleanup-plan.md
+  stale_docs_cut_plan_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/cleanup-plan.md
+  release_blocker_fix_plan_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/release-blocker-plan.md
+  verification_plan_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/verification-plan.md
+  archive_root_ready:
+    kind: command
+    status: passed
+    command: mkdir -p ~/imp-archive/imp-0.3.0-release-candidate
+  files_moved_to_archive_when_needed:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/archive-manifest.md
+  archive_manifest_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/archive-manifest.md
+  repo_references_updated_after_archival:
+    kind: command
+    status: passed
+    command: rg for archived paths and removed docs references
+  dead_code_disposition_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/cleanup-results.md
+  stale_docs_disposition_complete:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/cleanup-results.md
+  no_accidental_public_surface_loss:
+    kind: command
+    status: passed
+    command: cargo check --workspace plus CLI smoke tests
+  provider_auth_blockers_fixed:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/cleanup-results.md
+  cli_smoke_blockers_fixed:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/cleanup-results.md
+  docs_blockers_fixed:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/cleanup-results.md
+  compile_blockers_fixed:
+    kind: command
+    status: passed
+    command: cargo check --workspace
+  cargo_versions_bumped:
+    kind: artifact
+    status: passed
+    file: Cargo.toml
+  cargo_lock_updated:
+    kind: artifact
+    status: passed
+    file: Cargo.lock
+  cli_version_output_checked:
+    kind: command
+    status: passed
+    command: cargo run -q -p imp-cli -- --version
+  changelog_updated:
+    kind: artifact
+    status: passed
+    path: CHANGELOG.md
+  readme_install_docs_verified:
+    kind: artifact
+    status: passed
+    path: README.md
+  supported_surface_docs_updated:
+    kind: artifact
+    status: passed
+    path: README.md
+  release_checklist_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/release-checklist.md
+  local_tag_checklist_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/artifacts/release-checklist.md
+  cargo_fmt_passed:
+    kind: command
+    status: passed
+    command: cargo fmt --check
+  cargo_check_workspace_passed:
+    kind: command
+    status: passed
+    command: cargo check --workspace
+  targeted_tests_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core && cargo test -p imp-cli && cargo test -p imp-tui
+  cli_smoke_tests_passed:
+    kind: command
+    status: passed
+    command: automated CLI smoke commands from artifacts/verification-plan.md
+  docs_grep_passed:
+    kind: command
+    status: passed
+    command: rg checks for stale version, removed commands, blocked ACP promises, and stale install instructions
+  audit_scans_passed:
+    kind: aggregate
+    status: failed
+    requires:
+    - audit_scan_quality_complete
+    - audit_scan_security_complete
+    - audit_scan_secrets_complete
+    - audit_scan_deps_complete
+  git_diff_check_passed:
+    kind: command
+    status: passed
+    command: git diff --check
+  focused_diff_reviewed:
+    kind: approval
+    status: passed
+  go_no_go_summary_written:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/results.md
+  final_tag_approval_pending:
+    kind: approval
+    status: passed
+    decision: Ask user before creating final v0.3.0 git tag.
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/prepare-imp-0-3-0-release/results.md
+workers:
+  auditor:
+    role: auditor
+    writes_code: false
+    responsibilities:
+    - inventory current release surface across CLI, TUI, workflows, Lua extensions, providers, ACP, GUI, and docs
+    - identify dead code, stale docs, orphaned tests, misleading feature promises, dependency/security findings, and provider/auth risks
+    - produce evidence-backed archive candidates without over-removing live experimental code
+  planner:
+    role: planner
+    writes_code: false
+    responsibilities:
+    - decide supported 0.3.0 surface from audit evidence
+    - classify out-of-scope features, especially ACP/editor integration unless polished and documented
+    - write cleanup, release-blocker, and verification plans
+  implementer:
+    role: implementer
+    writes_code: true
+    responsibilities:
+    - archive clearly unused/dead code and stale docs to ~/imp-archive with manifest
+    - fix release blockers surfaced by the audit
+    - bump versions to 0.3.0 RC and update changelog/install/support docs
+  verifier:
+    role: verifier
+    writes_code: false
+    responsibilities:
+    - 'run automated verification only: cargo format/check/test, audit scans, docs grep, CLI smoke tests, and git diff checks'
+    - write final go/no-go summary and ask for explicit final tag approval
+results:
+  path: .imp/workflows/prepare-imp-0-3-0-release/results.md
+  required_claims:
+  - audit findings and cleanup decisions are evidence-backed
+  - archived files are recoverable under ~/imp-archive with a manifest
+  - supported 0.3.0 public surface is documented
+  - provider/auth readiness for Anthropic and OpenAI-compatible flows is verified or blocked with evidence
+  - versions/changelog/install docs/release checklist are ready for 0.3.0 RC
+  - automated verification commands and outcomes are recorded
+  - final git tag is pending explicit user approval
+closeout:
+  done:
+    requires:
+    - surface_audit_complete
+    - dead_code_disposition_complete
+    - stale_docs_disposition_complete
+    - cargo_versions_bumped
+    - changelog_updated
+    - cargo_check_workspace_passed
+    - results_rendered
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

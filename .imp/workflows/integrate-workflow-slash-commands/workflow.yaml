@@ -1,0 +1,141 @@
+schema: imp.workflow/v1
+id: integrate-workflow-slash-commands
+title: Integrate workflow slash commands
+status: done
+kind: roadmap_child
+parent:
+  workflow: prototype-imp-workflow-engine
+  step: integrate_plan_status_run
+settings:
+  worktree: per_workflow
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Back /plan, /status, and /run with the native workflow tool and engine.
+  user_value: |
+    Advance the imp-native workflow engine roadmap while preserving a durable, inspectable workflow plan.
+  non_goals:
+  - Broaden scope beyond this workflow slice before planning it in detail.
+  acceptance:
+    plan_written:
+      text: This workflow has a concrete implementation plan before code changes begin.
+      status: done
+      checks:
+      - plan_ready
+    results_rendered:
+      text: Results and verification are summarized for the parent workflow.
+      status: done
+      checks:
+      - results_rendered
+    slash_commands_integrated:
+      text: /plan, /status, /run, /workflow, and /workflows are routed to native workflow behavior.
+      status: done
+      checks:
+      - implementation_ready
+      - verification_passed
+  approval_required_for:
+  - changing spec.goal
+  - removing or weakening spec.acceptance
+  - removing required checks
+context:
+  parent_workflow:
+    file: .imp/workflows/prototype-imp-workflow-engine/workflow.yaml
+    status: done
+steps:
+  plan:
+    kind: plan
+    status: done
+    checks:
+    - plan_ready
+  execute:
+    kind: build
+    status: done
+    worker: builder
+    depends_on:
+    - plan
+    checks:
+    - implementation_ready
+  verify:
+    kind: verify
+    status: done
+    depends_on:
+    - execute
+    checks:
+    - verification_passed
+  review:
+    kind: review
+    status: done
+    worker: reviewer
+    depends_on:
+    - verify
+    checks:
+    - results_rendered
+    - final_claims_validated
+  closeout:
+    kind: closeout
+    status: done
+    depends_on:
+    - review
+    checks:
+    - required_checks_passed
+prototypes: {}
+checks:
+  plan_ready:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/integrate-workflow-slash-commands/artifacts/plan.md
+  implementation_ready:
+    kind: artifact
+    status: passed
+    path: crates/imp-tui/src/app.rs
+  verification_passed:
+    kind: command
+    status: passed
+    command: cargo check -p imp-tui && cargo test -p imp-core workflow_
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/integrate-workflow-slash-commands/results.md
+  final_claims_validated:
+    kind: closeout
+    status: passed
+  required_checks_passed:
+    kind: aggregate
+    status: passed
+workers:
+  parent:
+    role: orchestrator
+    writes:
+    - workflow
+    - results
+    - docs
+    writes_code: false
+  builder:
+    role: builder
+    writes:
+    - code
+    - tests
+    worktree: workflow
+  reviewer:
+    role: reviewer
+    writes:
+    - review_artifacts
+results:
+  path: .imp/workflows/integrate-workflow-slash-commands/results.md
+  required_claims:
+  - work completed
+  - verification performed
+  - concerns and next steps
+closeout:
+  done:
+    requires:
+    - required_checks_passed
+    - final_claims_validated
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

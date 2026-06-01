@@ -1,0 +1,682 @@
+## cargo fmt --check
+## cargo check --workspace
+    Checking imp-tui v0.3.0 (/Users/asher/imp/crates/imp-tui)
+    Checking mcp-shim v0.3.0 (/Users/asher/imp/crates/mcp-shim)
+    Checking imp-cli v0.3.0 (/Users/asher/imp/crates/imp-cli)
+warning: field `permission_policy` is never read
+  --> crates/imp-cli/src/acp/mod.rs:90:5
+   |
+86 | struct AcpSession {
+   |        ---------- field in this struct
+...
+90 |     permission_policy: PermissionPolicy,
+   |     ^^^^^^^^^^^^^^^^^
+   |
+   = note: `AcpSession` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `Reject` is never constructed
+  --> crates/imp-cli/src/acp/mod.rs:98:5
+   |
+96 | enum PermissionPolicy {
+   |      ---------------- variant in this enum
+97 |     Allow,
+98 |     Reject,
+   |     ^^^^^^
+   |
+   = note: `PermissionPolicy` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `session_update_message` is never used
+   --> crates/imp-cli/src/acp/mod.rs:354:15
+    |
+354 | pub(crate) fn session_update_message(
+    |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `event_update_messages` is never used
+   --> crates/imp-cli/src/acp/mod.rs:365:15
+    |
+365 | pub(crate) fn event_update_messages(
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `permission_request_message` is never used
+   --> crates/imp-cli/src/acp/mod.rs:403:4
+    |
+403 | fn permission_request_message(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `policy_denial_update` is never used
+   --> crates/imp-cli/src/acp/mod.rs:428:4
+    |
+428 | fn policy_denial_update(session_id: &str, message: &str) -> JsonRpcOutbound {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `agent_event_to_session_updates` is never used
+  --> crates/imp-cli/src/acp/events.rs:81:15
+   |
+81 | pub(crate) fn agent_event_to_session_updates(event: &AgentEvent) -> Vec<SessionUpdate> {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `stop_reason_from_llm` is never used
+   --> crates/imp-cli/src/acp/events.rs:171:15
+    |
+171 | pub(crate) fn stop_reason_from_llm(reason: &LlmStopReason) -> StopReason {
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tool_title` is never used
+   --> crates/imp-cli/src/acp/events.rs:206:4
+    |
+206 | fn tool_title(name: &str, arguments: &serde_json::Value) -> String {
+    |    ^^^^^^^^^^
+
+warning: function `tool_kind` is never used
+   --> crates/imp-cli/src/acp/events.rs:220:4
+    |
+220 | fn tool_kind(name: &str) -> ToolKind {
+    |    ^^^^^^^^^
+
+warning: variant `Request` is never constructed
+  --> crates/imp-cli/src/acp/protocol.rs:52:5
+   |
+49 | pub(crate) enum JsonRpcOutbound {
+   |                 --------------- variant in this enum
+...
+52 |     Request(JsonRpcRequest),
+   |     ^^^^^^^
+   |
+   = note: `JsonRpcOutbound` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated function `new` is never used
+   --> crates/imp-cli/src/acp/protocol.rs:341:19
+    |
+340 | impl JsonRpcRequest {
+    | ------------------- associated function in this implementation
+341 |     pub(crate) fn new(id: JsonRpcId, method: impl Into<String>, params: Value) -> Self {
+    |                   ^^^
+
+warning: `imp-cli` (lib) generated 12 warnings
+    Checking imp-install v0.3.0 (/Users/asher/imp)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.52s
+## cargo test -p imp-core --lib
+   Compiling imp-core v0.3.0 (/Users/asher/imp/crates/imp-core)
+error[E0425]: cannot find function `workflow_bash_equivalent_hint` in this scope
+    --> crates/imp-core/src/agent/mod.rs:3855:17
+     |
+3855 |         assert!(workflow_bash_equivalent_hint("workflow release 1").is_some());
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `workflow_bash_equivalent_hint` in this scope
+    --> crates/imp-core/src/agent/mod.rs:3856:17
+     |
+3856 |         assert!(workflow_bash_equivalent_hint("workflow tree").is_some());
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `workflow_bash_equivalent_hint` in this scope
+    --> crates/imp-core/src/agent/mod.rs:3861:17
+     |
+3861 |         assert!(workflow_bash_equivalent_hint("workflowtee status").is_none());
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `workflow_bash_equivalent_hint` in this scope
+    --> crates/imp-core/src/agent/mod.rs:3862:17
+     |
+3862 |         assert!(workflow_bash_equivalent_hint("./workflow status").is_none());
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `imp-core` (lib test) due to 4 previous errors
+## cargo test -p imp-cli --lib
+   Compiling imp-tui v0.3.0 (/Users/asher/imp/crates/imp-tui)
+   Compiling imp-cli v0.3.0 (/Users/asher/imp/crates/imp-cli)
+warning: field `permission_policy` is never read
+  --> crates/imp-cli/src/acp/mod.rs:90:5
+   |
+86 | struct AcpSession {
+   |        ---------- field in this struct
+...
+90 |     permission_policy: PermissionPolicy,
+   |     ^^^^^^^^^^^^^^^^^
+   |
+   = note: `AcpSession` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `Reject` is never constructed
+  --> crates/imp-cli/src/acp/mod.rs:98:5
+   |
+96 | enum PermissionPolicy {
+   |      ---------------- variant in this enum
+97 |     Allow,
+98 |     Reject,
+   |     ^^^^^^
+   |
+   = note: `PermissionPolicy` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `stop_reason_from_llm` is never used
+   --> crates/imp-cli/src/acp/events.rs:171:15
+    |
+171 | pub(crate) fn stop_reason_from_llm(reason: &LlmStopReason) -> StopReason {
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: `imp-cli` (lib test) generated 3 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.29s
+     Running unittests src/lib.rs (target/debug/deps/imp_cli-9f49b2314bce121b)
+
+running 72 tests
+test acp::events::tests::message_to_session_updates_maps_user_and_assistant_text ... ok
+test acp::events::tests::agent_event_to_session_updates_maps_tool_call ... ok
+test acp::protocol::tests::parses_cancel_notification ... ok
+test acp::events::tests::prompt_blocks_to_text_includes_embedded_resource ... ok
+test acp::protocol::tests::invalid_params_return_json_rpc_invalid_params ... ok
+test acp::protocol::tests::parses_initialize_request ... ok
+test acp::protocol::tests::serializes_initialize_result_with_truthful_capabilities ... ok
+test acp::protocol::tests::serializes_prompt_result_stop_reason ... ok
+test acp::protocol::tests::parses_session_prompt_content_blocks ... ok
+test acp::protocol::tests::serializes_session_update_tool_call ... ok
+test acp::protocol::tests::unknown_request_method_returns_method_not_found_response ... ok
+test acp::tests::permission_request_message_uses_acp_request_permission_shape ... ok
+test acp::tests::event_update_messages_wrap_agent_events_as_session_update_notifications ... ok
+test acp::tests::session_path_for_id_rejects_path_traversal ... ok
+test acp::tests::policy_denial_update_is_visible_tool_failure ... ok
+test acp::tests::stdio_server_rejects_session_before_initialize ... ok
+test acp::tests::stdio_server_initialize_handshake ... ok
+test stats_report::tests::period_keys_are_stable ... ok
+test stats_report::tests::summarizes_nested_diff_details ... ok
+test acp::tests::create_session_uses_absolute_cwd_and_can_load_by_id ... ok
+test stats_report::tests::tool_rows_group_and_sort_by_calls ... ok
+test tests::build_full_prompt_keeps_bare_prompt_after_file_context ... ok
+test acp::tests::stdio_server_creates_session_after_initialize ... ok
+test acp::tests::stdio_server_prompt_returns_stubbed_completion ... ok
+test acp::tests::cancel_before_prompt_returns_cancelled_stop_reason ... ok
+test tests::cli_rejects_unknown_autonomy_mode ... ok
+test acp::tests::session_prompt_persists_user_message_once ... ok
+test tests::cli_parses_verify_command_gates ... ok
+test tests::cli_parses_autonomy_mode_flag ... ok
+test tests::cli_parses_workflow_commands ... ok
+test tests::parse_rpc_cancel_command ... ok
+test tests::parse_rpc_followup_command ... ok
+test tests::parse_rpc_missing_type_errors ... ok
+test tests::parse_rpc_prompt_command ... ok
+test tests::parse_rpc_prompt_missing_content_errors ... ok
+test tests::parse_rpc_steer_command ... ok
+test tests::parse_thinking_level_strict_rejects_unknown_values ... ok
+test tests::parse_rpc_unknown_type_errors ... ok
+test tests::parse_thinking_level_all_variants ... ok
+test tests::parse_thinking_level_case_insensitive ... ok
+test tests::prompt_args_excludes_file_context_args ... ok
+test tests::parse_thinking_level_unknown_defaults_to_off ... ok
+test tests::parse_tool_output_display_accepts_known_values ... ok
+test tests::resolve_install_destination_falls_back_to_path_preference_when_imp_missing ... ok
+test tests::cli_workflow_rejects_invalid_validation_mode ... ok
+test tests::cli_treats_old_run_workflow_flags_as_prompt_args ... ok
+test tests::resolve_install_destination_prefers_active_user_imp_path ... ok
+test tests::resolve_install_destination_uses_cargo_bin_when_no_user_bin_is_on_path ... ok
+test tests::resolve_model_cli_provider_override ... ok
+test tests::resolve_model_allows_custom_openai_model ... ok
+test tests::resolve_model_haiku_alias ... ok
+test tests::resolve_custom_openai_model_does_not_switch_to_chatgpt_provider ... ok
+test tests::resolve_model_cli_overrides_config ... ok
+test acp::tests::acp_real_agent_prompt_streams_text_update ... ok
+test tests::resolve_model_unknown_alias_errors ... ok
+test tests::resolve_model_sonnet_alias ... ok
+test tests::rpc_agent_event_agent_end_serializes_blocked_status ... ok
+test tests::rpc_agent_event_agent_end ... ok
+test tests::rpc_agent_event_agent_end_serializes_failed_status ... ok
+test tests::rpc_agent_event_timing ... ok
+test tests::rpc_agent_event_tool_execution_start ... ok
+test tests::rpc_stream_event_text_delta ... ok
+test tests::startup_stage_names_are_stable ... ok
+test tests::rpc_stream_event_tool_call ... ok
+test usage_report::tests::export_json_contains_deduped_totals ... ok
+test tests::thinking_level_label_matches_expected_strings ... ok
+test usage_report::tests::grouped_rows_sum_tokens_and_costs ... ok
+test tests::web_search_provider_label_formats_none_and_provider_names ... ok
+test usage_report::tests::parse_usage_time_bound_supports_dates_and_timestamps ... ok
+test usage_report::tests::usage_filters_apply_provider_model_session_and_bounds ... ok
+test tests::resolve_model_prefers_chatgpt_provider_when_only_oauth_is_available ... ok
+test tests::resolve_model_keeps_openai_when_api_key_exists ... ok
+
+test result: ok. 72 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+## cargo test -p imp-tui --lib
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
+     Running unittests src/lib.rs (target/debug/deps/imp_tui-0bd4ab24b1da7796)
+
+running 324 tests
+test animation::tests::title_spinner_uses_braille_dot_cycle ... ok
+test animation::tests::title_loop_frame_uses_clockwise_loop_icon ... ok
+test animation::tests::activity_labels_keep_static_glyphs_when_motion_disabled ... ok
+test animation::tests::elapsed_formats_seconds_and_minutes ... ok
+test animation::tests::activity_labels_use_state_specific_glyphs ... ok
+test app::session_lifecycle::app_starts_without_selection_state ... ok
+test app::session_lifecycle::agent_task_completion_keeps_event_bridge_alive_for_terminal_events ... ok
+test app::session_lifecycle::agent_task_failure_preserves_active_replacement_handle ... ok
+test app::session_lifecycle::agent_end_does_not_double_count_usage_or_overwrite_context ... ok
+test app::session_lifecycle::agent_task_completion_preserves_active_replacement_handle ... ok
+test app::session_lifecycle::agent_task_completion_clears_handle_when_no_replacement_is_active ... ok
+test app::session_lifecycle::agent_start_request_keeps_expensive_startup_work_deferred ... ok
+test app::session_lifecycle::agent_start_status_updates_and_clears_startup_status_item ... ok
+test app::session_lifecycle::build_click_map_with_tool_calls ... ok
+test app::session_lifecycle::ask_select_typed_custom_text_with_other_returns_other_index ... ok
+test app::session_lifecycle::at_sign_is_plain_text_input ... ok
+test app::session_lifecycle::ask_tab_replacement_moves_editor_and_ask_cursors_to_end ... ok
+test app::session_lifecycle::autonomy_command_sets_status_and_warns_for_allow_all ... ok
+test app::session_lifecycle::command_palette_omits_checkpoint_commands ... ok
+test app::session_lifecycle::command_palette_omits_workflow_command ... ok
+test app::session_lifecycle::autonomy_command_help_and_unknown_mode_are_user_visible ... ok
+test app::session_lifecycle::chat_waiting_cache_changes_across_animation_ticks ... ok
+test app::session_lifecycle::command_palette_merges_lua_extension_commands ... ok
+test app::session_lifecycle::completion_bell_cancel_suppresses_notification_once ... ok
+test app::session_lifecycle::compact_git_label_shows_branch_and_dirty_count ... ok
+test app::session_lifecycle::command_palette_includes_skill_commands ... ok
+test app::session_lifecycle::cmd_c_shortcut_is_treated_as_copy_when_selection_exists ... ok
+test app::session_lifecycle::cached_git_label_reuses_recent_value ... ok
+test app::session_lifecycle::completion_bell_requires_completed_turn_and_resets_latch ... ok
+test app::session_lifecycle::current_model_meta_for_persistence_is_cached_for_render_status ... ok
+test app::session_lifecycle::current_oauth_display_info_is_cached_for_render_status ... ok
+test app::session_lifecycle::cached_git_label_refreshes_after_ttl ... ok
+test app::session_lifecycle::ctrl_o_without_read_selection_reports_no_file ... ok
+test app::session_lifecycle::ctrl_b_and_ctrl_f_map_to_page_scroll ... ok
+test app::session_lifecycle::drag_near_chat_edge_enables_and_clears_autoscroll ... ok
+test app::session_lifecycle::custom_ui_request_returns_none_without_panicking ... ok
+test app::session_lifecycle::completion_bell_toggle_still_resets_latch ... ok
+test app::session_lifecycle::filtered_model_options_hides_chatgpt_oauth_only_models_when_openai_api_key_exists ... ok
+test app::session_lifecycle::filtered_model_options_includes_chatgpt_oauth_only_models ... ok
+test app::session_lifecycle::eval_candidate_command_saves_manual_candidate_from_latest_evidence ... ok
+test app::session_lifecycle::execute_restore_checkpoint_command_reports_recorded_files ... ok
+test app::session_lifecycle::esc_cancel_first_requests_cancel_second_aborts_stuck_agent_task ... ok
+test app::session_lifecycle::evidence_written_event_updates_status_without_spamming_chat ... ok
+test app::session_lifecycle::extension_policy_event_surfaces_manifest_warning ... ok
+test app::session_lifecycle::focusing_tool_resets_inspector_scroll ... ok
+test app::session_lifecycle::eval_candidate_command_requires_evidence ... ok
+test app::session_lifecycle::execute_checkpoints_command_lists_recorded_checkpoints ... ok
+test app::session_lifecycle::handle_ui_request_stores_and_removes_widgets ... ok
+test app::session_lifecycle::model_picker_includes_current_alias_even_without_auth ... ok
+test app::session_lifecycle::loop_command_queues_prompt_and_shows_label ... ok
+test app::session_lifecycle::low_trust_tool_provenance_surfaces_concise_warning ... ok
+test app::session_lifecycle::lua_extension_command_can_be_selected_from_palette ... ok
+test app::session_lifecycle::keyboard_page_scroll_targets_chat_or_sidebar_detail ... ok
+test app::session_lifecycle::loop_command_defaults_to_unbounded_budget ... ok
+test app::session_lifecycle::inspector_defaults_to_latest_tool_when_no_focus ... ok
+test app::session_lifecycle::mouse_click_on_homepage_skill_opens_skill_in_inspector ... ok
+test app::session_lifecycle::load_session_messages_uses_compacted_active_history ... ok
+test app::session_lifecycle::mouse_click_on_chat_area_starts_selection_instead_of_opening_sidebar ... ok
+test app::session_lifecycle::mouse_click_on_sidebar_sets_focus ... ok
+test app::session_lifecycle::mouse_click_on_sidebar_list_selects_tool_for_review ... ok
+test app::session_lifecycle::mouse_click_on_chat_tool_line_uses_render_indices_when_click_map_misses ... ok
+test app::session_lifecycle::prompt_path_expansion_handles_relative_absolute_and_home_paths ... ok
+test app::session_lifecycle::render_skill_invocation_strips_frontmatter_and_appends_arguments ... ok
+test app::session_lifecycle::mouse_click_on_chat_tool_header_opens_inspector_detail ... ok
+test app::session_lifecycle::mouse_click_on_chat_area_sets_chat_focus ... ok
+test app::session_lifecycle::mouse_scroll_routes_by_position ... ok
+test app::session_lifecycle::pending_agent_start_reports_error_after_deferred_start ... ok
+test app::session_lifecycle::selected_read_file_path_ignores_non_read_tools ... ok
+test app::session_lifecycle::selected_read_file_path_resolves_relative_path ... ok
+test app::session_lifecycle::mouse_drag_in_chat_creates_selection ... ok
+test app::session_lifecycle::runtime_signal_batch_drains_bursty_agent_events_before_render ... ok
+test app::session_lifecycle::natural_prompt_sends_without_workflow_takeover_question ... ok
+test app::session_lifecycle::resume_command_opens_loading_session_picker ... ok
+test app::session_lifecycle::prompt_commands_change_cwd_and_run_shell_without_session_message ... ok
+test app::session_lifecycle::resumed_session_attaches_tool_results_persisted_before_assistant ... ok
+test app::session_lifecycle::session_list_load_finishes_into_picker ... ok
+test app::session_lifecycle::scrolling_down_releases_streaming_prompt_anchor ... ok
+test app::session_lifecycle::skill_command_injects_skill_prompt ... ok
+test app::session_lifecycle::shift_down_extends_selection_and_cmd_c_copies_it ... ok
+test app::session_lifecycle::startup_skill_detail_render_reuses_cache ... ok
+test app::session_lifecycle::sidebar_stream_cache_ignores_animation_tick ... ok
+test app::session_lifecycle::send_message_defers_agent_start_until_after_echo_redraw ... ok
+test app::session_lifecycle::startup_surface_uses_cached_skill_metadata ... ok
+test app::session_lifecycle::startup_surface_uses_tool_icons ... ok
+test app::session_lifecycle::status_info_includes_elapsed_while_agent_start_is_pending ... ok
+test app::session_lifecycle::terminal_title_uses_loop_icon_when_loop_is_active ... ok
+test app::session_lifecycle::submit_recovers_stale_streaming_state_and_starts_new_run ... ok
+test app::session_lifecycle::terminal_title_spins_while_agent_start_is_pending ... ok
+test app::session_lifecycle::terminal_title_falls_back_to_summarized_first_prompt ... ok
+test app::session_lifecycle::terminal_title_defaults_to_chat_when_empty ... ok
+test app::session_lifecycle::terminal_title_uses_manual_session_name_when_present ... ok
+test app::session_lifecycle::terminal_title_uses_static_loop_glyph_when_animations_are_off ... ok
+test app::session_lifecycle::terminal_title_uses_nine_dot_spinner_while_streaming ... ok
+test app::session_lifecycle::trust_policy_event_surfaces_concise_warning ... ok
+test app::session_lifecycle::tool_updates_target_streaming_assistant_not_latest_message ... ok
+test app::session_lifecycle::terminal_title_uses_static_working_glyph_when_animations_are_off ... ok
+test app::session_lifecycle::tui_integration_app_new_with_custom_config ... ok
+test app::session_lifecycle::tui_integration_app_new_persistent_session ... ok
+test app::session_lifecycle::tui_integration_app_new_defaults ... ok
+test app::session_lifecycle::tui_integration_continue_recent_session ... ok
+test app::session_lifecycle::tui_integration_model_switch_via_cycle ... ok
+test app::session_lifecycle::tui_integration_model_switch_updates_context_window ... ok
+test app::session_lifecycle::tui_integration_send_message_persists_to_disk ... ok
+test app::session_lifecycle::tui_integration_multiline_slash_paste_is_sent_as_prompt ... ok
+test app::session_lifecycle::tui_integration_send_message_empty_ignored ... ok
+test app::session_lifecycle::tui_integration_send_message_large_paste_displays_full_text ... ok
+test app::session_lifecycle::tui_integration_session_reload_on_restart ... ok
+test app::session_lifecycle::tui_integration_send_message_persists ... ok
+test app::session_lifecycle::tui_integration_slash_compact_noops_with_short_history ... ok
+test app::session_lifecycle::tui_integration_slash_memory_add_and_show ... ok
+test app::session_lifecycle::tui_integration_slash_memory_shows_stores ... ok
+test app::session_lifecycle::tui_integration_slash_memory_help ... ok
+test app::session_lifecycle::tui_integration_slash_memory_unknown_subcommand ... ok
+test app::session_lifecycle::tui_trace_from_env_reads_path ... ok
+test app::session_lifecycle::tui_trace_writes_log_lines ... ok
+test app::session_lifecycle::tui_integration_slash_new_resets_rendered_context_percent ... ok
+test app::session_lifecycle::tui_integration_slash_mouse_command_is_removed ... ok
+test app::session_lifecycle::tui_integration_slash_quit_stops_app ... ok
+test app::session_lifecycle::tui_integration_slash_new_clears_session ... ok
+test app::session_lifecycle::tui_integration_slash_via_send_message ... ok
+test event_source::tests::terminal_event_source_can_be_dropped_without_events ... ok
+test interactive::tests::panic_payload_message_supports_string_and_str ... ok
+test keybindings::tests::ctrl_arrows_do_not_cycle_tool_focus ... ok
+test keybindings::tests::ctrl_brackets_cycle_tool_focus ... ok
+test keybindings::tests::ctrl_p_cycles_model_forward ... ok
+test keybindings::tests::ctrl_p_no_longer_toggles_sidebar ... ok
+test keybindings::tests::ctrl_shift_p_cycles_model_backward ... ok
+test keybindings::tests::tab_toggles_sidebar ... ok
+test app::session_lifecycle::tui_integration_slash_unknown_shows_error ... ok
+test markdown::tests::honors_table_alignment_markers ... ok
+test app::session_lifecycle::tui_integration_thinking_level_cycle ... ok
+test app::session_lifecycle::user_message_persist_signal_updates_in_memory_leaf ... ok
+test repo_stats::tests::counts_nonblank_lines ... ok
+test repo_stats::tests::recognizes_language_by_extension ... ok
+test repo_stats::tests::recognizes_uppercase_extensions ... ok
+test selection::tests::contains_handles_saturated_rect_edges ... ok
+test selection::tests::overlay_render_handles_saturated_x_without_panicking ... ok
+test selection::tests::visible_row_for_line_handles_saturated_y ... ok
+test terminal::tests::restore_terminal_if_needed_is_idempotent ... ok
+test terminal::tests::restore_terminal_writes_reset_and_exit_sequences ... ok
+test theme::tests::default_theme_is_dungeon ... ok
+test theme::tests::named_themes ... ok
+test theme::tests::overrides_apply ... ok
+test theme::tests::parse_hex_invalid ... ok
+test theme::tests::parse_hex_valid ... ok
+test turn_tracker::tests::classifies_bash_and_search_tools ... ok
+test turn_tracker::tests::classifies_read_and_write_tools ... ok
+test turn_tracker::tests::deduplicates_file_paths ... ok
+test app::session_lifecycle::warning_notify_uses_system_role_not_error_role ... ok
+test turn_tracker::tests::reset_clears_all_state ... ok
+test views::ask_bar::tests::backspace_returns_to_option_mode ... ok
+test views::ask_bar::tests::confirm_clamps_stale_selected_cursor ... ok
+test views::ask_bar::tests::cursor_screen_position_handles_tiny_area_and_stale_cursor ... ok
+test views::ask_bar::tests::free_text_input ... ok
+test views::ask_bar::tests::height_calculation ... ok
+test views::ask_bar::tests::multi_select_toggle ... ok
+test views::ask_bar::tests::quick_select_confirms_single_select ... ok
+test views::ask_bar::tests::quick_select_toggles_multi_select_without_confirming ... ok
+test views::ask_bar::tests::single_select_confirm ... ok
+test views::ask_bar::tests::sync_from_editor_clamps_invalid_utf8_boundary ... ok
+test views::ask_bar::tests::tab_copies_option_to_input ... ok
+test views::ask_bar::tests::tab_to_edit_clamps_stale_option_cursor ... ok
+test views::ask_bar::tests::typing_activates_input_mode ... ok
+test views::chat::tests::assistant_blocks_preserve_text_tool_text_order ... ok
+test turn_tracker::tests::elapsed_increases_over_time ... ok
+test views::chat::tests::build_click_map_from_rendered_lines_finds_visible_tool_headers ... ok
+test views::chat::tests::build_click_map_from_rendered_lines_respects_scroll_window ... ok
+test app::session_lifecycle::workflow_slash_commands_are_removed ... ok
+test markdown::tests::leaves_non_table_pipe_text_alone ... ok
+test markdown::tests::wraps_tables_to_requested_width ... ok
+test views::chat::tests::large_pasted_code_is_summarized_for_display ... ok
+test views::chat::tests::ordinary_multiline_text_is_not_summarized ... ok
+test views::chat::tests::short_code_block_is_not_summarized ... ok
+test app::session_lifecycle::worktree_events_update_status_and_surface_closeout_choices ... ok
+test markdown::tests::renders_pipe_table_as_box_table ... ok
+test app::session_lifecycle::verification_events_update_status_and_warn_for_closeout_blockers ... ok
+test views::chat::tests::assistant_blocks_preserve_thought_duration_tool_thought_order ... ok
+test views::chat::tests::three_line_code_block_is_summarized ... ok
+test views::chat::tests::streaming_placeholder_renders_responding_in_chat ... ok
+test views::chat::tests::hide_tools_in_chat_removes_tool_lines ... ok
+test views::command_palette::tests::palette_filter_applies_to_active_page_only ... ok
+test views::command_palette::tests::palette_pages_partition_commands_skills_and_workflows ... ok
+test views::editor::tests::abbreviate_home_prefers_tilde ... ok
+test views::editor::tests::bottom_left_label_hides_thinking_state ... ok
+test views::editor::tests::bottom_left_label_uses_live_run_state_without_activity ... ok
+test views::editor::tests::cursor_position_tracks_partially_wrapped_word ... ok
+test views::editor::tests::cursor_position_tracks_word_boundary_wraps ... ok
+test views::editor::tests::cursor_screen_position_handles_tiny_area_without_underflow ... ok
+test views::editor::tests::cursor_screen_position_tracks_soft_wraps ... ok
+test views::editor::tests::editor_operations_clamp_cursor_past_end ... ok
+test views::editor::tests::editor_operations_clamp_invalid_utf8_boundary ... ok
+test views::editor::tests::format_compact_tokens_handles_millions ... ok
+test views::editor::tests::format_compact_tokens_handles_thousands ... ok
+test views::editor::tests::format_context_usage_prefers_percent_over_current_tokens ... ok
+test views::editor::tests::identity_label_prefers_tilde_path ... ok
+test views::editor::tests::pasted_code_summary_preserves_surrounding_prompt_text ... ok
+test views::editor::tests::superbar_border_style_stays_static_when_active ... ok
+test views::editor::tests::top_right_label_renders_elapsed ... ok
+test views::editor::tests::typed_long_code_is_not_summarized ... ok
+test views::editor::tests::visual_line_count_includes_soft_wraps ... ok
+test views::editor::tests::wrapped_lines_prefer_word_boundaries ... ok
+test views::editor::tests::wrapped_lines_split_words_that_exceed_width ... ok
+test views::login_picker::tests::login_picker_includes_oauth_providers ... ok
+test views::login_picker::tests::login_picker_only_lists_oauth_providers ... ok
+test views::login_picker::tests::picker_selection_moves_with_bounds ... ok
+test views::model_selector::tests::custom_model_is_available_after_builtin_matches ... ok
+test views::model_selector::tests::custom_model_is_selected_when_no_builtin_matches ... ok
+test views::model_selector::tests::model_selector_initially_selects_current_model ... ok
+test views::secrets_picker::tests::secrets_picker_excludes_oauth_providers ... ok
+test views::session_picker::tests::default_order_prioritizes_current_cwd_then_recency ... ok
+test views::session_picker::tests::fuzzy_match_supports_subsequence ... ok
+test views::session_picker::tests::picker_filter_matches_name_summary_and_path ... ok
+test views::session_picker::tests::preferred_cwd_ranks_filtered_matches_first ... ok
+test views::session_picker::tests::should_load_more_when_selection_nears_loaded_end ... ok
+test views::settings::tests::applying_settings_forces_primary_inspector_display_model ... ok
+test views::settings::tests::bell_setting_round_trips_into_config ... ok
+test views::settings::tests::chosen_models_round_trip_into_config ... ok
+test views::settings::tests::continue_policy_round_trips_into_config ... ok
+test views::settings::tests::current_field_clamps_stale_selection ... ok
+test views::settings::tests::custom_theme_value_is_selectable_and_cycles ... ok
+test views::settings::tests::cycle_model_is_safe_with_empty_model_options ... ok
+test views::settings::tests::empty_chosen_models_means_all_models ... ok
+test views::settings::tests::save_field_scrolls_into_view_on_short_panels ... ok
+test views::settings::tests::top_fields_do_not_scroll_when_visible ... ok
+test views::chat::tests::streaming_placeholder_renders_waiting_in_chat ... ok
+test views::chat::tests::system_messages_render_all_lines ... ok
+test views::sidebar::tests::compute_split_few_tools ... ok
+test views::sidebar::tests::compute_split_too_small ... ok
+test views::sidebar::tests::format_workflow_output_renders_delta_actions ... ok
+test views::sidebar::tests::format_workflow_output_renders_scope_target_and_runtime ... ok
+test views::sidebar::tests::format_workflow_output_renders_summary_and_units ... ok
+test views::chat::tests::focused_tool_call_shows_arrow_in_summary_mode ... ok
+test views::chat::tests::summary_mode_hides_tool_output_but_keeps_header ... ok
+test views::chat::tests::interleaved_mode_renders_tool_between_text_blocks ... ok
+test views::sidebar::tests::inspector_sidebar_uses_full_area_for_detail ... ok
+test views::sidebar::tests::sidebar_default_state ... ok
+test views::sidebar::tests::sidebar_ensure_selected_visible_scrolls_down ... ok
+test views::sidebar::tests::sidebar_ensure_selected_visible_scrolls_up ... ok
+test views::sidebar::tests::sidebar_scroll_detail ... ok
+test views::sidebar::tests::sidebar_scroll_list ... ok
+test views::sidebar::tests::sidebar_sub_areas_split_has_two_regions ... ok
+test views::sidebar::tests::sidebar_sub_areas_stream_covers_full ... ok
+test views::sidebar::tests::sidebar_summary_expands_nested_details ... ok
+test views::chat::tests::wraps_long_user_message ... ok
+test views::sidebar::tests::inspector_detail_includes_selected_tool_header_and_full_output ... ok
+test views::sidebar::tests::inspector_detail_includes_tool_input_arguments ... ok
+test views::chat::tests::warning_messages_render_with_prefix ... ok
+test views::sidebar::tests::build_detail_text_surface_uses_full_area_without_header_offset ... ok
+test views::sidebar::tests::sidebar_view_empty_no_panic ... ok
+test views::sidebar::tests::inspector_detail_summarizes_large_tool_input_arguments ... ok
+test views::sidebar::tests::sidebar_view_split_mode_no_panic ... ok
+test views::sidebar::tests::wrap_at_space ... ok
+test views::sidebar::tests::wrap_empty ... ok
+test views::sidebar::tests::wrap_long_word_force_break ... ok
+test views::sidebar::tests::wrap_short_line_unchanged ... ok
+test views::startup::tests::narrow_layout_prioritizes_fewer_sections ... ok
+test views::startup::tests::render_section_line_styles_tool_icon_and_label_consistently ... ok
+test views::startup::tests::render_section_line_styles_workflow_slash_command_white ... ok
+test views::startup::tests::summarize_inline_compacts_items ... ok
+test views::startup::tests::summarize_lines_appends_hidden_count ... ok
+test views::startup::tests::truncate_preview_marks_truncation ... ok
+test views::sidebar::tests::styled_output_lines_use_live_streaming_output_in_sidebar ... ok
+test views::sidebar::tests::styled_output_lines_wrap_long_plain_lines ... ok
+test views::sidebar::tests::sidebar_view_tiny_no_panic ... ok
+test views::tool_output::tests::git_diff_line_numbers_are_sidebar_only ... ok
+test views::sidebar::tests::sidebar_view_stream_mode_no_panic ... ok
+test views::sidebar::tests::styled_output_lines_read_include_numbered_source ... ok
+test views::sidebar::tests::styled_output_lines_write_show_file_content ... ok
+test views::tool_output::tests::git_diff_sidebar_output_adds_compact_line_number_gutter ... ok
+test views::sidebar::tests::card_tool_sidebar_detail_skips_raw_header_and_input_dump ... ok
+test views::tool_output::tests::read_output_prefers_live_streaming_transcript_while_running ... ok
+test views::tool_output::tests::prototype_sidebar_card_shows_experiment_metadata ... ok
+test views::tool_output::tests::shell_sidebar_card_shows_command_and_output ... ok
+test views::tool_output::tests::work_output_renders_tasks_as_styled_cards ... ok
+test views::tools::tests::abbreviates_user_home_paths ... ok
+test views::tools::tests::compact_group_fits_one_line ... ok
+test views::tools::tests::compact_group_wraps ... ok
+test views::tools::tests::compact_height_all_compactable ... ok
+test views::tools::tests::compact_height_mixed ... ok
+test views::tools::tests::compactable_completed_success ... ok
+test views::tools::tests::inline_edit_summary_includes_file_and_change_count ... ok
+test views::tools::tests::inline_edit_summary_uses_path_from_transactional_edit ... ok
+test views::tools::tests::inline_header_result_summary_reads_like_status_badge ... ok
+test views::tools::tests::inline_summaries_format_core_tool_arguments ... ok
+test views::tools::tests::make_args_summary_abbreviates_scan_directory ... ok
+test views::tools::tests::make_args_summary_formats_workflow_compactly ... FAILED
+test views::tools::tests::make_args_summary_hides_bash_command_text ... ok
+test views::tools::tests::make_args_summary_preserves_full_multiline_bash_command ... ok
+test views::tools::tests::make_args_summary_shows_scan_search_query ... ok
+test views::tools::tests::multiline_tool_summary_exposes_detail_line ... ok
+test views::tools::tests::not_compactable_error ... ok
+test views::tools::tests::not_compactable_expanded ... ok
+test views::tools::tests::not_compactable_running ... ok
+test views::tools::tests::running_tool_header_uses_static_glyph_when_animation_disabled ... ok
+test views::tools::tests::short_args_bash ... ok
+test views::tools::tests::short_args_bash_short ... ok
+test views::tools::tests::short_args_empty ... ok
+test views::tools::tests::short_args_path ... ok
+test views::tools::tests::short_args_short_text ... ok
+test views::tools::tests::tool_frame_uses_slow_simple_spinner ... ok
+test views::tools::tests::tool_headers_include_prototype_icon ... ok
+test views::tools::tests::tool_headers_use_icons_and_status_colors ... ok
+test views::top_bar::tests::shorten_path_over_limit ... ok
+test views::top_bar::tests::shorten_path_under_limit ... ok
+test views::top_bar::tests::top_bar_narrow_terminal_prefers_identity_over_elapsed ... ok
+test views::top_bar::tests::top_bar_renders_cwd_and_title ... ok
+test views::top_bar::tests::top_bar_renders_elapsed_when_streaming ... ok
+test views::top_bar::tests::top_bar_zero_height_noop ... ok
+test views::tree::tests::branch_points_filter_only_shows_multi_child_nodes ... ok
+test views::tree::tests::current_branch_filter_keeps_only_current_ancestry ... ok
+test views::tree::tests::filter_fallback_prefers_current_id_when_selected_node_disappears ... ok
+test views::tree::tests::render_guides_draws_vertical_connectors_for_open_ancestors ... ok
+test views::tree::tests::selection_is_preserved_when_filter_keeps_same_node_visible ... ok
+test views::welcome::tests::empty_provider_lists_fail_gracefully ... ok
+test views::welcome::tests::openai_setup_models_include_gpt_5_5 ... ok
+test views::welcome::tests::selected_provider_and_step_clamp_stale_indices ... ok
+test views::welcome::tests::setup_hides_kimi_code_provider_under_moonshot ... ok
+test views::tool_output::tests::workflow_run_command_orchestration_renders_progress_card ... ok
+test views::tool_output::tests::workflow_run_missing_contract_renders_blocked_card ... ok
+test views::tool_output::tests::workflow_sidebar_card_shows_metadata_and_output ... ok
+test views::tool_output::tests::write_output_uses_structured_display_content ... ok
+test views::tool_output::tests::git_scan_and_web_sidebar_cards_show_key_metadata ... ok
+test views::tool_output::tests::workflow_run_agent_action_renders_progress_card_inline_and_sidebar ... ok
+test views::tool_output::tests::read_write_edit_sidebar_cards_show_file_metadata ... ok
+
+failures:
+
+---- views::tools::tests::make_args_summary_formats_workflow_compactly stdout ----
+
+thread 'views::tools::tests::make_args_summary_formats_workflow_compactly' (4359792) panicked at crates/imp-tui/src/views/tools.rs:754:9:
+assertion failed: summary.starts_with("create  ")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    views::tools::tests::make_args_summary_formats_workflow_compactly
+
+test result: FAILED. 323 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.75s
+
+error: test failed, to rerun pass `-p imp-tui --lib`
+## cargo build -q -p imp-install
+warning: field `permission_policy` is never read
+  --> crates/imp-cli/src/acp/mod.rs:90:5
+   |
+86 | struct AcpSession {
+   |        ---------- field in this struct
+...
+90 |     permission_policy: PermissionPolicy,
+   |     ^^^^^^^^^^^^^^^^^
+   |
+   = note: `AcpSession` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `Reject` is never constructed
+  --> crates/imp-cli/src/acp/mod.rs:98:5
+   |
+96 | enum PermissionPolicy {
+   |      ---------------- variant in this enum
+97 |     Allow,
+98 |     Reject,
+   |     ^^^^^^
+   |
+   = note: `PermissionPolicy` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `session_update_message` is never used
+   --> crates/imp-cli/src/acp/mod.rs:354:15
+    |
+354 | pub(crate) fn session_update_message(
+    |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `event_update_messages` is never used
+   --> crates/imp-cli/src/acp/mod.rs:365:15
+    |
+365 | pub(crate) fn event_update_messages(
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `permission_request_message` is never used
+   --> crates/imp-cli/src/acp/mod.rs:403:4
+    |
+403 | fn permission_request_message(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `policy_denial_update` is never used
+   --> crates/imp-cli/src/acp/mod.rs:428:4
+    |
+428 | fn policy_denial_update(session_id: &str, message: &str) -> JsonRpcOutbound {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `agent_event_to_session_updates` is never used
+  --> crates/imp-cli/src/acp/events.rs:81:15
+   |
+81 | pub(crate) fn agent_event_to_session_updates(event: &AgentEvent) -> Vec<SessionUpdate> {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `stop_reason_from_llm` is never used
+   --> crates/imp-cli/src/acp/events.rs:171:15
+    |
+171 | pub(crate) fn stop_reason_from_llm(reason: &LlmStopReason) -> StopReason {
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tool_title` is never used
+   --> crates/imp-cli/src/acp/events.rs:206:4
+    |
+206 | fn tool_title(name: &str, arguments: &serde_json::Value) -> String {
+    |    ^^^^^^^^^^
+
+warning: function `tool_kind` is never used
+   --> crates/imp-cli/src/acp/events.rs:220:4
+    |
+220 | fn tool_kind(name: &str) -> ToolKind {
+    |    ^^^^^^^^^
+
+warning: variant `Request` is never constructed
+  --> crates/imp-cli/src/acp/protocol.rs:52:5
+   |
+49 | pub(crate) enum JsonRpcOutbound {
+   |                 --------------- variant in this enum
+...
+52 |     Request(JsonRpcRequest),
+   |     ^^^^^^^
+   |
+   = note: `JsonRpcOutbound` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated function `new` is never used
+   --> crates/imp-cli/src/acp/protocol.rs:341:19
+    |
+340 | impl JsonRpcRequest {
+    | ------------------- associated function in this implementation
+341 |     pub(crate) fn new(id: JsonRpcId, method: impl Into<String>, params: Value) -> Self {
+    |                   ^^^
+
+## CLI help smoke
+      56 /tmp/imp-help-root.txt
+       6 /tmp/imp-help-tui.txt
+      14 /tmp/imp-help-workflow.txt
+      20 /tmp/imp-help-secrets.txt
+      11 /tmp/imp-help-evidence.txt
+     107 total
+## git diff --check

@@ -128,7 +128,7 @@ impl WorkflowBootstrapRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowBootstrapResult {
-    pub workflow_root_id: String,
+    pub mana_root_id: String,
     pub path: PathBuf,
 }
 
@@ -180,6 +180,51 @@ pub fn validate_work_product_task_spec(spec: &WorkProductTaskSpec) -> Result<(),
     Ok(())
 }
 
+#[cfg(feature = "mana-api")]
+pub fn create_child_work_product_tasks(
+    mana_dir: &Path,
+    parent_id: &str,
+    specs: &[WorkProductTaskSpec],
+) -> Result<Vec<CreatedWorkProductTask>, String> {
+    let mut created = Vec::new();
+    for spec in specs {
+        validate_work_product_task_spec(spec)?;
+        let result = mana_core::api::create_unit(
+            mana_dir,
+            mana_core::ops::create::CreateParams {
+                title: spec.title.clone(),
+                handle: None,
+                description: Some(spec.description.clone()),
+                acceptance: Some(spec.acceptance.clone()),
+                notes: Some("Created by imp controlled workflow decomposition.".to_string()),
+                design: None,
+                verify: None,
+                priority: Some(1),
+                labels: spec.labels.clone(),
+                assignee: None,
+                dependencies: Vec::new(),
+                parent: Some(parent_id.to_string()),
+                produces: Vec::new(),
+                requires: Vec::new(),
+                paths: spec.paths.clone(),
+                on_fail: None,
+                fail_first: false,
+                feature: false,
+                kind: Some(mana_core::unit::UnitType::Task),
+                verify_timeout: None,
+                decisions: Vec::new(),
+                force: false,
+            },
+        )
+        .map_err(|err| err.to_string())?;
+        created.push(CreatedWorkProductTask {
+            unit_id: result.unit.id,
+            path: result.path,
+        });
+    }
+    Ok(created)
+}
+
 pub fn record_created_work_products(
     controller: &mut WorkflowRunController,
     created: &[CreatedWorkProductTask],
@@ -187,6 +232,48 @@ pub fn record_created_work_products(
     for task in created {
         controller.record_child_unit(task.unit_id.clone());
     }
+}
+
+#[cfg(feature = "mana-api")]
+pub fn create_native_mana_root(
+    mana_dir: &Path,
+    request: WorkflowBootstrapRequest,
+) -> Result<WorkflowBootstrapResult, String> {
+    let result = mana_core::api::create_unit(
+        mana_dir,
+        mana_core::ops::create::CreateParams {
+            title: request.title,
+            handle: None,
+            description: Some(request.description),
+            acceptance: Some(request.acceptance),
+            notes: Some(
+                "Created by imp workflow bootstrap before autonomous execution.".to_string(),
+            ),
+            design: None,
+            verify: None,
+            priority: Some(1),
+            labels: request.labels,
+            assignee: None,
+            dependencies: Vec::new(),
+            parent: None,
+            produces: Vec::new(),
+            requires: Vec::new(),
+            paths: request.paths,
+            on_fail: None,
+            fail_first: false,
+            feature: true,
+            kind: Some(mana_core::unit::UnitType::Task),
+            verify_timeout: None,
+            decisions: Vec::new(),
+            force: false,
+        },
+    )
+    .map_err(|err| err.to_string())?;
+
+    Ok(WorkflowBootstrapResult {
+        mana_root_id: result.unit.id,
+        path: result.path,
+    })
 }
 
 pub fn apply_intent_to_controller(
@@ -248,7 +335,7 @@ mod tests {
 
     #[test]
     fn records_created_work_products_on_controller() {
-        let mut controller = WorkflowRunController::new().with_workflow_root_id("28.1");
+        let mut controller = WorkflowRunController::new().with_mana_root_id("28.1");
         controller.set_graph_shape(WorkflowGraphShape::NeedsDecomposition);
         record_created_work_products(
             &mut controller,

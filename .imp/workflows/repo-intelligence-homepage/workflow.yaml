@@ -1,0 +1,157 @@
+schema: imp.workflow/v1
+id: repo-intelligence-homepage
+title: Build repo intelligence for homepage and agent context
+status: active
+kind: feature
+settings:
+  worktree: current
+  strictness: hard
+  commit: with_code_changes
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Build a lightweight repo intelligence foundation for imp that improves the TUI homepage and gives the agent better coding context, using a vendored whatlang-style scanner plus tree-sitter indexing without introducing heavyweight embeddings, LSP, daemon, or cache requirements in the first version.
+  user_value: |
+    Make imp feel more aware of the current project on launch and help the agent choose better files, symbols, related context, and verification paths during coding work.
+  non_goals:
+  - Add embeddings, LSP integration, a long-running daemon, or complex persistent cache in v1.
+  - Turn the homepage into a diagnostics wall; keep detailed related/impact output in tools and agent context.
+  - Add a tokei dependency for homepage repo stats.
+  acceptance:
+    homepage_polish_done:
+      text: Current homepage polish is visually inspected or otherwise verified, and cargo check -p imp-tui passes.
+      status: todo
+    shared_contract_defined:
+      text: Repo intelligence data contract is documented and adopted by the implementation.
+      status: todo
+    whatlang_scanner_integrated:
+      text: Vendored whatlang-style scanner powers repo inventory without a tokei dependency and preserves async homepage launch.
+      status: todo
+    tree_sitter_index_available:
+      text: Tree-sitter index extracts symbols/tests for supported languages and exposes aggregate counts.
+      status: todo
+    scan_tool_uses_repo_intelligence:
+      text: scan symbol/related/impact paths use repo intelligence when available and fall back safely otherwise.
+      status: todo
+    agent_context_improved:
+      text: Agent turn context receives compact repo intelligence that improves coding-task orientation without bloating prompts.
+      status: todo
+    verified:
+      text: Relevant checks pass and limitations are documented.
+      status: todo
+steps:
+  close_homepage_polish:
+    kind: verify
+    status: done_with_concerns
+    checks:
+    - homepage_visual_reviewed
+    - homepage_check_passed
+  design_repo_intelligence_contract:
+    kind: plan
+    status: done
+    depends_on:
+    - close_homepage_polish
+    checks:
+    - repo_intelligence_contract_documented
+  vendor_whatlang_scanner:
+    kind: build
+    status: done
+    depends_on:
+    - design_repo_intelligence_contract
+    checks:
+    - whatlang_scanner_vendored
+    - async_homepage_scan_preserved
+  add_tree_sitter_symbol_index:
+    kind: build
+    status: done
+    depends_on:
+    - vendor_whatlang_scanner
+    checks:
+    - symbol_index_built
+    - test_counts_available
+  surface_repo_intelligence_homepage:
+    kind: build
+    status: done
+    depends_on:
+    - add_tree_sitter_symbol_index
+    checks:
+    - homepage_index_counts_rendered
+  wire_scan_tool_to_repo_intelligence:
+    kind: build
+    status: done
+    depends_on:
+    - add_tree_sitter_symbol_index
+    checks:
+    - scan_uses_repo_intelligence
+  agent_context_summary:
+    kind: build
+    status: done
+    depends_on:
+    - design_repo_intelligence_contract
+    checks:
+    - agent_context_summary_added
+  verify_and_document:
+    kind: verify
+    status: done
+    depends_on:
+    - surface_repo_intelligence_homepage
+    - wire_scan_tool_to_repo_intelligence
+    - agent_context_summary
+    checks:
+    - relevant_checks_passed
+    - results_rendered
+workers: {}
+results:
+  path: .imp/workflows/repo-intelligence-homepage/results.md
+checks:
+  homepage_visual_reviewed:
+    kind: review
+    status: pending
+  homepage_check_passed:
+    kind: command
+    status: passed
+    command: cargo check -p imp-tui
+  repo_intelligence_contract_documented:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/repo-intelligence-homepage/artifacts/repo-intelligence-contract.md
+  whatlang_scanner_vendored:
+    kind: review
+    status: passed
+  async_homepage_scan_preserved:
+    kind: review
+    status: passed
+  symbol_index_built:
+    kind: review
+    status: passed
+  test_counts_available:
+    kind: review
+    status: passed
+  homepage_index_counts_rendered:
+    kind: review
+    status: passed
+  scan_uses_repo_intelligence:
+    kind: review
+    status: passed
+  agent_context_summary_added:
+    kind: review
+    status: passed
+  relevant_checks_passed:
+    kind: command
+    status: passed
+  results_rendered:
+    kind: artifact
+    status: passed
+    path: .imp/workflows/repo-intelligence-homepage/results.md
+closeout:
+  done:
+    requires:
+    - relevant_checks_passed
+    - results_rendered
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

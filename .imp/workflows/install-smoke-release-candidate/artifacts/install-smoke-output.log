@@ -1,0 +1,871 @@
+## isolated source install
+  Installing imp-install v0.3.0 (/Users/asher/imp)
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded atomic-waker v1.1.2
+  Downloaded rand_chacha v0.3.1
+  Downloaded adler2 v2.0.1
+  Downloaded cssparser-macros v0.6.1
+  Downloaded anstyle-parse v1.0.0
+  Downloaded anstyle v1.0.14
+  Downloaded anyhow v1.0.102
+  Downloaded ahash v0.8.12
+  Downloaded async-trait v0.1.89
+  Downloaded colorchoice v1.0.5
+  Downloaded clap_lex v1.1.0
+  Downloaded castaway v0.2.4
+  Downloaded cpufeatures v0.2.17
+  Downloaded cfg-if v1.0.4
+  Downloaded filedescriptor v0.8.3
+  Downloaded allocator-api2 v0.2.21
+  Downloaded fallible-streaming-iterator v0.1.9
+  Downloaded ego-tree v0.6.3
+  Downloaded document-features v0.2.12
+  Downloaded cfg_aliases v0.2.1
+  Downloaded dtoa-short v0.3.5
+  Downloaded fixedbitset v0.4.2
+  Downloaded darling_macro v0.23.0
+  Downloaded bit-set v0.5.3
+  Downloaded form_urlencoded v1.2.2
+  Downloaded fnv v1.0.7
+  Downloaded dunce v1.0.5
+  Downloaded crypto-common v0.1.7
+  Downloaded env_home v0.1.0
+  Downloaded block-buffer v0.10.4
+  Downloaded errno v0.3.14
+  Downloaded equivalent v1.0.2
+  Downloaded borrow-or-share v0.2.4
+  Downloaded futf v0.1.5
+  Downloaded futures-core v0.3.32
+  Downloaded anstream v1.0.0
+  Downloaded anstyle-query v1.1.5
+  Downloaded atomic v0.6.1
+  Downloaded autocfg v1.5.1
+  Downloaded http-body v1.0.1
+  Downloaded hyper-tls v0.6.0
+  Downloaded mac v0.1.1
+  Downloaded email_address v0.2.9
+  Downloaded fs_extra v1.3.0
+  Downloaded foldhash v0.2.0
+  Downloaded fallible-iterator v0.3.0
+  Downloaded futures-macro v0.3.32
+  Downloaded either v1.16.0
+  Downloaded bitflags v1.3.2
+  Downloaded num-cmp v0.1.0
+  Downloaded memoffset v0.9.1
+  Downloaded core-foundation v0.9.4
+  Downloaded futures-channel v0.3.32
+  Downloaded num v0.4.3
+  Downloaded lock_api v0.4.14
+  Downloaded deranged v0.5.8
+  Downloaded darling v0.23.0
+  Downloaded utf-8 v0.7.6
+  Downloaded tokio-tungstenite v0.27.0
+  Downloaded tokio-native-tls v0.3.1
+  Downloaded time-macros v0.2.27
+  Downloaded wezterm-color-types v0.3.0
+  Downloaded unicode-truncate v2.0.1
+  Downloaded futures-task v0.3.32
+  Downloaded tokio-rustls v0.26.4
+  Downloaded zerofrom-derive v0.1.7
+  Downloaded derive_more v2.1.1
+  Downloaded percent-encoding v2.3.2
+  Downloaded getopts v0.2.24
+  Downloaded fraction v0.15.4
+  Downloaded indexmap v2.14.0
+  Downloaded utf8parse v0.2.2
+  Downloaded system-configuration v0.7.0
+  Downloaded crossterm v0.29.0
+  Downloaded idna_adapter v1.2.2
+  Downloaded iana-time-zone v0.1.65
+  Downloaded is_terminal_polyfill v1.70.2
+  Downloaded writeable v0.6.3
+  Downloaded instability v0.3.12
+  Downloaded miniz_oxide v0.8.9
+  Downloaded tokio-macros v2.7.0
+  Downloaded clap_builder v4.6.0
+  Downloaded thiserror v2.0.18
+  Downloaded futures-io v0.3.32
+  Downloaded yaml-rust v0.4.5
+  Downloaded wezterm-blob-leases v0.1.1
+  Downloaded icu_properties v2.2.0
+  Downloaded zerovec-derive v0.11.3
+  Downloaded zerovec v0.11.6
+  Downloaded jobserver v0.1.34
+  Downloaded zmij v1.0.21
+  Downloaded httparse v1.10.1
+  Downloaded http-body-util v0.1.3
+  Downloaded mio v1.2.0
+  Downloaded toml v0.8.23
+  Downloaded icu_locale_core v2.2.0
+  Downloaded ignore v0.4.25
+  Downloaded proc-macro2 v1.0.106
+  Downloaded icu_collections v2.2.0
+  Downloaded hyper-util v0.1.20
+  Downloaded potential_utf v0.1.5
+  Downloaded aws-lc-rs v1.17.0
+  Downloaded sync_wrapper v1.0.2
+  Downloaded futures-executor v0.3.32
+  Downloaded ipnet v2.12.0
+  Downloaded yoke v0.8.2
+  Downloaded uuid v1.23.1
+  Downloaded toml_edit v0.22.27
+  Downloaded aho-corasick v1.1.4
+  Downloaded yoke-derive v0.8.2
+  Downloaded which v7.0.3
+  Downloaded uuid-simd v0.8.0
+  Downloaded pest v2.8.6
+  Downloaded outref v0.5.2
+  Downloaded icu_normalizer_data v2.2.0
+  Downloaded tower v0.5.3
+  Downloaded unicode-segmentation v1.13.2
+  Downloaded hyper v1.9.0
+  Downloaded futures-util v0.3.32
+  Downloaded num_threads v0.1.7
+  Downloaded mac_address v1.1.8
+  Downloaded tracing-core v0.1.36
+  Downloaded ident_case v1.0.1
+  Downloaded native-tls v0.2.18
+  Downloaded num-bigint v0.4.6
+  Downloaded crossterm v0.28.1
+  Downloaded phf_macros v0.11.3
+  Downloaded tower-service v0.3.3
+  Downloaded tower-layer v0.3.3
+  Downloaded toml_write v0.1.2
+  Downloaded toml_datetime v0.6.11
+  Downloaded pest_derive v2.8.6
+  Downloaded mlua-sys v0.6.8
+  Downloaded litrs v1.0.0
+  Downloaded litemap v0.8.2
+  Downloaded linked-hash-map v0.5.6
+  Downloaded hyper-rustls v0.27.9
+  Downloaded url v2.5.8
+  Downloaded regex-syntax v0.8.10
+  Downloaded phf v0.10.1
+  Downloaded cc v1.2.62
+  Downloaded flate2 v1.1.9
+  Downloaded fancy-regex v0.17.0
+  Downloaded derive_more-impl v2.1.1
+  Downloaded pin-project-lite v0.2.17
+  Downloaded compact_str v0.9.1
+  Downloaded new_debug_unreachable v1.0.6
+  Downloaded generic-array v0.14.7
+  Downloaded fancy-regex v0.11.0
+  Downloaded darling_core v0.23.0
+  Downloaded pest_generator v2.8.6
+  Downloaded tracing-attributes v0.1.31
+  Downloaded icu_normalizer v2.2.0
+  Downloaded euclid v0.22.14
+  Downloaded bitflags v2.11.1
+  Downloaded quote v1.0.45
+  Downloaded base64 v0.22.1
+  Downloaded num-iter v0.1.45
+  Downloaded num-integer v0.1.46
+  Downloaded try-lock v0.2.5
+  Downloaded parking_lot v0.12.5
+  Downloaded ordered-float v4.6.0
+  Downloaded tower-http v0.6.11
+  Downloaded once_cell v1.21.4
+  Downloaded zerotrie v0.2.4
+  Downloaded http v1.4.1
+  Downloaded wezterm-dynamic v0.2.1
+  Downloaded utf8_iter v1.0.4
+  Downloaded pest_meta v2.8.6
+  Downloaded tree-sitter-zig v1.1.2
+  Downloaded want v0.3.1
+  Downloaded simd-adler32 v0.3.9
+  Downloaded onig v6.5.3
+  Downloaded untrusted v0.9.0
+  Downloaded markup5ever v0.11.0
+  Downloaded wezterm-bidi v0.2.3
+  Downloaded unsafe-libyaml v0.2.11
+  Downloaded winnow v0.7.15
+  Downloaded globset v0.4.18
+  Downloaded num-rational v0.4.2
+  Downloaded idna v1.1.0
+  Downloaded mlua v0.10.5
+  Downloaded thiserror-impl v1.0.69
+  Downloaded unicode-general-category v1.1.0
+  Downloaded tree-sitter-language v0.1.7
+  Downloaded ucd-trie v0.1.7
+  Downloaded powerfmt v0.2.0
+  Downloaded chrono v0.4.44
+  Downloaded lazy_static v1.5.0
+  Downloaded sha1 v0.10.6
+  Downloaded phf_shared v0.10.0
+  Downloaded bytes v1.11.1
+  Downloaded hex v0.4.3
+  Downloaded line-clipping v0.3.7
+  Downloaded itoa v1.0.18
+  Downloaded lab v0.11.0
+  Downloaded unicode-ident v1.0.24
+  Downloaded precomputed-hash v0.1.1
+  Downloaded vtparse v0.6.2
+  Downloaded tendril v0.4.3
+  Downloaded phf_generator v0.11.3
+  Downloaded icu_provider v2.2.0
+  Downloaded finl_unicode v1.4.0
+  Downloaded thiserror v1.0.69
+  Downloaded kasuari v0.4.12
+  Downloaded futures v0.3.32
+  Downloaded fluent-uri v0.4.1
+  Downloaded derive_more v0.99.20
+  Downloaded cssparser v0.31.2
+  Downloaded version_check v0.9.5
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded phf_generator v0.10.0
+  Downloaded crossbeam-epoch v0.9.18
+  Downloaded clap v4.6.1
+  Downloaded system-configuration-sys v0.6.0
+  Downloaded lru v0.16.4
+  Downloaded zeroize v1.8.2
+  Downloaded strsim v0.11.1
+  Downloaded siphasher v0.3.11
+  Downloaded bytemuck v1.25.0
+  Downloaded clap_derive v4.6.1
+  Downloaded crc32fast v1.5.0
+  Downloaded core-foundation-sys v0.8.7
+  Downloaded indoc v2.0.7
+  Downloaded hashlink v0.11.0
+  Downloaded log v0.4.30
+  Downloaded getrandom v0.4.2
+  Downloaded ref-cast-impl v1.0.25
+  Downloaded getrandom v0.2.17
+  Downloaded serde_spanned v0.6.9
+  Downloaded scopeguard v1.2.0
+  Downloaded glob v0.3.3
+  Downloaded icu_properties_data v2.2.0
+  Downloaded heck v0.5.0
+  Downloaded zeroize_derive v1.4.3
+  Downloaded num-derive v0.4.2
+  Downloaded walkdir v2.5.0
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded fastrand v2.4.1
+  Downloaded bit-vec v0.6.3
+  Downloaded bincode v1.3.3
+  Downloaded data-encoding v2.11.0
+  Downloaded crossbeam-deque v0.8.6
+  Downloaded bytecount v0.6.9
+  Downloaded bit-vec v0.8.0
+  Downloaded bit-set v0.8.0
+  Downloaded dtoa v1.0.11
+  Downloaded csscolorparser v0.6.2
+  Downloaded convert_case v0.10.0
+  Downloaded futures-sink v0.3.32
+  Downloaded tinystr v0.8.3
+  Downloaded mime v0.3.17
+  Downloaded pathdiff v0.2.3
+  Downloaded tungstenite v0.27.0
+  Downloaded tokio-util v0.7.18
+  Downloaded parking_lot_core v0.9.12
+  Downloaded tree-sitter-lua v0.5.0
+  Downloaded vsimd v0.8.0
+  Downloaded typenum v1.20.0
+  Downloaded num-conv v0.2.2
+  Downloaded servo_arc v0.3.0
+  Downloaded getrandom v0.3.4
+  Downloaded termios v0.3.3
+  Downloaded cmake v0.1.58
+  Downloaded byteorder v1.5.0
+  Downloaded displaydoc v0.2.5
+  Downloaded digest v0.10.7
+  Downloaded core-foundation v0.10.1
+  Downloaded tempfile v3.27.0
+  Downloaded num-complex v0.4.6
+  Downloaded bstr v1.12.1
+  Downloaded terminfo v0.9.0
+  Downloaded keyring v3.6.3
+  Downloaded rustc-hash v2.1.2
+  Downloaded stable_deref_trait v1.2.1
+  Downloaded subtle v2.6.1
+  Downloaded siphasher v1.0.3
+  Downloaded rustc_version v0.4.1
+  Downloaded html5ever v0.26.0
+  Downloaded minimal-lexical v0.2.1
+  Downloaded nom v7.1.3
+  Downloaded memchr v2.8.0
+  Downloaded tree-sitter-go v0.25.0
+  Downloaded string_cache_codegen v0.5.4
+  Downloaded ref-cast v1.0.25
+  Downloaded tree-sitter-java v0.23.5
+  Downloaded serde_urlencoded v0.7.1
+  Downloaded tree-sitter-javascript v0.25.0
+  Downloaded same-file v1.0.6
+  Downloaded unicode-width v0.2.0
+  Downloaded tree-sitter-python v0.25.0
+  Downloaded hashbrown v0.16.1
+  Downloaded itertools v0.14.0
+  Downloaded vcpkg v0.2.15
+  Downloaded hashbrown v0.17.1
+  Downloaded tree-sitter v0.26.9
+  Downloaded tree-sitter-c v0.24.2
+  Downloaded jsonschema v0.45.1
+  Downloaded time v0.3.47
+  Downloaded phf_shared v0.11.3
+  Downloaded phf_codegen v0.10.0
+  Downloaded strum v0.27.2
+  Downloaded nix v0.29.0
+  Downloaded tracing v0.1.44
+  Downloaded tree-sitter-odin v1.3.0
+  Downloaded tree-sitter-rust v0.24.2
+  Downloaded tree-sitter-dart v0.2.0
+  Downloaded fxhash v0.2.1
+  Downloaded onig_sys v69.9.3
+  Downloaded memmem v0.1.1
+  Downloaded project-detect v0.1.2
+  Downloaded zerofrom v0.1.8
+  Downloaded tree-sitter-elixir v0.3.5
+  Downloaded time-core v0.1.8
+  Downloaded tree-sitter-bash v0.25.1
+  Downloaded tree-sitter-ruby v0.23.1
+  Downloaded wezterm-dynamic-derive v0.1.1
+  Downloaded phf_codegen v0.11.3
+  Downloaded phf v0.11.3
+  Downloaded rand_chacha v0.9.0
+  Downloaded lua-src v547.0.0
+  Downloaded tree-sitter-php v0.24.2
+  Downloaded syntect v5.3.0
+  Downloaded tree-sitter-cpp v0.23.4
+  Downloaded scraper v0.18.1
+  Downloaded strum_macros v0.27.2
+  Downloaded streaming-iterator v0.1.9
+  Downloaded rustversion v1.0.22
+  Downloaded ratatui-macros v0.7.0
+  Downloaded slab v0.4.12
+  Downloaded tokio v1.52.3
+  Downloaded libc v0.2.186
+  Downloaded tree-sitter-perl v1.1.2
+  Downloaded tree-sitter-swift v0.7.2
+  Downloaded tree-sitter-typescript v0.23.2
+  Downloaded tree-sitter-c-sharp v0.23.5
+  Downloaded luajit-src v210.5.12+a4f56a4
+  Downloaded string_cache v0.8.9
+  Downloaded security-framework-sys v2.17.0
+  Downloaded tree-sitter-kotlin-ng v1.1.0
+  Downloaded encoding_rs v0.8.35
+  Downloaded shlex v1.3.0
+  Downloaded ratatui-termwiz v0.1.0
+  Downloaded static_assertions v1.1.0
+  Downloaded tree-sitter-scala v0.26.0
+  Downloaded tree-sitter-ocaml v0.25.0
+  Downloaded deltae v0.3.2
+  Downloaded synstructure v0.13.2
+  Downloaded rand_core v0.6.4
+  Downloaded rand_core v0.9.5
+  Downloaded pkg-config v0.3.33
+  Downloaded signal-hook-registry v1.4.8
+  Downloaded ratatui-crossterm v0.1.0
+  Downloaded libsqlite3-sys v0.37.0
+  Downloaded signal-hook-mio v0.2.5
+  Downloaded wezterm-input-types v0.1.0
+  Downloaded thiserror-impl v2.0.18
+  Downloaded rustls-pki-types v1.14.1
+  Downloaded aws-lc-sys v0.41.0
+  Downloaded smallvec v1.15.1
+  Downloaded sha2 v0.10.9
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded semver v1.0.28
+  Downloaded plist v1.9.0
+  Downloaded referencing v0.45.1
+  Downloaded signal-hook v0.3.18
+  Downloaded selectors v0.25.0
+  Downloaded serde_core v1.0.228
+  Downloaded rustls-platform-verifier v0.7.0
+  Downloaded serde_yaml v0.9.34+deprecated
+  Downloaded num-traits v0.2.19
+  Downloaded serde_derive v1.0.228
+  Downloaded rayon-core v1.13.0
+  Downloaded socket2 v0.6.3
+  Downloaded similar v2.7.0
+  Downloaded ratatui v0.30.0
+  Downloaded ryu v1.0.23
+  Downloaded rustls-webpki v0.103.13
+  Downloaded rand v0.8.6
+  Downloaded rand v0.9.4
+  Downloaded security-framework v3.7.0
+  Downloaded serde v1.0.228
+  Downloaded portable-atomic v1.13.1
+  Downloaded ratatui-core v0.1.0
+  Downloaded serde_json v1.0.150
+  Downloaded reqwest v0.13.4
+  Downloaded regex v1.12.3
+  Downloaded rayon v1.12.0
+  Downloaded reqwest v0.12.28
+  Downloaded rusqlite v0.39.0
+  Downloaded h2 v0.4.14
+  Downloaded quick-xml v0.39.4
+  Downloaded ratatui-widgets v0.3.0
+  Downloaded syn v1.0.109
+  Downloaded zerocopy v0.8.48
+  Downloaded syn v2.0.117
+  Downloaded rustls v0.23.40
+  Downloaded rustix v0.38.44
+  Downloaded termwiz v0.23.3
+  Downloaded rustix v1.1.4
+  Downloaded regex-automata v0.4.14
+  Downloaded ring v0.17.14
+  Downloaded readability-rust v0.1.0
+   Compiling libc v0.2.186
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling cfg-if v1.0.4
+   Compiling tree-sitter-language v0.1.7
+   Compiling smallvec v1.15.1
+   Compiling zerocopy v0.8.48
+   Compiling itoa v1.0.18
+   Compiling bitflags v2.11.1
+   Compiling log v0.4.30
+   Compiling memchr v2.8.0
+   Compiling parking_lot_core v0.9.12
+   Compiling scopeguard v1.2.0
+   Compiling serde_core v1.0.228
+   Compiling lock_api v0.4.14
+   Compiling equivalent v1.0.2
+   Compiling serde v1.0.228
+   Compiling once_cell v1.21.4
+   Compiling stable_deref_trait v1.2.1
+   Compiling pin-project-lite v0.2.17
+   Compiling core-foundation-sys v0.8.7
+   Compiling errno v0.3.14
+   Compiling syn v2.0.117
+   Compiling signal-hook-registry v1.4.8
+   Compiling mio v1.2.0
+   Compiling parking_lot v0.12.5
+   Compiling jobserver v0.1.34
+   Compiling futures-core v0.3.32
+   Compiling bytes v1.11.1
+   Compiling getrandom v0.2.17
+   Compiling cc v1.2.62
+   Compiling zmij v1.0.21
+   Compiling rand_core v0.6.4
+   Compiling futures-sink v0.3.32
+   Compiling version_check v0.9.5
+   Compiling socket2 v0.6.3
+   Compiling slab v0.4.12
+   Compiling futures-channel v0.3.32
+   Compiling hashbrown v0.17.1
+   Compiling http v1.4.1
+   Compiling futures-io v0.3.32
+   Compiling futures-task v0.3.32
+   Compiling autocfg v1.5.1
+   Compiling num-traits v0.2.19
+   Compiling indexmap v2.14.0
+   Compiling cmake v0.1.58
+   Compiling percent-encoding v2.3.2
+   Compiling litemap v0.8.2
+   Compiling fs_extra v1.3.0
+   Compiling rustix v1.1.4
+   Compiling dunce v1.0.5
+   Compiling siphasher v1.0.3
+   Compiling getrandom v0.3.4
+   Compiling writeable v0.6.3
+   Compiling pkg-config v0.3.33
+   Compiling phf_shared v0.11.3
+   Compiling aws-lc-sys v0.41.0
+   Compiling core-foundation v0.10.1
+   Compiling security-framework-sys v2.17.0
+   Compiling utf8_iter v1.0.4
+   Compiling allocator-api2 v0.2.21
+   Compiling icu_normalizer_data v2.2.0
+   Compiling icu_properties_data v2.2.0
+   Compiling siphasher v0.3.11
+   Compiling httparse v1.10.1
+   Compiling thiserror v2.0.18
+   Compiling foldhash v0.2.0
+   Compiling hashbrown v0.16.1
+   Compiling phf_shared v0.10.0
+   Compiling synstructure v0.13.2
+   Compiling security-framework v3.7.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling getrandom v0.4.2
+   Compiling rand_chacha v0.3.1
+   Compiling zeroize v1.8.2
+   Compiling rand v0.8.6
+   Compiling serde_derive v1.0.228
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.5
+   Compiling zerofrom v0.1.8
+   Compiling tokio-macros v2.7.0
+   Compiling yoke v0.8.2
+   Compiling futures-macro v0.3.32
+   Compiling tokio v1.52.3
+   Compiling phf_generator v0.11.3
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling futures-util v0.3.32
+   Compiling thiserror-impl v2.0.18
+   Compiling phf_generator v0.10.0
+   Compiling http-body v1.0.1
+   Compiling generic-array v0.14.7
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_collections v2.2.0
+   Compiling tracing-core v0.1.36
+   Compiling system-configuration-sys v0.6.0
+   Compiling ryu v1.0.23
+   Compiling regex-syntax v0.8.10
+   Compiling fnv v1.0.7
+   Compiling aws-lc-rs v1.17.0
+   Compiling icu_provider v2.2.0
+   Compiling heck v0.5.0
+   Compiling serde_json v1.0.150
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling tracing v0.1.44
+   Compiling phf_codegen v0.10.0
+   Compiling rustls-pki-types v1.14.1
+   Compiling aho-corasick v1.1.4
+   Compiling tower-service v0.3.3
+   Compiling rustversion v1.0.22
+   Compiling typenum v1.20.0
+   Compiling base64 v0.22.1
+   Compiling try-lock v0.2.5
+   Compiling atomic-waker v1.1.2
+   Compiling either v1.16.0
+   Compiling unicode-width v0.2.0
+   Compiling want v0.3.1
+   Compiling idna_adapter v1.2.2
+   Compiling form_urlencoded v1.2.2
+   Compiling core-foundation v0.9.4
+   Compiling regex-automata v0.4.14
+   Compiling utf-8 v0.7.6
+   Compiling native-tls v0.2.18
+   Compiling fastrand v2.4.1
+   Compiling new_debug_unreachable v1.0.6
+   Compiling tempfile v3.27.0
+   Compiling system-configuration v0.7.0
+   Compiling tokio-util v0.7.18
+   Compiling idna v1.1.0
+   Compiling h2 v0.4.14
+   Compiling syn v1.0.109
+   Compiling ipnet v2.12.0
+   Compiling untrusted v0.9.0
+   Compiling crossbeam-utils v0.8.21
+   Compiling rustls v0.23.40
+   Compiling url v2.5.8
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling hyper v1.9.0
+   Compiling string_cache_codegen v0.5.4
+   Compiling num-integer v0.1.46
+   Compiling ahash v0.8.12
+   Compiling sync_wrapper v1.0.2
+   Compiling subtle v2.6.1
+   Compiling mac v0.1.1
+   Compiling strsim v0.11.1
+   Compiling precomputed-hash v0.1.1
+   Compiling tower-layer v0.3.3
+   Compiling hyper-util v0.1.20
+   Compiling ident_case v1.0.1
+   Compiling darling_core v0.23.0
+   Compiling tower v0.5.3
+   Compiling futf v0.1.5
+   Compiling markup5ever v0.11.0
+   Compiling digest v0.10.7
+   Compiling phf v0.10.1
+   Compiling http-body-util v0.1.3
+   Compiling phf_macros v0.11.3
+   Compiling rand_core v0.9.5
+   Compiling cpufeatures v0.2.17
+   Compiling dtoa v1.0.11
+   Compiling ref-cast v1.0.25
+   Compiling env_home v0.1.0
+   Compiling signal-hook v0.3.18
+   Compiling powerfmt v0.2.0
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v1.0.0
+   Compiling deranged v0.5.8
+   Compiling which v7.0.3
+   Compiling dtoa-short v0.3.5
+   Compiling phf v0.11.3
+   Compiling crossbeam-epoch v0.9.18
+   Compiling rand_chacha v0.9.0
+   Compiling darling_macro v0.23.0
+   Compiling tower-http v0.6.11
+   Compiling tendril v0.4.3
+   Compiling tree-sitter v0.26.9
+   Compiling string_cache v0.8.9
+   Compiling num-bigint v0.4.6
+   Compiling tokio-native-tls v0.3.1
+   Compiling regex v1.12.3
+   Compiling castaway v0.2.4
+   Compiling itertools v0.14.0
+   Compiling selectors v0.25.0
+   Compiling strum_macros v0.27.2
+   Compiling cssparser-macros v0.6.1
+   Compiling ref-cast-impl v1.0.25
+   Compiling num_threads v0.1.7
+   Compiling colorchoice v1.0.5
+   Compiling indoc v2.0.7
+   Compiling static_assertions v1.1.0
+   Compiling unicode-segmentation v1.13.2
+   Compiling data-encoding v2.11.0
+   Compiling vcpkg v0.2.15
+   Compiling time-core v0.1.8
+   Compiling anstyle-query v1.1.5
+   Compiling num-conv v0.2.2
+   Compiling anstyle v1.0.14
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling byteorder v1.5.0
+   Compiling instability v0.3.12
+   Compiling fxhash v0.2.1
+   Compiling html5ever v0.26.0
+   Compiling libsqlite3-sys v0.37.0
+   Compiling unicode-truncate v2.0.1
+   Compiling anstream v1.0.0
+   Compiling convert_case v0.10.0
+   Compiling time v0.3.47
+   Compiling strum v0.27.2
+   Compiling compact_str v0.9.1
+   Compiling cssparser v0.31.2
+   Compiling num-rational v0.4.2
+   Compiling darling v0.23.0
+   Compiling rand v0.9.4
+   Compiling crossbeam-deque v0.8.6
+   Compiling luajit-src v210.5.12+a4f56a4
+   Compiling sha1 v0.10.6
+   Compiling num-iter v0.1.45
+   Compiling kasuari v0.4.12
+   Compiling derive_more v0.99.20
+   Compiling num-complex v0.4.6
+   Compiling lru v0.16.4
+   Compiling lua-src v547.0.0
+   Compiling servo_arc v0.3.0
+   Compiling bstr v1.12.1
+   Compiling clap_lex v1.1.0
+   Compiling bit-vec v0.8.0
+   Compiling same-file v1.0.6
+   Compiling unicode-general-category v1.1.0
+   Compiling rayon-core v1.13.0
+   Compiling thiserror v1.0.69
+   Compiling borrow-or-share v0.2.4
+   Compiling fluent-uri v0.4.1
+   Compiling clap_builder v4.6.0
+   Compiling walkdir v2.5.0
+   Compiling bit-set v0.8.0
+   Compiling num v0.4.3
+   Compiling mlua-sys v0.6.8
+   Compiling ratatui-core v0.1.0
+   Compiling tungstenite v0.27.0
+   Compiling signal-hook-mio v0.2.5
+   Compiling derive_more-impl v2.1.1
+   Compiling hyper-tls v0.6.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling getopts v0.2.24
+   Compiling futures-executor v0.3.32
+   Compiling clap_derive v4.6.1
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling thiserror-impl v1.0.69
+   Compiling onig_sys v69.9.3
+   Compiling tree-sitter-c-sharp v0.23.5
+   Compiling tree-sitter-cpp v0.23.4
+   Compiling tree-sitter-elixir v0.3.5
+   Compiling tree-sitter-go v0.25.0
+   Compiling tree-sitter-php v0.24.2
+   Compiling tree-sitter-zig v1.1.2
+   Compiling tree-sitter-perl v1.1.2
+   Compiling tree-sitter-javascript v0.25.0
+   Compiling tree-sitter-python v0.25.0
+   Compiling tree-sitter-scala v0.26.0
+   Compiling tree-sitter-typescript v0.23.2
+   Compiling tree-sitter-java v0.23.5
+   Compiling tree-sitter-kotlin-ng v1.1.0
+   Compiling tree-sitter-ruby v0.23.1
+   Compiling tree-sitter-dart v0.2.0
+   Compiling tree-sitter-bash v0.25.1
+   Compiling tree-sitter-odin v1.3.0
+   Compiling tree-sitter-lua v0.5.0
+   Compiling tree-sitter-swift v0.7.2
+   Compiling tree-sitter-ocaml v0.25.0
+   Compiling tree-sitter-rust v0.24.2
+   Compiling tree-sitter-c v0.24.2
+   Compiling iana-time-zone v0.1.65
+   Compiling encoding_rs v0.8.35
+   Compiling mime v0.3.17
+   Compiling winnow v0.7.15
+   Compiling ego-tree v0.6.3
+   Compiling lazy_static v1.5.0
+   Compiling vsimd v0.8.0
+   Compiling toml_write v0.1.2
+   Compiling streaming-iterator v0.1.9
+   Compiling crc32fast v1.5.0
+   Compiling litrs v1.0.0
+   Compiling outref v0.5.2
+   Compiling uuid-simd v0.8.0
+   Compiling scraper v0.18.1
+   Compiling document-features v0.2.12
+   Compiling fraction v0.15.4
+   Compiling reqwest v0.12.28
+   Compiling toml_edit v0.22.27
+   Compiling chrono v0.4.44
+   Compiling clap v4.6.1
+   Compiling futures v0.3.32
+   Compiling derive_more v2.1.1
+   Compiling tokio-tungstenite v0.27.0
+   Compiling fancy-regex v0.17.0
+   Compiling referencing v0.45.1
+   Compiling globset v0.4.18
+   Compiling sha2 v0.10.9
+   Compiling email_address v0.2.9
+   Compiling keyring v3.6.3
+   Compiling async-trait v0.1.89
+   Compiling hashlink v0.11.0
+   Compiling line-clipping v0.3.7
+   Compiling unsafe-libyaml v0.2.11
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling adler2 v2.0.1
+   Compiling rustix v0.38.44
+   Compiling fallible-iterator v0.3.0
+   Compiling bytecount v0.6.9
+   Compiling num-cmp v0.1.0
+   Compiling simd-adler32 v0.3.9
+   Compiling miniz_oxide v0.8.9
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling imp-llm v0.3.0 (/Users/asher/imp/crates/imp-llm)
+   Compiling ratatui-widgets v0.3.0
+   Compiling ignore v0.4.25
+   Compiling rayon v1.12.0
+   Compiling crossterm v0.29.0
+   Compiling readability-rust v0.1.0
+   Compiling toml v0.8.23
+   Compiling project-detect v0.1.2
+   Compiling uuid v1.23.1
+   Compiling quick-xml v0.39.4
+   Compiling rustc-hash v2.1.2
+   Compiling glob v0.3.3
+   Compiling similar v2.7.0
+   Compiling pathdiff v0.2.3
+   Compiling linked-hash-map v0.5.6
+   Compiling plist v1.9.0
+   Compiling yaml-rust v0.4.5
+   Compiling rusqlite v0.39.0
+   Compiling mlua v0.10.5
+   Compiling flate2 v1.1.9
+   Compiling ratatui-crossterm v0.1.0
+   Compiling ratatui-macros v0.7.0
+   Compiling onig v6.5.3
+   Compiling bincode v1.3.3
+   Compiling crossterm v0.28.1
+   Compiling ratatui v0.30.0
+   Compiling syntect v5.3.0
+   Compiling rustls-webpki v0.103.13
+   Compiling tokio-rustls v0.26.4
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.4
+   Compiling jsonschema v0.45.1
+   Compiling imp-core v0.3.0 (/Users/asher/imp/crates/imp-core)
+   Compiling imp-lua v0.3.0 (/Users/asher/imp/crates/imp-lua)
+   Compiling imp-tui v0.3.0 (/Users/asher/imp/crates/imp-tui)
+   Compiling imp-cli v0.3.0 (/Users/asher/imp/crates/imp-cli)
+warning: field `permission_policy` is never read
+  --> crates/imp-cli/src/acp/mod.rs:90:5
+   |
+86 | struct AcpSession {
+   |        ---------- field in this struct
+...
+90 |     permission_policy: PermissionPolicy,
+   |     ^^^^^^^^^^^^^^^^^
+   |
+   = note: `AcpSession` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `Reject` is never constructed
+  --> crates/imp-cli/src/acp/mod.rs:98:5
+   |
+96 | enum PermissionPolicy {
+   |      ---------------- variant in this enum
+97 |     Allow,
+98 |     Reject,
+   |     ^^^^^^
+   |
+   = note: `PermissionPolicy` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `session_update_message` is never used
+   --> crates/imp-cli/src/acp/mod.rs:354:15
+    |
+354 | pub(crate) fn session_update_message(
+    |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `event_update_messages` is never used
+   --> crates/imp-cli/src/acp/mod.rs:365:15
+    |
+365 | pub(crate) fn event_update_messages(
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `permission_request_message` is never used
+   --> crates/imp-cli/src/acp/mod.rs:403:4
+    |
+403 | fn permission_request_message(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `policy_denial_update` is never used
+   --> crates/imp-cli/src/acp/mod.rs:428:4
+    |
+428 | fn policy_denial_update(session_id: &str, message: &str) -> JsonRpcOutbound {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `agent_event_to_session_updates` is never used
+  --> crates/imp-cli/src/acp/events.rs:81:15
+   |
+81 | pub(crate) fn agent_event_to_session_updates(event: &AgentEvent) -> Vec<SessionUpdate> {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `stop_reason_from_llm` is never used
+   --> crates/imp-cli/src/acp/events.rs:171:15
+    |
+171 | pub(crate) fn stop_reason_from_llm(reason: &LlmStopReason) -> StopReason {
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tool_title` is never used
+   --> crates/imp-cli/src/acp/events.rs:206:4
+    |
+206 | fn tool_title(name: &str, arguments: &serde_json::Value) -> String {
+    |    ^^^^^^^^^^
+
+warning: function `tool_kind` is never used
+   --> crates/imp-cli/src/acp/events.rs:220:4
+    |
+220 | fn tool_kind(name: &str) -> ToolKind {
+    |    ^^^^^^^^^
+
+warning: variant `Request` is never constructed
+  --> crates/imp-cli/src/acp/protocol.rs:52:5
+   |
+49 | pub(crate) enum JsonRpcOutbound {
+   |                 --------------- variant in this enum
+...
+52 |     Request(JsonRpcRequest),
+   |     ^^^^^^^
+   |
+   = note: `JsonRpcOutbound` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated function `new` is never used
+   --> crates/imp-cli/src/acp/protocol.rs:341:19
+    |
+340 | impl JsonRpcRequest {
+    | ------------------- associated function in this implementation
+341 |     pub(crate) fn new(id: JsonRpcId, method: impl Into<String>, params: Value) -> Self {
+    |                   ^^^
+
+warning: `imp-cli` (lib) generated 12 warnings
+   Compiling imp-install v0.3.0 (/Users/asher/imp)
+    Finished `release` profile [optimized] target(s) in 3m 21s
+  Installing /tmp/imp-install-smoke-cargo-home/bin/imp
+   Installed package `imp-install v0.3.0 (/Users/asher/imp)` (executable `imp`)
+## installed binary
+imp 0.3.0
+## help smoke
+      56 /tmp/imp-install-smoke-help-root.txt
+       6 /tmp/imp-install-smoke-help-tui.txt
+      14 /tmp/imp-install-smoke-help-workflow.txt
+      11 /tmp/imp-install-smoke-help-evidence.txt
+      20 /tmp/imp-install-smoke-help-secrets.txt
+     107 total

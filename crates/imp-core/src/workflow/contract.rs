@@ -14,7 +14,7 @@ pub struct ImplicitWorkflowContractInput {
     pub autonomy_mode: Option<AutonomyMode>,
     pub workflow_type: Option<WorkflowType>,
     pub risk_level: Option<RiskLevel>,
-    pub workflow_unit_ref: Option<String>,
+    pub mana_unit_ref: Option<String>,
 }
 
 impl ImplicitWorkflowContractInput {
@@ -45,8 +45,8 @@ impl ImplicitWorkflowContractInput {
         self
     }
 
-    pub fn workflow_unit_ref(mut self, workflow_unit_ref: impl Into<String>) -> Self {
-        self.workflow_unit_ref = Some(workflow_unit_ref.into());
+    pub fn mana_unit_ref(mut self, mana_unit_ref: impl Into<String>) -> Self {
+        self.mana_unit_ref = Some(mana_unit_ref.into());
         self
     }
 }
@@ -68,7 +68,7 @@ pub struct WorkflowContract {
     pub approval_requirements: Vec<ApprovalRequirement>,
     pub trust_scope: TrustScope,
     pub closeout_criteria: CloseoutCriteria,
-    pub workflow_unit_ref: Option<String>,
+    pub mana_unit_ref: Option<String>,
     pub parent_workflow_ref: Option<String>,
     pub role: Option<String>,
 }
@@ -92,7 +92,7 @@ impl WorkflowContract {
             risk_level: input.risk_level.unwrap_or_default(),
             autonomy_mode: input.autonomy_mode.unwrap_or_default(),
             workspace_scope,
-            workflow_unit_ref: input.workflow_unit_ref,
+            mana_unit_ref: input.mana_unit_ref,
             ..Self::default()
         }
     }
@@ -107,8 +107,8 @@ impl WorkflowContract {
         self
     }
 
-    pub fn with_workflow_unit_ref(mut self, workflow_unit_ref: impl Into<String>) -> Self {
-        self.workflow_unit_ref = Some(workflow_unit_ref.into());
+    pub fn with_mana_unit_ref(mut self, mana_unit_ref: impl Into<String>) -> Self {
+        self.mana_unit_ref = Some(mana_unit_ref.into());
         self
     }
 }
@@ -128,7 +128,7 @@ impl Default for WorkflowContract {
             approval_requirements: Vec::new(),
             trust_scope: TrustScope::default(),
             closeout_criteria: CloseoutCriteria::default(),
-            workflow_unit_ref: None,
+            mana_unit_ref: None,
             parent_workflow_ref: None,
             role: None,
         }
@@ -459,14 +459,13 @@ mod tests {
     }
 
     #[test]
-    fn implicit_workflow_contract_records_workflow_unit_ref() {
+    fn implicit_workflow_contract_records_mana_unit_ref() {
         let contract = WorkflowContract::implicit_from(
-            ImplicitWorkflowContractInput::prompt("Implement workflow task")
-                .workflow_unit_ref("394.2.2"),
+            ImplicitWorkflowContractInput::prompt("Implement mana task").mana_unit_ref("394.2.2"),
         );
 
-        assert_eq!(contract.workflow_unit_ref.as_deref(), Some("394.2.2"));
-        assert_eq!(contract.objective, "Implement workflow task");
+        assert_eq!(contract.mana_unit_ref.as_deref(), Some("394.2.2"));
+        assert_eq!(contract.objective, "Implement mana task");
         assert_eq!(contract.autonomy_mode, AutonomyMode::Safe);
         assert_eq!(contract.risk_level, RiskLevel::Unknown);
     }

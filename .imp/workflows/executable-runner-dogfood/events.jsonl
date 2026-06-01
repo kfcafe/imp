@@ -1,0 +1,4 @@
+{"timestamp":"2026-05-28T17:42:00.789604+00:00","action":"run","path":"checks.dogfood_command.status","value":"passed","reason":"command `true` exited with 0"}
+{"timestamp":"2026-05-28T17:42:00.789976+00:00","action":"run","path":"steps.verify_runner.status","value":"done","reason":"command checks completed with step status `done`"}
+{"timestamp":"2026-05-28T19:07:57.165187+00:00","action":"update","path":"spec.acceptance.command_check_advances_step.status","value":"done","reason":"Dogfood evidence verified: command check is passed and verify_runner step is done; results.md written."}
+{"timestamp":"2026-05-28T19:08:10.746747+00:00","action":"update","path":"status","value":"done","reason":"Disposable dogfood workflow completed and results recorded. Verification: test -s results.md and yq check for passed command/done step."}

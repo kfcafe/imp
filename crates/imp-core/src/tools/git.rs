@@ -1424,8 +1424,8 @@ fn truncate_for_display(text: &str) -> (String, String, Option<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mana_review::TurnManaReviewAccumulator;
     use crate::tools::{CheckpointState, FileCache, FileTracker};
-    use crate::workflow_review::TurnWorkflowReviewAccumulator;
     use std::fs;
     use std::path::Path;
     use std::sync::Arc;
@@ -1446,9 +1446,7 @@ mod tests {
             lua_tool_loader: None,
             mode,
             read_max_lines: 500,
-            turn_workflow_review: Arc::new(std::sync::Mutex::new(
-                TurnWorkflowReviewAccumulator::default(),
-            )),
+            turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
             supporting_provenance: Vec::new(),

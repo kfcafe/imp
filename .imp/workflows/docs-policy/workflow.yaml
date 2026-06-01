@@ -1,0 +1,134 @@
+schema: imp.workflow/v1
+id: docs-policy
+title: Write runtime policy technical documentation
+status: planned
+kind: docs
+parent:
+  workflow: technical-docs-suite
+  step: write_policy_doc
+settings:
+  worktree: current
+  strictness: hard
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: >
+    Document runtime policy controls for modes, autonomy, tool allow/deny rules, write paths, hooks, and verify gates.
+  user_value: >
+    Give readers a focused, technical page that answers implementation and integration questions without expanding README.md.
+  non_goals:
+    - Add a generated HTML/docs-site dependency in this pass.
+    - Document planned systems as shipped.
+    - Mix broad marketing copy into the technical reference.
+  acceptance:
+    doc_written:
+      text: docs/policy.md exists and covers the required technical topics.
+      status: todo
+      checks: [doc_file_written]
+    doc_linked:
+      text: The documentation index links to docs/policy.md.
+      status: todo
+      checks: [doc_index_linked]
+    doc_verified:
+      text: Markdown structure and links are checked by the docs sanity command.
+      status: todo
+      checks: [doc_sanity_passed]
+  approval_required_for:
+    - removing required topics
+    - documenting unshipped features as shipped
+context:
+  readme:
+    file: README.md
+    status: todo
+  source_search:
+    search: autonomy allow-tool deny-tool allow-write deny-write verify hooks mode
+    status: todo
+steps:
+  context:
+    kind: context
+    status: todo
+    checks:
+      - context_reviewed
+  outline:
+    kind: plan
+    status: todo
+    depends_on: [context]
+    checks:
+      - outline_recorded
+  write_doc:
+    kind: build
+    status: todo
+    depends_on: [outline]
+    checks:
+      - doc_file_written
+  verify:
+    kind: verify
+    status: todo
+    depends_on: [write_doc]
+    checks:
+      - doc_index_linked
+      - doc_sanity_passed
+  review:
+    kind: review
+    status: todo
+    depends_on: [verify]
+    checks:
+      - final_claims_validated
+  closeout:
+    kind: closeout
+    status: todo
+    depends_on: [review]
+    checks:
+      - required_checks_passed
+prototypes: {}
+checks:
+  context_reviewed:
+    kind: context
+    status: pending
+  outline_recorded:
+    kind: artifact
+    status: pending
+    path: .imp/workflows/docs-policy/artifacts/outline.md
+  doc_file_written:
+    kind: artifact
+    status: pending
+    path: docs/policy.md
+  doc_index_linked:
+    kind: artifact
+    status: pending
+    path: docs/index.md
+  doc_sanity_passed:
+    kind: command
+    status: pending
+    command: python markdown/link sanity check for docs/policy.md
+  final_claims_validated:
+    kind: closeout
+    status: pending
+  required_checks_passed:
+    kind: aggregate
+    status: pending
+workers:
+  writer:
+    role: docs_writer
+    writes: [docs]
+  reviewer:
+    role: reviewer
+    writes: [review_artifacts]
+results:
+  path: .imp/workflows/docs-policy/results.md
+  required_claims:
+    - topics covered
+    - source evidence inspected
+    - docs link verified
+    - concerns and follow-up work
+closeout:
+  done:
+    requires:
+      - required_checks_passed
+      - final_claims_validated
+  allowed_terminal_statuses:
+    - done
+    - done_with_concerns
+    - blocked
+    - needs_context

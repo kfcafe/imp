@@ -1,0 +1,92 @@
+schema: imp.workflow/v1
+id: fix-compact-failfast
+title: Fix compact fail-fast behavior
+status: done
+kind: bugfix
+settings:
+  worktree: none
+  strictness: medium
+  durable: true
+  disposable: false
+  commit_traces: false
+spec:
+  goal: |
+    Make /compact avoid oversized summarizer requests and surface provider errors instead of hanging or silently falling back on real provider failures.
+  user_value: |
+    Long chats should either compact successfully or explain why compaction failed, so the user is not left with an indefinitely stuck chat.
+  non_goals:
+  - Add stream timeouts.
+  - Redesign automatic compaction.
+  - Change provider APIs.
+  acceptance:
+    compact_prompt_budget:
+      text: Oversized compact summary prompts skip the provider and use deterministic fallback.
+      status: done
+      checks:
+      - compaction_tests_passed
+    provider_errors_visible:
+      text: Provider errors during /compact are surfaced instead of swallowed.
+      status: done
+      checks:
+      - tui_check_passed
+    context_full_message:
+      text: Over-full normal chat context reports a clear context-full message.
+      status: done
+      checks:
+      - context_full_tests_passed
+context:
+  audit:
+    artifact: /compact path audit
+    status: done
+steps:
+  inspect:
+    kind: review
+    status: done
+    checks:
+    - compact_path_audited
+  implement:
+    kind: build
+    status: done
+    depends_on:
+    - inspect
+    checks:
+    - compaction_tests_passed
+    - context_full_tests_passed
+  verify:
+    kind: verify
+    status: done
+    depends_on:
+    - implement
+    checks:
+    - tui_check_passed
+checks:
+  compact_path_audited:
+    kind: command
+    status: passed
+    command: rg compact crates/imp-tui/src/app.rs crates/imp-core/src/compaction.rs
+  compaction_tests_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core compaction --no-default-features
+  context_full_tests_passed:
+    kind: command
+    status: passed
+    command: cargo test -p imp-core error_display --no-default-features && cargo test -p imp-core agent_reports_context_full_before_provider_request --no-default-features
+  tui_check_passed:
+    kind: command
+    status: passed
+    command: cargo check -p imp-core -p imp-tui --no-default-features
+results:
+  path: .imp/workflows/fix-compact-failfast/results.md
+workers: {}
+closeout:
+  done:
+    requires:
+    - compaction_tests_passed
+    - context_full_tests_passed
+    - tui_check_passed
+  allowed_terminal_statuses:
+  - done
+  - done_with_concerns
+  - blocked
+  - needs_context

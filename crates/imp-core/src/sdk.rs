@@ -50,8 +50,8 @@ pub use crate::error::{Error, Result};
 pub use crate::imp_session::{
     ImpSession, ResolvedRuntimeConnection, RuntimeConnectionIntent, SessionChoice, SessionOptions,
 };
+pub use crate::mana_review::{ManaReviewState, TurnManaReview};
 pub use crate::ui::{
     ComponentSpec, NotifyLevel, NullInterface, SelectOption, UserInterface, WidgetContent,
 };
-pub use crate::workflow_review::{TurnWorkflowReview, WorkflowReviewState};
 pub use imp_llm::{Model, ThinkingLevel};

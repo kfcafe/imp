@@ -47,6 +47,13 @@ pub struct StartupTiming {
     pub since_previous_ms: u64,
 }
 
+#[cfg(feature = "mana-ui")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadlessOutputMode {
+    Json,
+    Human,
+}
+
 #[derive(Debug)]
 struct StartupTimer {
     started_at: std::time::Instant,
@@ -114,7 +121,6 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 
-pub(crate) mod acp;
 mod stats_report;
 mod usage_report;
 
@@ -233,19 +239,38 @@ struct Cli {
     command: Option<Commands>,
 }
 
+#[cfg(feature = "mana-ui")]
+#[derive(Args, Debug, Clone)]
+struct HeadlessManaArgs {
+    /// Mana unit ID to run
+    unit_id: String,
+    /// Explicit path to the .mana directory for canonical unit loading
+    #[arg(long)]
+    mana_dir: Option<PathBuf>,
+    /// Defer verify/close to compatibility orchestrators instead of verifying inline
+    #[arg(long)]
+    defer_verify: bool,
+}
+
+#[cfg(feature = "mana-ui")]
+#[derive(Args, Debug, Clone)]
+struct ManaNamespaceArgs {
+    /// Mana operator verb or unit ID
+    target: String,
+    /// Additional arguments for reserved mana namespace verbs
+    args: Vec<String>,
+    /// Explicit path to the .mana directory for canonical unit loading
+    #[arg(long)]
+    mana_dir: Option<PathBuf>,
+    /// Defer verify/close to compatibility orchestrators instead of verifying inline
+    #[arg(long)]
+    defer_verify: bool,
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Open the terminal chat interface (legacy alias for `tui`)
-    Chat,
-    /// Run as an Agent Client Protocol stdio server
-    Acp,
     /// Open the fullscreen terminal UI explicitly
     Tui,
-    /// Manage Model Context Protocol server connections (planned)
-    Mcp {
-        #[command(subcommand)]
-        command: Option<McpCommand>,
-    },
     /// Open the viewer/inspector surface (planned; not fully implemented yet)
     View {
         /// Viewer area to open (planned: sessions, tree, logs, checkpoints)
@@ -269,6 +294,9 @@ enum Commands {
     },
     /// Edit configuration
     Config,
+    /// Enter the mana-aware operator namespace. Use `imp mana <unit-id>` to run one unit.
+    #[cfg(feature = "mana-ui")]
+    Mana(ManaNamespaceArgs),
     /// Local statistics from persisted imp sessions
     Stats {
         #[command(subcommand)]
@@ -315,18 +343,6 @@ enum Commands {
         /// Search provider to configure (tavily, exa, linkup, perplexity)
         provider: String,
     },
-}
-
-#[derive(Subcommand, Debug)]
-enum McpCommand {
-    /// List configured MCP servers
-    List,
-    /// Add an MCP server to configuration
-    Add,
-    /// Remove an MCP server from configuration
-    Remove,
-    /// Diagnose MCP configuration and connectivity
-    Doctor,
 }
 
 #[derive(Subcommand, Debug)]
@@ -906,8 +922,8 @@ async fn run_workflow_tool(params: Value, mode: AgentMode) -> imp_core::Result<T
             lua_tool_loader: None,
             mode,
             read_max_lines: 500,
-            turn_workflow_review: std::sync::Arc::new(std::sync::Mutex::new(
-                imp_core::workflow_review::TurnWorkflowReviewAccumulator::default(),
+            turn_mana_review: std::sync::Arc::new(std::sync::Mutex::new(
+                imp_core::mana_review::TurnManaReviewAccumulator::default(),
             )),
             config: std::sync::Arc::new(Config::default()),
             run_policy: Default::default(),
@@ -921,36 +937,6 @@ fn print_tool_output(output: &ToolOutput) {
     for block in &output.content {
         if let imp_llm::ContentBlock::Text { text } = block {
             println!("{text}");
-        }
-    }
-}
-
-fn run_mcp_command(command: Option<&McpCommand>) {
-    match command {
-        None => {
-            println!(
-                "imp mcp is planned, but MCP server management is not implemented in this build."
-            );
-            println!("Available placeholder commands: list, add, remove, doctor");
-        }
-        Some(McpCommand::List) => {
-            println!("No MCP servers: MCP server management is not implemented in this build.");
-        }
-        Some(McpCommand::Add) => {
-            eprintln!("imp mcp add is not implemented in this build.");
-            std::process::exit(2);
-        }
-        Some(McpCommand::Remove) => {
-            eprintln!("imp mcp remove is not implemented in this build.");
-            std::process::exit(2);
-        }
-        Some(McpCommand::Doctor) => {
-            println!("MCP support: not implemented in this build");
-            println!("Expected future config locations:");
-            println!("  {}", Config::user_config_dir().join("mcp.json").display());
-            if let Ok(cwd) = std::env::current_dir() {
-                println!("  {}", cwd.join(".imp/mcp.json").display());
-            }
         }
     }
 }
@@ -986,29 +972,11 @@ pub async fn run() {
     // Dispatch subcommands first
     if let Some(command) = &cli.command {
         match command {
-            Commands::Chat => {
-                if let Err(e) = run_interactive(&cli).await {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
-                }
-                return;
-            }
-            Commands::Acp => {
-                if let Err(e) = acp::run_stdio_server(env!("CARGO_PKG_VERSION")).await {
-                    eprintln!("ACP server failed: {e}");
-                    std::process::exit(1);
-                }
-                return;
-            }
             Commands::Tui => {
                 if let Err(e) = run_interactive(&cli).await {
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
-                return;
-            }
-            Commands::Mcp { command } => {
-                run_mcp_command(command.as_ref());
                 return;
             }
             Commands::View { area } => {
@@ -1053,6 +1021,39 @@ pub async fn run() {
                 println!("{}", config_path.display());
                 return;
             }
+            #[cfg(feature = "mana-ui")]
+            Commands::Mana(ManaNamespaceArgs {
+                target,
+                args,
+                mana_dir,
+                defer_verify,
+            }) => match target.as_str() {
+                "status" | "show" | "logs" | "run" => {
+                    if let Err(e) = run_reserved_mana_namespace_command(target, args).await {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                    return;
+                }
+                _ => {
+                    if !args.is_empty() {
+                        eprintln!(
+                            "Error: unexpected extra arguments after mana unit id `{target}`: {}",
+                            args.join(" ")
+                        );
+                        std::process::exit(1);
+                    }
+                    match run_headless_mode(&cli, target, mana_dir.as_deref(), *defer_verify).await
+                    {
+                        Ok(true) => return,
+                        Ok(false) => std::process::exit(1),
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            },
             Commands::Stats { command } => {
                 if let Err(e) = stats_report::run_stats_command(command) {
                     eprintln!("Error: {e}");
@@ -2151,6 +2152,122 @@ async fn resolve_provider_api_key(
     }
 }
 
+#[cfg(feature = "mana-ui")]
+fn worker_status_counts_as_success(status: imp_core::mana_worker::WorkerStatus) -> bool {
+    matches!(
+        status,
+        imp_core::mana_worker::WorkerStatus::Completed
+            | imp_core::mana_worker::WorkerStatus::AwaitingVerify
+    )
+}
+
+#[cfg(feature = "mana-ui")]
+async fn run_headless_mode(
+    cli: &Cli,
+    unit_id: &str,
+    mana_dir_override: Option<&Path>,
+    defer_verify: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut startup_timer = StartupTimer::new(cli.verbose);
+    emit_startup_timing(&mut startup_timer, StartupStage::ProcessStart);
+    let cwd = std::env::current_dir()?;
+    emit_startup_timing(&mut startup_timer, StartupStage::CwdResolved);
+
+    // Load the unit via canonical mana-core APIs for the primary single-unit
+    // imp-run path instead of ad hoc markdown scanning.
+    let assignment =
+        imp_core::mana_worker::load_assignment_with_mana_dir(&cwd, unit_id, mana_dir_override)?;
+    let config = Config::resolve(&imp_core::storage::global_root(), Some(&cwd))?;
+    emit_startup_timing(&mut startup_timer, StartupStage::ConfigResolved);
+    emit_startup_timing(&mut startup_timer, StartupStage::ModelRegistryReady);
+    emit_startup_timing(&mut startup_timer, StartupStage::AuthLoaded);
+    emit_startup_timing(&mut startup_timer, StartupStage::ModelResolved);
+    emit_startup_timing(&mut startup_timer, StartupStage::ProviderReady);
+    emit_startup_timing(&mut startup_timer, StartupStage::ApiKeyResolved);
+
+    let options = imp_core::mana_worker::WorkerRunOptions {
+        cwd: cwd.clone(),
+        model_override: None,
+        model: cli.model.clone().or_else(|| assignment.model.clone()),
+        provider: cli.provider.clone(),
+        api_key: cli.api_key.clone(),
+        role: cli.role.clone(),
+        thinking: cli
+            .thinking
+            .as_ref()
+            .map(|thinking| parse_thinking_level(thinking)),
+        max_turns: cli.max_turns.or(config.max_turns),
+        autonomy_mode: cli.autonomy,
+        verification_gates: cli_verification_gates(&cli.verify),
+        max_tokens: cli.max_tokens.or(config.max_tokens),
+        system_prompt: cli.system_prompt.clone(),
+        no_tools: cli.no_tools,
+        mana_dir_override: mana_dir_override.map(Path::to_path_buf),
+        defer_verify,
+        lua_loader: build_lua_loader(cli.no_tools, cwd.clone()),
+    };
+
+    let mut prepared = imp_core::mana_worker::prepare_worker_run(assignment, options).await?;
+    emit_startup_timing(&mut startup_timer, StartupStage::AgentBuilt);
+
+    for warning in &prepared.prefill_warnings {
+        eprintln!("[imp] context prefill: {warning}");
+    }
+    if !prepared.prefilled_files.is_empty() {
+        eprintln!(
+            "[imp] prefilled {} files (~{} tokens)",
+            prepared.prefilled_files.len(),
+            prepared.estimated_prefill_tokens
+        );
+    }
+
+    emit_startup_timing(&mut startup_timer, StartupStage::PromptReady);
+    prepared
+        .session
+        .prompt(&prepared.prompt)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    emit_startup_timing(&mut startup_timer, StartupStage::RunLoopStarted);
+
+    let output_mode = determine_headless_output_mode(&cli.mode, io::stdout().is_terminal());
+    let mut runtime_state = RuntimeStateAccumulator::new("headless");
+    let mut printed_trailing_newline = false;
+
+    while let Some(event) = prepared.session.recv_event().await {
+        match output_mode {
+            HeadlessOutputMode::Json => {
+                if cli.runtime_json {
+                    print_json_event_with_runtime(&event, Some(&mut runtime_state))?
+                } else {
+                    print_json_event(&event)?
+                }
+            }
+            HeadlessOutputMode::Human => print_headless_human_event(
+                &event,
+                !cli.no_tools,
+                cli.verbose,
+                &mut printed_trailing_newline,
+            )?,
+        }
+    }
+
+    prepared
+        .session
+        .wait()
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+    let outcome = imp_core::mana_worker::finalize_worker_run(prepared).await?;
+    if let Some(summary) = &outcome.result.summary {
+        eprintln!("[worker] {summary}");
+    }
+    if let Some(error) = &outcome.result.error {
+        eprintln!("[worker error] {error}");
+    }
+
+    Ok(worker_status_counts_as_success(outcome.result.status))
+}
+
 fn build_lua_loader(no_tools: bool, cwd: PathBuf) -> Option<imp_core::tools::LuaToolLoader> {
     if no_tools {
         return None;
@@ -2212,6 +2329,22 @@ fn format_timing_event(timing: &TimingEvent) -> String {
     )
 }
 
+#[cfg(feature = "mana-ui")]
+async fn run_reserved_mana_namespace_command(
+    target: &str,
+    args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rendered_args = if args.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", args.join(" "))
+    };
+    Err(format!(
+        "`imp mana {target}{rendered_args}` is reserved for a future mana-aware operator command. For now, use `mana {target}{rendered_args}` directly or `imp mana <unit-id>` for single-unit worker execution."
+    )
+    .into())
+}
+
 fn cli_verification_gates(commands: &[String]) -> Vec<VerificationGate> {
     commands
         .iter()
@@ -2220,6 +2353,280 @@ fn cli_verification_gates(commands: &[String]) -> Vec<VerificationGate> {
             VerificationGate::command(format!("cli-verify-{}", index + 1), command.clone())
         })
         .collect()
+}
+
+#[cfg(feature = "mana-ui")]
+fn determine_headless_output_mode(cli_mode: &str, stdout_is_terminal: bool) -> HeadlessOutputMode {
+    match cli_mode {
+        "json" | "rpc" => HeadlessOutputMode::Json,
+        _ if stdout_is_terminal => HeadlessOutputMode::Human,
+        _ => HeadlessOutputMode::Json,
+    }
+}
+
+#[cfg(feature = "mana-ui")]
+fn print_headless_human_event(
+    event: &AgentEvent,
+    show_tools: bool,
+    verbose: bool,
+    printed_trailing_newline: &mut bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match event {
+        AgentEvent::MessageDelta { delta } => match delta {
+            StreamEvent::TextDelta { text } => {
+                print!("{text}");
+                io::stdout().flush()?;
+                *printed_trailing_newline = false;
+            }
+            StreamEvent::ThinkingDelta { text } => eprint!("{text}"),
+            _ => {}
+        },
+        AgentEvent::ToolExecutionStart {
+            tool_name, args, ..
+        } if show_tools => {
+            let summary = match tool_name.as_str() {
+                "bash" => args
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .map(|c| truncate_chars_with_suffix(c, 60, "…"))
+                    .unwrap_or_default(),
+                "read" | "write" | "edit" => args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                "scan" => args
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                _ => String::new(),
+            };
+            if summary.is_empty() {
+                eprintln!("[tool: {tool_name}]");
+            } else {
+                eprintln!("[tool: {tool_name} {summary}]");
+            }
+        }
+        AgentEvent::ToolExecutionEnd { result, .. } if show_tools => {
+            if result.is_error {
+                let text: String = result
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        imp_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !text.is_empty() {
+                    eprintln!("[error: {}]", truncate_chars_with_suffix(&text, 100, ""));
+                }
+            }
+        }
+        AgentEvent::TurnEnd { .. } => {
+            if !*printed_trailing_newline {
+                println!();
+                *printed_trailing_newline = true;
+            }
+        }
+        AgentEvent::Error { error } => {
+            eprintln!("Error: {}", format_error_for_display(error));
+        }
+        AgentEvent::Timing { timing } => {
+            if verbose {
+                eprintln!("{}", format_timing_event(timing));
+            }
+        }
+        AgentEvent::AgentEnd { usage, cost, .. } => {
+            eprintln!(
+                "\n[tokens: ↑{} ↓{} | cost: ${:.4}]",
+                usage.input_tokens, usage.output_tokens, cost.total
+            );
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "mana-ui")]
+fn print_json_event(event: &AgentEvent) -> Result<(), Box<dyn std::error::Error>> {
+    print_json_event_with_runtime(event, None)
+}
+#[cfg(feature = "mana-ui")]
+fn print_json_event_with_runtime(
+    event: &AgentEvent,
+    runtime: Option<&mut RuntimeStateAccumulator>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let value = legacy_json_event_value(event)?;
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{}", serde_json::to_string(&value)?)?;
+    if let Some(runtime) = runtime {
+        let sequence = runtime.snapshot().status_items.len() as u64
+            + runtime.snapshot().active_tools.len() as u64
+            + runtime.snapshot().completed_tools.len() as u64
+            + 1;
+        let run_id = runtime
+            .snapshot()
+            .workflow
+            .run_id
+            .clone()
+            .unwrap_or_else(|| "headless".into());
+        let runtime_event = event.to_runtime_event(run_id, sequence);
+        runtime.apply(&runtime_event);
+        writeln!(
+            stdout,
+            "{}",
+            serde_json::to_string(&json!({
+                "type": "runtime_event",
+                "event": runtime_event,
+            }))?
+        )?;
+        writeln!(
+            stdout,
+            "{}",
+            serde_json::to_string(&json!({
+                "type": "runtime_state",
+                "snapshot": runtime.snapshot(),
+            }))?
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mana-ui")]
+fn legacy_json_event_value(event: &AgentEvent) -> Result<Value, Box<dyn std::error::Error>> {
+    let value = match event {
+        AgentEvent::AgentStart { model, timestamp } => {
+            json!({ "type": "agent_start", "model": model, "timestamp": timestamp })
+        }
+        AgentEvent::AgentEnd { usage, cost, .. } => {
+            json!({ "type": "agent_end", "usage": usage, "cost": cost })
+        }
+        AgentEvent::TurnStart { index } => json!({ "type": "turn_start", "index": index }),
+        AgentEvent::TurnAssessment { index, assessment } => json!({
+            "type": "turn_assessment",
+            "index": index,
+            "assessment": next_action_assessment_to_json(assessment),
+        }),
+        AgentEvent::TurnEnd { index, message, .. } => {
+            json!({ "type": "turn_end", "index": index, "message": message })
+        }
+        AgentEvent::MessageStart { message } => {
+            json!({ "type": "message_start", "message": message })
+        }
+        AgentEvent::MessageDelta { delta } => stream_event_to_json(delta),
+        AgentEvent::MessageEnd { message } => json!({ "type": "message_end", "message": message }),
+        AgentEvent::ToolExecutionStart {
+            tool_call_id,
+            tool_name,
+            args,
+        } => {
+            json!({
+                "type": "tool_execution_start",
+                "tool_call_id": tool_call_id,
+                "tool": tool_name,
+                "args": args,
+            })
+        }
+        AgentEvent::ToolExecutionEnd {
+            tool_call_id,
+            result,
+            provenance,
+        } => {
+            json!({
+                "type": "tool_execution_end",
+                "tool_call_id": tool_call_id,
+                "result": result,
+                "provenance": provenance,
+            })
+        }
+        AgentEvent::Timing { timing } => json!({
+            "type": "timing",
+            "turn": timing.turn,
+            "stage": timing.stage.as_str(),
+            "since_turn_start_ms": timing.since_turn_start_ms,
+            "since_llm_request_start_ms": timing.since_llm_request_start_ms,
+            "duration_ms": timing.duration_ms,
+            "label": timing.label,
+            "success": timing.success,
+        }),
+        AgentEvent::RecoveryCheckpoint { checkpoint } => json!({
+            "type": "recovery_checkpoint",
+            "checkpoint": checkpoint,
+        }),
+        AgentEvent::Warning { message } => json!({ "type": "warning", "message": message }),
+        AgentEvent::WorktreeCreated { metadata } => json!({
+            "type": "worktree_created",
+            "metadata": metadata,
+        }),
+        AgentEvent::WorktreeDiffCaptured { metadata } => json!({
+            "type": "worktree_diff_captured",
+            "metadata": metadata,
+        }),
+        AgentEvent::WorktreeCloseout { result } => json!({
+            "type": "worktree_closeout",
+            "result": result,
+        }),
+        AgentEvent::EvidenceWritten { path } => json!({
+            "type": "evidence_written",
+            "path": path.display().to_string(),
+        }),
+        AgentEvent::WorkflowControllerSnapshot { snapshot } => json!({
+            "type": "workflow_controller_snapshot",
+            "snapshot": snapshot,
+        }),
+        AgentEvent::VerificationStarted { gate } => json!({
+            "type": "verification_started",
+            "gate": gate,
+        }),
+        AgentEvent::VerificationCompleted {
+            gate,
+            closeout_effect,
+        } => json!({
+            "type": "verification_completed",
+            "gate": gate,
+            "closeout_effect": closeout_effect,
+        }),
+        AgentEvent::PolicyChecked { record } => json!({
+            "type": "policy_checked",
+            "record": record,
+        }),
+        AgentEvent::Error { error } => json!({ "type": "error", "error": error }),
+        AgentEvent::ToolOutputDelta { .. } => json!({ "type": "tool_output_delta" }),
+    };
+
+    Ok(value)
+}
+
+#[cfg(feature = "mana-ui")]
+fn stream_event_to_json(event: &StreamEvent) -> serde_json::Value {
+    match event {
+        StreamEvent::MessageStart { model } => {
+            json!({ "type": "message_start", "model": model })
+        }
+        StreamEvent::TextDelta { text } => json!({ "type": "text_delta", "text": text }),
+        StreamEvent::ThinkingDelta { text } => {
+            json!({ "type": "thinking_delta", "text": text })
+        }
+        StreamEvent::ToolCall {
+            id,
+            name,
+            arguments,
+        } => {
+            json!({
+                "type": "tool_call",
+                "id": id,
+                "tool": name,
+                "args": arguments,
+            })
+        }
+        StreamEvent::MessageEnd { message } => {
+            json!({ "type": "message_end", "message": message })
+        }
+        StreamEvent::Error { error } => json!({ "type": "stream_error", "error": error }),
+    }
 }
 
 #[derive(Debug)]
@@ -2951,8 +3358,8 @@ fn next_action_assessment_to_json(assessment: &imp_core::agent::NextActionAssess
             "execution_evidence": assessment.runtime.execution_evidence,
             "planning_only_progress": assessment.runtime.planning_only_progress,
         },
-        "workflow": {
-            "stop_reason": assessment.workflow.stop_reason,
+        "mana": {
+            "stop_reason": assessment.mana.stop_reason,
         },
         "text_fallback": {
             "planner_stop_reason": assessment.text_fallback.planner_stop_reason,
@@ -3794,9 +4201,25 @@ fn build_full_prompt(prompt: &str, file_context: &str, stdin: &Option<String>) -
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    #[cfg(feature = "mana-ui")]
+    use async_trait::async_trait;
+    #[cfg(feature = "mana-ui")]
+    use futures_util::Stream;
     use imp_llm::auth::{OAuthCredential, StoredCredential};
+    #[cfg(feature = "mana-ui")]
+    use imp_llm::message::{AssistantMessage, ContentBlock, StopReason};
+    #[cfg(feature = "mana-ui")]
+    use imp_llm::provider::{Context as ProviderContext, Provider, RequestOptions, ThinkingLevel};
     use imp_llm::stream::StreamEvent;
+    #[cfg(feature = "mana-ui")]
+    use imp_llm::{Model, ModelMeta};
+    #[cfg(feature = "mana-ui")]
+    use mana_core::unit::Unit;
     use serde_json::json;
+    #[cfg(feature = "mana-ui")]
+    use std::pin::Pin;
+    #[cfg(feature = "mana-ui")]
+    use std::sync::Arc;
 
     /// Helper: build a minimal Cli struct with defaults for testing.
     fn default_cli() -> Cli {
@@ -3856,6 +4279,93 @@ mod tests {
         assert_eq!(prompt, "<file>ctx</file>\n\nhelp me install utop");
     }
 
+    #[cfg(feature = "mana-ui")]
+    struct StaticTestProvider {
+        text: String,
+    }
+
+    #[cfg(feature = "mana-ui")]
+    #[async_trait]
+    impl Provider for StaticTestProvider {
+        fn stream(
+            &self,
+            model: &Model,
+            _context: ProviderContext,
+            _options: RequestOptions,
+            _api_key: &str,
+        ) -> Pin<Box<dyn Stream<Item = imp_llm::Result<StreamEvent>> + Send>> {
+            let message = AssistantMessage {
+                content: vec![ContentBlock::Text {
+                    text: self.text.clone(),
+                }],
+                usage: None,
+                stop_reason: StopReason::EndTurn,
+                timestamp: 0,
+            };
+            let events = vec![
+                Ok(StreamEvent::MessageStart {
+                    model: model.meta.id.clone(),
+                }),
+                Ok(StreamEvent::TextDelta {
+                    text: self.text.clone(),
+                }),
+                Ok(StreamEvent::MessageEnd { message }),
+            ];
+            Box::pin(futures_util::stream::iter(events))
+        }
+
+        async fn resolve_auth(&self, _auth: &AuthStore) -> imp_llm::Result<imp_llm::auth::ApiKey> {
+            Ok("test-key".to_string())
+        }
+
+        fn id(&self) -> &str {
+            "test-provider"
+        }
+
+        fn models(&self) -> &[ModelMeta] {
+            &[]
+        }
+    }
+
+    #[cfg(feature = "mana-ui")]
+    fn static_test_model(text: &str) -> Model {
+        Model {
+            meta: ModelMeta {
+                id: "test-model".to_string(),
+                provider: "test-provider".to_string(),
+                name: "Test Model".to_string(),
+                context_window: 4096,
+                max_output_tokens: 1024,
+                pricing: Default::default(),
+                capabilities: Default::default(),
+            },
+            provider: Arc::new(StaticTestProvider {
+                text: text.to_string(),
+            }),
+        }
+    }
+
+    #[cfg(feature = "mana-ui")]
+    fn write_test_mana_unit(
+        root: &std::path::Path,
+        id: &str,
+        title_slug: &str,
+        title: &str,
+        description: &str,
+        verify: &str,
+    ) {
+        let mana_dir = root.join(".mana");
+        std::fs::create_dir_all(&mana_dir).unwrap();
+        std::fs::write(mana_dir.join("config.yaml"), "project: test\nnext_id: 2\n").unwrap();
+
+        let mut unit = Unit::new(id, title);
+        unit.description = Some(description.to_string());
+        unit.verify = Some(verify.to_string());
+        unit.updated_at = unit.created_at;
+        unit.to_file(mana_dir.join(format!("{id}-{title_slug}.md")))
+            .unwrap();
+    }
+
     #[test]
     fn cli_parses_autonomy_mode_flag() {
         let cli = Cli::try_parse_from(["imp", "--autonomy", "allow-all-local", "fix it"])
@@ -3895,6 +4405,21 @@ mod tests {
             Some("cargo test -p imp-core")
         );
         assert_eq!(gates[1].id, "cli-verify-2");
+    }
+
+    #[cfg(feature = "mana-ui")]
+    #[test]
+    fn cli_parses_mana_namespace_unit_target_for_headless_worker() {
+        let cli = Cli::try_parse_from(["imp", "mana", "5.1"]).expect("parse mana unit target");
+        match cli.command {
+            Some(Commands::Mana(args)) => {
+                assert_eq!(args.target, "5.1");
+                assert!(args.args.is_empty());
+                assert!(args.mana_dir.is_none());
+                assert!(!args.defer_verify);
+            }
+            other => panic!("expected mana namespace subcommand, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3952,11 +4477,230 @@ mod tests {
     }
 
     #[test]
-    fn cli_treats_old_run_workflow_flags_as_prompt_args() {
+    fn cli_treats_old_run_mana_flags_as_prompt_args() {
         let cli = Cli::try_parse_from(["imp", "run", "5.1", "--defer-verify"])
             .expect("legacy native work run flags are no longer a subcommand");
         assert!(cli.command.is_none());
         assert_eq!(cli.args, vec!["run", "5.1", "--defer-verify"]);
+    }
+
+    #[cfg(feature = "mana-ui")]
+    #[test]
+    fn cli_parses_reserved_mana_namespace_verb_with_passthrough_args() {
+        let cli = Cli::try_parse_from(["imp", "mana", "show", "28.1"]).expect("parse mana show");
+        match cli.command {
+            Some(Commands::Mana(args)) => {
+                assert_eq!(args.target, "show");
+                assert_eq!(args.args, vec!["28.1".to_string()]);
+            }
+            other => panic!("expected mana namespace args, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "mana-ui")]
+    #[test]
+    fn reserved_mana_namespace_commands_error_clearly() {
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let err = rt
+            .block_on(run_reserved_mana_namespace_command("status", &[]))
+            .expect_err("reserved command should error for now");
+        let text = err.to_string();
+        assert!(text.contains("reserved for a future mana-aware operator command"));
+        assert!(text.contains("use `mana status` directly"));
+    }
+
+    #[cfg(feature = "mana-ui")]
+    #[test]
+    fn worker_status_counts_as_success_for_completed_and_awaiting_verify_only() {
+        assert!(worker_status_counts_as_success(
+            imp_core::mana_worker::WorkerStatus::Completed
+        ));
+        assert!(worker_status_counts_as_success(
+            imp_core::mana_worker::WorkerStatus::AwaitingVerify
+        ));
+        assert!(!worker_status_counts_as_success(
+            imp_core::mana_worker::WorkerStatus::Failed
+        ));
+        assert!(!worker_status_counts_as_success(
+            imp_core::mana_worker::WorkerStatus::Blocked
+        ));
+        assert!(!worker_status_counts_as_success(
+            imp_core::mana_worker::WorkerStatus::Cancelled
+        ));
+    }
+
+    #[cfg(feature = "mana-ui")]
+    #[tokio::test]
+    async fn worker_run_end_to_end_with_model_override_closes_verified_unit() {
+        let temp = tempfile::tempdir().unwrap();
+        write_test_mana_unit(
+            temp.path(),
+            "1",
+            "test-unit",
+            "Test unit",
+            "Say hi and finish.",
+            "test -n ok",
+        );
+
+        let assignment = imp_core::mana_worker::load_assignment_with_mana_dir(
+            temp.path(),
+            "1",
+            Some(temp.path().join(".mana").as_path()),
+        )
+        .expect("load assignment");
+
+        let options = imp_core::mana_worker::WorkerRunOptions {
+            cwd: temp.path().to_path_buf(),
+            model_override: Some(static_test_model("done")),
+            model: None,
+            provider: None,
+            api_key: None,
+            role: None,
+            system_prompt: None,
+            thinking: Some(ThinkingLevel::Off),
+            max_turns: Some(2),
+            autonomy_mode: None,
+            verification_gates: Vec::new(),
+            max_tokens: None,
+            no_tools: false,
+            mana_dir_override: Some(temp.path().join(".mana")),
+            defer_verify: false,
+            lua_loader: None,
+        };
+
+        let mut prepared = imp_core::mana_worker::prepare_worker_run(assignment, options)
+            .await
+            .expect("prepare worker run");
+        prepared
+            .session
+            .prompt(&prepared.prompt)
+            .await
+            .expect("prompt session");
+        prepared.session.wait().await.expect("wait for session");
+        let outcome = imp_core::mana_worker::finalize_worker_run(prepared)
+            .await
+            .expect("finalize worker run");
+
+        assert_eq!(
+            outcome.result.status,
+            imp_core::mana_worker::WorkerStatus::Completed
+        );
+        assert_eq!(outcome.verify_passed, Some(true));
+        assert!(outcome.closed_after_verify);
+
+        let archived =
+            mana_core::ops::show::get(&temp.path().join(".mana"), "1").expect("show closed unit");
+        assert!(archived.unit.is_archived);
+        assert_eq!(archived.unit.status.to_string(), "closed");
+    }
+
+    #[cfg(feature = "mana-ui")]
+    #[tokio::test]
+    async fn run_headless_no_tools_worker_single_turn_exits_cleanly() {
+        let temp = tempfile::tempdir().unwrap();
+        write_test_mana_unit(
+            temp.path(),
+            "1",
+            "headless-no-tools",
+            "Headless no-tools unit",
+            "Check mana status and finish.",
+            "test -n ok",
+        );
+
+        let assignment = imp_core::mana_worker::load_assignment_with_mana_dir(
+            temp.path(),
+            "1",
+            Some(temp.path().join(".mana").as_path()),
+        )
+        .expect("load assignment");
+
+        let options = imp_core::mana_worker::WorkerRunOptions {
+            cwd: temp.path().to_path_buf(),
+            model_override: Some(static_test_model("SMOKE_OK")),
+            model: None,
+            provider: None,
+            api_key: None,
+            role: None,
+            system_prompt: None,
+            thinking: Some(ThinkingLevel::Off),
+            max_turns: Some(1),
+            autonomy_mode: None,
+            verification_gates: Vec::new(),
+            max_tokens: None,
+            no_tools: true,
+            mana_dir_override: Some(temp.path().join(".mana")),
+            defer_verify: true,
+            lua_loader: None,
+        };
+
+        let mut prepared = imp_core::mana_worker::prepare_worker_run(assignment, options)
+            .await
+            .expect("prepare worker run");
+        prepared
+            .session
+            .prompt(&prepared.prompt)
+            .await
+            .expect("prompt session");
+
+        let events = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut events = Vec::new();
+            while let Some(event) = prepared.session.recv_event().await {
+                events.push(event);
+            }
+            events
+        })
+        .await
+        .expect("headless event stream should complete promptly");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), prepared.session.wait())
+            .await
+            .expect("headless session wait should complete promptly")
+            .expect("wait for session");
+
+        let saw_expected_text = events.iter().any(|event| {
+            matches!(
+                event,
+                AgentEvent::MessageDelta {
+                    delta: StreamEvent::TextDelta { text },
+                } if text.contains("SMOKE_OK")
+            )
+        });
+        let saw_max_turn_error = events.iter().any(|event| {
+            matches!(event, AgentEvent::Error { error } if error.contains("Max turns exceeded"))
+        });
+
+        assert!(saw_expected_text);
+        assert!(!saw_max_turn_error);
+    }
+
+    #[cfg(feature = "mana-ui")]
+    #[test]
+    fn determine_headless_output_mode_prefers_human_for_terminal_run() {
+        assert_eq!(
+            determine_headless_output_mode("interactive", true),
+            HeadlessOutputMode::Human
+        );
+        assert_eq!(
+            determine_headless_output_mode("anything-else", true),
+            HeadlessOutputMode::Human
+        );
+    }
+
+    #[cfg(feature = "mana-ui")]
+    #[test]
+    fn determine_headless_output_mode_keeps_json_for_piped_or_explicit_protocol_modes() {
+        assert_eq!(
+            determine_headless_output_mode("interactive", false),
+            HeadlessOutputMode::Json
+        );
+        assert_eq!(
+            determine_headless_output_mode("json", true),
+            HeadlessOutputMode::Json
+        );
+        assert_eq!(
+            determine_headless_output_mode("rpc", true),
+            HeadlessOutputMode::Json
+        );
     }
 
     #[test]
@@ -4431,6 +5175,55 @@ mod tests {
     fn startup_stage_names_are_stable() {
         assert_eq!(StartupStage::ProcessStart.as_str(), "process_start");
         assert_eq!(StartupStage::RunLoopStarted.as_str(), "run_loop_started");
+    }
+
+    #[cfg(feature = "mana-ui")]
+    #[test]
+    fn imp_cli_uses_canonical_mana_worker_prompt_and_context_helpers() {
+        let assignment = imp_core::mana_worker::WorkerAssignment {
+            id: "42".to_string(),
+            title: "Fix the widget".to_string(),
+            description: "The widget is broken.\nPlease fix it.".to_string(),
+            design: None,
+            acceptance: Some("Widget tests pass".to_string()),
+            verify: Some("cargo test -p imp-cli".to_string()),
+            verify_timeout_secs: None,
+            fail_first: false,
+            notes: Some("Check the edge case.".to_string()),
+            decisions: vec!["Keep the CLI thin".to_string()],
+            dependencies: Vec::new(),
+            paths: vec!["imp/crates/imp-cli/src/main.rs".to_string()],
+            files: Vec::new(),
+            attempts: vec![imp_core::mana_worker::WorkerAttempt {
+                number: 1,
+                outcome: "failed".to_string(),
+                summary: "timed out".to_string(),
+            }],
+            workspace_root: PathBuf::from("/tmp"),
+            model: None,
+        };
+
+        let prompt = imp_core::mana_worker::build_task_prompt(&assignment);
+        let context = imp_core::mana_worker::build_task_context(&assignment);
+
+        assert!(prompt.starts_with("# Mana worker assignment"));
+        assert!(prompt.contains("Title: Fix the widget"));
+        assert!(prompt.contains("## Task\nThe widget is broken."));
+        assert!(prompt.contains("## Current notes / prior context\nCheck the edge case."));
+        assert!(prompt.contains("## Previous attempts"));
+        assert!(prompt.contains("## Verification contract\nCommand: cargo test -p imp-cli"));
+
+        assert_eq!(context.title, "Fix the widget");
+        assert_eq!(context.acceptance.as_deref(), Some("Widget tests pass"));
+        assert_eq!(context.verify.as_deref(), Some("cargo test -p imp-cli"));
+        assert_eq!(
+            context.context_paths,
+            vec!["imp/crates/imp-cli/src/main.rs"]
+        );
+        assert!(context
+            .constraints
+            .iter()
+            .any(|constraint| constraint.contains("verify command")));
     }
 }
 

@@ -11,8 +11,9 @@ use crate::personality::PersonalityConfig;
 use crate::roles::{RoleDef, RoleRegistry, RoleRegistryError};
 use crate::storage;
 use crate::tools::web::types::WebConfig;
+use crate::workflow_profiles::{WorkflowProfileDef, WorkflowProfileError, WorkflowRegistry};
 
-/// Agent mode — controls which tools and workflow actions the agent may use.
+/// Agent mode — controls which tools and mana actions the agent may use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentMode {
@@ -43,6 +44,74 @@ const WORKER_WORKFLOW_ACTIONS: &[&str] = &["show", "update", "list", "validate"]
 const ORCHESTRATOR_WORKFLOW_ACTIONS: &[&str] = &["list", "show", "validate", "run", "update"];
 const PLANNER_WORKFLOW_ACTIONS: &[&str] = &["list", "show", "validate", "update"];
 const AUDITOR_WORKFLOW_ACTIONS: &[&str] = &["list", "show", "validate"];
+
+// Legacy mana action lists are retained for compatibility with older code paths
+// that still route through the mana tool. New native orchestration should use
+// the workflow tool/action policy above.
+const WORKER_MANA_ACTIONS: &[&str] = &[
+    "show",
+    "update",
+    "status",
+    "list",
+    "logs",
+    "next",
+    "verify",
+    "notes_append",
+];
+const ORCHESTRATOR_MANA_ACTIONS: &[&str] = &[
+    "status",
+    "list",
+    "show",
+    "create",
+    "close",
+    "update",
+    "run",
+    "run_state",
+    "evaluate",
+    "claim",
+    "release",
+    "logs",
+    "agents",
+    "next",
+    "tree",
+    "reopen",
+    "verify",
+    "fail",
+    "delete",
+    "dep_add",
+    "dep_remove",
+    "fact_create",
+    "fact_verify",
+    "notes_append",
+    "decision_add",
+    "decision_resolve",
+];
+const PLANNER_MANA_ACTIONS: &[&str] = &[
+    "status",
+    "list",
+    "show",
+    "create",
+    "update",
+    "next",
+    "tree",
+    "dep_add",
+    "dep_remove",
+    "fact_create",
+    "notes_append",
+    "decision_add",
+    "decision_resolve",
+];
+const AUDITOR_MANA_ACTIONS: &[&str] = &[
+    "status",
+    "list",
+    "show",
+    "logs",
+    "agents",
+    "next",
+    "tree",
+    "verify",
+    "fact_verify",
+];
 
 impl AgentMode {
     /// Tool names this mode permits. An empty slice means "allow all" (Full).
@@ -82,6 +151,26 @@ impl AgentMode {
             AgentMode::Full => true,
             AgentMode::Reviewer => false,
             _ => self.allowed_workflow_actions().contains(&action),
+        }
+    }
+
+    /// Mana sub-actions this mode permits. An empty slice means "allow all" (Full).
+    pub fn allowed_mana_actions(&self) -> &'static [&'static str] {
+        match self {
+            AgentMode::Full | AgentMode::Reviewer => &[],
+            AgentMode::Worker => WORKER_MANA_ACTIONS,
+            AgentMode::Orchestrator => ORCHESTRATOR_MANA_ACTIONS,
+            AgentMode::Planner => PLANNER_MANA_ACTIONS,
+            AgentMode::Auditor => AUDITOR_MANA_ACTIONS,
+        }
+    }
+
+    /// Returns true if the mode allows the named mana action.
+    pub fn allows_mana_action(&self, action: &str) -> bool {
+        match self {
+            AgentMode::Full => true,
+            AgentMode::Reviewer => false,
+            _ => self.allowed_mana_actions().contains(&action),
         }
     }
 
@@ -295,19 +384,19 @@ pub struct AllowedCommandSecret {
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum WorkflowScopePreference {
+pub enum ManaScopePreference {
     #[default]
     Project,
     Root,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkflowRunConfig {
-    /// Whether native workflow runs should return immediately by default.
+pub struct ManaRunConfig {
+    /// Whether native mana runs should return immediately by default.
     #[serde(default = "default_enabled")]
     pub background: bool,
     /// Number of units to run in parallel by default.
-    #[serde(default = "default_workflow_run_jobs")]
+    #[serde(default = "default_mana_run_jobs")]
     pub max_workers: u32,
     /// Continue running other ready units after one unit fails.
     #[serde(default)]
@@ -317,7 +406,7 @@ pub struct WorkflowRunConfig {
     pub review_after_run: bool,
 }
 
-impl Default for WorkflowRunConfig {
+impl Default for ManaRunConfig {
     fn default() -> Self {
         Self {
             background: true,
@@ -328,7 +417,7 @@ impl Default for WorkflowRunConfig {
     }
 }
 
-impl WorkflowRunConfig {
+impl ManaRunConfig {
     fn is_default(&self) -> bool {
         self == &Self::default()
     }
@@ -338,37 +427,37 @@ fn default_enabled() -> bool {
     true
 }
 
-fn default_workflow_run_jobs() -> u32 {
+fn default_mana_run_jobs() -> u32 {
     4
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkflowConfig {
-    /// Default workflow selection for native workflow calls.
+pub struct ManaConfig {
+    /// Default mana graph selection for native mana calls.
     #[serde(default)]
-    pub scope: WorkflowScopePreference,
-    /// Whether successful workflow close operations should auto-commit workflow changes.
+    pub scope: ManaScopePreference,
+    /// Whether successful mana close operations should auto-commit mana changes.
     #[serde(default)]
     pub auto_commit: bool,
-    /// Whether workflows should close completed parent steps after closing a child.
+    /// Whether mana should close completed parent units after closing a child.
     #[serde(default = "default_true")]
     pub auto_close_parent: bool,
     /// Default verify timeout, in seconds, for close/create/verify flows.
     #[serde(default)]
     pub verify_timeout: Option<u64>,
-    /// Native workflow run defaults.
-    #[serde(default, skip_serializing_if = "WorkflowRunConfig::is_default")]
-    pub run: WorkflowRunConfig,
+    /// Native mana run defaults.
+    #[serde(default, skip_serializing_if = "ManaRunConfig::is_default")]
+    pub run: ManaRunConfig,
 }
 
-impl Default for WorkflowConfig {
+impl Default for ManaConfig {
     fn default() -> Self {
         Self {
-            scope: WorkflowScopePreference::Project,
+            scope: ManaScopePreference::Project,
             auto_commit: false,
             auto_close_parent: true,
             verify_timeout: None,
-            run: WorkflowRunConfig::default(),
+            run: ManaRunConfig::default(),
         }
     }
 }
@@ -395,6 +484,9 @@ pub struct Config {
     #[serde(default)]
     pub roles: HashMap<String, RoleDef>,
 
+    /// User-overridable workflow profiles backing slash commands.
+    #[serde(default)]
+    pub workflows: HashMap<String, WorkflowProfileDef>,
     /// Hook definitions.
     #[serde(default)]
     pub hooks: Vec<HookDef>,
@@ -415,7 +507,7 @@ pub struct Config {
     #[serde(default)]
     pub guardrails: GuardrailConfig,
 
-    /// Agent mode — controls tool and workflow action access.
+    /// Agent mode — controls tool and mana action access.
     #[serde(default)]
     pub mode: AgentMode,
 
@@ -439,9 +531,9 @@ pub struct Config {
     #[serde(default)]
     pub web: WebConfig,
 
-    /// Workflow tool settings.
+    /// Mana tool settings.
     #[serde(default)]
-    pub workflow: WorkflowConfig,
+    pub mana: ManaConfig,
 
     /// Shipped Lua extension runtime policy.
     #[serde(default)]
@@ -520,7 +612,7 @@ pub enum ContinuePolicy {
     Disabled,
     /// Only auto-continue when the runtime evidence is especially strong.
     Conservative,
-    /// Auto-continue on clear, visible, workflow-backed next steps.
+    /// Auto-continue on clear, visible, mana-backed next steps.
     Balanced,
     /// More willing to auto-continue when the local heuristic says confidence is high.
     Aggressive,
@@ -904,8 +996,8 @@ impl Config {
         if other.web != WebConfig::default() {
             self.web = other.web;
         }
-        if other.workflow != WorkflowConfig::default() {
-            self.workflow = other.workflow;
+        if other.mana != ManaConfig::default() {
+            self.mana = other.mana;
         }
         if other.lua != LuaConfig::default() {
             self.lua = other.lua;
@@ -917,6 +1009,7 @@ impl Config {
             self.personality.merge(other.personality);
         }
         self.roles.extend(other.roles);
+        self.workflows.extend(other.workflows);
         self.hooks.extend(other.hooks);
     }
 
@@ -935,6 +1028,10 @@ impl Config {
         RoleRegistry::from_overrides(self.roles.clone())
     }
 
+    /// Resolve built-in workflow profiles plus config overrides and validate them.
+    pub fn workflow_registry(&self) -> std::result::Result<WorkflowRegistry, WorkflowProfileError> {
+        WorkflowRegistry::from_overrides(self.workflows.clone())
+    }
     /// Save config to a TOML file. Creates parent directories if needed.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
@@ -989,6 +1086,7 @@ mod tests {
         assert_eq!(config.web, WebConfig::default());
         assert_eq!(config.personality, PersonalityConfig::default());
         assert!(config.roles.is_empty());
+        assert!(config.workflows.is_empty());
         assert!(config.hooks.is_empty());
         assert!((config.context.observation_mask_threshold - 0.6).abs() < f64::EPSILON);
         assert_eq!(config.context.mask_window, 10);
@@ -1182,6 +1280,32 @@ role = "assistant"
         assert_eq!(user.model.as_deref(), Some("sonnet"));
         assert_eq!(user.max_tokens, Some(1024));
         assert_eq!(user.max_turns, Some(20));
+    }
+
+    #[test]
+    fn config_merge_workflows_extend() {
+        let mut base = Config::default();
+        base.workflows.insert(
+            "plan".into(),
+            WorkflowProfileDef {
+                confirm_body: Some("Save plan".into()),
+                ..WorkflowProfileDef::default()
+            },
+        );
+        let mut other = Config::default();
+        other.workflows.insert(
+            "security-review".into(),
+            WorkflowProfileDef {
+                instructions: Some("Security: {{prompt}}".into()),
+                aliases: Some(vec!["sec".into()]),
+                ..WorkflowProfileDef::default()
+            },
+        );
+        base.merge(other);
+        assert_eq!(base.workflows.len(), 2);
+        let registry = base.workflow_registry().unwrap();
+        assert_eq!(registry.get("plan").unwrap().confirm_body, "Save plan");
+        assert_eq!(registry.get("sec").unwrap().name, "security-review");
     }
 
     #[test]
@@ -1436,6 +1560,13 @@ readonly = false
 [roles.reader]
 readonly = true
 
+[workflows.security-review]
+description = "Security review"
+aliases = ["sec"]
+triggers = ["audit auth"]
+readonly = true
+instructions = "Security: {{prompt}}"
+
 [[hooks]]
 event = "after_file_write"
 action = "log"
@@ -1450,6 +1581,9 @@ blocking = false
         assert!(config.roles.contains_key("reader"));
         assert_eq!(config.roles["coder"].model.as_deref(), Some("opus"));
         assert!(config.roles["reader"].readonly);
+        assert_eq!(config.workflows.len(), 1);
+        let workflows = config.workflow_registry().unwrap();
+        assert_eq!(workflows.get("sec").unwrap().name, "security-review");
         assert_eq!(config.hooks.len(), 1);
         assert_eq!(config.hooks[0].event, "after_file_write");
     }
@@ -1560,6 +1694,7 @@ model = "sonnet"
         assert!(mode.allows_tool("git"));
         assert!(!mode.allows_tool("recall"));
         assert!(mode.allows_tool("workflow"));
+        assert!(!mode.allows_tool("mana"));
         assert!(mode.allows_tool("ask_user"));
     }
 
@@ -1588,21 +1723,22 @@ model = "sonnet"
     }
 
     #[test]
-    fn agent_mode_planner_allows_workflow_update() {
+    fn agent_mode_planner_allows_mana_create() {
         let mode = AgentMode::Planner;
-        assert!(mode.allows_workflow_action("update"));
-        assert!(mode.allows_workflow_action("list"));
-        assert!(mode.allows_workflow_action("list"));
-        assert!(mode.allows_workflow_action("show"));
+        assert!(mode.allows_mana_action("create"));
+        assert!(mode.allows_mana_action("status"));
+        assert!(mode.allows_mana_action("list"));
+        assert!(mode.allows_mana_action("show"));
         assert!(mode.allows_tool("workflow"));
+        assert!(!mode.allows_tool("mana"));
     }
 
     #[test]
-    fn agent_mode_planner_blocks_workflow_run() {
+    fn agent_mode_planner_blocks_mana_close_and_run() {
         let mode = AgentMode::Planner;
-        assert!(!mode.allows_workflow_action("run"));
-        assert!(!mode.allows_workflow_action("run"));
-        assert!(mode.allows_workflow_action("update"));
+        assert!(!mode.allows_mana_action("close"));
+        assert!(!mode.allows_mana_action("run"));
+        assert!(mode.allows_mana_action("update"));
         assert!(mode.allows_tool("git"));
     }
 
@@ -1630,45 +1766,46 @@ model = "sonnet"
     }
 
     #[test]
-    fn agent_mode_worker_blocks_workflow_run() {
+    fn agent_mode_worker_blocks_mana_create() {
         let mode = AgentMode::Worker;
-        assert!(mode.allows_workflow_action("update"));
-        assert!(!mode.allows_workflow_action("run"));
+        assert!(!mode.allows_mana_action("create"));
+        assert!(!mode.allows_mana_action("run"));
+        assert!(!mode.allows_mana_action("close"));
         assert!(mode.allows_tool("git"));
     }
 
     #[test]
-    fn agent_mode_worker_allows_workflow_update() {
+    fn agent_mode_worker_allows_mana_update() {
         let mode = AgentMode::Worker;
-        assert!(mode.allows_workflow_action("update"));
-        assert!(mode.allows_workflow_action("show"));
-        assert!(mode.allows_workflow_action("list"));
-        assert!(mode.allows_workflow_action("list"));
+        assert!(mode.allows_mana_action("update"));
+        assert!(mode.allows_mana_action("show"));
+        assert!(mode.allows_mana_action("status"));
+        assert!(mode.allows_mana_action("list"));
     }
 
     #[test]
-    fn agent_mode_reviewer_no_workflow() {
+    fn agent_mode_reviewer_no_mana() {
         let mode = AgentMode::Reviewer;
-        assert!(!mode.allows_workflow_action("list"));
-        assert!(!mode.allows_workflow_action("list"));
-        assert!(!mode.allows_workflow_action("show"));
-        assert!(!mode.allows_workflow_action("update"));
-        assert!(!mode.allows_workflow_action("run"));
+        assert!(!mode.allows_mana_action("status"));
+        assert!(!mode.allows_mana_action("list"));
+        assert!(!mode.allows_mana_action("show"));
+        assert!(!mode.allows_mana_action("create"));
+        assert!(!mode.allows_mana_action("run"));
         // Reviewer also has no workflow tool access
-        assert!(!mode.allows_tool("workflow"));
+        assert!(!mode.allows_tool("mana"));
         assert!(mode.allows_tool("git"));
     }
 
     #[test]
-    fn agent_mode_auditor_workflow_readonly() {
+    fn agent_mode_auditor_mana_readonly() {
         let mode = AgentMode::Auditor;
-        assert!(mode.allows_workflow_action("list"));
-        assert!(mode.allows_workflow_action("list"));
-        assert!(mode.allows_workflow_action("show"));
-        assert!(!mode.allows_workflow_action("update"));
-        assert!(!mode.allows_workflow_action("run"));
-        assert!(!mode.allows_workflow_action("run"));
-        assert!(!mode.allows_workflow_action("update"));
+        assert!(mode.allows_mana_action("status"));
+        assert!(mode.allows_mana_action("list"));
+        assert!(mode.allows_mana_action("show"));
+        assert!(!mode.allows_mana_action("create"));
+        assert!(!mode.allows_mana_action("close"));
+        assert!(!mode.allows_mana_action("run"));
+        assert!(!mode.allows_mana_action("update"));
         assert!(mode.allows_tool("git"));
     }
 

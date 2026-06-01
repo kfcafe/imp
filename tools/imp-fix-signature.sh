@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-BIN=${1:-/Users/asher/.local/imp-current/bin/imp}
+BIN=${1:-${HOME}/.local/imp-current/bin/imp}
 
 if [ "$(uname -s)" != "Darwin" ]; then
   exit 0

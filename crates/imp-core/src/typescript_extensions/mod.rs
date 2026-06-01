@@ -790,7 +790,7 @@ export default function dynamicToolsExtension(pi: ExtensionAPI) {
             return;
         }
 
-        let source = Path::new("/Users/asher/.pi/agent/extensions/color-palette");
+        let source = Path::new("/Users/test/.pi/agent/extensions/color-palette");
         if !source.exists() {
             return;
         }
@@ -843,7 +843,7 @@ export default function dynamicToolsExtension(pi: ExtensionAPI) {
 
     fn test_tool_context(cwd: &Path) -> ToolContext {
         use crate::config::AgentMode;
-        use crate::workflow_review::TurnWorkflowReviewAccumulator;
+        use crate::mana_review::TurnManaReviewAccumulator;
         use crate::tools::{CheckpointState, FileCache, FileTracker};
         use crate::ui::NullInterface;
         use std::sync::atomic::AtomicBool;
@@ -865,7 +865,7 @@ export default function dynamicToolsExtension(pi: ExtensionAPI) {
             lua_tool_loader: None,
             mode: AgentMode::Full,
             read_max_lines: 0,
-            turn_workflow_review: Arc::new(std::sync::Mutex::new(TurnWorkflowReviewAccumulator::default())),
+            turn_mana_review: Arc::new(std::sync::Mutex::new(TurnManaReviewAccumulator::default())),
             config: Arc::new(crate::config::Config::default()),
             run_policy: Default::default(),
             supporting_provenance: Vec::new(),

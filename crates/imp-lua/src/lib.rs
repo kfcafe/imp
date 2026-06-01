@@ -103,8 +103,8 @@ mod tests {
             anchor_store: Arc::new(imp_core::tools::AnchorStore::new()),
             mode: imp_core::config::AgentMode::Full,
             read_max_lines: 0,
-            turn_workflow_review: Arc::new(std::sync::Mutex::new(
-                imp_core::workflow_review::TurnWorkflowReviewAccumulator::default(),
+            turn_mana_review: Arc::new(std::sync::Mutex::new(
+                imp_core::mana_review::TurnManaReviewAccumulator::default(),
             )),
             run_policy: Default::default(),
             config: Arc::new(imp_core::config::Config::default()),
