@@ -257,7 +257,7 @@ enum Commands {
     Setup,
     /// Log in to a provider. OAuth is supported for Anthropic, OpenAI/ChatGPT, and Kimi Code.
     Login {
-        /// Provider to configure (`anthropic`, `openai`, `kimi`, or `kimi-code`). Defaults to anthropic.
+        /// Provider to configure (`anthropic`, `openai`, `kimi`, or `kimi-code`). If omitted, prompts for a provider.
         provider: Option<String>,
     },
     /// Save, list, or remove API credentials in secure imp auth storage
@@ -1033,8 +1033,7 @@ pub async fn run() {
                 return;
             }
             Commands::Login { provider } => {
-                let provider_name = provider.as_deref().unwrap_or("anthropic");
-                if let Err(e) = run_login(provider_name).await {
+                if let Err(e) = run_login_command(provider.as_deref()).await {
                     eprintln!("Login failed: {e}");
                     std::process::exit(1);
                 }
@@ -1724,6 +1723,58 @@ fn try_import_kimi_cli_credentials() -> Option<imp_llm::auth::OAuthCredential> {
         refresh_token,
         expires_at,
     })
+}
+
+async fn run_login_command(provider: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let provider_name = match provider {
+        Some(provider) if !provider.trim().is_empty() => provider.trim().to_string(),
+        _ => prompt_login_provider()?,
+    };
+    run_login(&provider_name).await
+}
+
+fn prompt_login_provider() -> Result<String, Box<dyn std::error::Error>> {
+    if !std::io::stdin().is_terminal() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "No provider specified. Use `imp login <provider>` with one of: anthropic, openai, kimi.",
+        )
+        .into());
+    }
+
+    let providers = [
+        ("anthropic", "Anthropic / Claude"),
+        ("openai", "OpenAI / ChatGPT"),
+        ("kimi", "Kimi Code"),
+    ];
+    println!("Choose an OAuth provider:");
+    for (idx, (_id, label)) in providers.iter().enumerate() {
+        println!("{}. {label}", idx + 1);
+    }
+    println!("Or type a provider id: anthropic, openai, kimi");
+
+    let choice = prompt_input_line("Provider> ")?;
+    let trimmed = choice.trim();
+    if let Some((id, _label)) = providers
+        .iter()
+        .find(|(id, _)| trimmed.eq_ignore_ascii_case(id))
+    {
+        return Ok((*id).to_string());
+    }
+    if let Some((id, _label)) = trimmed
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .and_then(|idx| providers.get(idx))
+    {
+        return Ok((*id).to_string());
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "Invalid provider selection. Use one of: anthropic, openai, kimi.",
+    )
+    .into())
 }
 
 async fn run_login(provider_name: &str) -> Result<(), Box<dyn std::error::Error>> {
