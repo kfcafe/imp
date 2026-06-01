@@ -28,7 +28,6 @@ const STEPS: &[WelcomeStep] = &[
     WelcomeStep::Welcome,
     WelcomeStep::ProviderAuth,
     WelcomeStep::ModelThinking,
-    WelcomeStep::WebSearch,
     WelcomeStep::Done,
 ];
 
@@ -80,10 +79,14 @@ pub struct WelcomeState {
     pub models: Vec<ModelMeta>,
     /// Selected model index.
     pub model_selected: usize,
+    /// Whether OpenRouter's default routing is selected.
+    pub openrouter_default_model: bool,
     /// Selected thinking level.
     pub thinking_level: ThinkingLevel,
-    /// Whether auth was resolved (env or input).
+    /// Whether auth was resolved (env, OAuth, or input).
     pub auth_resolved: bool,
+    /// Whether an OAuth login is in progress for the selected provider.
+    pub oauth_pending: bool,
     /// The resolved API key (if entered manually).
     pub resolved_key: Option<String>,
     /// Optional web search providers for the built-in `web` tool.
@@ -197,8 +200,10 @@ impl WelcomeState {
             key_error: None,
             models,
             model_selected: 0,
+            openrouter_default_model: true,
             thinking_level: ThinkingLevel::Medium,
             auth_resolved: false,
+            oauth_pending: false,
             resolved_key: None,
             web_providers,
             web_provider_selected,
@@ -230,8 +235,54 @@ impl WelcomeState {
         self.selected_provider().map(|provider| provider.meta.id)
     }
 
-    pub fn selected_model(&self) -> Option<&ModelMeta> {
-        self.models.get(self.normalized_model_selected())
+    pub fn selected_provider_supports_oauth(&self) -> bool {
+        self.selected_provider_id()
+            .is_some_and(setup_provider_supports_oauth)
+    }
+
+    pub fn selected_provider_has_api_key_setup(&self) -> bool {
+        self.selected_provider_id()
+            .is_some_and(setup_provider_supports_api_key)
+    }
+
+    pub fn mark_oauth_pending(&mut self) {
+        self.oauth_pending = true;
+        self.key_error = None;
+    }
+
+    /// Mark the selected provider as logged in after a successful OAuth flow.
+    pub fn mark_selected_provider_oauth_complete(&mut self) {
+        let Some(provider_id) = self.selected_provider_id().map(str::to_string) else {
+            return;
+        };
+        self.mark_stored(&provider_id);
+        self.oauth_pending = false;
+        self.auth_resolved = true;
+        self.resolved_key = None;
+        self.key_input.clear();
+        self.openrouter_default_model = true;
+        self.key_error = None;
+    }
+
+    pub fn set_key_error(&mut self, error: impl Into<String>) {
+        self.key_error = Some(error.into());
+        self.oauth_pending = false;
+    }
+
+    pub fn paste_key(&mut self, text: &str) {
+        self.key_input.push_str(text.trim());
+        self.key_error = None;
+    }
+
+    pub fn paste_web_key(&mut self, text: &str) {
+        self.web_key_input.push_str(text.trim());
+    }
+
+    pub fn selected_model(&self) -> Option<ModelMeta> {
+        if self.selected_provider_id() == Some("openrouter") {
+            return Some(default_openrouter_model_meta());
+        }
+        self.models.get(self.normalized_model_selected()).cloned()
     }
 
     pub fn advance(&mut self) {
@@ -395,7 +446,34 @@ impl WelcomeState {
 }
 
 fn is_setup_visible_provider(provider_id: &str) -> bool {
-    provider_id != "kimi-code"
+    matches!(
+        provider_id,
+        "anthropic" | "openai" | "openai-codex" | "openrouter"
+    )
+}
+
+fn setup_provider_supports_oauth(provider_id: &str) -> bool {
+    matches!(provider_id, "anthropic" | "openai" | "openai-codex")
+}
+
+fn setup_provider_supports_api_key(provider_id: &str) -> bool {
+    matches!(provider_id, "anthropic" | "openai" | "openrouter")
+}
+
+fn default_openrouter_model_meta() -> ModelMeta {
+    ModelMeta {
+        id: "openrouter/auto".to_string(),
+        provider: "openrouter".into(),
+        name: "OpenRouter Default".into(),
+        context_window: 200_000,
+        max_output_tokens: 16_384,
+        pricing: Default::default(),
+        capabilities: imp_llm::model::Capabilities {
+            reasoning: true,
+            images: true,
+            tool_use: true,
+        },
+    }
 }
 
 fn provider_stored_for_setup(auth_store: &AuthStore, provider_id: &str) -> bool {
@@ -505,27 +583,6 @@ impl WelcomeView<'_> {
         let mut row: u16 = 0;
         let center_x = area.x;
 
-        let logo = [
-            "  ╔╗    ╔╗  ",
-            "  ║╚════╝║  ",
-            "  ║ ■  ■ ║  ",
-            "╔═╩══════╩═╗",
-            "║    imp    ║",
-            "╚══════════╝",
-        ];
-
-        for line in &logo {
-            if row >= area.height {
-                return;
-            }
-            let offset = area.width.saturating_sub(line.len() as u16) / 2;
-            let styled = Line::from(Span::styled(*line, self.theme.accent_style()));
-            buf.set_line(center_x + offset, area.y + row, &styled, area.width);
-            row += 1;
-        }
-
-        row += 1;
-
         let lines = [
             (
                 "Welcome to imp — an AI coding agent.",
@@ -533,7 +590,7 @@ impl WelcomeView<'_> {
             ),
             ("", Style::default()),
             (
-                "Let's get you set up. This takes about 30 seconds.",
+                "Sign in with OAuth or paste an API key to get started.",
                 self.theme.muted_style(),
             ),
         ];
@@ -621,45 +678,68 @@ impl WelcomeView<'_> {
             buf.set_line(x, area.y + row, &line, area.width);
             return;
         };
-        if !selected.has_auth() {
-            let prompt_line =
-                Line::from(vec![Span::styled("  API Key: ", self.theme.muted_style())]);
-            buf.set_line(x, area.y + row, &prompt_line, area.width);
-            row += 1;
-
-            let display_key = if self.state.key_input.is_empty() {
-                "  ┌─ paste your key here ─────────────────┐".to_string()
-            } else {
-                let masked: String = self
-                    .state
-                    .key_input
-                    .chars()
-                    .enumerate()
-                    .map(|(i, c)| if i < 6 { c } else { '•' })
-                    .collect();
-                format!(
-                    "  ┌ {masked}▎{} ┐",
-                    " ".repeat(40usize.saturating_sub(masked.len() + 1))
-                )
-            };
-            let key_style = if self.state.key_input.is_empty() {
-                self.theme.muted_style()
-            } else {
-                Style::default()
-            };
-            let key_line = Line::from(Span::styled(display_key, key_style));
-            buf.set_line(x, area.y + row, &key_line, area.width);
-            row += 1;
-
-            let url_line = Line::from(vec![
-                Span::styled("  Get a key: ", self.theme.muted_style()),
-                Span::styled(
-                    selected.meta.docs_url,
-                    Style::default().fg(self.theme.accent),
-                ),
+        if selected.has_auth() {
+            let ready = Line::from(vec![
+                Span::styled("  ✓ ", self.theme.success_style()),
+                Span::styled("Ready to connect.", self.theme.muted_style()),
             ]);
-            buf.set_line(x, area.y + row, &url_line, area.width);
-            row += 1;
+            buf.set_line(x, area.y + row, &ready, area.width);
+        } else {
+            if self.state.selected_provider_supports_oauth() {
+                let oauth = if self.state.oauth_pending {
+                    "  OAuth: waiting for browser login..."
+                } else {
+                    "  OAuth: press O to sign in in your browser"
+                };
+                buf.set_line(
+                    x,
+                    area.y + row,
+                    &Line::from(Span::styled(oauth, self.theme.accent_style())),
+                    area.width,
+                );
+                row += 2;
+            }
+
+            if self.state.selected_provider_has_api_key_setup() {
+                let prompt_line =
+                    Line::from(vec![Span::styled("  API Key: ", self.theme.muted_style())]);
+                buf.set_line(x, area.y + row, &prompt_line, area.width);
+                row += 1;
+
+                let display_key = if self.state.key_input.is_empty() {
+                    "  ┌─ paste your key here ─────────────────┐".to_string()
+                } else {
+                    let masked: String = self
+                        .state
+                        .key_input
+                        .chars()
+                        .enumerate()
+                        .map(|(i, c)| if i < 6 { c } else { '•' })
+                        .collect();
+                    format!(
+                        "  ┌ {masked}▎{} ┐",
+                        " ".repeat(40usize.saturating_sub(masked.len() + 1))
+                    )
+                };
+                let key_style = if self.state.key_input.is_empty() {
+                    self.theme.muted_style()
+                } else {
+                    Style::default()
+                };
+                let key_line = Line::from(Span::styled(display_key, key_style));
+                buf.set_line(x, area.y + row, &key_line, area.width);
+                row += 1;
+
+                let url_line = Line::from(vec![
+                    Span::styled("  Get a key: ", self.theme.muted_style()),
+                    Span::styled(
+                        selected.meta.docs_url,
+                        Style::default().fg(self.theme.accent),
+                    ),
+                ]);
+                buf.set_line(x, area.y + row, &url_line, area.width);
+                row += 1;
+            }
 
             if let Some(ref error) = self.state.key_error {
                 row += 1;
@@ -667,12 +747,6 @@ impl WelcomeView<'_> {
                     Line::from(Span::styled(format!("  {error}"), self.theme.error_style()));
                 buf.set_line(x, area.y + row, &error_line, area.width);
             }
-        } else {
-            let ready = Line::from(vec![
-                Span::styled("  ✓ ", self.theme.success_style()),
-                Span::styled("Ready to connect.", self.theme.muted_style()),
-            ]);
-            buf.set_line(x, area.y + row, &ready, area.width);
         }
 
         if area.height > 2 {
@@ -680,6 +754,9 @@ impl WelcomeView<'_> {
             let footer = Line::from(vec![
                 Span::styled("  Enter ", Style::default().add_modifier(Modifier::BOLD)),
                 Span::styled("Continue", self.theme.muted_style()),
+                Span::styled("    ", Style::default()),
+                Span::styled("O ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("OAuth login", self.theme.muted_style()),
                 Span::raw("    "),
                 Span::styled("↑↓ ", Style::default().add_modifier(Modifier::BOLD)),
                 Span::styled("Select provider", self.theme.muted_style()),
@@ -956,8 +1033,8 @@ impl WelcomeView<'_> {
         let model_name = self
             .state
             .selected_model()
-            .map(|m| m.name.as_str())
-            .unwrap_or("default");
+            .map(|m| m.name)
+            .unwrap_or_else(|| "default".to_string());
         let thinking_label = match self.state.thinking_level {
             ThinkingLevel::Off => "off",
             ThinkingLevel::Minimal => "minimal",

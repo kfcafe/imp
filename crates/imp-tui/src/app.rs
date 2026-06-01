@@ -2143,8 +2143,18 @@ impl App {
                 self.finish_lua_command_status_message(&format!("/{command} failed."));
                 self.push_error_msg(&format!("Lua command error: {error}"));
             }
-            RuntimeSignal::LoginTaskSucceeded(message) => self.push_system_msg(&message),
-            RuntimeSignal::LoginTaskFailed(message) => self.push_error_msg(&message),
+            RuntimeSignal::LoginTaskSucceeded(message) => {
+                if let UiMode::Welcome(ref mut state) = self.mode {
+                    state.mark_selected_provider_oauth_complete();
+                }
+                self.push_system_msg(&message);
+            }
+            RuntimeSignal::LoginTaskFailed(message) => {
+                if let UiMode::Welcome(ref mut state) = self.mode {
+                    state.set_key_error(&message);
+                }
+                self.push_error_msg(&message);
+            }
             RuntimeSignal::SessionListLoaded(result) => self.finish_session_list_load(result),
             RuntimeSignal::SessionListFailed(error) => self.fail_session_list_load(error),
             RuntimeSignal::SessionOpened(result) => self.finish_session_open(result),
@@ -4216,11 +4226,23 @@ impl App {
 
     fn handle_paste(&mut self, text: String) {
         let text = text.replace('\r', "");
-        self.editor.insert_paste(&text);
-        if self.ask_state.is_some() {
-            self.sync_ask_from_editor();
+        match self.mode {
+            UiMode::Welcome(ref mut state) => {
+                match state.current_step() {
+                    WelcomeStep::ProviderAuth => state.paste_key(&text),
+                    WelcomeStep::WebSearch => state.paste_web_key(&text),
+                    _ => {}
+                }
+                self.needs_redraw = true;
+            }
+            _ => {
+                self.editor.insert_paste(&text);
+                if self.ask_state.is_some() {
+                    self.sync_ask_from_editor();
+                }
+                self.needs_redraw = true;
+            }
         }
-        self.needs_redraw = true;
     }
 
     fn extend_selection_lines(&mut self, delta: isize) -> bool {
@@ -6816,6 +6838,24 @@ impl App {
                 _ => {}
             },
             WelcomeStep::ProviderAuth => match key.code {
+                KeyCode::Char('o') | KeyCode::Char('O') => {
+                    let provider = if let UiMode::Welcome(ref mut state) = self.mode {
+                        if state.selected_provider_supports_oauth() {
+                            state.mark_oauth_pending();
+                            state.selected_provider_id().map(str::to_string)
+                        } else {
+                            state.set_key_error(
+                                "OAuth is not available for this provider. Paste an API key instead.",
+                            );
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(provider) = provider {
+                        self.start_login(&provider);
+                    }
+                }
                 KeyCode::Up => {
                     if let UiMode::Welcome(ref mut state) = self.mode {
                         state.provider_up();
@@ -6894,9 +6934,7 @@ impl App {
                     }
                 }
                 KeyCode::Enter => {
-                    if let UiMode::Welcome(ref mut state) = self.mode {
-                        state.advance();
-                    }
+                    self.finish_welcome();
                 }
                 KeyCode::Esc => {
                     if let UiMode::Welcome(ref mut state) = self.mode {
